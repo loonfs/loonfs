@@ -238,8 +238,6 @@ async fn resolve_command_context_with_actor(
     })
 }
 
-// --- general helpers ---
-
 /// Whether a command accepts the root path `/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootPath {
@@ -364,8 +362,6 @@ pub(crate) fn destination_path_for_get(
 pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &AbsolutePath) -> String {
     format!("{namespace_id}:{absolute_path}")
 }
-
-// --- printed recovery commands ---
 
 /// The flags a printed `loonfs undelete` has to spell so that pasting it into
 /// a later shell still reaches the filesystem this command ran against.
@@ -493,10 +489,30 @@ mod tests {
                 .as_str(),
             "/docs"
         );
-        assert!(parse_user_path_arg("path", "//docs///A.txt/", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "//x.txt", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "docs/A.txt", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "", RootPath::Refused).is_err());
+        assert_eq!(
+            parse_user_path_arg("path", "//docs///A.txt/", RootPath::Refused)
+                .expect_err("a path with repeated slashes should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "//x.txt", RootPath::Refused)
+                .expect_err("a path with a leading double slash should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "docs/A.txt", RootPath::Refused)
+                .expect_err("a relative path should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "", RootPath::Refused)
+                .expect_err("an empty path should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
         assert_eq!(
             parse_user_path_arg("path", "/", RootPath::Allowed)
                 .expect("root")

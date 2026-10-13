@@ -1148,15 +1148,13 @@ fn seconds_from_ms(milliseconds: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // A reading of the wrong kind or an unregistered instrument is a bug in
-    // the test, not a case to handle.
 
     use super::*;
     use crate::metrics::{
         DefaultMetricsRecorder, KeyClass, MetricValue, MetricsSnapshot, ObjectStoreOperation,
         ObjectStoreResultKind, PutModeKind, VecObjectStoreMetricsRecorder,
     };
+    use std::assert_matches;
 
     fn sample(
         operation: ObjectStoreOperation,
@@ -1523,10 +1521,7 @@ mod tests {
             .by_name("loonfs.maintenance.compaction_seconds")
             .find(|entry| entry.labels == [("outcome", "abandoned")])
             .expect("abandoned compaction duration");
-        assert!(matches!(
-            duration.value,
-            MetricValue::Histogram { count: 1, .. }
-        ));
+        assert_matches!(duration.value, MetricValue::Histogram { count: 1, .. });
         assert!(snapshot
             .all()
             .iter()

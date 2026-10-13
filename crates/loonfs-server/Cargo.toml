@@ -30,12 +30,11 @@ loonfs-http.workspace = true
 loonfs-objectstore.workspace = true
 mixtrics.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -48,8 +47,8 @@ loonfs-client.workspace = true
 loonfs-core.workspace = true
 loonfs-test-support.workspace = true
 rcgen.workspace = true
-tower = { version = "0.5", features = ["util"] }
-tokio = { workspace = true, features = ["test-util"] }
+tower.workspace = true
+tokio = { workspace = true, features = ["io-util", "test-util"] }
 ureq.workspace = true
 
 [lints]

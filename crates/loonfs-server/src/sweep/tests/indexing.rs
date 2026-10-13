@@ -8,6 +8,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_test_support::test_actor;
+use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -171,10 +172,10 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
     server
         .tick_after(config.idle_session_close_after_ms + 1)
         .await;
-    assert!(matches!(
+    assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. }
-    ));
+    );
     assert_eq!(server.sweep.inner.namespaces.held_ids().len(), 1);
     store.reset();
     server.sweep.tick().await;

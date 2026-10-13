@@ -1,8 +1,5 @@
 //! Public handle behavior and fork isolation.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::{ConfiguredObjectStoreKind, DestinationBehavior, NamespaceId, PutFileOptions};
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};

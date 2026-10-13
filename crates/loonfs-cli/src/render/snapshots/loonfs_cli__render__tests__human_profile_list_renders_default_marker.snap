@@ -1,7 +1,0 @@
----
-source: crates/loonfs-cli/src/render/mod.rs
-expression: human_success(&output)
----
-NAME	MODE	STORE	DEFAULT
-default	embedded	local_fs	*
-prod	remote	-

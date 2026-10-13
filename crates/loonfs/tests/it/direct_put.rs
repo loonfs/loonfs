@@ -1,8 +1,5 @@
 //! Upload, direct-put, content publication, and concurrent write flows.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
@@ -27,6 +24,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -279,8 +277,9 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     let loonfs::uploads::UploadSessionView {
         session: status, ..
     } = block_on(namespace.get_upload(&begin.session.upload_id)).expect("get upload status");
-    assert!(
-        matches!(status.status, UploadSessionStatus::Open { .. }),
+    assert_matches!(
+        status.status,
+        UploadSessionStatus::Open { .. },
         "a store failure must not end the session"
     );
 

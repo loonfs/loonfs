@@ -370,6 +370,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
+    use std::assert_matches;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -461,10 +462,10 @@ mod tests {
                 .code(),
             loonfs_types::ErrorCode::ContentNotPrepared
         );
-        assert!(matches!(
+        assert_matches!(
             result.results[1],
             Err(CoreError::WalPublish(WalPublishError::NumberTaken))
-        ));
+        );
         assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(store.count(OperationSelector::CompareAndSwap), 0);
         assert_eq!(store.count(OperationSelector::Delete), 0);
@@ -541,7 +542,7 @@ mod tests {
             .expect_err("exhausted sequence must reject the commit");
         assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
         assert!(error.to_string().contains("largest sequence number"));
-        assert!(matches!(result.effect, PublishViewEffect::Unchanged));
+        assert_matches!(result.effect, PublishViewEffect::Unchanged);
         assert_eq!(
             store
                 .get(&hint_key, None)

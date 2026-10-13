@@ -9,8 +9,10 @@
 pub mod block_on;
 pub mod clock;
 mod env_guard;
+pub mod golden;
 pub mod http;
 pub mod ids;
+pub mod provider_detail;
 pub mod stores;
 
 pub use env_guard::EnvGuard;

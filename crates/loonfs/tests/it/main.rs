@@ -5,6 +5,8 @@
 //! `tests/tracing_capture.rs` stays a binary of its own; the comment there
 //! explains why it cannot share a process.
 
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
+
 mod access_namespace;
 mod access_reads;
 mod attributes;

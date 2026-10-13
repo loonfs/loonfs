@@ -23,6 +23,7 @@ use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
     OperationContext, OperationSelector, RecordedOperation, RecordingStore,
 };
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -2716,11 +2717,9 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
         visible_before.as_slice(),
         "the swap must not move anything a read already answered"
     );
-    assert!(
-        matches!(
-            visible_after.last().expect("the fold's file").file,
-            CurrentFile::Visible { .. }
-        ),
+    assert_matches!(
+        visible_after.last().expect("the fold's file").file,
+        CurrentFile::Visible { .. },
         "the file the fold published must be visible after the swap"
     );
 }
@@ -2760,8 +2759,9 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     )
     .await;
 
-    assert!(
-        matches!(finalization, MetadataCompactionJobOutcome::Cancelled),
+    assert_matches!(
+        finalization,
+        MetadataCompactionJobOutcome::Cancelled,
         "a cancelled finalization must publish nothing, got {finalization:?}"
     );
     assert_eq!(
@@ -2836,17 +2836,15 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
             let published = publish_manifest(&store, encode_manifest(winner.clone()))
                 .await
                 .expect("competing publication");
-            assert!(matches!(
-                published,
-                ManifestPublicationOutcome::Published(_)
-            ));
+            assert_matches!(published, ManifestPublicationOutcome::Published(_));
             cancellation.cancel();
             blocked.release();
         }
     );
 
-    assert!(
-        matches!(finalization, MetadataCompactionJobOutcome::Cancelled),
+    assert_matches!(
+        finalization,
+        MetadataCompactionJobOutcome::Cancelled,
         "the cancelled attempt must not be retried, got {finalization:?}"
     );
     assert_eq!(recorded.counts().create_if_absent_puts, 1);
@@ -3163,11 +3161,13 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             result
         }
     );
-    assert!(
-        matches!(second_outcome.expect("second publication"), MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 1)
+    assert_matches!(
+        second_outcome.expect("second publication"),
+        MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 1
     );
-    assert!(
-        matches!(first_outcome.expect("retried publication"), MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 2)
+    assert_matches!(
+        first_outcome.expect("retried publication"),
+        MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 2
     );
     assert_eq!(store.inner().counts().create_if_absent_puts, 3);
     assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
@@ -3211,8 +3211,10 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     )
     .await
     .expect("publish");
-    assert!(
-        matches!(outcome, MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no == before.successor().expect("next number"))
+    assert_matches!(
+        outcome,
+        MetadataCompactionJobOutcome::Published { manifest_no, .. }
+            if manifest_no == before.successor().expect("next number")
     );
     let puts = store
         .take()
@@ -3265,17 +3267,17 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         InjectedError::PermissionDenied("publication stopped".to_owned()),
     );
     failing.fail_next(1);
-    assert!(run_metadata_compaction_job(
+    run_metadata_compaction_job(
         &failing,
         &namespace,
         epoch,
         &spec,
         small_segment_policy(),
         &MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer()
+        crate::test_support::std_timer(),
     )
     .await
-    .is_err());
+    .expect_err("a stopped publication should fail the compaction job");
     assert_eq!(current_manifest_number(&failing, &namespace).await, before);
     let orphans = orphan_segment_keys(&failing, &namespace)
         .await

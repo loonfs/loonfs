@@ -15,7 +15,6 @@ use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse, WalFoldStepOutco
 use serde::Serialize;
 use std::io::{self, Write};
 
-pub(crate) use human::human_path_entry;
 #[cfg(test)]
 use human::human_success;
 #[cfg(test)]
@@ -25,8 +24,8 @@ pub(crate) use json::{json_error, render_parse_error};
 pub(crate) use output::write_success;
 use output::{human_error, request_id_suffix};
 pub(crate) use output::{
-    more_entries_hint, render_error, render_success, write_listing_drift_warning,
-    write_stderr_progress, write_stderr_warning, OutputFormat,
+    more_entries_hint, render_error, render_success, write_jsonl_page, write_listing_drift_warning,
+    write_path_entries_page, write_stderr_progress, write_stderr_warning, OutputFormat,
 };
 pub(crate) use summaries::{
     store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome,
@@ -40,8 +39,10 @@ mod tests {
     use crate::config::{ProfileConfig, StoreConfig};
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
-    use insta::{assert_json_snapshot, assert_snapshot};
     use loonfs_client::ClientError;
+    use loonfs_test_support::provider_detail::{
+        assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
+    };
     use loonfs_types::api::v0::{
         StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
     };
@@ -49,28 +50,6 @@ mod tests {
         AbsolutePath, AttributesProjection, ChangeSeq, DisplayName, InodeId, NamespaceId,
         PathEntry, PathEntryKind,
     };
-
-    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
-        arn:aws:iam::123456789012:role/private-role private-bucket \
-        namespaces/customer-a/hint.json x-amz-request-id=provider-request \
-        x-amz-id-2=provider-host-id AKIAEXAMPLE";
-
-    fn assert_provider_markers_absent(rendered: &str) {
-        for marker in [
-            "<Error>AccessDenied</Error>",
-            "arn:aws:iam::123456789012:role/private-role",
-            "private-bucket",
-            "namespaces/customer-a/hint.json",
-            "x-amz-request-id=provider-request",
-            "x-amz-id-2=provider-host-id",
-            "AKIAEXAMPLE",
-        ] {
-            assert!(
-                !rendered.contains(marker),
-                "rendered output leaked {marker}: {rendered}"
-            );
-        }
-    }
 
     fn poison_permission_error() -> loonfs::Error {
         loonfs::Error::Core(loonfs::CoreError::Store {
@@ -127,7 +106,7 @@ mod tests {
         let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode.as_deref());
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
         for rendered in [&embedded_human, &embedded_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
         }
 
@@ -153,7 +132,7 @@ mod tests {
         let remote_human = human_error(&remote_failure.error, remote_failure.mode.as_deref());
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
         for rendered in [&remote_human, &remote_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
             assert!(rendered.contains("req_provider_hygiene"), "{rendered}");
         }
@@ -208,7 +187,7 @@ mod tests {
         let doctor_human = human_success(&doctor);
         let doctor_json = json_success(&doctor).expect("doctor JSON renders");
         for rendered in [&doctor_human, &doctor_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
         }
         assert!(
@@ -393,7 +372,12 @@ mod tests {
                 ],
             },
         };
-        assert_snapshot!(human_success(&output));
+        assert_eq!(
+            human_success(&output),
+            "NAME\tMODE\tSTORE\tDEFAULT\n\
+             default\tembedded\tlocal_fs\t*\n\
+             prod\tremote\t-\t"
+        );
     }
 
     #[test]
@@ -418,7 +402,16 @@ mod tests {
                 default_profile: None,
             },
         };
-        assert_snapshot!(human_success(&output));
+        assert_eq!(
+            human_success(&output),
+            "name = \"default\"\n\
+             mode = \"embedded\"\n\
+             default_namespace = \"demo\"\n\
+             \n\
+             [store]\n\
+             kind = \"local_fs\"\n\
+             root = \"/tmp/store\"\n"
+        );
     }
 
     #[test]
@@ -479,10 +472,22 @@ mod tests {
             mode: Some("remote".to_owned()),
             error: Box::new(CliError::client_error("connection refused")),
         };
-        assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
-            &json_error(&failure).expect("json error renders")
-        )
-        .expect("rendered error is valid json"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &json_error(&failure).expect("json error renders")
+            )
+            .expect("rendered error is valid json"),
+            serde_json::json!({
+                "error": {
+                    "code": "client_error",
+                    "message": "connection refused"
+                },
+                "format_version": 1,
+                "kind": "config_show",
+                "mode": "remote",
+                "profile": "default"
+            })
+        );
     }
 
     #[test]

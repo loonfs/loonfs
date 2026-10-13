@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Version 1 is an uncompressed JSON envelope document carrying the payload as
-/// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
+/// a raw JSON fragment.
+///
+/// `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Version 1 uses the [block layout](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
@@ -584,9 +586,10 @@ impl MetadataRowFamily {
         }
     }
 
-    /// Fixed prefix before the first variable component in this family's row
-    /// keys. Compaction uses the remaining components to group rows for
-    /// retention.
+    /// Returns the fixed prefix before the first variable component in this
+    /// family's row keys.
+    ///
+    /// Compaction uses the remaining components to group rows for retention.
     pub const fn row_key_prefix(self) -> &'static str {
         match self {
             Self::Inodes => lookup_keys::INODE_ROW_PREFIX,
@@ -1062,12 +1065,13 @@ pub enum NamespaceAccess {
 }
 
 impl NamespaceAccess {
-    /// The unrestricted access mode.
+    /// Returns the unrestricted access mode.
     pub fn unrestricted() -> Self {
         Self::Unrestricted {}
     }
 
-    /// Whether every caller holding the deployment credential may do everything.
+    /// Reports whether every caller holding the deployment credential may do
+    /// everything.
     pub const fn is_unrestricted(&self) -> bool {
         matches!(self, Self::Unrestricted {})
     }
@@ -1391,6 +1395,7 @@ mod tests {
         ChangeSeq, CommitId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RunNo,
         WriterEpoch,
     };
+    use std::assert_matches;
 
     fn row_commit_id() -> CommitId {
         CommitId::parse("c_metadata_row").expect("commit id")
@@ -1458,7 +1463,9 @@ mod tests {
                 serde_json::from_value(payload.clone()).expect("regression");
             regression.manifest_no = ManifestNo(3);
             regression.head_seq = ChangeSeq(2);
-            assert!(successor.ensure_successor(&regression).is_err());
+            successor
+                .ensure_successor(&regression)
+                .expect_err("a successor whose activity totals go backward should be rejected");
             assert_eq!(regression.activity.checked_add(increment), Some(maximum));
 
             payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
@@ -1469,11 +1476,11 @@ mod tests {
             )
             .expect("encode invalid payload")
             .into_parts();
-            assert!(matches!(
+            assert_matches!(
                 decode_namespace_manifest_json(&encoded),
                 Err(crate::envelope::EnvelopeCodecError::PayloadDecode(message))
                     if message.contains(&crate::PublicOrdinalRangeError.to_string())
-            ));
+            );
         }
     }
 

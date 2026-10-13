@@ -113,39 +113,40 @@ mod tests {
     };
     use crate::keys::hint;
     use crate::ObjectStoreError;
+    use std::assert_matches;
 
     #[test]
     fn normalize_key_prefix_rejects_traversal_and_empty_segments() {
-        assert!(matches!(
+        assert_matches!(
             normalize_key_prefix(Some("tenant-a//bad")),
             Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "tenant-a//bad"
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             normalize_key_prefix(Some("../escape")),
             Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "../escape"
-        ));
+        );
     }
 
     #[test]
     fn a_plain_key_prefix_survives_normalization_and_a_blank_one_becomes_none() {
-        assert!(matches!(
+        assert_matches!(
             normalize_key_prefix(Some("tenant-a/reports")),
             Ok(Some(prefix)) if prefix == "tenant-a/reports"
-        ));
-        assert!(matches!(normalize_key_prefix(Some("   ")), Ok(None)));
+        );
+        assert_matches!(normalize_key_prefix(Some("   ")), Ok(None));
     }
 
     #[test]
     fn scoped_key_helpers_keep_prefix_isolation() {
         let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
-        assert!(matches!(
+        assert_matches!(
             scope_object_key(Some("tenant-a"), &hint_key),
             Ok(scoped) if scoped == format!("tenant-a/{hint_key}")
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             scope_list_prefix(Some("tenant-a"), "namespaces/ns-1/"),
             Ok(scoped) if scoped == "tenant-a/namespaces/ns-1/"
-        ));
+        );
         assert_eq!(
             unscope_listed_key(Some("tenant-a"), &format!("tenant-a/{hint_key}")),
             Some(hint_key)
@@ -159,9 +160,9 @@ mod tests {
     #[test]
     fn validate_segments_allows_trailing_separator_only_for_prefixes() {
         assert!(validate_segments("namespaces/ns-1/", TrailingSeparator::Allowed).is_ok());
-        assert!(matches!(
+        assert_matches!(
             validate_segments("namespaces/ns-1/", TrailingSeparator::Refused),
             Err(ObjectStoreError::InvalidKey { .. })
-        ));
+        );
     }
 }

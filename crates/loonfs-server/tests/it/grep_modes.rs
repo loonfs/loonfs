@@ -1,4 +1,3 @@
-#![allow(clippy::panic)]
 //! In-process HTTP matrix for the four things a deployment can do about
 //! grep: answer searches, keep the index built, both, or neither.
 
@@ -22,6 +21,7 @@ use loonfs_types::{
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use serde::de::DeserializeOwned;
+use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -223,17 +223,13 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     .await;
     // A fresh enable publishes a backfill and reports the sequence its
     // checkpoint captured — not a watermark it has not reached.
-    assert!(
-        matches!(
-            &enabled.status,
-            v0::GrepIndexStatus::Backfilling {
-                captured_seq: ChangeSeq(0),
-                cursor_inode_id: None,
-                ..
-            }
-        ),
-        "{:?}",
-        enabled.status
+    assert_matches!(
+        &enabled.status,
+        v0::GrepIndexStatus::Backfilling {
+            captured_seq: ChangeSeq(0),
+            cursor_inode_id: None,
+            ..
+        }
     );
     assert_eq!(
         server.binding.namespaces.visit_held(&namespace_id, |held| (
@@ -328,21 +324,19 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .await
         .expect("load disabled manifest")
         .expect("disabled manifest");
-    assert!(matches!(
+    assert_matches!(
         disabled.manifest_state().status(),
         GrepIndexStatus::Disabled {}
-    ));
+    );
     sweep(&server).await;
-    assert!(
-        matches!(
-            load_current_grep_manifest(&*store, &namespace_id, observation())
-                .await
-                .expect("reload disabled manifest")
-                .expect("disabled manifest")
-                .manifest_state()
-                .status(),
-            GrepIndexStatus::Disabled {}
-        ),
+    assert_matches!(
+        load_current_grep_manifest(&*store, &namespace_id, observation())
+            .await
+            .expect("reload disabled manifest")
+            .expect("disabled manifest")
+            .manifest_state()
+            .status(),
+        GrepIndexStatus::Disabled {},
         "no step may resurrect a manifest the operator disabled"
     );
 
@@ -452,10 +446,10 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .await
         .expect("load manifest")
         .expect("backfill manifest");
-    assert!(matches!(
+    assert_matches!(
         manifest.manifest_state().status(),
         GrepIndexStatus::Backfilling { .. }
-    ));
+    );
     writer.shutdown().await.expect("shutdown writer");
     drop(writer);
     drop(worker);
@@ -685,10 +679,10 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .await
         .expect("load manifest")
         .expect("maintained manifest");
-    assert!(matches!(
+    assert_matches!(
         manifest.manifest_state().status(),
         GrepIndexStatus::Active { .. }
-    ));
+    );
     assert!(
         !manifest.manifest_state().segments().is_empty(),
         "the index this deployment maintains holds real segments"
@@ -733,11 +727,9 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
     // Every index route still answers: serve-only maintenance withdraws the
     // sweep, not the operator's reach.
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    assert!(
-        matches!(
-            index_status(&router, &namespace_id).await.status,
-            v0::GrepIndexStatus::Backfilling { .. }
-        ),
+    assert_matches!(
+        index_status(&router, &namespace_id).await.status,
+        v0::GrepIndexStatus::Backfilling { .. },
         "the enable published a backfill this deployment left for someone else"
     );
 

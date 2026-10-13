@@ -1,4 +1,3 @@
-#![allow(clippy::panic, clippy::print_stdout)]
 //! Checks that the metadata segment cache and the head-state cache, which
 //! holds head anchors and WAL-tail projections, charge their budgets with the
 //! heap their contents hold.
@@ -6,6 +5,9 @@
 //! This binary counts every allocation, so it keeps a process of its own.
 //! Heap here means the bytes the program asks the allocator for; allocator
 //! overhead is outside every budget.
+
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
+#![allow(clippy::print_stdout)]
 
 use bytes::Bytes;
 use loonfs::publish::{

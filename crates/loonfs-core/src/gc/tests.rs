@@ -1,7 +1,5 @@
 //! Behavior tests for namespace GC.
 
-#![allow(clippy::panic)]
-
 use super::collect::gc_namespace;
 use super::options::GcOptions;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
@@ -51,6 +49,7 @@ use loonfs_test_support::stores::{
     OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::AttributeInclusion;
+use std::assert_matches;
 use tempfile::tempdir;
 
 mod concurrent_retirement;
@@ -198,9 +197,10 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     )
     .await
     .expect_err("sub-minimum grace window must be rejected");
-    assert!(
-        matches!(&error, CoreError::InvalidGcOptions(message)
-            if message.contains("below the derived safety minimum")),
+    assert_matches!(
+        &error,
+        CoreError::InvalidGcOptions(message)
+            if message.contains("below the derived safety minimum"),
         "expected invalid gc config, got {error:?}"
     );
     assert_eq!(
@@ -222,8 +222,9 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     )
     .await
     .expect_err("zero shard target");
-    assert!(
-        matches!(error, CoreError::InvalidGcOptions(message) if message == "`content_shard_rows` must be at least 1")
+    assert_matches!(
+        error,
+        CoreError::InvalidGcOptions(message) if message == "`content_shard_rows` must be at least 1"
     );
 }
 
@@ -676,10 +677,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("aborted session retained");
-    assert!(matches!(
-        session.status,
-        UploadSessionRecordStatus::Aborted { .. }
-    ));
+    assert_matches!(session.status, UploadSessionRecordStatus::Aborted { .. });
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "aborting deletes the object the session owned"
@@ -759,13 +757,13 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     .await
     .expect("retain after failed cleanup");
     assert_eq!(report.deleted.upload_sessions, 0);
-    assert!(matches!(
+    assert_matches!(
         read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .expect("aborted session retained")
             .status,
         UploadSessionRecordStatus::Aborted { .. }
-    ));
+    );
 
     let report = gc_namespace(
         &store,
@@ -992,10 +990,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("completed session retained");
-    assert!(matches!(
-        session.status,
-        UploadSessionRecordStatus::Completed { .. }
-    ));
+    assert_matches!(session.status, UploadSessionRecordStatus::Completed { .. });
     assert!(
         store.head(&content_key).await.expect("head").is_some(),
         "the losing abort must not clean up the winner's content"
@@ -1043,16 +1038,13 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     };
     let (completion, report) = tokio::join!(completion, abort);
     let error = completion.expect_err("an aborted session is logically absent");
-    assert!(matches!(&error, CoreError::UploadNotFound { .. }));
+    assert_matches!(&error, CoreError::UploadNotFound { .. });
     assert_eq!(error.code(), crate::error::ErrorCode::UploadNotFound);
     report.expect("gc pass");
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("aborted session retained for a grace window");
-    assert!(matches!(
-        session.status,
-        UploadSessionRecordStatus::Aborted { .. }
-    ));
+    assert_matches!(session.status, UploadSessionRecordStatus::Aborted { .. });
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "the winning abort cleans up, and the losing completion does not resurrect"
@@ -1934,13 +1926,9 @@ async fn assert_basis_reaped(
     _pass: &GcResponse,
     manifest_number: &ManifestNo,
 ) {
-    assert!(crate::manifest::load_namespace_manifest_envelope(
-        store,
-        namespace_id,
-        manifest_number
-    )
-    .await
-    .is_err());
+    crate::manifest::load_namespace_manifest_envelope(store, namespace_id, manifest_number)
+        .await
+        .expect_err("the reaped basis manifest should be gone");
 }
 
 #[tokio::test]
@@ -2395,16 +2383,16 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         KeyPredicate::exact(&pin_key),
     );
     store.inner().fail_next(1);
-    assert!(gc_namespace(
+    gc_namespace(
         &store,
         None,
         &clone,
         &options(),
         &aged,
-        crate::test_support::std_timer()
+        crate::test_support::std_timer(),
     )
     .await
-    .is_err());
+    .expect_err("a failed source pin delete should fail the pass");
     assert!(pin_exists(&store, &source, &fork_record.pin_id).await);
     let released = gc_namespace(
         &store,
@@ -3957,10 +3945,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
     .await
     .expect_err("the first session's content id does not fit the budget");
 
-    assert!(
-        matches!(error, CoreError::LiveSetExceedsReadMemory { limit: 1, .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, CoreError::LiveSetExceedsReadMemory { limit: 1, .. });
     let prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
     let session_reads = store
         .snapshot()

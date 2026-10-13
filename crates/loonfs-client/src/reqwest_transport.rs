@@ -5,7 +5,10 @@ use crate::{Body, ClientConfig, ClientError, Result, TransportError};
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
 use loonfs_types::config::ConfigFieldError;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::CertificateDer;
 use std::fs;
+use std::sync::Arc;
 use tower::{Service, ServiceExt as _};
 
 pub(crate) fn service(
@@ -13,16 +16,12 @@ pub(crate) fn service(
 ) -> Result<
     impl Service<Request<Body>, Response = Response<Body>, Error = TransportError, Future: Send> + Clone,
 > {
-    let mut builder = reqwest::Client::builder().connect_timeout(IO_INACTIVITY_TIMEOUT);
-    for certificate in extra_root_certificates(config)? {
-        builder = builder.add_root_certificate(certificate);
-    }
-    let client = builder.build().map_err(|err| {
-        ClientError::ConfigField(ConfigFieldError::Invalid {
-            field: "http_client",
-            reason: format!("failed to build: {err}"),
-        })
-    })?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(IO_INACTIVITY_TIMEOUT)
+        .tls_backend_preconfigured(tls_config(config)?)
+        .http1_only()
+        .build()
+        .map_err(|err| invalid("http_client", format!("failed to build: {err}")))?;
     Ok(tower::service_fn(move |request: Request<Body>| {
         let client = client.clone();
         async move {
@@ -56,30 +55,87 @@ fn transport_error(error: reqwest::Error) -> TransportError {
     }
 }
 
-fn extra_root_certificates(config: &ClientConfig) -> Result<Vec<reqwest::Certificate>> {
-    let Some(path) = &config.ca_cert_path else {
-        return Ok(Vec::new());
-    };
-    let path = path.trim();
-    let pem = fs::read(path).map_err(|err| {
-        ClientError::ConfigField(ConfigFieldError::Invalid {
-            field: "ca_cert_path",
-            reason: format!("failed to read `{path}`: {err}"),
-        })
-    })?;
-    let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|err| {
-        ClientError::ConfigField(ConfigFieldError::Invalid {
-            field: "ca_cert_path",
-            reason: format!("`{path}` is not a PEM certificate bundle: {err}"),
-        })
-    })?;
+/// Builds the client's TLS configuration: the ring provider, the protocol
+/// versions rustls defaults to, the operating system's root certificates
+/// plus the bundle at `ca_cert_path`, HTTP/1.1 in ALPN, and no client
+/// certificate.
+///
+/// The client names each of these itself, so its TLS stays the same whichever
+/// reqwest features the rest of a build turns on.
+///
+/// An operating system store often holds old certificates that rustls refuses
+/// as trust anchors, so those are skipped and counted, and construction fails
+/// only when the store yields certificates and none of them is usable. Every
+/// certificate in the `ca_cert_path` bundle must load.
+fn tls_config(config: &ClientConfig) -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    let (added, skipped) = roots.add_parsable_certificates(native.certs);
+    if skipped > 0 {
+        if added == 0 {
+            let reason = match native.errors.first() {
+                Some(err) => format!(
+                    "none of the {skipped} platform root certificates is a usable trust anchor, \
+                     and loading the store also reported: {err}"
+                ),
+                None => format!(
+                    "none of the {skipped} platform root certificates is a usable trust anchor"
+                ),
+            };
+            return Err(invalid("http_client", reason));
+        }
+        tracing::warn!(
+            skipped,
+            "skipped platform root certificates that are not usable trust anchors"
+        );
+    }
+    if let Some(path) = &config.ca_cert_path {
+        let path = path.trim();
+        for certificate in ca_bundle(path)? {
+            roots.add(certificate).map_err(|err| {
+                invalid(
+                    "ca_cert_path",
+                    format!(
+                        "`{path}` holds a certificate that is not a usable trust anchor: {err}"
+                    ),
+                )
+            })?;
+        }
+    }
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("the ring provider should support the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tls)
+}
+
+/// Reads the PEM certificates at `path`, and refuses a file that holds none.
+fn ca_bundle(path: &str) -> Result<Vec<CertificateDer<'static>>> {
+    let pem = fs::read(path)
+        .map_err(|err| invalid("ca_cert_path", format!("failed to read `{path}`: {err}")))?;
+    let certificates = CertificateDer::pem_slice_iter(&pem)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| {
+            invalid(
+                "ca_cert_path",
+                format!("`{path}` is not a PEM certificate bundle: {err}"),
+            )
+        })?;
     if certificates.is_empty() {
-        return Err(ClientError::ConfigField(ConfigFieldError::Invalid {
-            field: "ca_cert_path",
-            reason: format!("`{path}` holds no CERTIFICATE section"),
-        }));
+        return Err(invalid(
+            "ca_cert_path",
+            format!("`{path}` holds no CERTIFICATE section"),
+        ));
     }
     Ok(certificates)
+}
+
+fn invalid(field: &'static str, reason: String) -> ClientError {
+    ClientError::ConfigField(ConfigFieldError::Invalid { field, reason })
 }
 
 #[cfg(test)]

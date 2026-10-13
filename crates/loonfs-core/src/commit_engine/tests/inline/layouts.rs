@@ -9,6 +9,7 @@ use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{Checksum, ExtentObject};
+use std::assert_matches;
 use tokio::sync::Semaphore;
 
 async fn layout(
@@ -210,8 +211,10 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
     assert_eq!(store.counts().gets, 2);
     let missing = content_span(&namespace_id, &original.content_id, 100, 110);
     store.delete(&missing).await.expect("delete span");
-    assert!(
-        matches!(location.read_bytes(&store, &reference).await, Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing)
+    assert_matches!(
+        location.read_bytes(&store, &reference).await,
+        Err(DurableContentValidationError::MissingContentObject { object_key })
+            if object_key == missing
     );
 }
 
@@ -257,7 +260,7 @@ async fn a_merged_span_must_match_its_objects_stored_checksum() {
     let error = fold_wal(&incorrect, &namespace_id)
         .await
         .expect_err("stored checksum mismatch");
-    assert!(matches!(error, CoreError::NamespaceCorrupt(message) if message.contains(&key)));
+    assert_matches!(error, CoreError::NamespaceCorrupt(message) if message.contains(&key));
     assert_no_writes(&store);
 }
 
@@ -511,8 +514,9 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         .await
         .expect("fold shared base");
     let span = content_span(&namespace_id, &fresh.content_id, 105, 106);
-    assert!(
-        matches!(content_operations(&store).as_slice(), [RecordedOperation::Assemble { key, bytes: 1, .. }] if key == &span)
+    assert_matches!(
+        content_operations(&store).as_slice(),
+        [RecordedOperation::Assemble { key, bytes: 1, .. }] if key == &span
     );
     let row = layout(&store, &fresh).await;
     row.layout.validate(106).expect("shared prefix layout");
@@ -1274,19 +1278,19 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     let store = denied.inner();
     store.reset();
     for path in ["/file-0", "/file-1"] {
-        assert!(matches!(
+        assert_matches!(
             view.direct_download_target(&denied, path, None, 10, &access, &content_writes)
                 .await,
             Err(CoreError::ResumeOffsetOutOfRange { .. })
-        ));
+        );
     }
     assert_eq!(denied.attempts(), 0);
     for path in ["/file-0", "/file-1"] {
-        assert!(matches!(
+        assert_matches!(
             view.direct_download_target(&denied, path, None, 0, &access, &content_writes)
                 .await,
             Err(CoreError::ContentNotMaterialized { .. })
-        ));
+        );
     }
     assert_eq!(denied.attempts(), 2);
     assert_no_writes(store);

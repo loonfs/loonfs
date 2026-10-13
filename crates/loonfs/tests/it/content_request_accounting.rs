@@ -15,6 +15,7 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, RecordingStore,
 };
 use loonfs_types::ContentId;
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -206,13 +207,11 @@ fn assert_content_counts(
 fn assert_content_not_prepared(error: impl Into<Error>, content_ref: &loonfs::ContentRef) {
     let error = error.into();
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-    assert!(
-        matches!(
-            error,
-            Error::Core(CoreError::ContentPreparation(
-                ContentPreparationError::ContentNotPrepared { ref content_id }
-            )) if content_id == &content_ref.content_id
-        ),
+    assert_matches!(
+        error,
+        Error::Core(CoreError::ContentPreparation(
+            ContentPreparationError::ContentNotPrepared { ref content_id }
+        )) if content_id == &content_ref.content_id,
         "content-not-prepared error should carry the rejected digest"
     );
 }
@@ -312,8 +311,9 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
         .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect_err("another store must reject the admission");
-    assert!(
-        matches!(error, Error::Core(_)),
+    assert_matches!(
+        error,
+        Error::Core(_),
         "expected core content-preparation error"
     );
     let Error::Core(error) = error else {
@@ -914,13 +914,13 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         .expect_err("new rejected preparation must fail");
 
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::Core(CoreError::ContentPreparation(
             ContentPreparationError::ContentToken(ref rejections)
         ))
             if matches!(rejections[..], [(_, ContentTokenError::Expired)])
-    ));
+    );
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 

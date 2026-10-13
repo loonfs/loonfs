@@ -316,8 +316,8 @@ impl ObjectStoreError {
         self.kind().public_message()
     }
 
-    /// Key of the object (or listed prefix) the failing operation targeted,
-    /// when the failure is object-scoped.
+    /// Returns the key of the object (or listed prefix) the failing operation
+    /// targeted, when the failure is object-scoped.
     pub fn object_key(&self) -> Option<&str> {
         match self {
             Self::NotFound { object_key }
@@ -332,8 +332,8 @@ impl ObjectStoreError {
         }
     }
 
-    /// Failure text without the object key, for wrappers that record the key
-    /// as their own structured field.
+    /// Returns the failure text without the object key, for wrappers that record
+    /// the key as their own structured field.
     pub fn message(&self) -> String {
         match self {
             Self::NotFound { .. } => "object not found".to_owned(),
@@ -563,7 +563,11 @@ pub trait ObjectStore: Send + Sync + Debug {
         key: &str,
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::immutable_write::put(self, key, bytes).await
+        // A store without a limiter of its own spaces the retry warnings of
+        // this one write only.
+        let warnings =
+            crate::retry::RetryWarnings::new(Arc::new(crate::timing::StdMonotonicTimer::default()));
+        crate::immutable_write::put(self, &warnings, key, bytes).await
     }
 
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.

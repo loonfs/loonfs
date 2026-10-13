@@ -2,9 +2,6 @@
 //! per name, cumulative buckets, and an output that does not move between
 //! scrapes of the same readings.
 
-#![allow(clippy::panic)]
-// A wrong reading kind in a fixture is a bug in the test.
-
 use super::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES};
 

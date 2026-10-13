@@ -147,14 +147,14 @@ impl DirectPutBody<'_> {
 /// Size and checksum of the bytes sent in one direct PUT.
 struct DirectPutObservation {
     size_bytes: u64,
-    checksum: Option<StreamingChecksum>,
+    checksum: Option<ChecksumDigest>,
 }
 
 impl DirectPutObservation {
     fn new(algorithm: ChecksumAlgorithm) -> Self {
         Self {
             size_bytes: 0,
-            checksum: Some(StreamingChecksum::for_algorithm(algorithm)),
+            checksum: Some(ChecksumDigest::new(algorithm)),
         }
     }
 
@@ -626,7 +626,7 @@ impl Client {
             .resume
             .map_or::<&[CompletedUploadPart], _>(&[], |resume| &resume.parts);
         let mut source = payload.into_parts_of(part_size);
-        let mut whole_object = StreamingChecksum::for_algorithm(checksum_algorithm);
+        let mut whole_object = ChecksumDigest::new(checksum_algorithm);
         let mut size_bytes = 0u64;
         let mut parts = Vec::new();
         let mut next_part_number = 1u32;

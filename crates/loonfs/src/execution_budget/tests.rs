@@ -4,8 +4,6 @@
 //! back, a runtime that leaves gives everything back, and every wait can be
 //! dropped.
 
-#![allow(clippy::panic)]
-
 use super::{ExecutionBudget, ExecutionBudgetStats};
 use crate::metrics::{DefaultMetricsRecorder, MetricValue};
 use crate::{

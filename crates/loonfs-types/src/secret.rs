@@ -33,7 +33,9 @@ impl SecretString {
         self.0.trim().is_empty()
     }
 
-    /// Returns the raw secret. Keep the exposure site as small as possible.
+    /// Returns the raw secret.
+    ///
+    /// Keep the exposure site as small as possible.
     pub fn expose(&self) -> &str {
         &self.0
     }

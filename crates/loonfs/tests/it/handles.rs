@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Handle integration tests use panic in helper assertions for precise diagnostics.
-
 //! Purpose-specific handle coverage: builder contracts, the background-work
 //! policy, background-shutdown semantics, and cross-handle reads. Each test drives every
 //! handle from one runtime fixture, matching the runtime-ownership contract
@@ -21,6 +18,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -265,10 +263,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             )
             .await
             .expect("fold what the writer left");
-        assert!(
-            matches!(step.wal_fold, WalFoldStepOutcome::Folded { .. }),
-            "{step:?}"
-        );
+        assert_matches!(step.wal_fold, WalFoldStepOutcome::Folded { .. }, "{step:?}");
 
         // Reads and writes on the writer's own runtime see the state the
         // step left behind, with no stale-cache error in between.
@@ -674,8 +669,9 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .diagnostics(&namespace_id)
             .await
             .expect("status after fold recovery");
-        assert!(
-            matches!(status.wal_tail_objects, 1 | 2),
+        assert_matches!(
+            status.wal_tail_objects,
+            1 | 2,
             "the fold in flight at recovery may have begun one commit early: {status:?}"
         );
     });

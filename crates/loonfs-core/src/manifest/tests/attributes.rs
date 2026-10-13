@@ -4,6 +4,7 @@
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
 use loonfs_types::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
+use std::assert_matches;
 use std::collections::BTreeMap;
 
 fn attributes(entries: &[(&str, &str)]) -> Attributes {
@@ -138,15 +139,13 @@ fn the_merge_keeps_a_latest_empty_revision() {
     let kept = rows_by_family
         .remove(&ApiMetadataRowFamily::Attributes)
         .expect("family rows");
-    assert!(
-        matches!(
-            kept.as_slice(),
-            [MetadataRow::AttributesRevision (crate::metadata::AttributesRevisionRecord {
-                attributes_revision_no: AttributesRevisionNo(2),
-                attributes,
-                ..
-            })] if attributes.is_empty()
-        ),
+    assert_matches!(
+        kept.as_slice(),
+        [MetadataRow::AttributesRevision (crate::metadata::AttributesRevisionRecord {
+            attributes_revision_no: AttributesRevisionNo(2),
+            attributes,
+            ..
+        })] if attributes.is_empty(),
         "only the cleared revision survives: {kept:?}"
     );
 }
@@ -188,10 +187,7 @@ fn the_merge_refuses_to_compact_repeated_revision_numbers() {
     )
     .expect_err("repeated revision numbers are corruption");
 
-    assert!(
-        matches!(&error, CoreError::NamespaceCorrupt(_)),
-        "{error:?}"
-    );
+    assert_matches!(&error, CoreError::NamespaceCorrupt(_));
     assert!(error.to_string().contains("two attributes rows"), "{error}");
 }
 

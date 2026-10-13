@@ -1,9 +1,6 @@
 //! The served attribute surface: what `include_attributes` projects, what the
 //! server does with the parameter, and that the client round-trips it.
 
-#![allow(clippy::panic)]
-// A transport failure is not an outcome under test; it panics with what it saw.
-
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
 use loonfs_client::AccessState;
@@ -12,6 +9,7 @@ use loonfs_client::{ListOptions, NamespacePath, StatOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::AttributesRevisionNo;
+use std::assert_matches;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -302,8 +300,5 @@ async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
         error.code(),
         Some(loonfs_types::ErrorCode::NamespaceUnrestricted)
     );
-    assert!(matches!(
-        error,
-        loonfs_client::ClientError::Api { status: 409, .. }
-    ));
+    assert_matches!(error, loonfs_client::ClientError::Api { status: 409, .. });
 }

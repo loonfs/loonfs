@@ -3,6 +3,9 @@
 //! Most callers should use the higher-level `loonfs` crate. Use
 //! [`NamespaceEngine`] when working directly with the metadata protocol.
 //!
+//! Caching, batching, background work, and process lifecycle don't belong
+//! here: core never spawns a task, and the `loonfs` runtime adds them.
+//!
 //! # Example
 //!
 //! Commits are published as candidate batches through
@@ -87,8 +90,10 @@ pub mod commit;
 /// Content staging and preparation-token creation used by the `loonfs` write
 /// path and server integration code.
 pub mod content;
-/// Protocol and resource ceilings. Consumed by `loonfs` (re-exported to the
-/// server for request validation) and by layout tests.
+/// Protocol and resource ceilings.
+///
+/// Consumed by `loonfs` (re-exported to the server for request validation)
+/// and by layout tests.
 pub mod limits;
 /// Durable metadata state and row codecs. This module is public so
 /// integration tests can compare projected state with the reference model.
@@ -97,9 +102,11 @@ pub mod metadata;
 /// path (`parse_mutation_path`).
 pub mod path;
 /// Test doubles for the public core APIs, available through the
-/// `test-support` feature. They remain in this crate because
-/// `loonfs-test-support` is a development dependency and cannot depend on
-/// these types without creating a dependency cycle.
+/// `test-support` feature.
+///
+/// They remain in this crate because `loonfs-test-support` is a development
+/// dependency and cannot depend on these types without creating a dependency
+/// cycle.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 /// Durable timestamps and monotonic publication budgets.

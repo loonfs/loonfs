@@ -1,18 +1,17 @@
 //! HTTP directory and revision pagination behavior.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
-use crate::common::{collect_checkpoints, collect_path_entries, start_server};
+use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, start_server};
 use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use loonfs_types::PageRequest;
 use loonfs_types::{
     api::v0::FilesystemChange, ChangeSeq, CommitId, CreateCheckpointRequest, DestinationBehavior,
-    ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
+    ErrorCode, ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT,
 };
+use std::assert_matches;
 use tempfile::tempdir;
 
 fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
@@ -30,13 +29,7 @@ fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
 }
 
 fn assert_invalid_request<T: std::fmt::Debug>(result: Result<T, ClientError>) {
-    match result.expect_err("request should be rejected") {
-        ClientError::Api { status, code, .. } => {
-            assert_eq!(status, 400);
-            assert_eq!(code, "invalid_request");
-        }
-        other => panic!("expected invalid_request API error, got {other:?}"),
-    }
+    assert_api_code(result, 400, ErrorCode::InvalidRequest);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -505,7 +498,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     );
     // Restoring a revision emits the same event as a regular content update.
     assert_eq!(changes.changes[2].events.len(), 1);
-    assert!(matches!(
+    assert_matches!(
         &changes.changes[2].events[0],
         FilesystemChange::ContentChanged {
             inode_id: event_inode,
@@ -514,7 +507,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         } if *event_inode == inode_id
             && *revision_no == RevisionNo(3)
             && *content_ref == first_content_ref
-    ));
+    );
 
     let first_page = harness
         .client
@@ -625,10 +618,10 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         )
         .await
         .expect("move path");
-    assert!(matches!(
+    assert_matches!(
         harness.client.list_file_revisions(&target).page(first_page()).await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
-    ));
+    );
     // Revision history follows the inode after a move.
     let moved_revisions = harness
         .client

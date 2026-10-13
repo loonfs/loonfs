@@ -2,8 +2,6 @@
 //! operation names its position, and replay shares one fingerprint domain
 //! with the embedded runtime.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitIntent;

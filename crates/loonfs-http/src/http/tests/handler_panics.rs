@@ -8,7 +8,6 @@ use axum::routing::get;
 use axum::Router;
 use tower::ServiceExt;
 
-#[allow(clippy::panic, reason = "the route stands in for a handler with a bug")]
 async fn panicking_handler() -> StatusCode {
     panic!("injected handler panic")
 }

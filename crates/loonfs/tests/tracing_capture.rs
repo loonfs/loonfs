@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Tracing-capture tests panic in helper assertions for precise diagnostics.
-
 //! Asserts a metadata maintenance pass is observable at debug level.
 //!
 //! This stays out of the crate's `tests/it` harness and keeps its own test
@@ -13,6 +10,8 @@
 //! events intermittently under parallel test execution. Alone in its
 //! process, the callsites are first hit with the capture subscriber
 //! installed, and the assertion is deterministic.
+
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, StoreConfig, Writable};
 use loonfs_core::test_support::append_wal_objects;

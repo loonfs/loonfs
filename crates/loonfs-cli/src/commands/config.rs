@@ -13,8 +13,6 @@ use crate::profiles::add_profile;
 use crate::prompt;
 use std::path::Path;
 
-// --- init ---
-
 /// Writes the resolved config file, whichever way it was named, creating
 /// the directories it needs. Naming a path that holds no file yet is the
 /// way back from a default config this build refuses to read: init only
@@ -57,8 +55,6 @@ pub(crate) fn run_config_init(
         },
     })
 }
-
-// --- config ---
 
 pub(crate) fn run_config_command(
     kind: CommandKind,

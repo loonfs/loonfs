@@ -309,9 +309,11 @@ pub struct ServerConfig {
     pub store: StoreConfig,
 }
 
-/// The server's TLS identity: one certificate chain and its private key,
-/// both read at startup. A file that is missing, unreadable, or not the PEM
-/// it claims to be fails the process rather than degrading to plaintext.
+/// The server's TLS identity: one certificate chain and its private key, both
+/// read at startup.
+///
+/// A file that is missing, unreadable, or not the PEM it claims to be fails the
+/// process rather than degrading to plaintext.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {
@@ -1041,8 +1043,6 @@ fn bind_serves_beyond_localhost(addr: &SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
         load_server_config, ConfigFieldError, InlineContentConfig, PublicationLimitsConfig,
@@ -1844,9 +1844,8 @@ root = "/tmp/loonfs-server"
                 threshold
             );
         }
-        assert!(
-            toml::from_str::<InlineContentConfig>("inline_content_threshold_bytes = true").is_err()
-        );
+        toml::from_str::<InlineContentConfig>("inline_content_threshold_bytes = true")
+            .expect_err("a boolean threshold should be rejected");
     }
 
     #[test]
@@ -1863,9 +1862,11 @@ root = "/tmp/loonfs-server"
             "max_estimated_bytes_per_namespace",
             "max_concurrent_publications",
         ] {
-            assert!(toml::from_str::<PublicationLimitsConfig>(&format!("{field} = 0")).is_err());
+            toml::from_str::<PublicationLimitsConfig>(&format!("{field} = 0"))
+                .expect_err(&format!("`{field} = 0` should be rejected"));
         }
-        assert!(toml::from_str::<PublicationLimitsConfig>("max_requsets = 10").is_err());
+        toml::from_str::<PublicationLimitsConfig>("max_requsets = 10")
+            .expect_err("a misspelled field should be rejected");
         let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
         assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));

@@ -6,6 +6,7 @@ use axum::http::Method;
 use axum::response::IntoResponse;
 use loonfs::NamespaceSessionStatus;
 use loonfs_test_support::stores::BlockingStore;
+use std::assert_matches;
 use tower::ServiceExt;
 
 async fn send(
@@ -521,10 +522,10 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         .await
         .expect("another namespace opens while the drain is parked")
         .expect("open other namespace");
-        assert!(matches!(
+        assert_matches!(
             futures::poll!(Box::pin(state.namespaces.open(&other))),
             std::task::Poll::Ready(Ok(_))
-        ));
+        );
         other_handle
             .create_directory("/during-close", &loonfs_test_support::test_actor())
             .await

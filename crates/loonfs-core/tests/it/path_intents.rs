@@ -1,8 +1,5 @@
 //! Path-intent planning, query visibility, and mutation semantics.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_core::commit::CommitValidationError;
@@ -22,6 +19,7 @@ use loonfs_types::{
     DirectoryPageCursor, EntryInodeKind, InodeId, NameKey, NamespaceId, NamespaceNaming, Page,
     PageRequest, PathEntry, RevisionNo,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -500,12 +498,20 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     assert_eq!(actual_file_list, expected_file_list);
     assert_eq!(store.count(OperationSelector::Read), 0);
 
-    assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt")
-        .await
-        .is_err());
-    assert!(resolve_path_latest(&store, &namespace_id, "/dead/leaf.txt")
-        .await
-        .is_err());
+    assert_eq!(
+        resolve_path_latest(&store, &namespace_id, "/docs/a.txt")
+            .await
+            .expect_err("the moved path should not resolve")
+            .code(),
+        loonfs_types::ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        resolve_path_latest(&store, &namespace_id, "/dead/leaf.txt")
+            .await
+            .expect_err("a path under the deleted directory should not resolve")
+            .code(),
+        loonfs_types::ErrorCode::PathNotFound
+    );
 }
 
 #[tokio::test]
@@ -1322,7 +1328,12 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     .await
     .expect("put recreates the subtree");
     let old_child = resolve_path(&store, &namespace_id("demo"), "/docs/old.txt").await;
-    assert!(old_child.is_err(), "dead subtree child must stay invisible");
+    assert_eq!(
+        old_child
+            .expect_err("dead subtree child must stay invisible")
+            .code(),
+        loonfs_types::ErrorCode::PathNotFound
+    );
 
     move_path(
         &store,
@@ -1413,9 +1424,13 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         .filter(|event| matches!(event, FilesystemChange::Moved { .. }))
         .count();
     assert_eq!(move_count, 1);
-    assert!(resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
-        .await
-        .is_err());
+    assert_eq!(
+        resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
+            .await
+            .expect_err("the old path should not resolve after the move")
+            .code(),
+        loonfs_types::ErrorCode::PathNotFound
+    );
     resolve_path(&store, &namespace_id("demo"), "/docs/b.txt")
         .await
         .expect("new path visible");
@@ -1699,13 +1714,13 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     )
     .await
     .expect_err("non-recursive delete should reject non-empty dir");
-    assert!(matches!(
+    assert_matches!(
         &error,
         CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::CommitValidation(
                 CommitValidationError::DirectoryNotEmpty { inode_id: InodeId(2) }
             ))
-    ));
+    );
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
@@ -2001,9 +2016,10 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     )
     .await
     .expect_err("no-replace move onto an occupied name fails");
-    assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
-        if matches!(*source, CoreError::DestinationExists { .. }))
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: 0, error: source }
+        if matches!(*source, CoreError::DestinationExists { .. })
     );
 
     // Replace compiles to one commit: the destination file's delete and the
@@ -2078,9 +2094,10 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     )
     .await
     .expect_err("replace move onto a directory fails");
-    assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
-        if matches!(*source, CoreError::ExpectedFile { .. }))
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: 0, error: source }
+        if matches!(*source, CoreError::ExpectedFile { .. })
     );
 
     // A path never replaces itself, force or not.
@@ -2101,9 +2118,10 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     )
     .await
     .expect_err("replace move onto itself fails");
-    assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
-        if matches!(*source, CoreError::DestinationExists { .. }))
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: 0, error: source }
+        if matches!(*source, CoreError::DestinationExists { .. })
     );
 }
 
@@ -2418,7 +2436,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     else {
         panic!("expected failed operation, got {error:?}");
     };
-    assert!(matches!(
+    assert_matches!(
         *source,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_inode_id: Some(expected_child_inode_id),
@@ -2426,7 +2444,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
             ..
         }) if expected_child_inode_id == old.inode_id
             && actual_child_inode_id == recreated.inode_id
-    ));
+    );
 
     let error = submit_operation(
         &store,

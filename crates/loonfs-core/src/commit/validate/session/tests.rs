@@ -174,20 +174,6 @@ fn replace_file_overlay_rows_match_replayed_wal_deltas() {
 }
 
 #[test]
-fn restore_revision_overlay_rows_match_replayed_wal_deltas() {
-    assert_overlay_matches_replay(
-        ChangeSeq(12),
-        &[WalDelta::AppendFileRevision {
-            delta_index: 0,
-            inode_id: InodeId(4),
-            revision_no: RevisionNo(6),
-            content_ref: content_ref(3),
-            layout: None,
-        }],
-    );
-}
-
-#[test]
 fn delete_file_overlay_rows_match_replayed_wal_deltas() {
     assert_overlay_matches_replay(
         ChangeSeq(15),

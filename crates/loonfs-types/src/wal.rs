@@ -1,5 +1,5 @@
 //! The WAL object format: envelopes, commit payloads, and the delta
-//! records replay applies (format spec, "WAL records").
+//! records replay applies ([Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records)).
 
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
@@ -14,10 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 
-/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
-/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
-/// bytes, and delta/precondition tags use the snake_case names the format
-/// spec fixes ("Standard mutation operations" and "Preconditions").
+/// Version 1: a zstd-compressed CBOR envelope document carrying the payload as
+/// an opaque CBOR byte string.
+///
+/// `payload_checksum` covers exactly those bytes, and delta and precondition
+/// tags use the snake_case names in
+/// [Operations and WAL deltas](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#66-operations-and-wal-deltas)
+/// and [Preconditions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b3-preconditions).
 pub const WAL_FORMAT_VERSION: u32 = 1;
 
 /// Largest decompressed WAL document allowed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
@@ -233,6 +236,7 @@ pub struct WalCommitDelta {
 }
 
 /// Groups a commit's ordered deltas by their durable semantic operation.
+///
 /// Indices are local to the commit and need not be consecutive.
 pub fn semantic_operation_groups(
     deltas: &[WalCommitDelta],
@@ -241,6 +245,7 @@ pub fn semantic_operation_groups(
 }
 
 /// Counts activity represented by one committed record.
+///
 /// Returns `None` if a counter overflows.
 ///
 /// A revision counts its full length, except that bytes the record's pieces
@@ -566,9 +571,9 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
 
     use super::*;
+    use std::assert_matches;
 
     fn activity(
         content_bytes: u64,
@@ -878,19 +883,20 @@ mod tests {
                 .expect("at limit"),
             encoded.envelope(),
         );
-        assert!(matches!(
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
-            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes }) if max_bytes == document.len() - 1
-        ));
+            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes })
+                if max_bytes == document.len() - 1
+        );
         let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
-        assert!(matches!(
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 8),
             Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: 8 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
             Err(EnvelopeCodecError::EnvelopeDecode(_))
-        ));
+        );
     }
 
     #[test]
@@ -941,20 +947,21 @@ mod tests {
             } else {
                 if piece_offset == Some(0) {
                     for error in [decoded.as_ref().err(), encoded.as_ref().err()] {
-                        assert!(
-                            matches!(error, Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
-                            if *reason == "a whole value carries no layout")
+                        assert_matches!(
+                            error,
+                            Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
+                            if *reason == "a whole value carries no layout"
                         );
                     }
                 }
-                assert!(matches!(
+                assert_matches!(
                     decoded,
                     Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                ));
-                assert!(matches!(
+                );
+                assert_matches!(
                     encoded,
                     Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                ));
+                );
             }
         }
     }

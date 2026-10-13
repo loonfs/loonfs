@@ -2,9 +2,6 @@
 //! preconditions reject, and what survives a fold, a fork, and every operation that
 //! moves an inode around.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use loonfs_core::content::store_bytes_as_content;
@@ -23,6 +20,7 @@ use loonfs_types::{
     AttributesRevisionNo, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
     InodeId, NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
 };
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -40,9 +38,15 @@ fn path(value: &str) -> AbsolutePath {
 }
 
 fn assert_invalid_commit_request(error: &CoreError, label: &str) {
-    assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
-            if matches!(source.as_ref(), CoreError::InvalidCommitRequest(_) | CoreError::InvalidCommitField { .. })),
+    assert_matches!(
+        error,
+        CoreError::FailedOperation {
+            operation_index: 0,
+            error: source,
+        } if matches!(
+            source.as_ref(),
+            CoreError::InvalidCommitRequest(_) | CoreError::InvalidCommitField { .. }
+        ),
         "for `{label}`: {error:?}"
     );
     assert_eq!(error.code(), ErrorCode::InvalidRequest, "for `{label}`");

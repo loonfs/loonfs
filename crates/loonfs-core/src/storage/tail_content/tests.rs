@@ -9,6 +9,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use std::assert_matches;
 
 struct Layout(ContentLayoutRecord);
 
@@ -149,9 +150,10 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     assert!(operations[..2]
         .iter()
         .all(|operation| matches!(operation, RecordedOperation::Head { .. })));
-    assert!(
-        matches!(&operations[2], RecordedOperation::Assemble { sources, expected, .. }
-        if sources.len() == 2 && expected == &reference.checksum)
+    assert_matches!(
+        &operations[2],
+        RecordedOperation::Assemble { sources, expected, .. }
+        if sources.len() == 2 && expected == &reference.checksum
     );
     let key = extent_object_key(extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
@@ -198,8 +200,9 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
         3 * (MAX_LAYOUT_EXTENTS as u64 - 1) + 1
     );
     let operations = store.snapshot();
-    assert!(
-        matches!(operations.last(), Some(RecordedOperation::Assemble { sources, .. }) if sources.len() == MAX_LAYOUT_EXTENTS - 1)
+    assert_matches!(
+        operations.last(),
+        Some(RecordedOperation::Assemble { sources, .. }) if sources.len() == MAX_LAYOUT_EXTENTS - 1
     );
     assert_eq!(store.counts().gets, 0);
 }
@@ -229,7 +232,7 @@ async fn assembly_sources_require_whole_extents_and_stored_checksums_in_the_stor
                 if valid && offset == 0 {
                     assert_eq!(result.expect("whole source").0.len(), 1);
                 } else {
-                    assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
+                    assert_matches!(result, Err(CoreError::NamespaceCorrupt(_)));
                 }
             }
         }
@@ -266,10 +269,10 @@ async fn local_large_tail_assembles_without_sources() {
     let written = write_tail_content(&store, &layout, &content, pieces, &pool)
         .await
         .expect("streamed tail");
-    assert!(matches!(
+    assert_matches!(
         store.snapshot().as_slice(),
         [RecordedOperation::Assemble { sources, .. }] if sources.is_empty()
-    ));
+    );
     let stored = store
         .head(&extent_object_key(&written.layout.extents[0]))
         .await
@@ -321,9 +324,11 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         assert_eq!(written.layout.size_bytes(), reference.size_bytes);
         assert_eq!(written.layout.extents[0].length, size);
         let operations = store.snapshot();
-        assert!(
-            matches!(operations.last(), Some(RecordedOperation::Assemble { sources, bytes, .. })
-            if *bytes == 10 - loonfs_types::usize_from_u64(size) && sources.len() == usize::from(size == 10))
+        assert_matches!(
+            operations.last(),
+            Some(RecordedOperation::Assemble { sources, bytes, .. })
+                if *bytes == 10 - loonfs_types::usize_from_u64(size)
+                    && sources.len() == usize::from(size == 10)
         );
     }
 }

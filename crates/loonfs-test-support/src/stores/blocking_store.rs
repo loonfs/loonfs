@@ -36,12 +36,10 @@ struct Gate {
 impl Gate {
     async fn park(&self) {
         let level_triggered = self.armed.load(Ordering::SeqCst);
-        // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
-        #[allow(deprecated)]
         let one_shot = !level_triggered
             && self
                 .block_next
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok();

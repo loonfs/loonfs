@@ -1,7 +1,5 @@
 //! Embedded integration tests for actor and timestamp fields.
 
-#![allow(clippy::panic)]
-
 use crate::common::*;
 use loonfs::AttributeChanges;
 use loonfs::{

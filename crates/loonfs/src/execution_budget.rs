@@ -30,9 +30,11 @@ pub const DEFAULT_MAX_CONTENT_WRITES: usize = 32;
 const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
-/// Work in flight that one or more runtimes share: admitted
-/// publication requests, running reads and publications, WAL folds, metadata merges,
-/// the decoded input one merge may hold, content writes, and retained read working memory.
+/// Work in flight that one or more runtimes share.
+///
+/// It covers admitted publication requests, running reads and publications, WAL
+/// folds, metadata merges, the decoded input one merge may hold, content
+/// writes, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its

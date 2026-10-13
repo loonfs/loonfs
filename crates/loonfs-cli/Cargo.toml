@@ -25,8 +25,8 @@ clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
 fs4.workspace = true
-dialoguer = { version = "0.11", features = ["fuzzy-select"] }
-hostname = "0.4"
+dialoguer.workspace = true
+hostname.workspace = true
 loonfs-types.workspace = true
 loonfs-client.workspace = true
 loonfs.workspace = true
@@ -37,12 +37,12 @@ serde_json.workspace = true
 tempfile.workspace = true
 # `io-std` is what makes standard input an asynchronous source, which is
 # how `loonfs put -` reads a payload of unknown length.
-tokio = { workspace = true, features = ["io-std"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "time"] }
 toml.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["sync"] }
 walkdir.workspace = true
-insta = { version = "1.39", features = ["json"] }
 loonfs-core = { workspace = true, features = ["test-support"] }
 # The store wrappers that make "this transfer never held the file" a
 # checkable claim rather than a comment.

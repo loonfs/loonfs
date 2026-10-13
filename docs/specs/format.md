@@ -1639,6 +1639,8 @@ A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 | `crc64nvme` | 16 hexadecimal characters |
 | `crc32c` | 8 hexadecimal characters |
 
+The value is the CRC result written as a big-endian integer, so the hex is the checksum bytes in wire order.
+
 What a checksum covers depends on the field that contains it. A content reference's checksum covers the prefix it identifies, an upload-content claim covers the complete object, and a multipart part checksum covers one part. An algorithm selector without a value isn't a checksum. Provider encodings are converted to this representation before the stored value is built.
 
 ### A.4 Control and manifest payloads

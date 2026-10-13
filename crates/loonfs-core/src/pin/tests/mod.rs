@@ -1,8 +1,5 @@
 //! Pin creation, listing, verification, snapshot, and cleanup tests.
 
-#![allow(clippy::panic)]
-// These tests use panic in impossible match arms to preserve precise failure messages.
-
 mod inventory;
 mod pin_cleanup;
 mod pin_verification;

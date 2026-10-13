@@ -6,10 +6,12 @@ use loonfs_objectstore::ConfiguredObjectStoreKind;
 /// Default minimum interval, in milliseconds, between checks for a successor
 /// to a cached manifest.
 pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
-/// Default largest file content that one buffered read materializes. With the
-/// default of [`DEFAULT_MAX_CONCURRENT_READS`](crate::DEFAULT_MAX_CONCURRENT_READS)
-/// reads at once, the buffered reads under one budget hold at most 16 GiB (64
-/// reads of 256 MiB).
+/// Default largest file content that one buffered read materializes.
+///
+/// With the default of
+/// [`DEFAULT_MAX_CONCURRENT_READS`](crate::DEFAULT_MAX_CONCURRENT_READS) reads
+/// at once, the buffered reads under one budget hold at most 16 GiB (64 reads
+/// of 256 MiB).
 pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// Default minimum interval, in milliseconds, between publication starts
 /// for one namespace (see [`crate::publisher`]). A request to an idle
@@ -48,6 +50,7 @@ impl Default for PublicationPolicy {
 }
 
 /// Writer policy for content carried in WAL objects.
+///
 /// Retrying a completed inline commit does not upload its content again while
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 ///

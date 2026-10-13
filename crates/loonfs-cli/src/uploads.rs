@@ -685,9 +685,8 @@ mod tests {
         let expected = request(&next);
         let mut wrong_options = expected.clone();
         wrong_options.message = Some("different intent".to_owned());
-        assert!(next
-            .commit_prepared(&wrong_options, &next.actor_id(), None)
-            .is_err());
+        next.commit_prepared(&wrong_options, &next.actor_id(), None)
+            .expect_err("a commit request that differs from the saved one should be refused");
         assert!(next.prepared_request().is_none());
         next.commit_prepared(&expected, &next.actor_id(), None)
             .expect("save commit");
@@ -695,12 +694,14 @@ mod tests {
         let replay = open(&path);
         assert!(replay.resume().is_none());
         assert_eq!(replay.prepared_request(), Some(expected.clone()));
-        assert!(replay.part_completed(&part(3)).is_err());
+        replay
+            .part_completed(&part(3))
+            .expect_err("a part after the commit request is saved should be refused");
         let mut changed = expected;
         changed.commit_id = CommitId::generate();
-        assert!(replay
+        replay
             .commit_prepared(&changed, &replay.actor_id(), None)
-            .is_err());
+            .expect_err("a second, different commit request should be refused");
         replay
             .acknowledge(UploadOutcome::Committed)
             .expect("acknowledged");
@@ -857,25 +858,25 @@ mod tests {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
         std::fs::write(&path, b"{").expect("corrupt record");
-        assert!(UploadJournal::open_at(
+        UploadJournal::open_at(
             path.clone(),
             source(1024),
             &loonfs_test_support::test_actor(),
             &options(),
-            None
+            None,
         )
-        .is_err());
+        .expect_err("a corrupt journal record should be refused");
         assert_eq!(std::fs::read(&path).expect("preserved"), b"{");
         std::fs::remove_file(&path).expect("remove fixture");
         std::fs::create_dir(&path).expect("unreadable record");
-        assert!(UploadJournal::open_at(
+        UploadJournal::open_at(
             path.clone(),
             source(1024),
             &loonfs_test_support::test_actor(),
             &options(),
-            None
+            None,
         )
-        .is_err());
+        .expect_err("an unreadable journal record should be refused");
         std::fs::remove_dir(&path).expect("remove fixture");
         let original = open(&path).options();
         assert!(UploadJournal::open_at(
@@ -902,14 +903,14 @@ mod tests {
         .contains("PUT options changed"));
         changed = options();
         changed.commit.commit_id = Some(CommitId::generate());
-        assert!(UploadJournal::open_at(
+        UploadJournal::open_at(
             path.clone(),
             source(1024),
             &loonfs_test_support::test_actor(),
             &changed,
-            None
+            None,
         )
-        .is_err());
+        .expect_err("a changed commit ID should be refused");
         assert_eq!(open(&path).options(), original);
     }
 
@@ -974,15 +975,19 @@ mod tests {
         let saved = dir.path().join("saved");
         let path = parent.join("upload.json");
         let journal = open(&path);
-        assert!(journal.part_completed(&part(1)).is_err());
+        journal
+            .part_completed(&part(1))
+            .expect_err("a part before the session begins should be refused");
         begin(&journal);
         journal.part_completed(&part(1)).expect("first part");
         std::fs::rename(&parent, &saved).expect("move directory");
         std::fs::write(&parent, b"blocked").expect("block writes");
-        assert!(journal.part_completed(&part(2)).is_err());
-        assert!(journal
+        journal
+            .part_completed(&part(2))
+            .expect_err("a part should fail to save while the directory is blocked");
+        journal
             .commit_prepared(&request(&journal), &journal.actor_id(), None)
-            .is_err());
+            .expect_err("the commit request should fail to save while the directory is blocked");
         assert_eq!(
             journal.resume().expect("original state").parts,
             vec![part(1)]

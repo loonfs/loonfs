@@ -2,6 +2,7 @@
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::*;
+use std::assert_matches;
 
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
     store: &S,
@@ -787,8 +788,9 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     )
     .await
     .expect_err("tampered inline filter must fail");
-    assert!(
-        matches!(error, ManifestLoadError::SegmentCodec { .. }),
+    assert_matches!(
+        error,
+        ManifestLoadError::SegmentCodec { .. },
         "unexpected error: {error:?}"
     );
 }

@@ -258,6 +258,7 @@ mod cursor_tests {
         };
         let token = encode_cursor(&directory).expect("encode directory cursor");
 
-        assert!(decode_cursor::<CheckpointPageCursor>(&token).is_err());
+        decode_cursor::<CheckpointPageCursor>(&token)
+            .expect_err("a directory cursor should not resume a checkpoint listing");
     }
 }

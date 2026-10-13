@@ -18,8 +18,6 @@
 //! The decode-rejection rules sit in `manifest_format`, which builds its inputs
 //! from these same files.
 
-#![allow(clippy::panic)]
-
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
@@ -51,51 +49,31 @@ const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v1.bin";
 // ---------------------------------------------------------------------------
 // Golden helpers
 // ---------------------------------------------------------------------------
-//
-// Copied from the core fixture helpers in
-// `crates/loonfs-types/tests/golden_formats.rs`, which name their own package
-// in the same message. Both crates store their fixtures under `tests/golden`
-// and rewrite them the same way.
 
-fn golden_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name)
+fn golden_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
-// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-grep -- --test-threads=1`:
-// without the single thread, tests that read a fixture race the tests rewriting
-// it and fail on a half-written file.
+fn golden_path(name: &str) -> PathBuf {
+    golden_dir().join(name)
+}
+
+// Without the single thread, tests that read a fixture race the tests
+// rewriting it and fail on a half-written file.
+const REGENERATE_GOLDEN: &str = "UPDATE_GOLDEN=1 cargo test -p loonfs-grep -- --test-threads=1";
+
 fn assert_matches_golden(name: &str, actual: &[u8]) {
-    let path = golden_path(name);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(path.parent().expect("fixture parent dir"))
-            .expect("create golden dir");
-        std::fs::write(&path, actual).expect("write golden fixture");
-    }
-    let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-grep -- --test-threads=1` to generate it")
-    });
-    if expected != actual {
-        let offset = expected
-            .iter()
-            .zip(actual.iter())
-            .position(|(left, right)| left != right)
-            .unwrap_or_else(|| expected.len().min(actual.len()));
-        panic!(
-            "golden fixture `{name}` diverged at byte {offset} \
-             (expected {} bytes, actual {} bytes). The durable encoding changed: \
-             while pre-release, regenerate the version-1 fixture with UPDATE_GOLDEN=1 \
-             if the change is intentional.",
-            expected.len(),
-            actual.len(),
-        );
-    }
+    loonfs_test_support::golden::assert_matches_golden(
+        &golden_dir(),
+        REGENERATE_GOLDEN,
+        name,
+        actual,
+    );
 }
 
 pub(crate) fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-grep -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `{REGENERATE_GOLDEN}` to generate it")
     })
 }
 
@@ -268,7 +246,11 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
         offset: 0,
         stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
         decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
-        crc32c: crc32c::crc32c(&stored),
+        crc32c: u32::try_from(crc_fast::checksum(
+            crc_fast::CrcAlgorithm::Crc32Iscsi,
+            &stored,
+        ))
+        .expect("a CRC-32 value should fit in 32 bits"),
     };
     decode_data_block_rows::<IndexRow>(&stored, &handle).expect("decode golden data block")
 }

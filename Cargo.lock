@@ -797,17 +797,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console"
-version = "0.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
-dependencies = [
- "encode_unicode",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -880,30 +869,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "crc32c"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
-dependencies = [
- "rustc_version",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "crc64fast-nvme"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38fe9239af6a04e140c7424d36d1615f37f1804700c17d5339af162add9022e0"
-dependencies = [
- "crc",
 ]
 
 [[package]]
@@ -963,7 +934,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
 dependencies = [
- "console 0.15.11",
+ "console",
  "fuzzy-matcher",
  "shell-words",
  "tempfile",
@@ -1779,19 +1750,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "insta"
-version = "1.47.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
-dependencies = [
- "console 0.16.3",
- "once_cell",
- "serde",
- "similar",
- "tempfile",
-]
-
-[[package]]
 name = "io-uring"
 version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1984,7 +1942,6 @@ dependencies = [
  "hostname",
  "http 1.4.0",
  "http-body-util",
- "insta",
  "loonfs",
  "loonfs-client",
  "loonfs-core",
@@ -2007,13 +1964,16 @@ name = "loonfs-client"
 version = "0.4.0"
 dependencies = [
  "bytes",
+ "form_urlencoded",
  "futures",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
  "loonfs-test-support",
  "loonfs-types",
- "reqwest 0.12.28",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
@@ -2022,7 +1982,6 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]
@@ -2037,7 +1996,7 @@ dependencies = [
  "loonfs-server",
  "loonfs-test-support",
  "loonfs-types",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -2072,7 +2031,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
- "crc32c",
+ "crc-fast",
  "futures",
  "loonfs",
  "loonfs-objectstore",
@@ -2188,7 +2147,6 @@ dependencies = [
  "mixtrics",
  "rcgen",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
@@ -2237,8 +2195,6 @@ dependencies = [
  "base64 0.22.1",
  "ciborium",
  "crc-fast",
- "crc32c",
- "crc64fast-nvme",
  "getrandom 0.3.4",
  "http 1.4.0",
  "icu_casemap",
@@ -2460,7 +2416,7 @@ dependencies = [
  "percent-encoding",
  "quick-xml",
  "rand 0.10.2",
- "reqwest 0.13.5",
+ "reqwest",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -2837,47 +2793,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-core",
- "futures-util",
- "http 1.4.0",
- "http-body 1.0.1",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "quinn",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams 0.4.2",
- "web-sys",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
@@ -2901,6 +2816,9 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -2911,7 +2829,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams 0.5.0",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -2992,15 +2910,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -3265,12 +3174,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "slab"
@@ -3968,19 +3871,6 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -220,8 +220,6 @@ fn default_writer_id() -> String {
         .unwrap_or_else(|| "loonfs-cli".to_owned())
 }
 
-// --- Target resolution ---
-
 pub(crate) struct ResolvedTarget {
     pub(crate) client: Client,
     pub(crate) maintenance: Option<MaintenanceHost>,

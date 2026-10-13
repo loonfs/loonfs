@@ -1,6 +1,6 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
-use crate::retry::{with_transport_retry, DEFAULT};
+use crate::retry::{with_transport_retry, RetryWarnings, StoreRetry, DEFAULT};
 use crate::timing::StdMonotonicTimer;
 use crate::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use bytes::Bytes;
@@ -51,10 +51,11 @@ impl ImmutableWriteError {
 
 pub(crate) async fn put<S: ObjectStore + ?Sized>(
     store: &S,
+    warnings: &RetryWarnings,
     key: &str,
     bytes: Bytes,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    put_with(store, key, &bytes, || {
+    put_with(store, warnings, key, &bytes, || {
         store.put(key, bytes.clone(), PutMode::CreateIfAbsent)
     })
     .await
@@ -62,6 +63,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn put_with<S, F, Fut>(
     store: &S,
+    warnings: &RetryWarnings,
     key: &str,
     bytes: &Bytes,
     create: F,
@@ -74,7 +76,10 @@ where
     let timer = StdMonotonicTimer::default();
     let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
     let written = with_transport_retry(
-        &DEFAULT,
+        StoreRetry {
+            policy: &DEFAULT,
+            warnings,
+        },
         key,
         "put_immutable_verified",
         bytes.len() as u64,
@@ -153,6 +158,7 @@ fn transport(key: &str, source: ObjectStoreError) -> ImmutableWriteError {
 mod tests {
     use super::*;
     use crate::test_support::SteppingTimer;
+    use std::assert_matches;
     use std::time::Duration;
 
     #[test]
@@ -167,15 +173,15 @@ mod tests {
         };
         assert!(verify_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());
         for actual in [Checksum::crc64nvme(b"other"), Checksum::crc32c(b"bytes")] {
-            assert!(matches!(
+            assert_matches!(
                 verify_stored_checksum("key", &expected, metadata(Some(actual))),
                 Err(ImmutableWriteError::DifferentObject { .. })
-            ));
+            );
         }
-        assert!(matches!(
+        assert_matches!(
             verify_stored_checksum("key", &expected, metadata(None)),
             Err(ImmutableWriteError::StoredChecksumMissing { .. })
-        ));
+        );
     }
 
     #[test]

@@ -8,10 +8,9 @@
 # The image carries the server binary and nothing else. Mount a config file
 # and, for a local_fs store, the directory that store writes to.
 
-# The tag names no version on purpose. `rust-toolchain.toml` pins
-# `channel = "stable"`, and the rustup in this image honors that file, so the
-# toolchain file picks the compiler whatever version the tag installed. The
-# CI `msrv` job is what enforces the 1.88 floor.
+# The tag names no version on purpose. `rust-toolchain.toml` pins the exact
+# compiler version, and the rustup in this image installs that version, so the
+# image builds with the same compiler as CI whatever version the tag installed.
 FROM rust:bookworm AS builder
 
 WORKDIR /src

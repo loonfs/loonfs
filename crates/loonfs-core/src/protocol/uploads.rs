@@ -1558,6 +1558,7 @@ mod tests {
         OperationSelector, RecordingStore,
     };
     use loonfs_types::format::control::decode_control_object;
+    use std::assert_matches;
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
@@ -1613,7 +1614,7 @@ mod tests {
         .await
         .expect_err("the final session read must succeed");
 
-        assert!(matches!(error, CoreError::ControlObjectLoad(_)));
+        assert_matches!(error, CoreError::ControlObjectLoad(_));
         assert_eq!(recording.count(OperationSelector::Read), 1);
         assert_eq!(recording.counts().puts, 0);
         assert!(recording
@@ -1624,12 +1625,12 @@ mod tests {
         let loaded = load_upload_session_state(&recording, &namespace_id, &session.upload_id)
             .await
             .expect("load retained claim");
-        assert!(matches!(
+        assert_matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed {}
             }
-        ));
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1672,16 +1673,16 @@ mod tests {
         .await
         .expect_err("the failed write still holds the claim");
 
-        assert!(matches!(retry, CoreError::UploadContentConflict { .. }));
+        assert_matches!(retry, CoreError::UploadContentConflict { .. });
         let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
             .await
             .expect("load session");
-        assert!(matches!(
+        assert_matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed {}
             }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1719,14 +1720,11 @@ mod tests {
             }
         );
 
-        assert!(matches!(result, Err(CoreError::UploadNotFound { .. })));
+        assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
         let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
             .await
             .expect("load session");
-        assert!(matches!(
-            loaded.status,
-            UploadSessionRecordStatus::Aborted { .. }
-        ));
+        assert_matches!(loaded.status, UploadSessionRecordStatus::Aborted { .. });
         assert!(!matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
@@ -1849,12 +1847,12 @@ mod tests {
         let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
             .await
             .expect("session");
-        assert!(matches!(
+        assert_matches!(
             state.mode,
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged { .. }
             }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1877,7 +1875,7 @@ mod tests {
         let error = complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
             .expect_err("completion acknowledgement is lost");
-        assert!(matches!(error, CoreError::Store { .. }));
+        assert_matches!(error, CoreError::Store { .. });
         assert_eq!(store.counts().compare_and_swaps, 1);
         let stored = store
             .get_with_metadata(&key)
@@ -1906,13 +1904,13 @@ mod tests {
             .await
             .expect("replay completion");
         assert_eq!(replay.response.content_ref(), Some(&content_ref));
-        assert!(matches!(
+        assert_matches!(
             replay.response.status,
             UploadSessionStatus::Completed {
                 completed_at_ms: 2_000,
                 ..
             }
-        ));
+        );
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
         assert_eq!(
@@ -1972,7 +1970,7 @@ mod tests {
             assert_eq!(store.counts().compare_and_swaps, 1);
             assert_eq!(store.count(OperationSelector::Read), usize::from(contended));
             if contended {
-                assert!(matches!(completed, Err(CoreError::UploadNotFound { .. })));
+                assert_matches!(completed, Err(CoreError::UploadNotFound { .. }));
             } else {
                 assert_eq!(
                     completed.expect("complete").response.content_ref(),
@@ -2043,25 +2041,34 @@ mod tests {
             etag: "etag".to_owned(),
             checksum: Checksum::crc64nvme(b"payload"),
         };
-        assert!(multipart_parts(&[wrong_part], required_algorithm).is_err());
+        assert_matches!(
+            multipart_parts(&[wrong_part], required_algorithm)
+                .expect_err("a part checksum in another algorithm should be rejected"),
+            CoreError::InvalidUploadContent(_)
+        );
         let wrong_signing_claim = UploadPartChecksumClaim {
             part_number: 1,
             checksum: Checksum::crc64nvme(b"payload"),
         };
-        assert!(
-            validate_upload_checksum(&wrong_signing_claim.checksum, required_algorithm).is_err()
+        assert_matches!(
+            validate_upload_checksum(&wrong_signing_claim.checksum, required_algorithm)
+                .expect_err("a signing claim in another algorithm should be rejected"),
+            CoreError::InvalidUploadContent(_)
         );
         let wrong_content = UploadContentClaim {
             size_bytes: 7,
             checksum: Checksum::crc64nvme(b"payload"),
         };
-        assert!(claimed_content_ref(
-            session.namespace_id.clone(),
-            session.content_id,
-            &wrong_content,
-            required_algorithm
-        )
-        .is_err());
+        assert_matches!(
+            claimed_content_ref(
+                session.namespace_id.clone(),
+                session.content_id,
+                &wrong_content,
+                required_algorithm
+            )
+            .expect_err("a content claim in another algorithm should be rejected"),
+            CoreError::InvalidUploadContent(_)
+        );
     }
 
     #[tokio::test]
@@ -2092,17 +2099,11 @@ mod tests {
         )
         .await
         .expect_err("a different checksum algorithm is invalid content");
-        assert!(matches!(
-            wrong_algorithm,
-            CoreError::InvalidUploadContent(_)
-        ));
+        assert_matches!(wrong_algorithm, CoreError::InvalidUploadContent(_));
         let open = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
-        assert!(matches!(
-            open.status,
-            UploadSessionRecordStatus::Open { .. }
-        ));
+        assert_matches!(open.status, UploadSessionRecordStatus::Open { .. });
 
         store
             .put(
@@ -2195,17 +2196,17 @@ mod tests {
         let error = complete(&store, &namespace_id, &upload_id, &context(3_000))
             .await
             .expect_err("an aborted session cannot complete");
-        assert!(matches!(error, CoreError::UploadNotFound { .. }));
+        assert_matches!(error, CoreError::UploadNotFound { .. });
 
         let state = load_upload_session_state(&store, &namespace_id, &upload_id)
             .await
             .expect("session still readable");
-        assert!(matches!(
+        assert_matches!(
             state.status,
             UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: 2_000
             }
-        ));
+        );
         assert!(store.head(&content_key).await.expect("head").is_none());
     }
 
@@ -2246,14 +2247,11 @@ mod tests {
         )
         .await
         .expect_err("a claim the object does not match cannot complete");
-        assert!(matches!(error, CoreError::InvalidUploadContent(_)));
+        assert_matches!(error, CoreError::InvalidUploadContent(_));
         let state = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
-        assert!(matches!(
-            state.status,
-            UploadSessionRecordStatus::Open { .. }
-        ));
+        assert_matches!(state.status, UploadSessionRecordStatus::Open { .. });
         assert!(store
             .head(&begin.object_key)
             .await
@@ -2299,7 +2297,7 @@ mod tests {
         let error = abort(&store, &namespace_id, &upload_id, &context(3_000))
             .await
             .expect_err("a completed session cannot be aborted");
-        assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
+        assert_matches!(error, CoreError::UploadAlreadyCompleted { .. });
         assert!(
             store.head(&content_key).await.expect("head").is_some(),
             "a refused abort must not clean up published-able content"
@@ -2322,12 +2320,12 @@ mod tests {
             .expect("repeated abort");
 
         assert_eq!(first.mode, UploadMode::ServiceProxied);
-        assert!(matches!(
+        assert_matches!(
             &first.status,
             UploadSessionStatus::Aborted {
                 aborted_at_ms: 2_000
             }
-        ));
+        );
         assert_eq!(second, first);
     }
 
@@ -2344,7 +2342,7 @@ mod tests {
         let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 2_000)
             .await
             .expect_err("a completed session takes no more bytes");
-        assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
+        assert_matches!(error, CoreError::UploadAlreadyCompleted { .. });
 
         let aborted = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
             .await
@@ -2362,7 +2360,7 @@ mod tests {
         )
         .await
         .expect_err("an aborted session takes no more bytes");
-        assert!(matches!(error, CoreError::UploadNotFound { .. }));
+        assert_matches!(error, CoreError::UploadNotFound { .. });
     }
 
     #[tokio::test]
@@ -2429,11 +2427,9 @@ mod tests {
                 ),
             ];
             for (operation, result) in results {
-                assert!(
-                    matches!(
-                        (open, &result),
-                        (true, Ok(())) | (false, Err(CoreError::UploadNotFound { .. }))
-                    ),
+                assert_matches!(
+                    (open, &result),
+                    (true, Ok(())) | (false, Err(CoreError::UploadNotFound { .. })),
                     "{operation} at {now_ms} answered {result:?}"
                 );
             }
@@ -2451,10 +2447,7 @@ mod tests {
         let view = get_upload_status(&store, &namespace_id, &upload_id, None, expired.now_ms)
             .await
             .expect("status of an expired session");
-        assert!(matches!(
-            view.session.status,
-            UploadSessionStatus::Open { .. }
-        ));
+        assert_matches!(view.session.status, UploadSessionStatus::Open { .. });
         let aborted = abort(&store, &namespace_id, &upload_id, &expired)
             .await
             .expect("abort an expired session");
@@ -2481,7 +2474,7 @@ mod tests {
         } = get_upload_status(&store, &namespace_id, &upload_id, None, 1_500)
             .await
             .expect("status of an open session");
-        assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
+        assert_matches!(open.status, UploadSessionStatus::Open { .. });
         assert!(
             evidence.is_none(),
             "an open session provides no stored checksum evidence"
@@ -2497,10 +2490,7 @@ mod tests {
         } = get_upload_status(&store, &namespace_id, &upload_id, None, 2_500)
             .await
             .expect("status of a completed session");
-        assert!(matches!(
-            completed.status,
-            UploadSessionStatus::Completed { .. }
-        ));
+        assert_matches!(completed.status, UploadSessionStatus::Completed { .. });
         assert_eq!(
             evidence.expect("a completed session mints").content_ref(),
             &content_ref
@@ -2520,10 +2510,7 @@ mod tests {
         } = get_upload_status(&store, &namespace_id, &begin.upload_id, None, 3_500)
             .await
             .expect("status of an aborted session");
-        assert!(matches!(
-            aborted.status,
-            UploadSessionStatus::Aborted { .. }
-        ));
+        assert_matches!(aborted.status, UploadSessionStatus::Aborted { .. });
         assert!(
             evidence.is_none(),
             "an aborted session provides no stored checksum evidence"
@@ -2636,7 +2623,7 @@ mod tests {
         )
         .await
         .expect_err("deleted namespace");
-        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
     }
@@ -2651,7 +2638,7 @@ mod tests {
         let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 4_000)
             .await
             .expect_err("deleted namespace");
-        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
     }
@@ -2666,7 +2653,7 @@ mod tests {
         let error = complete(&store, &namespace_id, &upload_id, &context(4_000))
             .await
             .expect_err("deleted namespace");
-        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
     }
@@ -2684,7 +2671,7 @@ mod tests {
         let error = get_upload_status(&store, &namespace_id, &upload_id, None, 4_000)
             .await
             .expect_err("deleted namespace");
-        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
     }

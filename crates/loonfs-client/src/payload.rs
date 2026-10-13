@@ -43,7 +43,7 @@ impl std::fmt::Debug for PayloadSource {
 }
 
 impl PayloadSource {
-    /// A source of unknown length.
+    /// Creates a source of unknown length.
     pub fn stream(stream: PayloadStream) -> Self {
         Self {
             stream,
@@ -51,8 +51,8 @@ impl PayloadSource {
         }
     }
 
-    /// A source of unknown length reading from anything asynchronous —
-    /// standard input, a socket, a decompressor.
+    /// Creates a source of unknown length that reads from anything asynchronous
+    /// — standard input, a socket, a decompressor.
     pub fn reader<R>(reader: R) -> Self
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -60,8 +60,8 @@ impl PayloadSource {
         Self::stream(read_in_chunks(reader))
     }
 
-    /// A source reading one local file, whose length is known before the
-    /// first byte moves.
+    /// Opens a source that reads one local file, whose length is known before
+    /// the first byte moves.
     pub async fn open_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = tokio::fs::File::open(path.as_ref()).await?;
         let size_bytes = file.metadata().await?.len();
@@ -71,7 +71,7 @@ impl PayloadSource {
         })
     }
 
-    /// Complete length when the source knows it.
+    /// Returns the complete length when the source knows it.
     pub fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
     }

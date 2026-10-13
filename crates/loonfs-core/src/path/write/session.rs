@@ -153,6 +153,7 @@ mod tests {
     use crate::test_support::ops::create;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
+    use std::assert_matches;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -530,9 +531,10 @@ mod tests {
         results[0].as_ref().expect("first create succeeds");
         let error = results[1].as_ref().expect_err("duplicate create rejected");
         assert_eq!(error.code(), ErrorCode::PathConflict);
-        assert!(
-            matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
-            if matches!(source.as_ref(), CoreError::DestinationExists { .. }))
+        assert_matches!(
+            error,
+            CoreError::FailedOperation { operation_index: 0, error: source }
+            if matches!(source.as_ref(), CoreError::DestinationExists { .. })
         );
     }
 

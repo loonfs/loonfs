@@ -170,7 +170,8 @@ mod tests {
                 .expect("deserialize public inode id"),
             value
         );
-        assert!(serde_json::from_str::<RequiredField>(r#"{"inode_id":42}"#).is_err());
+        serde_json::from_str::<RequiredField>(r#"{"inode_id":42}"#)
+            .expect_err("a numeric inode ID should be rejected");
     }
 
     #[test]
@@ -202,6 +203,7 @@ mod tests {
             serde_json::from_str::<OptionalField>("{}").expect("deserialize missing inode id"),
             absent
         );
-        assert!(serde_json::from_str::<OptionalField>(r#"{"inode_id":42}"#).is_err());
+        serde_json::from_str::<OptionalField>(r#"{"inode_id":42}"#)
+            .expect_err("a numeric inode ID should be rejected");
     }
 }

@@ -1,6 +1,6 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, upload sessions, and their envelopes (format spec,
-//! "Control objects").
+//! pins, upload sessions, and their envelopes
+//! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
@@ -30,7 +30,7 @@ impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
     pub const ALL: [Self; 3] = [Self::Hint, Self::Pin, Self::UploadSession];
 
-    /// Durable format version for this control object kind.
+    /// Returns the durable format version for this control object kind.
     ///
     /// Versions are tracked per kind so one kind's payload schema can make a
     /// breaking change without invalidating every other control object.
@@ -117,7 +117,8 @@ pub enum PinOwner {
 }
 
 impl PinOwner {
-    /// When garbage collection may release this record without asking its owner.
+    /// Returns when garbage collection may release this record without asking
+    /// its owner.
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
@@ -215,8 +216,8 @@ pub struct ForkBasis {
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 
-/// The commit id every namespace's sequence zero carries, before any commit
-/// has landed.
+/// Returns the commit id every namespace's sequence zero carries, before any
+/// commit has landed.
 pub fn genesis_commit_id() -> CommitId {
     CommitId::parse(GENESIS_COMMIT_ID).expect("the genesis commit ID should parse")
 }
@@ -239,7 +240,9 @@ pub enum ProxiedStaging {
     },
 }
 
-/// Upload mode and its mode-specific state. The mode never changes.
+/// Upload mode and its mode-specific state.
+///
+/// The mode never changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UploadSessionMode {

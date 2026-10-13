@@ -389,11 +389,9 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
     validate_id_grammar(value).map_err(|reason| CommitIdValidationError::new(value, reason))
 }
 
-/// Maximum name-key length in UTF-8 bytes. Keys are derived from display
-/// names capped at [`crate::path::MAX_DISPLAY_NAME_BYTES`]; normalization and
-/// case folding expand at most threefold in bytes, so 768 admits every key
-/// derivable from a valid name while bounding row keys, filter keys, and
-/// cursors.
+/// Maximum name-key length in UTF-8 bytes
+/// ([Names and paths](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#14-names-and-paths)), three times the display-name
+/// cap, so every key derived from a valid name fits.
 pub const MAX_NAME_KEY_BYTES: usize = 768;
 const _: () = assert!(MAX_NAME_KEY_BYTES >= 3 * crate::path::MAX_DISPLAY_NAME_BYTES);
 /// Maximum validated namespace and commit id length in UTF-8 bytes.
@@ -906,17 +904,16 @@ mod tests {
             "", "/", "a/b", ".", "..", " demo", "demo ", "demo\n", "demo?", "demo#", "demo%",
             "Demo", &long_id,
         ] {
-            assert!(
-                NamespaceId::parse(value).is_err(),
-                "expected invalid namespace_id {value:?}"
-            );
+            NamespaceId::parse(value)
+                .expect_err(&format!("expected invalid namespace_id {value:?}"));
         }
     }
 
     #[test]
     fn namespace_id_parse_rejects_reserved_system_prefix() {
-        assert!(NamespaceId::parse("loonfs-doctor-abc").is_err());
-        assert!(NamespaceId::parse("loonfs-").is_err());
+        NamespaceId::parse("loonfs-doctor-abc")
+            .expect_err("the reserved `loonfs-` prefix should be rejected");
+        NamespaceId::parse("loonfs-").expect_err("the bare reserved prefix should be rejected");
         // The reservation is a prefix rule, not a substring rule.
         assert_eq!(
             NamespaceId::parse("my-loonfs-notes")
@@ -931,14 +928,14 @@ mod tests {
     #[test]
     fn writer_id_rejects_blank_text() {
         for value in ["", " ", "\n", " \t "] {
-            assert!(WriterId::parse(value).is_err(), "accepted {value:?}");
+            WriterId::parse(value).expect_err(&format!("accepted {value:?}"));
         }
     }
 
     #[test]
     fn binding_version_requires_nonempty_unpadded_base64url() {
         for value in ["", "YWJj=", "a+b", "a/b", "a.b", "a b"] {
-            assert!(BindingVersion::parse(value).is_err(), "accepted {value:?}");
+            BindingVersion::parse(value).expect_err(&format!("accepted {value:?}"));
         }
         for value in ["0", "0123456789abcdef", "AZaz09-_"] {
             assert_eq!(
@@ -977,10 +974,13 @@ mod tests {
             "report.txt"
         );
 
-        assert!(NamespaceId::try_from("invalid/name").is_err());
-        assert!(CommitId::try_from("invalid/name").is_err());
-        assert!(PinId::try_from("pin_00000000000000000001-000000000000000g").is_err());
-        assert!(NameKey::try_from("a/b").is_err());
+        NamespaceId::try_from("invalid/name")
+            .expect_err("a namespace ID with a slash should be rejected");
+        CommitId::try_from("invalid/name")
+            .expect_err("a commit ID with a slash should be rejected");
+        PinId::try_from("pin_00000000000000000001-000000000000000g")
+            .expect_err("a pin ID with a non-hex digit should be rejected");
+        NameKey::try_from("a/b").expect_err("a name key with a slash should be rejected");
     }
 
     #[test]
@@ -1012,11 +1012,14 @@ mod tests {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
         assert!(PinId::parse("pin_00000000000000000001-0000000000000001").is_ok());
-        assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
+        UploadId::parse(["upl", "123"].join("-"))
+            .expect_err("a hyphenated upload ID should be rejected");
         // The two positional families are told apart by their prefix, never
         // by context.
-        assert!(MetadataSegmentId::parse(["seg", "123"].join("-")).is_err());
-        assert!(PinId::parse(["chk", "123"].join("-")).is_err());
+        MetadataSegmentId::parse(["seg", "123"].join("-"))
+            .expect_err("a hyphenated segment ID should be rejected");
+        PinId::parse(["chk", "123"].join("-"))
+            .expect_err("a pin ID with another prefix should be rejected");
     }
 
     #[test]
@@ -1050,7 +1053,7 @@ mod tests {
             "pin_1-0000000000000000".to_owned(),
             "pin_00000000000000000001-00000000000000000".to_owned(),
         ] {
-            assert!(PinId::parse(&invalid).is_err());
+            PinId::parse(&invalid).expect_err(&format!("{invalid} should be rejected"));
         }
     }
 
@@ -1070,7 +1073,8 @@ mod tests {
     #[test]
     fn content_id_parse_requires_the_generated_id_shape() {
         assert!(ContentId::parse("con_0123456789abcdef0123456789abcdef").is_ok());
-        assert!(ContentId::parse("upl_0123456789abcdef0123456789abcdef").is_err());
+        ContentId::parse("upl_0123456789abcdef0123456789abcdef")
+            .expect_err("an upload ID should not parse as a content ID");
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {
@@ -1125,6 +1129,7 @@ mod tests {
             serde_json::from_str::<NameKey>("\"report.txt\"").expect("deserialize name key"),
             name_key
         );
-        assert!(serde_json::from_str::<NameKey>("\"a/b\"").is_err());
+        serde_json::from_str::<NameKey>("\"a/b\"")
+            .expect_err("a name key with a slash should be rejected");
     }
 }

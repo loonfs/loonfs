@@ -9,6 +9,7 @@ use loonfs_types::{
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 use serde_json::{json, Value};
+use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
@@ -463,8 +464,10 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
             assert_eq!(retry.expect("replay"), first);
             assert_eq!(requests.load(Ordering::SeqCst), 1);
         } else {
-            assert!(
-                matches!(retry, Err(ClientError::Api { code, .. }) if code == ErrorCode::CommitIdReuseConflict.as_str())
+            assert_matches!(
+                retry,
+                Err(ClientError::Api { code, .. })
+                    if code == ErrorCode::CommitIdReuseConflict.as_str()
             );
         }
         harness.state.runtime.shutdown().await.expect("shutdown");

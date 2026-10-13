@@ -13,8 +13,9 @@ pub fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
 }
 
 /// Compares token bytes without short-circuiting on the first mismatch, so
-/// response timing does not narrow down the token byte by byte. Length is
-/// still observable; token values are not.
+/// response timing does not narrow down the token byte by byte.
+///
+/// Length is still observable; token values are not.
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;

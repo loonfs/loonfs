@@ -1,9 +1,6 @@
 //! The runtime's attribute surface: the one-operation write convenience, and
 //! what the read options project.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::AttributeChanges;
@@ -12,6 +9,7 @@ use loonfs::{
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::semantic_commit_fingerprint;
+use std::assert_matches;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -229,10 +227,10 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let conflict = fs
         .mutate_blocking(&namespace_id, different)
         .expect_err("a different update under the same id conflicts");
-    assert!(matches!(
+    assert_matches!(
         conflict,
         loonfs::Error::Core(error) if error.code() == loonfs::ErrorCode::CommitIdReuseConflict
-    ));
+    );
 }
 
 #[test]

@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Lifecycle assertions use panic for precise failure diagnostics.
-
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
 use crate::common::{default_page_limit, is_content_object, page_limit, GrepHost};
@@ -19,6 +16,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -127,7 +125,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("grep without the feature must be refused");
-    assert!(matches!(error, GrepError::NotEnabled));
+    assert_matches!(error, GrepError::NotEnabled);
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     let enabled = host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -181,7 +179,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("grep after disable must be refused");
-    assert!(matches!(error, GrepError::NotEnabled));
+    assert_matches!(error, GrepError::NotEnabled);
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     writer.shutdown().await.expect("writer shutdown");
@@ -233,15 +231,15 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     .await
     .expect("load grep manifest")
     .expect("grep manifest exists");
-    assert!(matches!(
+    assert_matches!(
         manifest.manifest_state().status(),
         loonfs_grep::manifest::GrepIndexStatus::Backfilling { .. }
-    ));
+    );
     let error = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("background metadata work must not materialize grep");
-    assert!(matches!(error, GrepError::Backfilling));
+    assert_matches!(error, GrepError::Backfilling);
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -431,13 +429,13 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build_step(&namespace_id, policy)
         .await
         .expect("first bounded build");
-    assert!(matches!(
+    assert_matches!(
         first,
         GrepBuildOutcome::Published {
             indexed_revisions,
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
-    ));
+    );
     let first_reads = raw_store.take_get_keys();
     let first_read_bytes = raw_store.inner().counts().read_bytes;
     assert_eq!(first_reads.len(), FILES_PER_STEP);
@@ -504,13 +502,13 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build_step(&namespace_id, policy)
         .await
         .expect("resumed bounded build");
-    assert!(matches!(
+    assert_matches!(
         second,
         GrepBuildOutcome::Published {
             indexed_revisions,
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
-    ));
+    );
     let second_reads = raw_store.take_get_keys();
     let second_read_bytes = raw_store.inner().counts().read_bytes;
     assert_eq!(second_reads.len(), FILES_PER_STEP);
@@ -1049,13 +1047,13 @@ async fn reorganization_does_not_warm_the_query_cache() {
         .reorganize_step(&namespace_id, reorganize_policy)
         .await
         .expect("partial reorganization");
-    assert!(matches!(
+    assert_matches!(
         reorganization,
         GrepReorganizeOutcome::UnitPublished {
             completed: false,
             ..
         }
-    ));
+    );
     assert!(
         raw_store.count(OperationSelector::Read) > gets_before_reorganization,
         "the worker must load its snapshot's segment blocks"

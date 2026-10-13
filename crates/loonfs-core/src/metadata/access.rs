@@ -126,6 +126,7 @@ mod tests {
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
         NameKey, NamespaceNaming, PrincipalId,
     };
+    use std::assert_matches;
 
     fn principal(id: &str) -> PrincipalId {
         PrincipalId::parse(id).expect("principal id")
@@ -332,6 +333,6 @@ mod tests {
         .await
         .expect_err("inheritance cycle");
         assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
-        assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
     }
 }

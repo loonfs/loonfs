@@ -6,6 +6,7 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
+use std::assert_matches;
 
 fn policy() -> InlineContentPolicy {
     InlineContentPolicy {
@@ -1249,10 +1250,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 .maintain_metadata_with_options(&namespace, &options)
                 .await
                 .expect("explicit fold");
-            assert!(matches!(
-                step.wal_fold,
-                crate::WalFoldStepOutcome::Folded { .. }
-            ));
+            assert_matches!(step.wal_fold, crate::WalFoldStepOutcome::Folded { .. });
             // The fold does not lower the writer's count; with nothing left
             // unfolded, the next pass does not consult it.
             let again = maintenance
@@ -1326,7 +1324,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             .await
             .err()
             .expect("invalid policy");
-        assert!(matches!(error, Error::Config(_)));
+        assert_matches!(error, Error::Config(_));
         assert!(store.snapshot().is_empty());
     }
     crate::LoonFs::builder_with_store(store)

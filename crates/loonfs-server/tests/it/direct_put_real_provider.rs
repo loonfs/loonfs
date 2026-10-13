@@ -1,7 +1,5 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
-#![allow(clippy::panic)]
-
 use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -277,14 +275,11 @@ async fn assert_direct_get_capability_serves_only_its_range(
     let whole = format!("bytes=0-{}", bytes.len() - 1);
     assert_eq!(headers.get("range"), Some(&whole));
     assert_eq!(fetch_range(url, 0, bytes.len() - 1), bytes);
-    assert!(
-        raw_agent()
-            .get(url)
-            .set("range", &format!("bytes=1-{}", bytes.len() - 1))
-            .call()
-            .is_err(),
-        "a range the grant does not sign was served"
-    );
+    raw_agent()
+        .get(url)
+        .set("range", &format!("bytes=1-{}", bytes.len() - 1))
+        .call()
+        .expect_err("a range the grant does not sign was served");
 
     let split = bytes.len() / 2;
     let rest = client
@@ -898,10 +893,7 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
     let expired = url.replace("X-Goog-Expires=900", "X-Goog-Expires=1");
     assert_ne!(&expired, url, "the capability did not carry an expiry");
     let response = raw_agent().put(&expired).send_bytes(bytes);
-    assert!(
-        response.is_err(),
-        "a capability with an edited lifetime was accepted"
-    );
+    response.expect_err("a capability with an edited lifetime was accepted");
 }
 
 /// An object past the deployment's proxy caps moves only directly, in both

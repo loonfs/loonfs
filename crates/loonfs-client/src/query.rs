@@ -7,10 +7,11 @@ use crate::transport::{QueryBuilder, SendPolicy};
 pub type GrepPager = loonfs_types::Pager<GrepResponse, ClientError>;
 
 impl Client {
-    /// Content search over the namespace's grep index (query API group).
+    /// Searches content through the namespace's grep index (query API group).
+    ///
     /// Gate on the `query.grep` capability before calling against unknown
-    /// deployments; the namespace must also have a materialized active
-    /// grep manifest or the server answers `not_supported`.
+    /// deployments; the namespace must also have a materialized active grep
+    /// manifest or the server answers `not_supported`.
     ///
     /// The search starts at `request.cursor` when it is set: a page request
     /// without a cursor reads from there. From then on the pager owns the

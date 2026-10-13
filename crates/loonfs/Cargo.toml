@@ -17,7 +17,7 @@ loonfs-types.workspace = true
 loonfs-core.workspace = true
 loonfs-objectstore.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
@@ -29,7 +29,7 @@ loonfs-core = { workspace = true, features = ["test-support"] }
 loonfs-test-support.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tracing-subscriber.workspace = true
 
 [lints]

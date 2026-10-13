@@ -100,7 +100,7 @@ impl GcsRequestSigner {
             .etag
             .as_deref()
             .ok_or_else(|| crate::assembly::missing_source(&source.key))?;
-        let state = loonfs_types::StreamingChecksum::for_algorithm(source.checksum.algorithm);
+        let state = loonfs_types::ChecksumDigest::new(source.checksum.algorithm);
         let body = stream::try_unfold(
             (range.start_inclusive, state),
             |(offset, mut checksum)| async move {
@@ -125,9 +125,7 @@ impl GcsRequestSigner {
                         &source.checksum,
                         &std::mem::replace(
                             &mut checksum,
-                            loonfs_types::StreamingChecksum::for_algorithm(
-                                source.checksum.algorithm,
-                            ),
+                            loonfs_types::ChecksumDigest::new(source.checksum.algorithm),
                         )
                         .finish(),
                     )?;

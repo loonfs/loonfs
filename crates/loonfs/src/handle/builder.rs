@@ -108,6 +108,7 @@ impl<M> LoonFsBuilder<M> {
     }
 
     /// Supplies wall time for durable timestamps and expiration decisions.
+    ///
     /// The read-only view and the maintenance of this runtime read the same
     /// clock.
     pub fn wall_clock(mut self, clock: Arc<dyn crate::WallClock>) -> Self {
@@ -129,8 +130,9 @@ impl<M> LoonFsBuilder<M> {
     }
 
     /// Sets the minimum interval, in milliseconds, between checks for a
-    /// successor to a cached manifest. Defaults to 1000; zero checks on
-    /// every read.
+    /// successor to a cached manifest.
+    ///
+    /// Defaults to 1000; zero checks on every read.
     pub fn manifest_revalidation_interval_ms(
         mut self,
         manifest_revalidation_interval_ms: u64,
@@ -159,9 +161,11 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Caps the file content size the buffered read APIs will materialize
-    /// for one call, checked against resolved metadata before any content
-    /// fetch; over-limit reads fail with `content_too_large`. Defaults to
+    /// Caps the file content size the buffered read APIs will materialize for
+    /// one call, checked against resolved metadata before any content fetch;
+    /// over-limit reads fail with `content_too_large`.
+    ///
+    /// Defaults to
     /// [`DEFAULT_MAX_READ_CONTENT_BYTES`](crate::DEFAULT_MAX_READ_CONTENT_BYTES),
     /// 256 MiB. A caller that reads larger files through these APIs raises it,
     /// and a server sets it to its download limit.
@@ -246,7 +250,9 @@ impl LoonFsBuilder<ReadOnly> {
 }
 
 impl LoonFsBuilder<Writable> {
-    /// Sets the writer id used by namespace mutations. Required.
+    /// Sets the writer id used by namespace mutations.
+    ///
+    /// Required.
     pub fn writer_id(mut self, writer_id: impl Into<WriterId>) -> Self {
         self.writer.writer_id = Some(writer_id.into());
         self
@@ -266,9 +272,10 @@ impl LoonFsBuilder<Writable> {
     }
 
     /// Sets the admission limits this runtime applies to each namespace's
-    /// publication requests. The totals across namespaces, and the
-    /// publications running at once, are limits of the execution budget (see
-    /// [`Self::execution_budget`]).
+    /// publication requests.
+    ///
+    /// The totals across namespaces, and the publications running at once, are
+    /// limits of the execution budget (see [`Self::execution_budget`]).
     pub fn publication_policy(mut self, policy: PublicationPolicy) -> Self {
         self.writer.publication_policy = policy;
         self

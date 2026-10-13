@@ -14,8 +14,10 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 /// Holds the WAL tail after a manifest as one chunk per WAL object, oldest
-/// first. Replay already downloaded the resident bytes, so reads need no
-/// content request for them. The head-state budgets bound those bytes.
+/// first.
+///
+/// Replay already downloaded the resident bytes, so reads need no content
+/// request for them. The head-state budgets bound those bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
     chunks: Vec<Arc<TailChunk>>,

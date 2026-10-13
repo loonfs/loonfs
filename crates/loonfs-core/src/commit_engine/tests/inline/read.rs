@@ -1,7 +1,5 @@
 //! Reads of published inline content and projection accounting.
 
-#![allow(clippy::panic)]
-
 use super::*;
 use crate::cache::{HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheKey};
 use crate::namespace::read_anchor::load_read_anchor;
@@ -10,6 +8,7 @@ use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::keys::{content_blob, wal_object};
 use loonfs_objectstore::PutMode;
 use loonfs_types::{DestinationPrecondition, RevisionNo, WalNo};
+use std::assert_matches;
 use std::num::NonZeroU64;
 
 fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadContext {
@@ -158,10 +157,10 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     };
                     let mut bytes = value.bytes()[..start_offset].to_vec();
                     if start_offset != 0 {
-                        assert!(matches!(
+                        assert_matches!(
                             stream.next_chunk().await,
                             Err(CoreError::ResumePrefixIncomplete { .. })
-                        ));
+                        );
                         stream.fold_resumed_prefix(&bytes).expect("fold prefix");
                     }
                     while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
@@ -462,10 +461,10 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         .await
         .expect("foreign object");
     store.reset();
-    assert!(matches!(
+    assert_matches!(
         engine.read_content_ref(&foreign, u64::MAX, &context).await,
         Err(CoreError::NamespaceCorrupt(_))
-    ));
+    );
     assert_no_content_requests(&store);
     assert_no_writes(&store);
     let stored = store_bytes_as_content(&store, &publisher.namespace_id, b"object")
@@ -598,10 +597,10 @@ async fn inline_checksum_failures_match_object_validation() {
         .read_bytes(&store, &corrupt_ref)
         .await
         .expect_err("object mismatch");
-    assert!(matches!(
+    assert_matches!(
         expected,
         DurableContentValidationError::ContentChecksumMismatch { .. }
-    ));
+    );
     assert_eq!(error.to_string(), CoreError::from(expected).to_string());
 }
 

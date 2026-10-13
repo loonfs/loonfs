@@ -5,6 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationSelector};
 use loonfs_types::ErrorCode;
+use std::assert_matches;
 
 #[tokio::test]
 async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_commit() {
@@ -105,10 +106,10 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         "lost-ack",
         vec![inline(&namespace_id, Bytes::from_static(b"changed bytes"))],
     );
-    assert!(matches!(
+    assert_matches!(
         publish(&mut restarted, &store, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
 
     let view = load_current_metadata_view(&store, &namespace_id)
@@ -133,6 +134,9 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         )
         .await
         .expect("original reference");
-    assert!(matches!(entry.kind, PathEntryKind::File { content_ref, .. }
-        if content_ref == *original.content_ref()));
+    assert_matches!(
+        entry.kind,
+        PathEntryKind::File { content_ref, .. }
+            if content_ref == *original.content_ref()
+    );
 }

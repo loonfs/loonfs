@@ -148,8 +148,6 @@ pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
         }
 }
 
-// --- create/update helpers ---
-
 #[derive(Debug)]
 pub(super) struct CreateProfileSpec {
     provider: CreateProviderSpec,
@@ -1176,8 +1174,6 @@ fn prompt_r2_credentials(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // Profile tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
         apply_update_flags, build_profile_from_create_spec, has_update_flags, profile_update_spec,
@@ -1190,6 +1186,7 @@ mod tests {
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
     use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
+    use std::assert_matches;
 
     #[cfg(unix)]
     #[test]
@@ -1427,7 +1424,7 @@ mod tests {
             non_interactive_runtime(),
         )
         .expect("complete static credentials");
-        assert!(matches!(
+        assert_matches!(
             complete,
             ProfileConfig::Embedded {
                 store: StoreConfig::AwsS3 {
@@ -1436,7 +1433,7 @@ mod tests {
                 },
                 ..
             }
-        ));
+        );
     }
 
     #[test]
@@ -1588,7 +1585,7 @@ mod tests {
         let error =
             apply_update_flags("default", profile.clone(), &incomplete).expect_err("failed switch");
         assert!(error.message.contains("secret-access-key"));
-        assert!(matches!(
+        assert_matches!(
             profile,
             ProfileConfig::Embedded {
                 store: StoreConfig::AwsS3 {
@@ -1597,7 +1594,7 @@ mod tests {
                 },
                 ..
             }
-        ));
+        );
 
         let complete = update_spec(CreateProviderSpec::S3 {
             store: ProfileS3Args {
@@ -1609,7 +1606,7 @@ mod tests {
             force_path_style: None,
         });
         let updated = apply_update_flags("default", profile, &complete).expect("complete switch");
-        assert!(matches!(
+        assert_matches!(
             updated,
             ProfileConfig::Embedded {
                 store: StoreConfig::AwsS3 {
@@ -1618,7 +1615,7 @@ mod tests {
                 },
                 ..
             }
-        ));
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Runs every shared SDK case through `loonfs-client`.
 
-#![allow(clippy::panic, clippy::unwrap_used)]
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use bytes::Bytes;
 use loonfs_client::{
@@ -29,6 +29,7 @@ use loonfs_types::{
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::assert_matches;
 use std::collections::HashSet;
 use std::io::Write;
 
@@ -2355,7 +2356,7 @@ async fn stage_content(
         .await
         .expect("begin service-proxied upload");
     assert_eq!(begin.mode, UploadMode::ServiceProxied);
-    assert!(matches!(begin.status, UploadSessionStatus::Open { .. }));
+    assert_matches!(begin.status, UploadSessionStatus::Open { .. });
     let upload_id = begin.upload_id;
     harness
         .client
@@ -2510,10 +2511,10 @@ async fn run_changes(harness: &Harness, case: &Case) {
     let change = feed.changes.first().expect("one change");
     assert_eq!(change.commit_id.as_str(), request.commit_id);
     assert_eq!(change.committed_by, request.actor_id);
-    assert!(matches!(
+    assert_matches!(
         change.events.as_slice(),
         [FilesystemChange::DirectoryCreated { .. }]
-    ));
+    );
 }
 
 #[derive(Debug, Deserialize)]

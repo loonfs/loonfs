@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// These integration tests use panic for precise fixture-divergence diagnostics.
-
 //! Golden-byte fixtures for every durable LoonFS encoding.
 //!
 //! These tests pin the exact bytes each format version writes. They exist to
@@ -17,6 +14,8 @@
 //! - Every durable family rejects unknown fields at every nesting level.
 //!   Compaction and WAL folding write successor records, so permissive
 //!   decoding could erase a field introduced by an unsupported writer.
+
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
@@ -43,6 +42,7 @@ use loonfs_types::{
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::assert_matches;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -61,9 +61,13 @@ fn actor() -> ActorId {
     ActorId::parse("loonfs-golden").expect("valid actor id")
 }
 
-// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1`:
-// without the single thread, tests that read a fixture race the tests rewriting
-// it and fail on a half-written file.
+// Without the single thread, tests that read a fixture race the tests
+// rewriting it and fail on a half-written file.
+const REGENERATE_GOLDEN: &str = "UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1";
+
+// This copies `loonfs_test_support::golden::assert_matches_golden` because
+// `loonfs-test-support` depends on `loonfs-types`, and a dev-dependency back
+// on it would form a dependency cycle.
 fn assert_matches_golden(name: &str, actual: &[u8]) {
     let path = golden_path(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
@@ -72,7 +76,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
         std::fs::write(&path, actual).expect("write golden fixture");
     }
     let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `{REGENERATE_GOLDEN}` to generate it")
     });
     if expected != actual {
         let offset = expected
@@ -93,7 +97,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
 
 fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `{REGENERATE_GOLDEN}` to generate it")
     })
 }
 
@@ -1231,8 +1235,9 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 
     let error = decode_control_object::<HintPayload>(&edited, ControlObjectKind::Hint)
         .expect_err("unknown mutable envelope field must be rejected");
-    assert!(
-        matches!(error, EnvelopeCodecError::EnvelopeDecode(_)),
+    assert_matches!(
+        error,
+        EnvelopeCodecError::EnvelopeDecode(_),
         "unexpected error: {error}"
     );
 }
@@ -1282,14 +1287,14 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
         let wrong_version = serde_json::to_vec(&document).expect("encode wrong version");
         let error = decode_control_object::<serde_json::Value>(&wrong_version, kind)
             .expect_err("wrong version must not fall back");
-        assert!(matches!(
+        assert_matches!(
             error,
             EnvelopeCodecError::UnsupportedFormatVersion {
                 found: 7,
                 supported,
                 ..
             } if supported == kind.format_version()
-        ));
+        );
     }
 }
 
@@ -1465,15 +1470,13 @@ fn wal_decode_rejects_wrong_format_version_cleanly() {
 
     let err = decode_wal_object_envelope_zstd(&rezstd(&wrong_version))
         .expect_err("wrong version must be rejected");
-    assert!(
-        matches!(
-            err,
-            EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 7,
-                supported: 1,
-                ..
-            }
-        ),
+    assert_matches!(
+        err,
+        EnvelopeCodecError::UnsupportedFormatVersion {
+            found: 7,
+            supported: 1,
+            ..
+        },
         "unexpected error: {err}"
     );
 }
@@ -1491,8 +1494,9 @@ fn wal_decode_rejects_unknown_kind_cleanly() {
 
     let err = decode_wal_object_envelope_zstd(&rezstd(&rekinded))
         .expect_err("unknown kind must be rejected");
-    assert!(
-        matches!(err, EnvelopeCodecError::KindMismatch { .. }),
+    assert_matches!(
+        err,
+        EnvelopeCodecError::KindMismatch { .. },
         "unexpected error: {err}"
     );
 }
@@ -1515,8 +1519,9 @@ fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
 
     let err = decode_wal_object_envelope_zstd(&rezstd(&tampered))
         .expect_err("tampered payload must be rejected");
-    assert!(
-        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
+    assert_matches!(
+        err,
+        EnvelopeCodecError::ChecksumMismatch { .. },
         "unexpected error: {err}"
     );
 }
@@ -1529,8 +1534,11 @@ fn wal_decode_rejects_unknown_payload_fields() {
 
     let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("unknown durable fields must be rejected");
-    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
-        if message.contains("unknown field") && message.contains("field_from_the_future")));
+    assert_matches!(
+        error,
+        EnvelopeCodecError::PayloadDecode(message)
+            if message.contains("unknown field") && message.contains("field_from_the_future")
+    );
 }
 
 #[test]
@@ -1568,8 +1576,11 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
 
     let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("unknown durable fields must be rejected");
-    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
-        if message.contains("unknown field") && message.contains("field_from_the_future")));
+    assert_matches!(
+        error,
+        EnvelopeCodecError::PayloadDecode(message)
+            if message.contains("unknown field") && message.contains("field_from_the_future")
+    );
 }
 
 #[test]
@@ -1581,8 +1592,9 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
 
     let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("version-one WAL commits require an actor");
-    assert!(
-        matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("committed_by")),
+    assert_matches!(
+        &error,
+        EnvelopeCodecError::PayloadDecode(message) if message.contains("committed_by"),
         "unexpected corruption error: {error}"
     );
 }
@@ -1603,8 +1615,9 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 
     let err = decode_control_object::<HintPayload>(&tampered, ControlObjectKind::Hint)
         .expect_err("tampered payload must be rejected");
-    assert!(
-        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
+    assert_matches!(
+        err,
+        EnvelopeCodecError::ChecksumMismatch { .. },
         "unexpected error: {err}"
     );
 }
@@ -1622,8 +1635,9 @@ fn namespace_manifest_requires_every_activity_counter() {
                     .remove(field);
             }
         });
-        assert!(
-            matches!(decode_namespace_manifest_json(&encoded), Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("missing field"))
+        assert_matches!(
+            decode_namespace_manifest_json(&encoded),
+            Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("missing field")
         );
     }
 }
@@ -1640,15 +1654,13 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
         let wrong_version = serde_json::to_vec(&document).expect("encode document");
         let err = decode_namespace_manifest_json(&wrong_version)
             .expect_err("wrong version must be rejected");
-        assert!(
-            matches!(
-                err,
-                EnvelopeCodecError::UnsupportedFormatVersion {
-                    found,
-                    supported: 1,
-                    ..
-                } if found == version
-            ),
+        assert_matches!(
+            err,
+            EnvelopeCodecError::UnsupportedFormatVersion {
+                found,
+                supported: 1,
+                ..
+            } if found == version,
             "unexpected error: {err}"
         );
     }
@@ -1666,8 +1678,9 @@ fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
 
     let err =
         decode_namespace_manifest_json(&tampered).expect_err("tampered payload must be rejected");
-    assert!(
-        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
+    assert_matches!(
+        err,
+        EnvelopeCodecError::ChecksumMismatch { .. },
         "unexpected error: {err}"
     );
 }
@@ -1699,9 +1712,10 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
         );
         let error = decode_namespace_manifest_json(future_document.as_bytes())
             .expect_err("unknown durable fields must be rejected");
-        assert!(
-            matches!(error, EnvelopeCodecError::PayloadDecode(message)
-            if message.contains("unknown field") && message.contains("field_from_the_future")),
+        assert_matches!(
+            error,
+            EnvelopeCodecError::PayloadDecode(message)
+            if message.contains("unknown field") && message.contains("field_from_the_future"),
             "path {path}"
         );
     }
@@ -1714,8 +1728,11 @@ fn immutable_envelopes_reject_unknown_fields() {
         .into_bytes();
     assert_eq!(manifest.pop(), Some(b'}'));
     manifest.extend_from_slice(br#", "field_from_the_future": true}"#);
-    assert!(matches!(decode_namespace_manifest_json(&manifest),
-        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
+    assert_matches!(
+        decode_namespace_manifest_json(&manifest),
+        Err(EnvelopeCodecError::EnvelopeDecode(message))
+            if message.contains("field_from_the_future")
+    );
 
     let encoded = unzstd(
         &encode_wal_object_envelope_zstd(sample_wal_payload())
@@ -1727,13 +1744,16 @@ fn immutable_envelopes_reject_unknown_fields() {
     with_future_field(&mut document);
     let mut future = Vec::new();
     ciborium::ser::into_writer(&document, &mut future).expect("encode document");
-    assert!(matches!(decode_wal_object_envelope_zstd(&rezstd(&future)),
-        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
+    assert_matches!(
+        decode_wal_object_envelope_zstd(&rezstd(&future)),
+        Err(EnvelopeCodecError::EnvelopeDecode(message))
+            if message.contains("field_from_the_future")
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Wire-name pinning: the durable delta and precondition names the format
-// spec fixes ("Standard mutation operations" and "Preconditions")
+// Wire-name pinning: the durable delta and precondition names in format.md
+// 6.6, "Operations and WAL deltas", and B.3, "Preconditions"
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2195,7 +2215,11 @@ fn decode_golden_data_block(name: &str) -> loonfs_types::format::segment_blocks:
         offset: 0,
         stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
         decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
-        crc32c: crc32c::crc32c(&stored),
+        crc32c: u32::try_from(crc_fast::checksum(
+            crc_fast::CrcAlgorithm::Crc32Iscsi,
+            &stored,
+        ))
+        .expect("a CRC-32 value should fit in 32 bits"),
     };
     decode_data_block(&stored, &handle).expect("decode golden data block")
 }

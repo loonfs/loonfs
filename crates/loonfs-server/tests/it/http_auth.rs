@@ -1,7 +1,5 @@
 //! HTTP content-token admission and replay behavior.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::NamespacePath;
@@ -81,12 +79,12 @@ fn rejected_content_token_message(request: &CommitRequest, reason: &str) -> Stri
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_with_bad_content_token_fails_content_not_prepared() {
+async fn path_puts_without_a_proof_for_their_content_fail_content_not_prepared() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-current",
-        "http-bad-content-token",
+        "http-content-not-prepared",
     ))
     .await;
 
@@ -96,119 +94,56 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let completed = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
-
-    let request = CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
-        message: None,
-        content_tokens: vec![ContentToken {
-            content_ref: completed.content_ref.clone(),
-            token: "not.a.valid.token".to_owned(),
-        }],
-        operations: vec![FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/bad-token.txt").expect("path"),
-            content_ref: Some(completed.content_ref),
-            inline_content: None,
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        }],
-    };
-    // The rejection names the ref the token was supplied for, so a caller
-    // holding several tokens knows which one to mint again.
-    assert_content_not_prepared_response(
-        send_commit(&harness.server_url, &namespace, &request),
-        &request,
-        &rejected_content_token_message(&request, "content token is malformed"),
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_without_content_token_fails_content_not_prepared() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-current",
-        "http-missing-content-token",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
-    let request = CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
-        message: None,
-        content_tokens: Vec::new(),
-        operations: vec![FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/missing-token.txt").expect("path"),
-            content_ref: Some(completed.content_ref),
-            inline_content: None,
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        }],
-    };
-
-    assert_content_not_prepared_response(
-        send_commit(&harness.server_url, &namespace, &request),
-        &request,
-        &missing_content_proof_message(&request),
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_with_valid_content_token_succeeds() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-current",
-        "http-valid-content-token",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let bytes = b"valid token";
-    let completed = stage_uploaded_content(&harness.client, &namespace, bytes).await;
-    let request = CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
-        message: None,
-        content_tokens: vec![content_token(&completed)],
-        operations: vec![FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/valid-token.txt").expect("path"),
-            content_ref: Some(completed.content_ref),
-            inline_content: None,
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        }],
-    };
-    let response = send_commit(&harness.server_url, &namespace, &request).expect("valid token put");
-    let response: Commit =
-        serde_json::from_reader(response.into_reader()).expect("decode operation response");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
-
-    let target = NamespacePath::parse("demo", "/valid-token.txt").expect("target");
-    assert_eq!(
-        harness.client.read_file(&target).await.expect("read file"),
-        bytes
-    );
+    let bad = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
+    let missing = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
+    let target = stage_uploaded_content(&harness.client, &namespace, b"target content").await;
+    let irrelevant =
+        stage_uploaded_content(&harness.client, &namespace, b"irrelevant content").await;
+    let malformed = vec![ContentToken {
+        content_ref: bad.content_ref.clone(),
+        token: "not.a.valid.token".to_owned(),
+    }];
+    let cases = [
+        // The rejection names the ref the token was supplied for, so a caller
+        // holding several tokens knows which one to mint again.
+        (
+            "bad-token",
+            &bad,
+            malformed,
+            Some("content token is malformed"),
+        ),
+        ("missing-token", &missing, Vec::new(), None),
+        (
+            "irrelevant-token",
+            &target,
+            vec![content_token(&irrelevant)],
+            None,
+        ),
+    ];
+    for (label, staged, content_tokens, rejection) in cases {
+        let request = CommitRequest {
+            preconditions: Vec::new(),
+            commit_id: CommitId::parse(format!("{label}-put")).expect("valid commit id"),
+            message: None,
+            content_tokens,
+            operations: vec![FilesystemOperation::PutFile {
+                path: AbsolutePath::parse(format!("/{label}.txt")).expect("path"),
+                content_ref: Some(staged.content_ref.clone()),
+                inline_content: None,
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            }],
+        };
+        assert_content_not_prepared_response(
+            send_commit(&harness.server_url, &namespace, &request),
+            &request,
+            &match rejection {
+                Some(reason) => rejected_content_token_message(&request, reason),
+                None => missing_content_proof_message(&request),
+            },
+        );
+    }
 
     harness.server.abort();
 }
@@ -284,49 +219,6 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-current",
-        "http-irrelevant-content-token",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let target = stage_uploaded_content(&harness.client, &namespace, b"target content").await;
-    let irrelevant =
-        stage_uploaded_content(&harness.client, &namespace, b"irrelevant content").await;
-    let request = CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
-        message: None,
-        content_tokens: vec![content_token(&irrelevant)],
-        operations: vec![FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
-            content_ref: Some(target.content_ref),
-            inline_content: None,
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        }],
-    };
-
-    assert_content_not_prepared_response(
-        send_commit(&harness.server_url, &namespace, &request),
-        &request,
-        &missing_content_proof_message(&request),
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -375,6 +267,14 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(
+        harness
+            .client
+            .read_file(&NamespacePath::parse("demo", "/first.txt").expect("path"))
+            .await
+            .expect("read file"),
+        b"first"
+    );
 
     // The same staged ref and token admit a second put: preparation
     // belongs to the content, not to one operation.

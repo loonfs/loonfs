@@ -1,7 +1,5 @@
 //! HTTP checkpoint, retention, garbage collection, and maintenance operations.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;

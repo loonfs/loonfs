@@ -863,7 +863,7 @@ pub enum FilesystemOperation {
 }
 
 impl FilesystemOperation {
-    /// An undelete of the deletion of `inode_id` committed at
+    /// Builds an undelete of the deletion of `inode_id` committed at
     /// `deletion_seq`, bound where `destination` says.
     pub fn undelete(
         inode_id: InodeId,
@@ -944,6 +944,10 @@ impl FilesystemOperation {
 /// Admission conditions checked against the candidate's pre-state before its operations.
 /// The pre-state head sequence is the last admitted commit's sequence in the batch,
 /// or the batch's base head sequence when no earlier candidate was admitted.
+#[allow(
+    clippy::too_long_first_doc_paragraph,
+    reason = "a ToSchema doc is the OpenAPI description, so it keeps its wording"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1056,7 +1060,7 @@ impl CommitRequest {
         self
     }
 
-    /// A request carrying exactly one operation.
+    /// Builds a request with exactly one operation.
     pub fn single(
         commit_id: CommitId,
         message: Option<String>,
@@ -1412,7 +1416,8 @@ pub struct GcResponse {
 }
 
 impl GcResponse {
-    /// An empty report for `namespace_id`, before any candidate is examined.
+    /// Creates an empty report for `namespace_id`, before any candidate is
+    /// examined.
     pub fn empty(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
@@ -1511,9 +1516,10 @@ impl RetainedCandidates {
         self.upload_session_undecided += upload_session_undecided;
     }
 
-    /// The reason with the highest count, and that count. `None` when
-    /// nothing was retained. Ties go to the first reason in the fixed table
-    /// order, so one pass's report is stable.
+    /// Returns the reason with the highest count, and that count.
+    ///
+    /// `None` when nothing was retained. Ties go to the first reason in the
+    /// fixed table order, so one pass's report is stable.
     pub fn top_reason(&self) -> Option<(&'static str, u64)> {
         self.by_reason()
             .into_iter()
@@ -1612,8 +1618,9 @@ pub struct MetadataMaintenanceRequest {
     pub max_wal_tail_objects: Option<u64>,
 }
 
-/// An option-free request for one metadata compaction unit. Repeat it while
-/// it publishes to compact every eligible family group.
+/// An option-free request for one metadata compaction unit.
+///
+/// Repeat it while it publishes to compact every eligible family group.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1843,6 +1850,7 @@ pub enum StoreProbeCheckOutcome {
 mod tests {
     use super::*;
     use crate::ContentId;
+    use std::assert_matches;
 
     #[test]
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
@@ -2161,7 +2169,8 @@ mod tests {
                 "remove": ["a\u{0}b"]
             }),
         ] {
-            assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
+            serde_json::from_value::<FilesystemOperation>(encoded)
+                .expect_err("an invalid attribute key or value should be rejected");
         }
     }
 
@@ -2182,7 +2191,7 @@ mod tests {
             }
         }))
         .expect("put op defaults behavior");
-        assert!(matches!(
+        assert_matches!(
             put,
             FilesystemOperation::PutFile {
                 behavior: DestinationBehavior::NoReplace,
@@ -2190,7 +2199,7 @@ mod tests {
                 expected_revision_no: None,
                 ..
             }
-        ));
+        );
 
         let delete: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "delete_path",
@@ -2385,7 +2394,8 @@ mod tests {
                 .as_object_mut()
                 .expect("an operation is an object")
                 .remove("inline_content");
-            assert!(serde_json::from_value::<FilesystemOperation>(missing).is_err());
+            serde_json::from_value::<FilesystemOperation>(missing)
+                .expect_err("an append without its bytes should be rejected");
         }
     }
 
@@ -2426,7 +2436,8 @@ mod tests {
                 "remove": ["draft"]
             }),
         ] {
-            assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
+            serde_json::from_value::<FilesystemOperation>(encoded)
+                .expect_err("an invalid path should be rejected");
         }
     }
 
@@ -2463,10 +2474,8 @@ mod tests {
             for invalid in [serde_json::json!(27), serde_json::json!("27")] {
                 let mut invalid_operation = operation.clone();
                 invalid_operation[inode_key] = invalid;
-                assert!(
-                    serde_json::from_value::<FilesystemOperation>(invalid_operation).is_err(),
-                    "{inode_key} accepted an invalid inode ID"
-                );
+                serde_json::from_value::<FilesystemOperation>(invalid_operation)
+                    .expect_err(&format!("{inode_key} accepted an invalid inode ID"));
             }
         }
     }
@@ -2516,19 +2525,18 @@ mod tests {
 
         let spelled: CommitRequest = serde_json::from_value(put("expected_revision_no"))
             .expect("the precondition spelled correctly decodes");
-        assert!(matches!(
+        assert_matches!(
             spelled.operations.as_slice(),
             [FilesystemOperation::PutFile {
                 expected_revision_no: Some(RevisionNo(3)),
                 ..
             }]
-        ));
+        );
 
         for misspelling in ["expected_revsion_no", "expectedRevisionNo"] {
-            assert!(
-                serde_json::from_value::<CommitRequest>(put(misspelling)).is_err(),
+            serde_json::from_value::<CommitRequest>(put(misspelling)).expect_err(&format!(
                 "`{misspelling}` decoded instead of failing the request"
-            );
+            ));
         }
     }
 
@@ -2550,13 +2558,13 @@ mod tests {
 
         let request: CommitRequest = serde_json::from_value(body(crate::MAX_PUBLIC_INTEGER))
             .expect("deserialize the maximum revision number");
-        assert!(matches!(
+        assert_matches!(
             request.operations.as_slice(),
             [FilesystemOperation::PutFile {
                 expected_revision_no: Some(RevisionNo(value)),
                 ..
             }] if *value == crate::MAX_PUBLIC_INTEGER
-        ));
+        );
 
         let error = serde_json::from_value::<CommitRequest>(body(crate::MAX_PUBLIC_INTEGER + 1))
             .expect_err("reject a revision number above the public limit");
@@ -2606,10 +2614,9 @@ mod tests {
             ("a nested content token", in_content_token),
             ("a content ref below that", in_content_ref),
         ] {
-            assert!(
-                serde_json::from_value::<CommitRequest>(body).is_err(),
+            serde_json::from_value::<CommitRequest>(body).expect_err(&format!(
                 "an unknown field in {level} decoded instead of failing the request"
-            );
+            ));
         }
     }
 
@@ -2881,10 +2888,9 @@ mod tests {
                         body
                     );
                 }
-                None => assert!(
-                    decoded.is_err(),
-                    "invalid maintenance request decoded: {body}"
-                ),
+                None => {
+                    decoded.expect_err(&format!("invalid maintenance request decoded: {body}"));
+                }
             }
         }
 
@@ -2892,37 +2898,32 @@ mod tests {
             serde_json::json!({"name": "nightly", "ttl_ms": 60_000}),
         )
         .expect("the same checkpoint body without a typo decodes");
-        assert!(serde_json::from_value::<CreateCheckpointRequest>(
-            serde_json::json!({"name": "nightly", "ttlMs": 60_000})
+        serde_json::from_value::<CreateCheckpointRequest>(
+            serde_json::json!({"name": "nightly", "ttlMs": 60_000}),
         )
-        .is_err());
+        .expect_err("a camel-case field should be rejected");
 
         // The probe body carries no options yet, so an unknown one is the
         // only thing it can be sent.
         serde_json::from_value::<StoreProbeRequest>(serde_json::json!({}))
             .expect("an empty probe body decodes");
-        assert!(
-            serde_json::from_value::<StoreProbeRequest>(serde_json::json!({"deep": true})).is_err()
-        );
+        serde_json::from_value::<StoreProbeRequest>(serde_json::json!({"deep": true}))
+            .expect_err("an unknown probe field should be rejected");
 
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
             "namespace_id": "demo",
         }))
         .expect("the same create body without a typo decodes");
-        assert!(
-            serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
-                "namespace_id": "demo",
-                "fork_of": "other"
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
-                "new_namespace_id": "demo",
-                "source_namespace_id": "other"
-            }))
-            .is_err()
-        );
+        serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "namespace_id": "demo",
+            "fork_of": "other"
+        }))
+        .expect_err("a fork field on a create request should be rejected");
+        serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
+            "new_namespace_id": "demo",
+            "source_namespace_id": "other"
+        }))
+        .expect_err("a source namespace field on a fork request should be rejected");
     }
     #[test]
     fn update_access_round_trips_and_requires_boundary_and_grants() {
@@ -2950,10 +2951,8 @@ mod tests {
         for field in ["boundary", "grants"] {
             let mut missing = json.clone();
             missing.as_object_mut().expect("object").remove(field);
-            assert!(
-                serde_json::from_value::<FilesystemOperation>(missing).is_err(),
-                "missing {field}"
-            );
+            serde_json::from_value::<FilesystemOperation>(missing)
+                .expect_err(&format!("missing {field}"));
         }
         assert_eq!(
             serde_json::to_value(CommitPrecondition::AccessRevision {

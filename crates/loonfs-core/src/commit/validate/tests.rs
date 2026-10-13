@@ -3,8 +3,6 @@
 //!
 //! These tests live in the crate because the operation types are internal.
 
-#![allow(clippy::panic)]
-
 use super::super::{CommitOperation, ResolvedBinding, ValidatedCommitPlan};
 use super::checks::{validate_operations, CommitNumbering};
 use super::error::CommitOperand;
@@ -23,6 +21,7 @@ use loonfs_types::{
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
     WriterEpoch, MAX_PUBLIC_INTEGER,
 };
+use std::assert_matches;
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
     DisplayName::parse(value.as_ref()).expect("valid display name")
@@ -322,17 +321,14 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("the base revision is stale");
-    assert!(
-        matches!(
-            error,
-            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-                inode_id: InodeId(2),
-                expected: AttributesRevisionNo(1),
-                actual: Some(AttributesRevisionNo(2)),
-                precondition_index: None,
-            }
-        ),
-        "{error:?}"
+    assert_matches!(
+        error,
+        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+            inode_id: InodeId(2),
+            expected: AttributesRevisionNo(1),
+            actual: Some(AttributesRevisionNo(2)),
+            precondition_index: None,
+        }
     );
     assert_eq!(
         CoreError::from(error).code(),
@@ -364,16 +360,13 @@ async fn a_first_attribute_write_states_revision_zero() {
     let error = build_commit_plan(&request(1), 4_200, &context)
         .await
         .expect_err("nothing has written revision 1 yet");
-    assert!(
-        matches!(
-            error,
-            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-                expected: AttributesRevisionNo(1),
-                actual: Some(AttributesRevisionNo(0)),
-                ..
-            }
-        ),
-        "{error:?}"
+    assert_matches!(
+        error,
+        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+            expected: AttributesRevisionNo(1),
+            actual: Some(AttributesRevisionNo(0)),
+            ..
+        }
     );
 }
 
@@ -390,15 +383,12 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("the inode does not exist");
-    assert!(
-        matches!(
-            error,
-            CommitValidationError::InodeMissing {
-                operand: CommitOperand::AttributeTarget,
-                inode_id: InodeId(9)
-            }
-        ),
-        "{error:?}"
+    assert_matches!(
+        error,
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::AttributeTarget,
+            inode_id: InodeId(9)
+        }
     );
 }
 
@@ -425,7 +415,7 @@ async fn stale_revision_precondition_is_rejected() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("stale revision");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::BaseRevisionMismatch {
             inode_id: InodeId(3),
@@ -433,7 +423,7 @@ async fn stale_revision_precondition_is_rejected() {
             actual: Some(RevisionNo(2)),
             precondition_index: None,
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -454,7 +444,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("the name is already bound");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::NameTaken {
             operand: CommitOperand::CreateParent,
@@ -462,7 +452,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
             child_inode_id: InodeId(2),
             ..
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -505,7 +495,7 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
         let error = validate_planned_ops(&[op], 4_200, &context)
             .await
             .expect_err("inode 3 already has a parent");
-        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert_eq!(
             error.to_string(),
             "namespace corrupt: a commit binds inode `3`, which is already bound as \
@@ -542,13 +532,13 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("the observed binding is gone");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::BindingPreconditionMissing {
             parent_inode_id: InodeId(1),
             ..
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -577,13 +567,13 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("late op fails");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::InodeMissing {
             operand: CommitOperand::ReplaceTarget,
             inode_id: InodeId(99)
         }
-    ));
+    );
     assert!(metadata_state
         .visible_child(
             InodeId(1),
@@ -620,14 +610,14 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     )
     .await
     .expect_err("create under tombstone");
-    assert!(matches!(
+    assert_matches!(
         create_error,
         CommitValidationError::TargetUnderSubtreeTombstone {
             operand: CommitOperand::CreateParent,
             inode_id: InodeId(2),
             ..
         }
-    ));
+    );
     assert_eq!(
         CoreError::from(create_error).code(),
         ErrorCode::NamespaceCorrupt
@@ -644,14 +634,14 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     )
     .await
     .expect_err("replace under tombstone");
-    assert!(matches!(
+    assert_matches!(
         replace_error,
         CommitValidationError::TargetUnderSubtreeTombstone {
             operand: CommitOperand::ReplaceTarget,
             inode_id: InodeId(3),
             ..
         }
-    ));
+    );
     assert_eq!(
         CoreError::from(replace_error).code(),
         ErrorCode::NamespaceCorrupt
@@ -676,13 +666,13 @@ async fn restore_revision_validation_rejects_missing_inode() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore missing inode");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::InodeMissing {
             operand: CommitOperand::RestoreTarget,
             inode_id: InodeId(99),
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -703,7 +693,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore non-file");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::InodeWrongKind {
             operand: CommitOperand::RestoreTarget,
@@ -711,7 +701,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
             expected: InodeKind::File,
             actual: InodeKind::Directory,
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -740,7 +730,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     )
     .await
     .expect_err("restore stale base");
-    assert!(matches!(
+    assert_matches!(
         &stale_base,
         CommitValidationError::BaseRevisionMismatch {
             inode_id: InodeId(3),
@@ -748,7 +738,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             actual: Some(RevisionNo(2)),
             precondition_index: None,
         }
-    ));
+    );
     assert_eq!(
         stale_base.to_string(),
         "base revision mismatch for inode `3`: expected revision 1, found revision 2"
@@ -765,13 +755,13 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     )
     .await
     .expect_err("restore missing source");
-    assert!(matches!(
+    assert_matches!(
         missing_source,
         CommitValidationError::RestoreRevisionSourceRevisionMissing {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(99),
         }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -806,13 +796,13 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
-    assert!(matches!(
+    assert_matches!(
         &plan.deltas[1].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
-    ));
+    );
 }
 
 #[tokio::test]
@@ -848,20 +838,20 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
-    assert!(matches!(
+    assert_matches!(
         &plan.deltas[0].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         &plan.deltas[1].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
-    ));
+    );
 }
 
 #[tokio::test]
@@ -890,14 +880,14 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     )
     .await
     .expect_err("restore under a covering tombstone");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::TargetUnderSubtreeTombstone {
             operand: CommitOperand::RestoreTarget,
             inode_id: InodeId(3),
             ..
         }
-    ));
+    );
     assert_eq!(CoreError::from(error).code(), ErrorCode::NamespaceCorrupt);
 }
 
@@ -946,11 +936,11 @@ async fn restore_revision_overflow_is_rejected() {
     let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore overflow");
-    assert!(matches!(
+    assert_matches!(
         error,
         CommitValidationError::RestoreRevisionOverflow {
             inode_id: InodeId(2),
             base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }
-    ));
+    );
 }

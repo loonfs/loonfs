@@ -11,6 +11,7 @@ use loonfs_types::{
     Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
     RevisionNo,
 };
+use std::assert_matches;
 
 fn actor() -> ActorId {
     loonfs_test_support::test_actor()
@@ -66,7 +67,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         loonfs_types::format::manifest::MetadataRow::Commit(invalid),
     )
     .expect_err("commit rows must not carry inline content");
-    assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
     assert!(error.to_string().contains("sequence `9`"), "{error}");
 }
 
@@ -135,7 +136,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     assert_eq!(state.revisions()[0].commit_id, owning_commit_id);
     assert_eq!(state.subtree_tombstones()[0].commit_id, owning_commit_id);
     assert_eq!(state.attributes_revisions()[0].commit_id, owning_commit_id);
-    assert!(matches!(
+    assert_matches!(
         state.access_revisions(),
         [AccessRevisionRecord {
             inode_id: InodeId(7),
@@ -143,7 +144,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             committed_seq: ChangeSeq(9),
             ..
         }]
-    ));
+    );
 }
 
 #[test]

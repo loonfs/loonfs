@@ -126,7 +126,6 @@ fn event_from_op_deltas(
     deltas: &[&WalDelta],
 ) -> Result<FilesystemChange> {
     Ok(match deltas {
-        // CreateDirectory: allocate + bind.
         [WalDelta::CreateInode {
             inode_id,
             inode_kind: loonfs_types::InodeKind::Directory,
@@ -291,6 +290,7 @@ mod tests {
         AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
         InodeId, NamespaceId,
     };
+    use std::assert_matches;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -358,7 +358,7 @@ mod tests {
             .list_changes_after(ChangeSeq(1), limit, &context)
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
-        assert!(matches!(error, CoreError::InvalidCursor(_)), "{error}");
+        assert_matches!(error, CoreError::InvalidCursor(_));
     }
 
     #[tokio::test]

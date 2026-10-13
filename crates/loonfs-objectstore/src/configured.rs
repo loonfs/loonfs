@@ -111,9 +111,11 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native GCS store. Direct reads and whole-object writes are
-    /// enabled only after live validation sets `GCS_DIRECT_TRANSFERS_PROVEN`
-    /// to confirm that the provider enforces them.
+    /// Builds a native GCS store.
+    ///
+    /// Direct reads and whole-object writes are enabled only after live
+    /// validation sets `GCS_DIRECT_TRANSFERS_PROVEN` to confirm that the
+    /// provider enforces them.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
     /// multipart slot stays empty rather than holding a signer that would
@@ -210,6 +212,7 @@ mod tests {
     use crate::ObjectStoreError;
     use crate::{AwsS3Credentials, ObjectStore};
     use bytes::Bytes;
+    use std::assert_matches;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -510,10 +513,10 @@ mod tests {
             .put_overwrite("../hint.json", Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect_err("traversal key should be rejected");
-        assert!(matches!(
+        assert_matches!(
             error,
             ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../hint.json"
-        ));
+        );
     }
 
     fn unique_temp_dir(label: &str) -> tempfile::TempDir {

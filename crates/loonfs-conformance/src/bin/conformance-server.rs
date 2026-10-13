@@ -1,4 +1,6 @@
 //! Runs the reference server until standard input closes.
+//!
+//! Server setup doesn't belong here: it's in `loonfs_conformance::server`.
 
 use loonfs_conformance::server::{start_server, StoreShape};
 use serde::Serialize;

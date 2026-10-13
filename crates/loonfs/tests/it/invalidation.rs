@@ -2,8 +2,6 @@
 //! instead of dropping them, and no cache lifecycle event — invalidation,
 //! LRU eviction, or running with zero cache limits — erases writer fencing.
 
-#![allow(clippy::panic)]
-
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -18,6 +16,7 @@ use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::NamespaceStatus;
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -95,11 +94,9 @@ async fn first_head_state_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) 
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
 fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &str) -> WriterFence {
     let error = result.expect_err(when);
-    assert!(
-        matches!(
-            &error,
-            Error::Core(core) if core.code() == loonfs::ErrorCode::WriterFenced
-        ),
+    assert_matches!(
+        &error,
+        Error::Core(core) if core.code() == loonfs::ErrorCode::WriterFenced,
         "{when}: unexpected error: {error:?}"
     );
     match error {
@@ -151,11 +148,9 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect_err("superseded writer surfaces fencing");
-    assert!(
-        matches!(
-            &fenced,
-            Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
-        ),
+    assert_matches!(
+        &fenced,
+        Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced,
         "unexpected error: {fenced:?}"
     );
 
@@ -165,11 +160,9 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect_err("fenced session never reacquires on its own");
-    assert!(
-        matches!(
-            &still_fenced,
-            Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
-        ),
+    assert_matches!(
+        &still_fenced,
+        Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced,
         "unexpected error: {still_fenced:?}"
     );
     let reader = writer_a.read_only();
@@ -469,11 +462,11 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .await
         .expect("rediscover at the revalidation bound");
     let operations = recording.take();
-    assert!(matches!(
+    assert_matches!(
         operations.first(),
         Some(RecordedOperation::GetWithMetadata { key, .. })
             if key == &loonfs_objectstore::keys::hint(&namespace_id)
-    ));
+    );
 
     timer.advance_ms(interval_ms);
     namespace
@@ -481,12 +474,19 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .await
         .expect("revalidate a fresh cached view");
     let operations = recording.take();
-    assert!(matches!(
+    assert_matches!(
         operations.as_slice(),
-        [RecordedOperation::Head { key: manifest_key }, RecordedOperation::Get { key: wal_key, range: None, result_bytes: 0 }]
-            if manifest_key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
-                && wal_key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
-    ));
+        [
+            RecordedOperation::Head { key: manifest_key },
+            RecordedOperation::Get {
+                key: wal_key,
+                range: None,
+                result_bytes: 0,
+            },
+        ] if manifest_key.starts_with(
+            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+        ) && wal_key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
+    );
 }
 
 async fn read_across_a_held_successor_probe(
@@ -585,12 +585,10 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
     let operations = recording.take();
     assert_eq!(operations[..2], warm_check, "{operations:?}");
-    assert!(
-        matches!(
-            operations.get(2),
-            Some(RecordedOperation::GetWithMetadata { key, .. })
-                if key == &loonfs_objectstore::keys::hint(&namespace_id)
-        ),
+    assert_matches!(
+        operations.get(2),
+        Some(RecordedOperation::GetWithMetadata { key, .. })
+            if key == &loonfs_objectstore::keys::hint(&namespace_id),
         "the late answer was trusted: {operations:?}"
     );
 }
@@ -746,12 +744,10 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         ],
         "{operations:?}"
     );
-    assert!(
-        matches!(
-            operations.get(2),
-            Some(RecordedOperation::GetWithMetadata { key, .. })
-                if key == &loonfs_objectstore::keys::hint(&namespace_id)
-        ),
+    assert_matches!(
+        operations.get(2),
+        Some(RecordedOperation::GetWithMetadata { key, .. })
+            if key == &loonfs_objectstore::keys::hint(&namespace_id),
         "the seed claimed a later check: {operations:?}"
     );
 }
@@ -824,11 +820,9 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         .await
         .expect("read on the new basis");
     let operations = recording.take();
-    assert!(
-        matches!(
-            operations.first(),
-            Some(RecordedOperation::GetWithMetadata { key, .. }) if key == &hint_key
-        ),
+    assert_matches!(
+        operations.first(),
+        Some(RecordedOperation::GetWithMetadata { key, .. }) if key == &hint_key,
         "the seed kept the old basis's check: {operations:?}"
     );
 }

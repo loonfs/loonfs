@@ -26,14 +26,16 @@ pub const FEATURE_SNAPSHOTS: &str = "filesystem.snapshots";
 pub const FEATURE_COMMIT_INLINE_CONTENT: &str = "filesystem.commits.inline_content";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "filesystem.uploads.direct_put";
-/// Starting presigned `direct_multipart` upload sessions. Independent of
-/// [`FEATURE_UPLOADS_DIRECT_PUT`]: a provider may sign whole-object writes
-/// without having an S3-style multipart API at all.
+/// Starting presigned `direct_multipart` upload sessions.
+///
+/// Independent of [`FEATURE_UPLOADS_DIRECT_PUT`]: a provider may sign
+/// whole-object writes without having an S3-style multipart API at all.
 pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "filesystem.uploads.direct_multipart";
-/// Gates download grants that are authorized with short-lived presigned
-/// URLs. A deployment that offers any direct transfer advertises this one,
-/// because letting a client write an object too large to proxy back means
-/// being able to hand it back.
+/// Gates download grants that are authorized with short-lived presigned URLs.
+///
+/// A deployment that offers any direct transfer advertises this one, because
+/// letting a client write an object too large to proxy back means being able to
+/// hand it back.
 pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "filesystem.downloads.direct_get";
 
 /// Gates grep index content search: the serving half of the capability;
@@ -63,6 +65,8 @@ macro_rules! limit_keys {
     };
 }
 
+// The [capability document](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#21-the-capability-document)
+// defines each limit key, and the docs below summarize it.
 limit_keys! {
     /// Advisory limit: the largest request body accepted by one service-proxied
     /// upload content request. This is the proxy's cap, not the provider's, and not a
@@ -172,13 +176,14 @@ pub enum CapabilityDocumentError {
 }
 
 impl CapabilityDocument {
-    /// Whether a feature is advertised as supported. Absent keys are
-    /// unsupported.
+    /// Reports whether a feature is advertised as supported.
+    ///
+    /// Absent keys are unsupported.
     pub fn supports(&self, feature: &str) -> bool {
         self.features.get(feature).copied().unwrap_or(false)
     }
 
-    /// The largest object this deployment's provider accepts in one
+    /// Returns the largest object this deployment's provider accepts in one
     /// `direct_put` request, when it advertises the limit.
     pub fn direct_put_max_content_bytes(&self) -> Option<u64> {
         self.limits
@@ -298,7 +303,8 @@ mod tests {
             .as_object_mut()
             .expect("document")
             .remove("api_groups");
-        assert!(serde_json::from_value::<CapabilityDocument>(missing_groups).is_err());
+        serde_json::from_value::<CapabilityDocument>(missing_groups)
+            .expect_err("a document without groups should be rejected");
 
         let future = encoded.replacen('{', "{\"field_from_the_future\":true,", 1);
         let decoded: CapabilityDocument =

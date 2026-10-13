@@ -1,12 +1,10 @@
 //! HTTP stat, revision history, content reads, and mutations by inode ID.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::{replace_file_options, test_config};
-use crate::common::{start_server, TestServer};
+use crate::common::{assert_api_code, start_server, TestServer};
 use futures::StreamExt;
 use loonfs_client::AttributeChanges;
-use loonfs_client::{ClientError, DeleteByInodeOptions, DeleteOptions, NamespacePath};
+use loonfs_client::{DeleteByInodeOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
@@ -46,25 +44,6 @@ async fn server_with_namespace(root: &Path, writer_id: &str) -> TestServer {
         .await
         .expect("create namespace");
     harness
-}
-
-fn assert_api_code<T: std::fmt::Debug>(
-    result: Result<T, ClientError>,
-    expected_status: u16,
-    code: ErrorCode,
-) {
-    match result.expect_err("request should fail") {
-        ClientError::Api {
-            status,
-            code: actual,
-            ..
-        } => {
-            assert_eq!(status, expected_status);
-            assert_eq!(actual, code.as_str());
-            assert_ne!(actual, ErrorCode::PathNotFound.as_str());
-        }
-        other => panic!("expected API error, got {other:?}"),
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

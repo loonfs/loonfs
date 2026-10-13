@@ -7,7 +7,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
 
 pub(crate) const READ_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
@@ -101,7 +101,7 @@ async fn source_stream<'a, S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| missing_source(&source.key))?;
     let range = source_range(source, metadata.size_bytes)?;
-    let checksum = StreamingChecksum::for_algorithm(source.checksum.algorithm);
+    let checksum = ChecksumDigest::new(source.checksum.algorithm);
     Ok(stream::try_unfold(
         (range.start_inclusive, Some(checksum)),
         move |(offset, checksum)| async move {
@@ -221,6 +221,7 @@ pub(crate) fn plan_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[tokio::test]
     async fn local_fs_assembly_matches_buffered_sources_and_tail() {
@@ -310,7 +311,7 @@ mod tests {
             assembled.etag,
             Some(format!("local-fs-v1:crc64nvme:{}", expected.value))
         );
-        assert!(matches!(
+        assert_matches!(
             store
                 .assemble(
                     "destination",
@@ -320,7 +321,7 @@ mod tests {
                 )
                 .await,
             Err(crate::ImmutableWriteError::DifferentObject { .. })
-        ));
+        );
     }
 
     #[test]

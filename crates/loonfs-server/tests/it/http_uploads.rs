@@ -1,7 +1,5 @@
 //! HTTP upload session and upload-backed commit flows.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::{ClientError, NamespacePath};
@@ -18,6 +16,7 @@ use loonfs_types::{
     ErrorCode, ErrorResponse, FilesystemOperation, InodeId, RevisionNo,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
+use std::assert_matches;
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -381,7 +380,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.message.as_deref(), Some("upload over http"));
     // The commit emits one file-created event with its initial revision.
     assert_eq!(change.events.len(), 1);
-    assert!(matches!(
+    assert_matches!(
         &change.events[0],
         FilesystemChange::FileCreated {
             inode_id: InodeId(2),
@@ -391,7 +390,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
             content_ref: created_ref,
             ..
         } if display_name.as_str() == "uploaded.txt" && *created_ref == content_ref
-    ));
+    );
 
     let empty = harness
         .client
@@ -429,7 +428,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     assert_eq!(status.namespace_id, namespace);
     assert_eq!(&status.upload_id, &open.upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
-    assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
+    assert_matches!(status.status, UploadSessionStatus::Open { .. });
 
     // Abort is idempotent.
     let aborted = abort_upload(&harness.server_url, &open.upload_id).expect("abort");

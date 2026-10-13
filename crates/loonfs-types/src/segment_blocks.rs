@@ -1,23 +1,9 @@
 //! Block-granular encoding for metadata and derived-index segments.
 //!
-//! A segment contains data blocks followed by one filter block and one index
-//! block. The manifest descriptor stores the index and filter handles. Each
-//! handle identifies a byte range and its CRC32C.
-//!
-//! The block format supports any CBOR row type, including [`MetadataRow`] and
-//! grep index rows. The durable layout is:
-//!
-//! - A **data block** holds prefix-compressed entries: each entry stores
-//!   `(shared_prefix_len, key_suffix_len)` as LEB128 varints, the key
-//!   suffix, and a length-prefixed CBOR row. Every [`RESTART_INTERVAL`]th
-//!   entry stores its full key. Restart offsets and their count end the
-//!   zstd-compressed block.
-//! - The **index block** is a zstd-compressed CBOR list with one entry per
-//!   data block: the block's last row key and its [`BlockHandle`].
-//! - The **filter block** is a bloom filter over caller-chosen filter keys
-//!   and is stored without compression.
-//! - Every section's CRC32C is stored in its handle.
-//! - Bloom hashing uses two xxh64 hashes with fixed seeds.
+//! A segment is a run of data blocks, then one filter block and one index
+//! block, for any CBOR row type, including [`MetadataRow`] and grep index
+//! rows. [Appendix A.7](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding)
+//! defines the byte layout.
 
 use crate::format::manifest::MetadataRow;
 use serde::{Deserialize, Serialize};
@@ -32,7 +18,9 @@ pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
-/// Target decoded data bytes in one metadata segment. A row is never split.
+/// Target decoded data bytes in one metadata segment.
+///
+/// A row is never split.
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of runs read by one compaction step.
 pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: usize = 8;
@@ -123,8 +111,9 @@ pub fn key_range_may_intersect(
 }
 
 /// One decoded data block: row keys and rows, parallel and in key order.
-/// The row type defaults to [`MetadataRow`]; index segments decode their
-/// own row payload through [`decode_data_block_rows`].
+///
+/// The row type defaults to [`MetadataRow`]; index segments decode their own
+/// row payload through [`decode_data_block_rows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedDataBlock<R = MetadataRow> {
     /// Reconstructed row keys in the same ascending order as `rows`.
@@ -235,10 +224,12 @@ impl SegmentBlocksBuilder {
         }
     }
 
-    /// Appends one row. `filter_key` is the lookup prefix point reads will
-    /// probe for this row; the caller derives it per family. The row is any
-    /// CBOR payload; a segment must hold one row type throughout, named by
-    /// the descriptor family that references it.
+    /// Appends one row.
+    ///
+    /// `filter_key` is the lookup prefix point reads will probe for this row;
+    /// the caller derives it per family. The row is any CBOR payload; a segment
+    /// must hold one row type throughout, named by the descriptor family that
+    /// references it.
     pub fn push<R: Serialize>(
         &mut self,
         row_key: &str,
@@ -323,12 +314,14 @@ impl SegmentBlocksBuilder {
         Ok(())
     }
 
-    /// Number of rows accepted by this builder.
+    /// Returns the number of rows accepted by this builder.
     pub fn row_count(&self) -> u64 {
         self.row_count
     }
 
-    /// Decoded data bytes accepted so far, including block restart tables.
+    /// Returns the decoded data bytes accepted so far, including block restart
+    /// tables.
+    ///
     /// The open block's pending restart table is included.
     pub fn decoded_data_bytes(&self) -> usize {
         self.decoded_data_bytes
@@ -560,8 +553,8 @@ impl SegmentFilter {
         std::mem::size_of::<Self>() + self.bits.capacity()
     }
 
-    /// False means no row with this filter key is in the segment; true
-    /// means one may be.
+    /// Reports whether a row with this filter key may be in the segment: false
+    /// means none is, and true means one may be.
     pub fn may_contain(&self, filter_key: &str) -> bool {
         let (h1, h2) = filter_key_hashes(filter_key);
         for probe in 0..u64::from(self.n_hashes) {
@@ -575,7 +568,7 @@ impl SegmentFilter {
     }
 }
 
-/// The exclusive upper bound for every row key beginning with `prefix`.
+/// Returns the exclusive upper bound for every row key beginning with `prefix`.
 ///
 /// Row keys are ordered as byte strings, so a prefix scan is the range
 /// `[prefix, string_prefix_upper_bound(prefix))`. `None` means the prefix is
@@ -592,8 +585,8 @@ pub fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
     None
 }
 
-/// Index positions of the blocks that can hold keys in
-/// `[lower_bound, upper_bound)`; `None` bounds the range at the last block.
+/// Returns the index positions of the blocks that can hold keys in `[lower_bound,
+/// upper_bound)`; `None` bounds the range at the last block.
 pub fn index_blocks_for_key_range(
     index: &[SegmentIndexEntry],
     lower_bound: &str,
@@ -631,7 +624,7 @@ fn append_section(
         offset: bytes.len() as u64,
         stored_bytes: handle_bytes(stored.len())?,
         decoded_bytes: handle_bytes(payload.len())?,
-        crc32c: crc32c::crc32c(&stored),
+        crc32c: crate::content::crc32c(&stored),
     };
     bytes.extend_from_slice(&stored);
     Ok(handle)
@@ -648,7 +641,7 @@ fn decode_section(
             actual: stored.len(),
         });
     }
-    let actual = crc32c::crc32c(stored);
+    let actual = crate::content::crc32c(stored);
     if actual != handle.crc32c {
         return Err(SegmentBlockCodecError::ChecksumMismatch {
             expected: handle.crc32c,
@@ -786,6 +779,7 @@ fn take_slice<'a>(
 mod tests {
     use super::*;
     use crate::{ChangeSeq, InodeId, InodeKind};
+    use std::assert_matches;
 
     #[test]
     fn decoded_byte_accounting_includes_closed_and_open_blocks() {
@@ -944,15 +938,12 @@ mod tests {
         let error = builder
             .push(&key_a, &filter_a, &row_a)
             .expect_err("descending key should be rejected");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::RowKeysOutOfOrder { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::RowKeysOutOfOrder { .. });
 
         let error = SegmentBlocksBuilder::default()
             .build()
             .expect_err("empty segment should be rejected");
-        assert!(matches!(error, SegmentBlockCodecError::EmptySegment));
+        assert_matches!(error, SegmentBlockCodecError::EmptySegment);
     }
 
     #[test]
@@ -1048,12 +1039,10 @@ mod tests {
         let error = builder
             .push(&key_low, &filter_low, &row_low)
             .expect_err("a descending key across a block boundary should be rejected");
-        assert!(
-            matches!(
-                &error,
-                SegmentBlockCodecError::RowKeysOutOfOrder { previous, offered }
-                    if previous == &key_high && offered == &key_low
-            ),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::RowKeysOutOfOrder { previous, offered }
+                if previous == &key_high && offered == &key_low,
             "unexpected error: {error}"
         );
     }
@@ -1079,30 +1068,21 @@ mod tests {
         corrupted[target] ^= 0xff;
         let error = decode_data_block(section(&corrupted, &index[0].block), &index[0].block)
             .expect_err("corrupted data block should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
 
         let mut corrupted = built.bytes.clone();
         let target = crate::usize_from_u64(built.index.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_index_block(section(&corrupted, &built.index), &built.index)
             .expect_err("corrupted index should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
 
         let mut corrupted = built.bytes.clone();
         let target = crate::usize_from_u64(built.filter.offset) + 12;
         corrupted[target] ^= 0xff;
         let error = decode_filter_block(section(&corrupted, &built.filter), &built.filter)
             .expect_err("corrupted filter should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
     }
 
     #[test]
@@ -1169,10 +1149,10 @@ mod tests {
             payload.resize(12 + crate::usize_from_u64(bit_len.div_ceil(8)), 0xff);
             let mut bytes = Vec::new();
             let handle = append_section(&mut bytes, &payload, false).expect("filter section");
-            assert!(matches!(
+            assert_matches!(
                 decode_filter_block(&bytes, &handle),
                 Err(SegmentBlockCodecError::Malformed(_))
-            ));
+            );
         }
     }
 
@@ -1278,8 +1258,9 @@ mod tests {
 
         let error =
             decode_data_block(&bytes, &handle).expect_err("descending rows should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("row-key order")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("row-key order"),
             "unexpected error: {error}"
         );
     }
@@ -1306,11 +1287,11 @@ mod tests {
         let handle = append_section(&mut bytes, &payload, true).expect("append section");
         let error = decode_data_block(&bytes, &handle)
             .expect_err("a partial utf-8 prefix should be rejected");
-        assert!(matches!(
+        assert_matches!(
             &error,
             SegmentBlockCodecError::Malformed(message)
                 if message == "shared prefix exceeds previous key"
-        ));
+        );
     }
 
     #[test]
@@ -1323,8 +1304,9 @@ mod tests {
 
         let error =
             decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("key order")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("key order"),
             "unexpected error: {error}"
         );
     }
@@ -1336,8 +1318,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("descending block offsets should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1349,8 +1332,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("overlapping block ranges should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1362,8 +1346,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a gap between block ranges should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1375,8 +1360,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("an overflowing single range should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
             "unexpected error: {error}"
         );
     }
@@ -1391,8 +1377,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a trailing overflowing range should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
             "unexpected error: {error}"
         );
     }

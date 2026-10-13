@@ -1,8 +1,5 @@
 //! User-visible snapshots.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::{
     CheckpointOwner, ErrorCode, ListSnapshotsResponse, LoonFs, NamespaceId, PageRequest,

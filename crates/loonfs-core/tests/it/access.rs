@@ -17,6 +17,7 @@ use loonfs_types::{
     AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
     TrashEntry, TrashPageCursor,
 };
+use std::assert_matches;
 use std::num::NonZeroU64;
 use tempfile::tempdir;
 
@@ -821,14 +822,14 @@ async fn a_replay_from_another_principal_scope_is_refused() {
     )
     .await
     .expect_err("wrong-scope replay");
-    assert!(matches!(
+    assert_matches!(
         error,
         loonfs_core::CoreError::PrincipalScopeMismatch {
             expected_principal_scope,
             actual_principal_scope,
         } if expected_principal_scope.as_str() == "org_demo"
             && actual_principal_scope.as_str() == "org_other"
-    ));
+    );
 }
 
 #[tokio::test]
@@ -1342,10 +1343,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         .await
         .expect_err("subject required");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert!(matches!(
-        error,
-        loonfs_core::CoreError::SubjectRequired { .. }
-    ));
+    assert_matches!(error, loonfs_core::CoreError::SubjectRequired { .. });
 }
 
 #[tokio::test]

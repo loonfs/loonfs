@@ -17,12 +17,12 @@ loonfs-types.workspace = true
 loonfs-objectstore.workspace = true
 loonfs-server = { path = "../loonfs-server" }
 loonfs-test-support.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "query"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 loonfs-client.workspace = true

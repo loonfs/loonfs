@@ -42,8 +42,9 @@ const GCS_SIGNING_ALGORITHM: &str = "GOOG4-RSA-SHA256";
 /// own client libraries write, so a deployment never has to configure one.
 const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 
-/// Maximum GCS object size. GCS does not document a smaller limit for a
-/// single-request upload.
+/// Maximum GCS object size.
+///
+/// GCS does not document a smaller limit for a single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// Creates native GCS V4 signed URLs.
@@ -300,6 +301,7 @@ mod tests {
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
     use crate::{ByteRange, ObjectStoreError};
     use loonfs_types::ChecksumAlgorithm;
+    use std::assert_matches;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
@@ -487,14 +489,14 @@ mod tests {
         for raw_prefix in ["tenant-a//bad", "../escape"] {
             let (_key_dir, service_account_key_path) =
                 gcs_fixture_service_account_key_file("gcs-presign-prefix");
-            assert!(matches!(
+            assert_matches!(
                 GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
                     service_account_key_path: service_account_key_path.display().to_string(),
                     key_prefix: Some(raw_prefix.to_owned()),
                 }),
                 Err(ObjectStoreError::InvalidKey { .. })
-            ));
+            );
         }
     }
 
@@ -564,7 +566,7 @@ mod tests {
                     signing_time(),
                 )
                 .await;
-            assert!(matches!(result, Err(ObjectStoreError::Configuration(_))));
+            assert_matches!(result, Err(ObjectStoreError::Configuration(_)));
         }
     }
 
@@ -583,15 +585,13 @@ mod tests {
         let missing = key_dir.path().join("absent.json");
 
         for path in [not_json, no_pem, missing] {
-            assert!(
-                matches!(
-                    GcsV4Presigner::new(&GcpGcsStoreConfig {
-                        bucket: "bucket".to_owned(),
-                        service_account_key_path: path.display().to_string(),
-                        key_prefix: None,
-                    }),
-                    Err(ObjectStoreError::Configuration(_))
-                ),
+            assert_matches!(
+                GcsV4Presigner::new(&GcpGcsStoreConfig {
+                    bucket: "bucket".to_owned(),
+                    service_account_key_path: path.display().to_string(),
+                    key_prefix: None,
+                }),
+                Err(ObjectStoreError::Configuration(_)),
                 "{} should not have produced a signer",
                 path.display()
             );

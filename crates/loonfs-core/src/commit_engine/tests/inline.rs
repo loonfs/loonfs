@@ -1,10 +1,12 @@
 //! Inline publication, retry identity, admission, fold, and append contracts.
 
-#[path = "commit_engine_inline_retention_tests.rs"]
-mod retention;
-
-#[path = "commit_engine_inline_layout_tests.rs"]
+mod append;
+mod fold;
+mod gc;
 mod layouts;
+mod read;
+mod retention;
+mod retry_gc;
 
 use super::*;
 use crate::manifest::{fold_wal, fold_wal_tail, FoldWalOutcome};
@@ -21,6 +23,7 @@ use loonfs_types::{
     AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, InodeId, RevisionNo,
     WriterId,
 };
+use std::assert_matches;
 
 async fn setup() -> (
     tempfile::TempDir,
@@ -287,8 +290,9 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             )
             .await
             .expect("stat");
-        assert!(
-            matches!(entry.kind, PathEntryKind::File { content_ref, .. } if content_ref == *value.content_ref())
+        assert_matches!(
+            entry.kind,
+            PathEntryKind::File { content_ref, .. } if content_ref == *value.content_ref()
         );
     }
 }
@@ -330,10 +334,10 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         "retry",
         vec![inline(&engine.namespace_id, Bytes::from_static(b"other"))],
     );
-    assert!(matches!(
+    assert_matches!(
         publish(&mut engine, &store, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
 
     let staged = store_bytes_as_content(&store, &engine.namespace_id, b"hello")
@@ -352,10 +356,10 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         .await
         .expect("inline publish");
     store.reset();
-    assert!(matches!(
+    assert_matches!(
         publish(&mut engine, &store, &context, staged_candidate).await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
 }
 
@@ -429,10 +433,10 @@ async fn invalid_inline_candidates_write_nothing() {
         wrong_checksum,
     ] {
         store.reset();
-        assert!(matches!(
+        assert_matches!(
             publish(&mut engine, &store, &context, candidate).await,
             Err(CoreError::InvalidCommitRequest(_))
-        ));
+        );
         assert_no_writes(&store);
     }
 }
@@ -507,7 +511,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .expect("fold inline content");
         if index == 0 {
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-            fold_tests::assert_content_before_metadata(&store, values.len());
+            fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
                     .expect("content key");
@@ -522,7 +526,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             }
         } else if index == 1 {
             assert_eq!(folded.response.outcome, FoldWalOutcome::ManifestAdvanced);
-            fold_tests::assert_content_before_metadata(&store, values.len());
+            fold::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }
                     if loonfs_objectstore::layout::manifest_no_of(key).is_some())
@@ -548,18 +552,3 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         );
     }
 }
-
-#[path = "commit_engine_inline_read_tests.rs"]
-mod read_tests;
-
-#[path = "commit_engine_inline_fold_tests.rs"]
-mod fold_tests;
-
-#[path = "commit_engine_inline_gc_tests.rs"]
-mod gc_tests;
-
-#[path = "commit_engine_inline_retry_gc_tests.rs"]
-mod retry_gc_tests;
-
-#[path = "commit_engine_inline_append_tests.rs"]
-mod append_tests;

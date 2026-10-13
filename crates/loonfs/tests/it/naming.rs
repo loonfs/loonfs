@@ -1,7 +1,5 @@
 //! Per-namespace naming modes: how a namespace compares sibling names.
 
-#![allow(clippy::panic)]
-
 use crate::common::{expect_code, store, writer};
 use loonfs::{CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, Writable};
 use loonfs_types::NamespaceNaming;

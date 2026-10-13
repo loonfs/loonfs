@@ -1,8 +1,5 @@
 //! Directory and revision pagination cursor behavior.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::{
     AdvanceRetentionFloorOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,

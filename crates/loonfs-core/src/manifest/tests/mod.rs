@@ -1,8 +1,5 @@
 //! Manifest, cache, index, recovery, and retention tests.
 
-#![allow(clippy::panic)]
-// These tests use panic in impossible match arms to preserve precise failure messages.
-
 mod access;
 mod active_deletions;
 mod attributes;
@@ -505,8 +502,9 @@ pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
 ) {
     let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
-    assert!(
-        matches!(outcome, MetadataCompactionJobOutcome::Published { .. }),
+    assert_matches!(
+        outcome,
+        MetadataCompactionJobOutcome::Published { .. },
         "the planned job must publish, got {outcome:?}"
     );
 }
@@ -692,6 +690,7 @@ use super::build::{
 };
 use super::fold::next_run_no_after;
 use super::runs::delta_run_count;
+use std::assert_matches;
 
 // Test support: a manifest built directly from a MetadataState, used to
 // author arbitrary layouts without driving the full checkpoint pipeline.

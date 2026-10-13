@@ -471,28 +471,38 @@ mod tests {
         let catalog = catalog_entry(namespace.clone());
         let other_catalog = catalog_entry(other_namespace);
 
-        assert!(verify_content_token("other", &catalog, &token, 1_000).is_err());
+        assert_eq!(
+            verify_content_token("other", &catalog, &token, 1_000)
+                .expect_err("a token signed with another secret should be rejected"),
+            ContentTokenError::BadSignature
+        );
         assert_eq!(
             verify_content_token("secret", &other_catalog, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch),
             "evidence belongs to one namespace"
         );
-        assert!(verify_content_token(
-            "secret",
-            &catalog,
-            &ContentToken {
-                content_ref: other_content,
-                token: token.token.clone(),
-            },
-            1_000,
-        )
-        .is_err());
-        assert!(verify_content_token(
-            "secret",
-            &catalog,
-            &token,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1
-        )
-        .is_err());
+        assert_eq!(
+            verify_content_token(
+                "secret",
+                &catalog,
+                &ContentToken {
+                    content_ref: other_content,
+                    token: token.token.clone(),
+                },
+                1_000,
+            )
+            .expect_err("a token presented with other content should be rejected"),
+            ContentTokenError::ContentRefMismatch
+        );
+        assert_eq!(
+            verify_content_token(
+                "secret",
+                &catalog,
+                &token,
+                issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1
+            )
+            .expect_err("an expired token should be rejected"),
+            ContentTokenError::Expired
+        );
     }
 }

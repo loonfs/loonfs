@@ -7,6 +7,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::AbsolutePath;
+use std::assert_matches;
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
@@ -43,10 +44,10 @@ async fn deletion_budget_includes_writer_acquisition() {
         store.release();
     };
     let (result, ()) = tokio::join!(delete, delay);
-    assert!(matches!(
+    assert_matches!(
         result,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
-    ));
+    );
     let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
@@ -209,19 +210,16 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .await
         .expect_err("deletion rejected before folding");
         if expected_head_seq == ChangeSeq(0) {
-            assert!(matches!(
+            assert_matches!(
                 error,
                 CoreError::StaleHeadPrecondition {
                     expected: ChangeSeq(0),
                     actual: ChangeSeq(1),
                     ..
                 }
-            ));
+            );
         } else {
-            assert!(matches!(
-                error,
-                CoreError::MetadataPublicationBudgetExceeded { .. }
-            ));
+            assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
         }
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().compare_and_swaps, 0);

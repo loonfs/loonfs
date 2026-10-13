@@ -70,6 +70,7 @@ impl CandidateAllocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn multiple_creates_in_one_candidate_receive_consecutive_ids() {
@@ -131,10 +132,10 @@ mod tests {
         let mut candidate = allocator.begin_candidate();
 
         let error = candidate.allocate().expect_err("counter must not wrap");
-        assert!(matches!(
+        assert_matches!(
             error,
             CoreError::NamespaceCorrupt(message) if message.contains("largest inode ID")
-        ));
+        );
         assert_eq!(candidate.resulting_next_inode_id(), InodeId(u64::MAX));
     }
 }

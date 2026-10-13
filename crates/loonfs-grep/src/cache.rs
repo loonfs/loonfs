@@ -84,9 +84,6 @@ impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // The metric helper below expects counters and panics if a test requests
-    // a metric of another type.
 
     use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics};
     use loonfs::engine::SegmentBlockKind;

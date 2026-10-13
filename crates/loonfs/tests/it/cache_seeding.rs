@@ -1,8 +1,5 @@
 //! Runtime cache seeding, reuse, eviction, and cross-handle sharing.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -17,6 +14,7 @@ use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -172,10 +170,10 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(wal.len(), 1, "publish {number}: {wal:?}");
-            assert!(matches!(
+            assert_matches!(
                 wal[0],
                 loonfs_test_support::stores::RecordedOperation::Put { .. }
-            ));
+            );
         }
         let usage =
             loonfs_core::cache::load_namespace_wal_tail_usage(recording.as_ref(), &namespace_id)

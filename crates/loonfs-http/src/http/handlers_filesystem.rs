@@ -22,8 +22,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    payload_class, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
-    ReadOnly, ReadView, StatOptions, TraceMode,
+    ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId, ReadOnly,
+    ReadView, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -35,7 +35,6 @@ use loonfs_types::{
     CommitRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
     ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo, TrashPageCursor,
 };
-use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -563,17 +562,11 @@ pub(super) async fn create_commit(
         .iter()
         .filter_map(FilesystemOperation::content_ref)
         .collect::<Vec<_>>();
-    // A request that puts nothing skips both the preparation pass and the
-    // put span; one that puts is classified by the bytes it publishes.
+    // A request that puts nothing skips the preparation pass.
     let put_content_preparation = if put_content_refs.is_empty() {
         None
     } else {
-        let put_bytes = put_content_refs
-            .iter()
-            .map(|content_ref| content_ref.size_bytes)
-            .fold(0, u64::saturating_add);
-        Some((
-            payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
+        Some(
             content_preparation_for_puts(
                 &state.namespaces,
                 &namespace,
@@ -584,7 +577,7 @@ pub(super) async fn create_commit(
                 state.runtime.now_ms(),
             )
             .await?,
-        ))
+        )
     };
     let request = CommitIntent {
         preconditions,
@@ -594,33 +587,20 @@ pub(super) async fn create_commit(
         message,
         operations,
     };
-    let response_result = if let Some((payload_class, preparation)) = put_content_preparation {
-        let span = tracing::debug_span!(target: "loonfs_server::http::handlers_filesystem",
-            "loonfs.put",
-            operation = "put",
-            mode = TraceMode::Remote.as_str(),
-            store_kind = state.options.store_kind.as_str(),
-            payload_class,
-        );
-        async {
-            let candidate = match preparation {
-                PutContentPreparation::Absent => {
-                    CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
-                }
-                PutContentPreparation::Ready(prepared_content) => {
-                    CommitCandidate::with_inline_content(request, prepared_content, inline_content)
-                }
-                PutContentPreparation::Rejected(rejections) => {
-                    CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
-                        .reject_content_preparation(ContentPreparationError::ContentToken(
-                            rejections,
-                        ))
-                }
-            };
-            namespace.commit_candidate(candidate).await
-        }
-        .instrument(span)
-        .await
+    let response_result = if let Some(preparation) = put_content_preparation {
+        let candidate = match preparation {
+            PutContentPreparation::Absent => {
+                CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
+            }
+            PutContentPreparation::Ready(prepared_content) => {
+                CommitCandidate::with_inline_content(request, prepared_content, inline_content)
+            }
+            PutContentPreparation::Rejected(rejections) => {
+                CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
+                    .reject_content_preparation(ContentPreparationError::ContentToken(rejections))
+            }
+        };
+        namespace.commit_candidate(candidate).await
     } else {
         namespace.commit(request).await
     };
@@ -737,6 +717,7 @@ mod tests {
             parse_after_seq("9007199254740991"),
             Ok(loonfs_types::ChangeSeq(loonfs_types::MAX_PUBLIC_INTEGER))
         ));
-        assert!(parse_after_seq("9007199254740992").is_err());
+        parse_after_seq("9007199254740992")
+            .expect_err("the value after the public maximum should be rejected");
     }
 }

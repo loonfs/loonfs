@@ -7,6 +7,7 @@ use loonfs_objectstore::keys::{pin, pin_prefix};
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
 use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::AttributeInclusion;
+use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture {
@@ -72,10 +73,7 @@ impl Fixture {
         )
         .await
         .expect("replace old runs");
-        assert!(matches!(
-            report,
-            CompactionStepOutcome::UnitPublished { .. }
-        ));
+        assert_matches!(report, CompactionStepOutcome::UnitPublished { .. });
         let current = load_current_manifest(&store, &source)
             .await
             .expect("current");
@@ -266,7 +264,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             gate.release();
         }
     );
-    assert!(matches!(fork, Err(CoreError::SnapshotNotFound { .. })));
+    assert_matches!(fork, Err(CoreError::SnapshotNotFound { .. }));
     assert!(fixture
         .store
         .list_prefix(&pin_prefix(&fixture.source))
@@ -409,10 +407,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             store.release();
         }
     );
-    assert!(
-        matches!(fork, Err(CoreError::SnapshotGone { .. })),
-        "{fork:?}"
-    );
+    assert_matches!(fork, Err(CoreError::SnapshotGone { .. }));
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
         0,

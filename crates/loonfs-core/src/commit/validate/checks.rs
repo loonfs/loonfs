@@ -860,6 +860,7 @@ async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
 mod ordinal_tests {
     use super::*;
     use loonfs_types::MAX_PUBLIC_INTEGER;
+    use std::assert_matches;
 
     #[test]
     fn revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {
@@ -874,7 +875,7 @@ mod ordinal_tests {
         .expect("advance to public maximum");
         assert_eq!(at_maximum, RevisionNo(MAX_PUBLIC_INTEGER));
 
-        assert!(matches!(
+        assert_matches!(
             next_revision_no(
                 InodeId(2),
                 RevisionNo(MAX_PUBLIC_INTEGER),
@@ -887,7 +888,7 @@ mod ordinal_tests {
                 inode_id: InodeId(2),
                 base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
             })
-        ));
+        );
     }
 
     #[test]
@@ -897,12 +898,12 @@ mod ordinal_tests {
                 .expect("advance to public maximum"),
             AttributesRevisionNo(MAX_PUBLIC_INTEGER)
         );
-        assert!(matches!(
+        assert_matches!(
             next_attributes_revision_no(InodeId(2), AttributesRevisionNo(MAX_PUBLIC_INTEGER),),
             Err(CommitValidationError::UpdateAttributesRevisionOverflow {
                 inode_id: InodeId(2),
                 base_attributes_revision_no: AttributesRevisionNo(MAX_PUBLIC_INTEGER),
             })
-        ));
+        );
     }
 }

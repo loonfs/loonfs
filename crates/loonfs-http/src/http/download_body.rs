@@ -32,7 +32,7 @@ pub(super) fn streamed_download_response(
             Ok(Some(bytes)) => Ok(Some((bytes, (stream, permit)))),
             Ok(None) => Ok(None),
             Err(error) => {
-                tracing::warn!(target: "loonfs_server::http::download_body", code = %error.code(), error = %error, "download body failed verification or transfer");
+                tracing::warn!(code = %error.code(), error = %error, "download body failed verification or transfer");
                 Err(std::io::Error::other(error))
             }
         }

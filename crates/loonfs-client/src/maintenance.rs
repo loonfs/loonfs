@@ -100,6 +100,7 @@ impl Client {
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).
+    ///
     /// `actor_id` attributes the administrator recovery commit when supplied.
     /// Retrying this request starts a distinct attempt.
     pub async fn run_maintenance(
@@ -134,9 +135,10 @@ impl Client {
             .await
     }
 
-    /// Returns whether the namespace's grep index is disabled, being built,
-    /// or active (maintenance API group). This operation does not change the
-    /// index.
+    /// Returns whether the namespace's grep index is disabled, being built, or
+    /// active (maintenance API group).
+    ///
+    /// This operation does not change the index.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index",
@@ -160,7 +162,9 @@ impl Client {
     }
 
     /// Disables the namespace's grep index (maintenance API group); garbage
-    /// collection reclaims the segments. Idempotent.
+    /// collection reclaims the segments.
+    ///
+    /// Idempotent.
     pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",

@@ -2,6 +2,8 @@
 //! `tests/<name>.rs` file is a module here, so the suite links once and
 //! runs its tests as threads instead of as separate processes.
 
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
+
 mod access;
 mod attributes;
 mod batch_publish;

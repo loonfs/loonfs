@@ -59,7 +59,7 @@ pub(crate) use phase_event;
 
 /// Classifies a payload size into the low-cardinality `small`, `medium`, or
 /// `large` trace label.
-pub fn payload_class(size_bytes: usize) -> &'static str {
+pub(crate) fn payload_class(size_bytes: usize) -> &'static str {
     match size_bytes {
         0..=16_383 => "small",
         16_384..=1_048_575 => "medium",

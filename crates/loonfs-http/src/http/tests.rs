@@ -1,8 +1,5 @@
 //! HTTP router and handler contracts.
 
-#![allow(clippy::panic)]
-// HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
-
 mod attribution;
 mod handler_panics;
 mod hosted_content_ref_access;
@@ -487,34 +484,16 @@ fn is_snake_case_token(token: &str) -> bool {
 }
 use loonfs_test_support::http::{raw_agent, retry_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::provider_detail::{
+    assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
+};
 use loonfs_test_support::stores::{
     delegate_object_store, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
     OperationContext, OperationKind, OperationSelector,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
-    arn:aws:iam::123456789012:role/private-role private-bucket \
-    namespaces/customer-a/hint.json x-amz-request-id=provider-request \
-    x-amz-id-2=provider-host-id AKIAEXAMPLE";
-
-fn assert_provider_markers_absent(rendered: &str) {
-    for marker in [
-        "<Error>AccessDenied</Error>",
-        "arn:aws:iam::123456789012:role/private-role",
-        "private-bucket",
-        "namespaces/customer-a/hint.json",
-        "x-amz-request-id=provider-request",
-        "x-amz-id-2=provider-host-id",
-        "AKIAEXAMPLE",
-    ] {
-        assert!(
-            !rendered.contains(marker),
-            "API body leaked {marker}: {rendered}"
-        );
-    }
-}
 
 #[derive(Debug)]
 struct PoisonProviderStore;
@@ -574,7 +553,7 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
         .expect("read provider failure body");
     let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
 
-    assert_provider_markers_absent(&rendered);
+    assert_provider_markers_absent("API body", &rendered);
     assert!(rendered.contains(
         "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
     ));
@@ -599,7 +578,7 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
         .expect("read presign failure body");
     let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
 
-    assert_provider_markers_absent(&rendered);
+    assert_provider_markers_absent("API body", &rendered);
     assert!(rendered.contains(
         "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
     ));
@@ -1555,6 +1534,8 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
 
 struct TestHarness {
     client: Client,
+    addr: std::net::SocketAddr,
+    state: BindingState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -1563,17 +1544,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_options(temp_dir.path(), "server-writer");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     for auth_token in [None, Some("wrong-token".to_owned())] {
         let client = Client::new(ClientConfig {
@@ -1638,17 +1609,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_options(temp_dir.path(), "server-writer");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     // An invalid numeric query value returns invalid_request.
     let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
@@ -1953,17 +1914,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.inline_content.inline_content_threshold_bytes = None;
     config.binding.max_upload_bytes = Some(1024);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
@@ -2142,17 +2093,7 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_options(temp_dir.path(), "server-writer");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     // Unknown path: in-envelope 404 instead of axum's empty body.
     let error = raw_agent()
@@ -2207,17 +2148,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
     .await;
 
     let config = test_options(temp_dir.path(), "server-writer");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     let cursor = tokio::task::spawn_blocking({
         move || {
@@ -2308,16 +2239,12 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.inline_content.inline_content_threshold_bytes = None;
     config.binding.max_concurrent_uploads = 1;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = test_app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness {
+        addr,
+        state,
+        server,
+        ..
+    } = start_server_with_config(store, config).await;
 
     // Hold the only buffering slot, standing in for a slow concurrent
     // upload; the next proxied body must be refused before buffering.
@@ -2400,16 +2327,12 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.max_concurrent_downloads = 1;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = test_app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness {
+        addr,
+        state,
+        server,
+        ..
+    } = start_server_with_config(store, config).await;
 
     let held = state
         .download_permits
@@ -2549,10 +2472,10 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
 
     let next_permit = state.download_permits.clone().acquire_owned();
     tokio::pin!(next_permit);
-    assert!(matches!(
+    assert_matches!(
         futures::poll!(next_permit.as_mut()),
         std::task::Poll::Pending
-    ));
+    );
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -2600,17 +2523,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.max_download_bytes = Some(16);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
-        .await
-        .expect("build app")
-        .0;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
@@ -2818,15 +2731,18 @@ async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) ->
     start_server_with_config(store, test_options(root, writer_id)).await
 }
 
+// The server runs as a task on the test's own runtime. A test that sends a raw
+// request through the blocking `ureq` agent holds its worker thread until the
+// response arrives, so it runs with `flavor = "multi_thread"` to give the
+// server a second worker.
 async fn start_server_with_config(store: SharedObjectStore, config: TestOptions) -> TestHarness {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = test_app(config, options_with_store(store))
+    let (router, state) = test_app(config, options_with_store(store))
         .await
-        .expect("build app")
-        .0;
+        .expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2840,6 +2756,8 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
             ca_cert_path: None,
         })
         .expect("valid client config"),
+        addr,
+        state,
         server,
     }
 }
@@ -3786,18 +3704,15 @@ mod direct_download {
     }
 
     fn assert_offset_refused<T: std::fmt::Debug>(result: Result<T, ClientError>) {
-        match result {
+        assert_matches!(
+            result,
             Err(ClientError::Api {
                 status: 400,
                 code,
-                param,
+                param: Some(param),
                 ..
-            }) => {
-                assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-                assert_eq!(param.as_deref(), Some("/start_offset"));
-            }
-            other => panic!("expected invalid_request for start_offset, got {other:?}"),
-        }
+            }) if code == ErrorCode::InvalidRequest.as_str() && param == "/start_offset"
+        );
     }
 
     #[tokio::test]

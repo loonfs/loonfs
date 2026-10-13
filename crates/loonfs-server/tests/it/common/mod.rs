@@ -1,19 +1,18 @@
 //! Shared fixtures for the crate's integration tests.
 
 #![allow(dead_code)]
-#![allow(clippy::panic)]
 #![allow(
     clippy::result_large_err,
     reason = "test helpers preserve the client's structured error type"
 )]
 
-use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServeError,
     ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
-use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
+use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
@@ -94,6 +93,26 @@ pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
         .unwrap_or_else(|| panic!("no series `{name}` in the scrape"))
 }
 
+/// Asserts that `result` failed with an API error of `expected_status` and
+/// `code`.
+pub(crate) fn assert_api_code<T: std::fmt::Debug>(
+    result: Result<T, ClientError>,
+    expected_status: u16,
+    code: ErrorCode,
+) {
+    match result.expect_err("request should fail") {
+        ClientError::Api {
+            status,
+            code: actual,
+            ..
+        } => {
+            assert_eq!(status, expected_status);
+            assert_eq!(actual, code.as_str());
+        }
+        other => panic!("expected API error, got {other:?}"),
+    }
+}
+
 pub(crate) struct TestServer {
     pub(crate) namespaces: std::sync::Arc<loonfs_http::Namespaces>,
     pub(crate) client: Client,
@@ -103,6 +122,10 @@ pub(crate) struct TestServer {
     pub(crate) server: tokio::task::JoinHandle<()>,
 }
 
+// The server runs as a task on the test's own runtime, and the tests call it
+// through the blocking `ureq` agent as well as the async client. A blocking
+// call holds its worker thread until the response arrives, so the tests run
+// with `flavor = "multi_thread"` to give the server a second worker.
 pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let (store_root, store_key_prefix) = match &config.store {
         StoreConfig::LocalFs { root, key_prefix } => {
@@ -160,15 +183,32 @@ pub(crate) struct TlsTestServer {
     _identity_dir: tempfile::TempDir,
 }
 
-pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer {
+pub(crate) async fn start_tls_server(config: ServerConfig) -> TlsTestServer {
+    start_tls_server_with_certificate(config, tls_certificate_params()).await
+}
+
+/// Returns the parameters of the harness's self-signed certificate, which
+/// names `localhost` and `127.0.0.1` and keeps rcgen's default validity.
+pub(crate) fn tls_certificate_params() -> rcgen::CertificateParams {
+    rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+        .expect("certificate parameters")
+}
+
+/// Starts the server of [`start_tls_server`] with a certificate self-signed
+/// from `certificate`.
+pub(crate) async fn start_tls_server_with_certificate(
+    mut config: ServerConfig,
+    certificate: rcgen::CertificateParams,
+) -> TlsTestServer {
     let identity_dir = tempfile::tempdir().expect("tls identity dir");
     let cert_path = identity_dir.path().join("server.crt");
     let key_path = identity_dir.path().join("server.key");
-    let identity =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
-            .expect("generate self-signed identity");
-    std::fs::write(&cert_path, identity.cert.pem()).expect("write certificate");
-    std::fs::write(&key_path, identity.signing_key.serialize_pem()).expect("write private key");
+    let signing_key = rcgen::KeyPair::generate().expect("generate signing key");
+    let certificate = certificate
+        .self_signed(&signing_key)
+        .expect("self-sign certificate");
+    std::fs::write(&cert_path, certificate.pem()).expect("write certificate");
+    std::fs::write(&key_path, signing_key.serialize_pem()).expect("write private key");
 
     let addr = reserve_loopback_addr().await;
     config.bind = addr.to_string();
@@ -280,7 +320,7 @@ async fn reserve_loopback_addr() -> SocketAddr {
     probe.local_addr().expect("probe addr")
 }
 
-#[allow(clippy::disallowed_methods, clippy::panic)]
+#[allow(clippy::disallowed_methods)]
 // Test-harness polling for a port the server binds on its own schedule.
 async fn wait_until_listening(
     addr: SocketAddr,

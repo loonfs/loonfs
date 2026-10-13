@@ -23,6 +23,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
 };
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -75,8 +76,9 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
         .by_name(name)
         .find(|entry| entry.labels == labels)
         .expect("the counter must be registered with these labels");
-    assert!(
-        matches!(entry.value, MetricValue::Counter(_)),
+    assert_matches!(
+        entry.value,
+        MetricValue::Counter(_),
         "expected a counter, found {:?}",
         entry.value
     );
@@ -422,11 +424,9 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
         .compact_metadata(&explicit, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
-    assert!(
-        matches!(
-            outcome.compaction,
-            MetadataCompactionOutcome::Published { .. }
-        ),
+    assert_matches!(
+        outcome.compaction,
+        MetadataCompactionOutcome::Published { .. },
         "the explicit call must run and publish the job rather than a delta merge, got {outcome:?}"
     );
 
@@ -504,11 +504,9 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
-    assert!(
-        matches!(
-            outcome.compaction,
-            MetadataCompactionOutcome::Published { .. }
-        ),
+    assert_matches!(
+        outcome.compaction,
+        MetadataCompactionOutcome::Published { .. },
         "and the explicit call runs it, got {outcome:?}"
     );
 }
@@ -653,16 +651,13 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         if attribute_runs(&next) != attribute_runs(&manifest) {
             remaining_runs.push(attribute_runs(&next));
             if read_base {
-                assert!(
-                    matches!(
-                        compaction,
-                        MetadataCompactionOutcome::Published {
-                            rows_read: 340,
-                            rows_written: 340,
-                            ..
-                        }
-                    ),
-                    "{compaction:?}"
+                assert_matches!(
+                    compaction,
+                    MetadataCompactionOutcome::Published {
+                        rows_read: 340,
+                        rows_written: 340,
+                        ..
+                    }
                 );
             } else {
                 assert_eq!(compaction, MetadataCompactionOutcome::BoundedMergePublished);
@@ -794,8 +789,6 @@ struct RivalFold {
 
 #[async_trait::async_trait]
 impl Interceptor for RivalFold {
-    // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
-    #[allow(deprecated)]
     async fn before(&self, context: &OperationContext<'_>) -> Intercept {
         use std::sync::atomic::Ordering::SeqCst;
         let kind = context.kind();
@@ -805,7 +798,7 @@ impl Interceptor for RivalFold {
             && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
             && self
                 .races_left
-                .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
                 .is_ok()
         {
             self.races_run.fetch_add(1, SeqCst);

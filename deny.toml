@@ -1,0 +1,33 @@
+# `cargo deny check bans` fails when the build has two versions of one crate.
+# Each `skip` entry allows one duplicate and names the crates that pull it.
+
+[graph]
+# The targets the release builds. Windows-only and UEFI-only duplicates
+# (`windows-sys`, `r-efi`) never reach a shipped binary.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    { crate = "thiserror@1", reason = "dialoguer 0.11 uses thiserror 1, and the workspace uses 2" },
+    { crate = "thiserror-impl@1", reason = "the derive behind dialoguer's thiserror 1" },
+    { crate = "http@0.2", reason = "the aws-smithy crates, aws-runtime, aws-sigv4, and the aws-sdk crates behind aws-config use http 0.2" },
+    { crate = "http-body@0.4", reason = "aws-runtime and the aws-smithy crates behind aws-config use http-body 0.4" },
+    { crate = "base64@0.23", reason = "object_store 0.14 and reqwest 0.13 use base64 0.23, and the workspace, hyper-util, pem, and ureq use 0.22" },
+    { crate = "getrandom@0.2", reason = "ring 0.17 uses getrandom 0.2" },
+    { crate = "getrandom@0.4", reason = "rand 0.10 (through object_store and foyer's twox-hash) and tempfile use getrandom 0.4, and the workspace uses 0.3" },
+    { crate = "digest@0.11", reason = "md-5 0.11, through object_store, uses digest 0.11, and sha2, hmac, and crc-fast use 0.10" },
+    { crate = "block-buffer@0.12", reason = "digest 0.11, through object_store's md-5" },
+    { crate = "crypto-common@0.2", reason = "digest 0.11, through object_store's md-5" },
+    { crate = "cpufeatures@0.3", reason = "chacha20 0.10, through rand 0.10 (object_store and foyer), uses cpufeatures 0.3, and sha2 0.10 uses 0.2. Only x86_64 builds both" },
+    { crate = "itertools@0.14", reason = "foyer 0.22, pinned exactly, uses itertools 0.14, and object_store and mixtrics use 0.15" },
+    { crate = "rand@0.9", reason = "foyer-storage 0.22, pinned exactly, uses rand 0.9, and object_store and foyer's twox-hash use 0.10" },
+    { crate = "rand_core@0.9", reason = "rand 0.9, through foyer-storage" },
+    { crate = "syn@3", reason = "async-trait 0.1.92 uses syn 3, and every other proc macro in the tree uses syn 2" },
+]

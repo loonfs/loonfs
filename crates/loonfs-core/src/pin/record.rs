@@ -211,6 +211,7 @@ mod tests {
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::ChangeSeq;
+    use std::assert_matches;
     use tempfile::{tempdir, TempDir};
 
     fn local_store() -> (TempDir, LocalFsStore) {
@@ -251,7 +252,7 @@ mod tests {
             .await
             .expect_err("wrong family should fail");
 
-        assert!(matches!(error, ControlObjectLoadError::KeyLayout { .. }));
+        assert_matches!(error, ControlObjectLoadError::KeyLayout { .. });
     }
 
     #[tokio::test]
@@ -267,7 +268,7 @@ mod tests {
             let error = load_pin_at_key(&store, &object_key)
                 .await
                 .expect_err("invalid key id should fail");
-            assert!(matches!(error, ControlObjectLoadError::KeyLayout { .. }));
+            assert_matches!(error, ControlObjectLoadError::KeyLayout { .. });
         }
     }
 
@@ -310,16 +311,15 @@ mod tests {
                 .await
                 .expect_err("a record that does not describe its key should fail");
             match expected {
-                Mismatch::Namespace => assert!(
-                    matches!(error, ControlObjectLoadError::NamespaceMismatch { .. }),
+                Mismatch::Namespace => assert_matches!(
+                    error,
+                    ControlObjectLoadError::NamespaceMismatch { .. },
                     "for `{label}`: {error:?}"
                 ),
-                Mismatch::PinId => assert!(
-                    matches!(
-                        error,
-                        ControlObjectLoadError::IdentityMismatch { ref field, .. }
-                            if field == "pin id"
-                    ),
+                Mismatch::PinId => assert_matches!(
+                    error,
+                    ControlObjectLoadError::IdentityMismatch { ref field, .. }
+                        if field == "pin id",
                     "for `{label}`: {error:?}"
                 ),
             }

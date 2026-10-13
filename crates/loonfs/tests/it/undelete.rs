@@ -1,8 +1,5 @@
 //! Undelete positions, delete preconditions, and restored visibility.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
@@ -10,6 +7,7 @@ use loonfs::{
     ErrorCode, InodeId, PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::{first_page, namespace_id};
+use std::assert_matches;
 use tempfile::tempdir;
 
 #[test]
@@ -31,10 +29,10 @@ fn delete_options_select_recursive_behavior() {
     let error = fs
         .delete_path_blocking(&namespace_id, "/docs", &loonfs_test_support::test_actor())
         .expect_err("non-recursive delete should reject non-empty directory");
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::Core(error) if error.code() == loonfs::ErrorCode::DirectoryNotEmpty
-    ));
+    );
 
     fs.delete_path_with_options_blocking(
         &namespace_id,
@@ -54,10 +52,10 @@ fn delete_options_select_recursive_behavior() {
     let error = fs
         .stat_path_blocking(&namespace_id, "/docs/hello.txt")
         .expect_err("deleted file should not stat");
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
-    ));
+    );
 }
 
 #[test]
@@ -145,10 +143,10 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         &undelete_at("/docs/again.txt"),
     ))
     .expect_err("double undelete should conflict");
-    assert!(matches!(
+    assert_matches!(
         &error,
         Error::Core(error) if error.code() == ErrorCode::NotDeleted
-    ));
+    );
 
     // Delete again: the old position handle must not cancel the new
     // deletion, and the failure names both positions.
@@ -177,7 +175,12 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         other => panic!("expected core error, got {other:?}"),
     }
     let still_gone = fs.stat_path_blocking(&namespace_id, "/docs/stale.txt");
-    assert!(still_gone.is_err(), "stale undelete must not bind anything");
+    assert_eq!(
+        still_gone
+            .expect_err("stale undelete must not bind anything")
+            .code(),
+        loonfs_types::ErrorCode::PathNotFound
+    );
 
     // The current position's handle recovers to the original path.
     block_on(namespace_writer.undelete_with_options(
@@ -249,10 +252,10 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         &undelete_at("/docs/a-alone.txt"),
     ))
     .expect_err("child of a deleted directory is not the deletion root");
-    assert!(matches!(
+    assert_matches!(
         &error,
         Error::Core(error) if error.code() == ErrorCode::NotDeleted
-    ));
+    );
 
     block_on(namespace.undelete_with_options(
         directory_inode,
@@ -340,10 +343,10 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         b"kept"
     );
     let hidden = fs.stat_path_blocking(&namespace_id, "/docs/notes/secret.txt");
-    assert!(matches!(
+    assert_matches!(
         hidden,
         Err(Error::Core(error)) if error.code() == ErrorCode::PathNotFound
-    ));
+    );
 }
 
 #[test]
@@ -394,8 +397,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
             .expect("checkpoint the revoke into durable segments");
-        assert!(
-            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
+        assert_matches!(
+            step.wal_fold,
+            loonfs::WalFoldStepOutcome::Folded { .. },
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
@@ -429,8 +433,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
             .expect("checkpoint the deletion");
-        assert!(
-            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
+        assert_matches!(
+            step.wal_fold,
+            loonfs::WalFoldStepOutcome::Folded { .. },
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
@@ -449,8 +454,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
             .expect("checkpoint the second revoke");
-        assert!(
-            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
+        assert_matches!(
+            step.wal_fold,
+            loonfs::WalFoldStepOutcome::Folded { .. },
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
@@ -623,10 +629,10 @@ fn undelete_rejects_deletions_from_the_same_commit() {
             },
         )
         .expect_err("same-commit delete/undelete cycling must be rejected");
-    assert!(matches!(
+    assert_matches!(
         &error,
         Error::Core(error) if error.code() == ErrorCode::NotDeleted
-    ));
+    );
     // The rejected commit changed nothing.
     assert_eq!(
         fs.read_file_blocking(&namespace_id, "/docs/report.txt")
@@ -761,10 +767,10 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
             },
         )
         .expect_err("a mismatched expectation must fail the delete");
-    assert!(matches!(
+    assert_matches!(
         &error,
         Error::Core(error) if error.code() == ErrorCode::PathConflict
-    ));
+    );
     assert_eq!(
         fs.read_file_blocking(&namespace_id, "/docs/report.txt")
             .expect("file untouched")

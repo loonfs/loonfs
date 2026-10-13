@@ -31,9 +31,11 @@ pub struct GrepRequest {
 }
 
 impl GrepRequest {
-    /// Fingerprint of the fields that select results, binding cursors to
-    /// the request that issued them. Not a durable format: cursors are
-    /// opaque and short-lived, so this may change between builds.
+    /// Computes the fingerprint of the fields that select results, binding
+    /// cursors to the request that issued them.
+    ///
+    /// Not a durable format: cursors are opaque and short-lived, so this may
+    /// change between builds.
     pub fn fingerprint(&self) -> u64 {
         let mut seed = xxh64(self.pattern.as_bytes(), 0);
         seed = xxh64(
@@ -143,7 +145,7 @@ pub enum GrepIndexStatus {
 }
 
 impl GrepIndexStatus {
-    /// Whether every commit at or below `target_seq` is represented.
+    /// Reports whether every commit at or below `target_seq` is represented.
     ///
     /// A watermark inside a commit (`next_event_index` above zero) has that
     /// commit only partly indexed, so it counts as reached only for earlier

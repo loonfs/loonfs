@@ -162,10 +162,10 @@ mod tests {
             assert_eq!(request.snapshot_id, Some(snapshot_id.clone()));
             assert_eq!(request.revision_no, revision_no);
         }
-        assert!(serde_json::from_str::<CreateDownloadRequest>(
+        serde_json::from_str::<CreateDownloadRequest>(
             r#"{"path":"/docs/report.txt","snapshot_id":"invalid"}"#,
         )
-        .is_err());
+        .expect_err("an invalid snapshot ID should be rejected");
 
         assert_eq!(request.start_offset, 0);
         let resumed: CreateDownloadRequest =
@@ -173,13 +173,10 @@ mod tests {
                 .expect("decode resumed request");
         assert_eq!(resumed.start_offset, 10);
 
-        assert!(
-            serde_json::from_str::<CreateDownloadRequest>(
-                r#"{"path":"/docs/report.txt","content_id":"con_0123456789abcdef0123456789abcdef"}"#
-            )
-            .is_err(),
-            "a client must not be able to name the content object"
-        );
+        serde_json::from_str::<CreateDownloadRequest>(
+            r#"{"path":"/docs/report.txt","content_id":"con_0123456789abcdef0123456789abcdef"}"#,
+        )
+        .expect_err("a client must not be able to name the content object");
     }
 
     #[test]

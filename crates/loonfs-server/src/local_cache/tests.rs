@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Cache tests panic in unexpected match arms for precise diagnostics.
-
 use super::{
     DiskGeometry, FoyerOverflowCounters, FoyerStoredMetadataBlockCache, OverflowRegistry,
     CACHE_DIRECTORY, DISK_BLOCK_BYTES, FOYER_BUFFER_OVERFLOW_LABEL, FOYER_CHANNEL_OVERFLOW_LABEL,

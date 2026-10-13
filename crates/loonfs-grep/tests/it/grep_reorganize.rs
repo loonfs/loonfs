@@ -24,6 +24,7 @@ use loonfs_types::format::segment_blocks::{
 use loonfs_types::{
     ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RevisionNo, RunNo,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -194,8 +195,13 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         )
         .await
         .expect("reorganize");
-    assert!(
-        matches!(outcome, GrepReorganizeOutcome::UnitPublished { merged_rows, completed: true, .. } if merged_rows == built.row_count * 8)
+    assert_matches!(
+        outcome,
+        GrepReorganizeOutcome::UnitPublished {
+            merged_rows,
+            completed: true,
+            ..
+        } if merged_rows == built.row_count * 8
     );
     assert_eq!(host.block_cache.stats(), cache_before);
     let reads = watched.reads();

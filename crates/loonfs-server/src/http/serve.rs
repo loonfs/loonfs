@@ -444,9 +444,10 @@ pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, Serv
     Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
 }
 
-/// Serves until ctrl-c or SIGTERM, then shuts down gracefully. Admission
-/// closes while the listener remains available to reads and probes. After
-/// active requests drain, the listener closes and accepted work settles.
+/// Serves until ctrl-c or SIGTERM, then shuts down gracefully.
+///
+/// Admission closes while the listener remains available to reads and probes.
+/// After active requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     let shutdown = shutdown_signal().map_err(ServeError::Signal)?;
     serve_with_shutdown(config, shutdown).await

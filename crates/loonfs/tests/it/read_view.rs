@@ -7,6 +7,7 @@ use loonfs::{
     CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest,
     PaginationPolicy, PutFileOptions, SnapshotPolicy,
 };
+use std::assert_matches;
 use tempfile::tempdir;
 
 /// Reads `/a` while a compaction and a collection remove the segments the
@@ -168,12 +169,10 @@ async fn read_during_compaction_and_collection(
                 converged = true;
                 break;
             }
-            assert!(
-                matches!(
-                    outcome.compaction,
-                    loonfs::MetadataCompactionOutcome::BoundedMergePublished
-                        | loonfs::MetadataCompactionOutcome::Published { .. }
-                ),
+            assert_matches!(
+                outcome.compaction,
+                loonfs::MetadataCompactionOutcome::BoundedMergePublished
+                    | loonfs::MetadataCompactionOutcome::Published { .. },
                 "unexpected compaction: {:?}",
                 outcome.compaction
             );

@@ -4,6 +4,9 @@
 //! hosted LoonFS server. Applications that embed the runtime directly should
 //! use the `loonfs` crate. Both crates share operation options from
 //! `loonfs-types`.
+//!
+//! Namespace logic doesn't belong here: the client sends HTTP API requests
+//! and decodes their responses, and the server does the work.
 
 #![warn(missing_docs)]
 #![allow(
@@ -43,13 +46,13 @@ use loonfs_types::{
         StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadPartChecksumClaim,
         UploadSession, UploadSessionStatus,
     },
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, Checksum, ChecksumAlgorithm, CommitId,
-    CommitRequest, ContentRef, CreateCheckpointRequest, CreateNamespaceRequest,
-    DeleteCheckpointResponse, DeleteNamespaceResponse, FilesystemOperation, ForkNamespaceRequest,
-    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListPathEntriesResponse, ListTrashResponse, NamespaceDiagnostics,
-    NamespaceId, NamespaceMetadata, PathEntry, PinId, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, SecretString, StreamingChecksum, UploadId,
+    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, Checksum, ChecksumAlgorithm,
+    ChecksumDigest, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
+    CreateNamespaceRequest, DeleteCheckpointResponse, DeleteNamespaceResponse, FilesystemOperation,
+    ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListTrashResponse, NamespaceDiagnostics, NamespaceId, NamespaceMetadata, PathEntry, PinId,
+    RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, SecretString, UploadId,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };

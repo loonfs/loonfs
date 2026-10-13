@@ -1,9 +1,6 @@
 //! What a writer built with a metrics recorder actually reports: the
 //! object-store bridge, the publication instruments, and a collection pass.
 
-#![allow(clippy::panic)]
-// A missing instrument is a wiring bug, and naming it beats an option.
-
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{LoonFs, MaintainMetadataOptions, SnapshotPolicy};

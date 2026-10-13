@@ -1,6 +1,7 @@
 //! Derived retirement deadlines and outstanding multipart uploads.
 
 use super::*;
+use std::assert_matches;
 
 #[tokio::test]
 async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest() {
@@ -291,10 +292,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let open_session = read_upload_session(&store, &namespace_id, &upload.session.upload_id)
         .await
         .expect("open session");
-    assert!(matches!(
-        open_session.status,
-        UploadSessionRecordStatus::Open { .. }
-    ));
+    assert_matches!(open_session.status, UploadSessionRecordStatus::Open { .. });
     clock.advance_ms(
         setup.now_ms + UPLOAD_SESSION_LEASE_MS + options.grace_window_ms - clock.now_ms(),
     );
@@ -378,7 +376,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     )
     .await
     .expect_err("corrupt basis");
-    assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
     assert!(pin_exists(&store, &source, &pin_id).await);

@@ -54,8 +54,12 @@ impl RuntimeCore {
         let _validation = validation
             .lock
             .lock()
-            .instrument(phase_span!(self, "namespace_validation_wait", namespace_id))
-            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wait"))
+            .instrument(tracing::debug_span!(
+                target: "loonfs::page",
+                "loonfs.phase",
+                phase = "validation_wait",
+                namespace_id = %namespace_id,
+            ))
             .await;
         let reusable = self
             .inner
@@ -79,11 +83,9 @@ impl RuntimeCore {
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
         // sharing, since no later validation number can exceed the observed one.
-        // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
-        #[allow(deprecated)]
         let validation_no = validation
             .started
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map(|previous| previous + 1)
             .unwrap_or(u64::MAX);
         let result = self

@@ -2,6 +2,7 @@
 //! listener that wraps accepted TCP connections in a rustls session.
 
 use crate::config::TlsServerConfig;
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::future::Future;
 use std::io;
@@ -41,9 +42,12 @@ pub enum TlsConfigError {
 
 /// Builds the rustls server configuration from the configured files.
 ///
-/// The provider is named rather than taken from the process-wide default:
-/// this process links exactly one, and resolving it here keeps a startup
-/// misconfiguration a returned error instead of a panic deep in rustls.
+/// The provider is named rather than taken from the process-wide default.
+/// The server links two rustls crypto providers: `ring`, which the workspace
+/// enables for this listener, and `aws-lc-rs`, which `object_store` and
+/// `reqwest` use for their HTTP clients. With two providers linked, rustls
+/// has no single default and would panic when asked for one, so the listener
+/// names `ring`, and a bad configuration stays a returned error.
 pub(super) fn server_config(
     config: &TlsServerConfig,
 ) -> Result<rustls::ServerConfig, TlsConfigError> {
@@ -72,8 +76,7 @@ pub(super) fn server_config(
 }
 
 fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
-    let mut reader = io::BufReader::new(open(path)?);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_reader_iter(open(path)?)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| TlsConfigError::Pem {
             path: path.to_owned(),
@@ -89,17 +92,15 @@ fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsConfig
 }
 
 fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
-    let mut reader = io::BufReader::new(open(path)?);
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|error| TlsConfigError::Pem {
-            path: path.to_owned(),
-            reason: error.to_string(),
-        })?
-        .ok_or_else(|| TlsConfigError::Pem {
-            path: path.to_owned(),
-            reason: "no PRIVATE KEY section found; expected a PKCS#8, RSA, or EC private key"
-                .to_owned(),
-        })
+    PrivateKeyDer::from_pem_reader(open(path)?).map_err(|error| TlsConfigError::Pem {
+        path: path.to_owned(),
+        reason: match error {
+            pem::Error::NoItemsFound => {
+                "no PRIVATE KEY section found; expected a PKCS#8, RSA, or EC private key".to_owned()
+            }
+            error => error.to_string(),
+        },
+    })
 }
 
 fn open(path: &str) -> Result<std::fs::File, TlsConfigError> {
@@ -276,5 +277,34 @@ impl AsyncWrite for TlsIo {
             TlsIo::Ready(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
             TlsIo::Handshaking(_) | TlsIo::Failed => Poll::Ready(Ok(())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_cert_chain, load_private_key};
+
+    #[test]
+    fn a_file_without_the_expected_section_names_what_was_expected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, b"").expect("write the empty file");
+        let path = empty.to_str().expect("the temporary path should be UTF-8");
+        assert_eq!(
+            load_cert_chain(path)
+                .expect_err("an empty chain file has no certificate")
+                .to_string(),
+            format!(
+                "`{path}` is not valid PEM: no CERTIFICATE section found; expected the PEM chain, leaf first"
+            )
+        );
+        assert_eq!(
+            load_private_key(path)
+                .expect_err("an empty key file has no key")
+                .to_string(),
+            format!(
+                "`{path}` is not valid PEM: no PRIVATE KEY section found; expected a PKCS#8, RSA, or EC private key"
+            )
+        );
     }
 }

@@ -205,7 +205,10 @@ async fn refresh_failure_reuses_only_unexpired_credentials_with_bounded_retry_ba
     clock.set(119);
     assert_eq!(get(&cache, &provider, &clock).await.expiry(), Some(at(120)));
     clock.set(120);
-    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    cache
+        .get(&provider, || clock.now(), None)
+        .await
+        .expect_err("a failed refresh at the expiry should fail the lookup");
     assert_eq!(provider.calls(), 4);
     assert_eq!(
         get(&cache, &provider, &clock).await.access_key_id(),
@@ -308,8 +311,14 @@ async fn uncached_sources_still_check_expiry_if_the_provider_later_supplies_it()
     let clock = Clock::default();
     get(&cache, &provider, &clock).await;
     assert_eq!(get(&cache, &provider, &clock).await.expiry(), Some(at(120)));
-    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
-    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    cache
+        .get(&provider, || clock.now(), None)
+        .await
+        .expect_err("an already expired result should fail the lookup");
+    cache
+        .get(&provider, || clock.now(), None)
+        .await
+        .expect_err("a failed load should fail the lookup");
     assert_eq!(
         get(&cache, &provider, &clock).await.access_key_id(),
         "access-recovered"
@@ -326,8 +335,14 @@ async fn expired_results_and_cold_errors_are_rejected_without_poisoning_the_cach
         Step::Return(credentials("valid", Some(3600))),
     ]);
     let clock = Clock::default();
-    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
-    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    cache
+        .get(&provider, || clock.now(), None)
+        .await
+        .expect_err("a cold failure should fail the lookup");
+    cache
+        .get(&provider, || clock.now(), None)
+        .await
+        .expect_err("an already expired result should fail the lookup");
     assert_eq!(
         get(&cache, &provider, &clock).await.access_key_id(),
         "access-valid"
@@ -429,7 +444,9 @@ async fn expiry_is_checked_after_a_suspended_provider_lookup() {
         .forget();
     clock.set(1);
     gate.add_permits(1);
-    assert!(task.await.expect("lookup completed").is_err());
+    task.await
+        .expect("lookup completed")
+        .expect_err("credentials that expired during the lookup should be refused");
 }
 
 #[tokio::test]

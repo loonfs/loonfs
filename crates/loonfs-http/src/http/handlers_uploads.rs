@@ -247,7 +247,6 @@ async fn begin_direct_multipart_upload(
              deployment's endpoint cannot",
         ));
     }
-    // Use the server's default when no part size is requested.
     let prepared = namespace
         .create_direct_multipart_upload_target_with_options(&DirectMultipartUploadOptions {
             part_size_bytes,
@@ -421,14 +420,14 @@ pub(super) async fn content_preparation_for_puts(
             Err(error) => {
                 let content_id = token.content_ref.content_id.clone();
                 if is_forged_content_token(&error) {
-                    tracing::warn!(target: "loonfs_server::http::handlers_uploads",
+                    tracing::warn!(
                         namespace_id = %namespace_id,
                         content_id = %content_id,
                         error = %error,
                         "content token was not minted by this deployment for this namespace"
                     );
                 } else {
-                    tracing::debug!(target: "loonfs_server::http::handlers_uploads",
+                    tracing::debug!(
                         namespace_id = %namespace_id,
                         content_id = %content_id,
                         error = %error,

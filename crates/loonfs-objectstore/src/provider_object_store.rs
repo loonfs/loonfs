@@ -6,7 +6,9 @@ use crate::keyspace::{
     unscope_listed_key,
 };
 use crate::object_store::{unsupported_multipart, Result};
-use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
+use crate::retry::{
+    provider_transport_retryable, with_transport_retry, RetryWarnings, StoreRetry, DEFAULT,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::ListedObject;
@@ -42,9 +44,10 @@ pub struct ProviderObjectStoreConfig {
 }
 
 /// Bound for one control-plane HTTP attempt's request phase, and the
-/// response-body idle bound for every request. An attempt that makes no
-/// progress for this long fails and counts against the operation deadline
-/// instead of consuming it invisibly.
+/// response-body idle bound for every request.
+///
+/// An attempt that makes no progress for this long fails and counts against the
+/// operation deadline instead of consuming it invisibly.
 pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One HTTP attempt's connect timeout.
@@ -70,15 +73,18 @@ pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 /// uses the provider's own conditional path where the provider has one.
 pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Fixed size of every multipart part except the last. Cloudflare R2
-/// requires all non-final parts to share one size, and every supported
-/// provider requires at least 5 MiB per non-final part; 8 MiB matches the
-/// part size mainstream storage clients default to, and keeps every part a
+/// Fixed size of every multipart part except the last.
+///
+/// Cloudflare R2 requires all non-final parts to share one size, and every
+/// supported provider requires at least 5 MiB per non-final part; 8 MiB matches
+/// the part size mainstream storage clients default to, and keeps every part a
 /// cheap retry that fits comfortably inside one flat attempt bound.
 pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Concurrent in-flight parts of one multipart overwrite or verified
-/// immutable write. A `put_streamed` write sends one part at a time.
+/// Concurrent in-flight parts of one multipart overwrite or verified immutable
+/// write.
+///
+/// A `put_streamed` write sends one part at a time.
 pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// The smallest part every supported provider accepts anywhere but last, and
@@ -89,9 +95,10 @@ pub const PROVIDER_MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
 /// The largest part every supported provider accepts.
 pub const PROVIDER_MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Parts one provider multipart upload accepts. Every supported provider
-/// stops at 10,000, which with the part size sets the largest object a
-/// multipart write can produce.
+/// Parts one provider multipart upload accepts.
+///
+/// Every supported provider stops at 10,000, which with the part size sets the
+/// largest object a multipart write can produce.
 pub const PROVIDER_MAX_MULTIPART_PARTS: u32 = 10_000;
 
 /// Request-phase timeout for one HTTP attempt that carries a payload.
@@ -250,6 +257,7 @@ pub struct ProviderObjectStore {
     key_prefix: Option<String>,
     transport_retry: TransportRetryPolicy,
     timer: Arc<dyn MonotonicTimer>,
+    retry_warnings: Arc<RetryWarnings>,
 }
 
 impl fmt::Debug for ProviderObjectStore {
@@ -283,6 +291,7 @@ impl ProviderObjectStore {
         checksum_reader: Arc<dyn StoredChecksumReader>,
         multipart_controller: Arc<dyn MultipartController>,
     ) -> Result<Self> {
+        let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
         Ok(Self {
             inner,
             one_attempt,
@@ -297,13 +306,28 @@ impl ProviderObjectStore {
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             transport_retry: DEFAULT,
-            timer: Arc::new(StdMonotonicTimer::default()),
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::clone(&timer))),
+            timer,
         })
     }
 
     pub(crate) fn compare_token(mut self, compare_token: CompareToken) -> Self {
         self.compare_token = compare_token;
         self
+    }
+
+    /// Shares `retry_warnings` with the requests a provider adapter signs
+    /// itself, so the bucket keeps one limiter.
+    pub(crate) fn retry_warnings(mut self, retry_warnings: Arc<RetryWarnings>) -> Self {
+        self.retry_warnings = retry_warnings;
+        self
+    }
+
+    fn retry(&self) -> StoreRetry<'_> {
+        StoreRetry {
+            policy: &self.transport_retry,
+            warnings: &self.retry_warnings,
+        }
     }
 
     #[cfg(test)]
@@ -329,6 +353,7 @@ impl ProviderObjectStore {
 
     #[cfg(test)]
     fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+        self.retry_warnings = Arc::new(RetryWarnings::new(Arc::clone(&timer)));
         self.timer = timer;
         self
     }
@@ -576,7 +601,7 @@ impl MultipartWrite<'_> {
             self.store.transport_retry.operation_deadline,
         );
         let upload_id = with_transport_retry(
-            &self.store.transport_retry,
+            self.store.retry(),
             self.key,
             "create_multipart",
             payload_bytes,
@@ -681,7 +706,7 @@ impl MultipartWrite<'_> {
             self.store.transport_retry.operation_deadline,
         );
         with_transport_retry(
-            &self.store.transport_retry,
+            self.store.retry(),
             self.key,
             "put_part",
             payload_bytes,
@@ -865,10 +890,10 @@ impl ObjectStore for ProviderObjectStore {
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         if (bytes.len() as u64) < self.multipart_geometry.threshold_bytes {
-            return crate::immutable_write::put(self, key, bytes).await;
+            return crate::immutable_write::put(self, &self.retry_warnings, key, bytes).await;
         }
         let controller = &self.multipart_controller;
-        crate::immutable_write::put_with(self, key, &bytes, || {
+        crate::immutable_write::put_with(self, &self.retry_warnings, key, &bytes, || {
             let bytes = bytes.clone();
             async move {
                 let mut parts = PartReader::new(
@@ -919,7 +944,7 @@ impl ObjectStore for ProviderObjectStore {
         let deadline =
             OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
         with_transport_retry(
-            &self.transport_retry,
+            self.retry(),
             key,
             "delete",
             0,
@@ -1385,7 +1410,6 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::aws_credentials::{aws_credentials_source, ObjectStoreAwsCredentialProvider};
@@ -1864,15 +1888,15 @@ mod tests {
             Some(Bytes::new())
         );
         // A start past the end is an invalid range.
-        assert!(matches!(
+        assert_matches!(
             store.get(key, range(11, 12)).await,
             Err(ObjectStoreError::InvalidRange { .. })
-        ));
+        );
         // An inverted range is rejected without any store call.
-        assert!(matches!(
+        assert_matches!(
             store.get(key, range(6, 2)).await,
             Err(ObjectStoreError::InvalidRange { .. })
-        ));
+        );
         // Zero-length reads answer from existence and size alone.
         assert_eq!(
             store.get(key, range(4, 4)).await.expect("zero length"),
@@ -1901,17 +1925,17 @@ mod tests {
             .await
             .expect("first put");
 
-        assert!(matches!(
+        assert_matches!(
             store.put_if_absent(key, Bytes::from_static(b"two")).await,
             Err(ObjectStoreError::PreconditionFailed { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             store
                 .compare_and_swap(key, "stale", Bytes::from_static(b"two"))
                 .await,
             Err(ObjectStoreError::PreconditionFailed { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             store
                 .compare_and_swap(
                     "namespaces/missing/hint.json",
@@ -1920,7 +1944,7 @@ mod tests {
                 )
                 .await,
             Err(ObjectStoreError::PreconditionFailed { .. })
-        ));
+        );
         let etag = first.etag.expect("etag");
         store
             .compare_and_swap(key, &etag, Bytes::from_static(b"two"))
@@ -1936,15 +1960,16 @@ mod tests {
     async fn provider_stream_reports_invalid_prefix() {
         let store = memory_store();
         let mut stream = store.list_prefix_stream("../");
-        assert!(matches!(
+        assert_matches!(
             stream.next().await,
             Some(Err(ObjectStoreError::InvalidKey { .. }))
-        ));
+        );
     }
 
     use provider_store::{
         CopyOptions, GetResult, ListResult, MultipartUpload, PutMultipartOptions,
     };
+    use std::assert_matches;
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -2351,7 +2376,7 @@ mod tests {
             .await
             .expect_err("mutable overwrite must surface an ambiguous outcome");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
@@ -2431,14 +2456,16 @@ mod tests {
             .await
             .expect("an equal stored checksum identifies this object");
         assert_eq!(accepted.checksum, Some(Checksum::crc64nvme(&ours)));
-        assert!(matches!(
+        assert_matches!(
             store.put_immutable_verified(different, ours.clone()).await,
-            Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
-        ));
-        assert!(matches!(
+            Err(crate::ImmutableWriteError::DifferentObject { object_key })
+                if object_key == different
+        );
+        assert_matches!(
             store.put_immutable_verified(without_checksum, ours).await,
-            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key }) if object_key == without_checksum
-        ));
+            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key })
+                if object_key == without_checksum
+        );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 3);
         assert_eq!(
@@ -2499,13 +2526,13 @@ mod tests {
             .await
             .expect_err("persistent failure exhausts the immutable retry budget");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             crate::ImmutableWriteError::Transport {
                 source: ObjectStoreError::Transport { .. },
                 ..
             }
-        ));
+        );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 11);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
     }
@@ -2527,7 +2554,7 @@ mod tests {
             .await
             .expect_err("compare-and-swap surfaces the transport failure");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         assert_eq!(
             store.get(key, None).await.expect("get"),
@@ -2562,7 +2589,7 @@ mod tests {
             .put_if_absent(key, Bytes::from_static(b"claim"))
             .await
             .expect_err("the landed write's lost answer reaches the caller");
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(one_attempt.puts.load(Ordering::SeqCst), 1);
 
         store
@@ -2602,7 +2629,7 @@ mod tests {
             .await
             .expect_err("deadline exhaustion surfaces the transport failure");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         let attempts = flaky.deletes.load(Ordering::SeqCst);
         assert!(
             attempts < 5,
@@ -2622,7 +2649,7 @@ mod tests {
             .await
             .expect_err("auth rejection surfaces immediately");
 
-        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
+        assert_matches!(error, ObjectStoreError::PermissionDenied { .. });
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
@@ -2891,8 +2918,7 @@ mod tests {
                 .lock()
                 .expect("part windows")
                 .push(part_window);
-            let mut checksum =
-                loonfs_types::StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
+            let mut checksum = loonfs_types::ChecksumDigest::new(ChecksumAlgorithm::Crc64nvme);
             checksum.update(&head);
             let mut size_bytes = head.len() as u64;
             while let Some(part) = rest.next_part().await? {
@@ -2983,7 +3009,7 @@ mod tests {
             .put_if_absent(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
             .await
             .expect_err("existing object fails the create precondition");
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_matches!(error, ObjectStoreError::PreconditionFailed { .. });
         assert_eq!(
             flaky.multipart_creates.load(Ordering::SeqCst),
             0,
@@ -3057,7 +3083,7 @@ mod tests {
             )
             .await
             .expect_err("the key is taken and create-only means it");
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_matches!(error, ObjectStoreError::PreconditionFailed { .. });
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
@@ -3147,7 +3173,7 @@ mod tests {
             .await
             .expect_err("a payload that stops is not a write");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -3202,7 +3228,7 @@ mod tests {
             .await
             .expect_err("persistent part failure surfaces after the retry budget");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(part_attempts(&flaky, 0), 5, "1 attempt + max_retries");
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -3226,7 +3252,7 @@ mod tests {
 
         // Auth failures carry their own classification — never mistaken
         // for network weather, and never retried.
-        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
+        assert_matches!(error, ObjectStoreError::PermissionDenied { .. });
         assert_eq!(part_attempts(&flaky, 0), 1);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
@@ -3242,7 +3268,7 @@ mod tests {
             .await
             .expect_err("an unanswered completion is not a success");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
@@ -3261,7 +3287,7 @@ mod tests {
             .await
             .expect_err("persistent part failure surfaces after the operation deadline");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         let attempts = part_attempts(&flaky, 0);
         assert!(
             attempts < 5,

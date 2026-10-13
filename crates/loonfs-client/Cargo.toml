@@ -12,25 +12,27 @@ categories = ["filesystem"]
 
 [dependencies]
 bytes.workspace = true
+form_urlencoded.workspace = true
 futures.workspace = true
 http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 loonfs-types.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "time"] }
 toml.workspace = true
 tower.workspace = true
 tracing.workspace = true
-urlencoding.workspace = true
 
 [dev-dependencies]
 loonfs-test-support.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "test-util"] }
 
 [lints]
 workspace = true

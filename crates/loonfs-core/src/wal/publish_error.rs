@@ -25,9 +25,11 @@ impl WalPublishError {
     }
 }
 
-/// Returns whether a candidate with this result is published again: a taken
-/// WAL number, an expired budget, or an unknown outcome. The retry keeps the
-/// commit ID, so a candidate that already committed replays its receipt.
+/// Returns whether a candidate with this result is published again: a taken WAL
+/// number, an expired budget, or an unknown outcome.
+///
+/// The retry keeps the commit ID, so a candidate that already committed replays
+/// its receipt.
 pub fn is_retryable_wal_publish(result: &Result<Commit>) -> bool {
     matches!(
         result,

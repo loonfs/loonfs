@@ -1,8 +1,6 @@
 //! The per-namespace handle: opening, sharing, closing, dropping, epochs,
 //! and the read-only mode.
 
-#![allow(clippy::panic)]
-
 use crate::common::{data_wal_put_for, expect_code, writer, writer_epoch};
 use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;

@@ -34,12 +34,12 @@ impl NamespacePath {
         }
     }
 
-    /// Namespace the path is scoped to.
+    /// Returns the namespace the path is scoped to.
     pub fn namespace(&self) -> &NamespaceId {
         &self.namespace
     }
 
-    /// Absolute path inside the namespace.
+    /// Returns the absolute path inside the namespace.
     pub fn absolute_path(&self) -> &AbsolutePath {
         &self.absolute_path
     }

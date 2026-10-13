@@ -18,6 +18,7 @@ use loonfs_types::{
     DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
     PrincipalSet, Subject, SubjectId,
 };
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -254,8 +255,11 @@ async fn inline_publication_without_fallback_keeps_its_store_requests() {
         .expect("inline publication");
     let operations = recording.take();
     assert_eq!(operations.len(), 1, "{operations:?}");
-    assert!(matches!(&operations[0], RecordedOperation::Put { key, .. }
-        if key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace()))));
+    assert_matches!(
+        &operations[0],
+        RecordedOperation::Put { key, .. }
+            if key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace()))
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

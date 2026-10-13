@@ -64,9 +64,11 @@ impl ClientConfig {
         Ok(config)
     }
 
-    /// Validates field invariants. [`Self::load`] and
-    /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
-    /// config and a directly built one cannot diverge in what they accept.
+    /// Validates field invariants.
+    ///
+    /// [`Self::load`] and [`Client::new`](crate::Client::new) both run this, so
+    /// a file-loaded config and a directly built one cannot diverge in what
+    /// they accept.
     pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
@@ -123,6 +125,7 @@ fn is_literal_loopback_host(uri: &Uri) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn config(server_url: &str, auth_token: Option<&str>) -> ClientConfig {
         ClientConfig {
@@ -159,14 +162,12 @@ mod tests {
             let error = config(server_url, Some("test-token"))
                 .validate()
                 .expect_err("non-loopback plaintext URL should be rejected");
-            assert!(
-                matches!(
-                    error,
-                    ConfigFieldError::Invalid {
-                        field: "server_url",
-                        ref reason,
-                    } if reason == "bearer tokens require https except for loopback http URLs"
-                ),
+            assert_matches!(
+                error,
+                ConfigFieldError::Invalid {
+                    field: "server_url",
+                    ref reason,
+                } if reason == "bearer tokens require https except for loopback http URLs",
                 "unexpected validation error for {server_url}: {error}"
             );
         }

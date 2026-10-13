@@ -4,6 +4,10 @@
 //! remote-mode clients, with per-namespace write batching in front of the
 //! commit protocol. Embedded-mode callers skip this crate entirely and use
 //! `loonfs` directly.
+//!
+//! Route handlers don't belong here: they're in `loonfs-http`, and this crate
+//! adds configuration, TLS listeners, the local block cache, and the
+//! maintenance sweep.
 
 mod config;
 mod http;

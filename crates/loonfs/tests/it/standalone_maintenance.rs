@@ -10,6 +10,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+use std::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -85,14 +86,14 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         WalFoldStepOutcome::NotNeeded,
         "zero turns the idle rule off"
     );
-    assert!(matches!(
+    assert_matches!(
         maintenance
             .maintain_metadata(&namespace_id)
             .await
             .expect("idle fold")
             .wal_fold,
         WalFoldStepOutcome::Folded { .. }
-    ));
+    );
     let diagnostics = maintenance
         .diagnostics(&namespace_id)
         .await

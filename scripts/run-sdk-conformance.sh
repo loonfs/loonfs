@@ -65,9 +65,9 @@ SERVER_PID=$!
 IFS= read -r SERVER_LINE <"$SERVER_OUTPUT"
 
 LOONFS_CONFORMANCE_URL=$(printf '%s\n' "$SERVER_LINE" | \
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["base_url"])')
+    python3 "$REPO_ROOT/scripts/read-json-field.py" base_url)
 LOONFS_CONFORMANCE_TOKEN=$(printf '%s\n' "$SERVER_LINE" | \
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+    python3 "$REPO_ROOT/scripts/read-json-field.py" token)
 LOONFS_CONFORMANCE_CASES="$REPO_ROOT/crates/loonfs-conformance/cases"
 LOONFS_PROXY_DOCUMENT="$REPO_ROOT/docs/specs/openapi-proxy.json"
 LOONFS_SERVER_DOCUMENT="$REPO_ROOT/docs/specs/openapi.json"

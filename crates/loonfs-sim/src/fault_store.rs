@@ -760,6 +760,7 @@ mod tests {
     use crate::rng::SimSeed;
     use futures::TryStreamExt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::assert_matches;
 
     fn temp_store() -> (tempfile::TempDir, LocalFsStore) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -805,10 +806,10 @@ mod tests {
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        assert!(matches!(
+        assert_matches!(
             store.put_overwrite("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport { .. })
-        ));
+        );
         assert_eq!(
             store.inner().get("a", None).await.expect("inner get"),
             Some(Bytes::from_static(b"abc"))
@@ -829,10 +830,10 @@ mod tests {
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        assert!(matches!(
+        assert_matches!(
             store.put_overwrite("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport { .. })
-        ));
+        );
         assert_eq!(store.inner().get("a", None).await.expect("inner get"), None);
     }
 
@@ -942,9 +943,6 @@ mod tests {
             Bytes::from_static(b"ef")
         );
         assert_eq!(read(6, 8).expect("read at the exact end"), Bytes::new());
-        assert!(matches!(
-            read(7, 8),
-            Err(ObjectStoreError::InvalidRange { .. })
-        ));
+        assert_matches!(read(7, 8), Err(ObjectStoreError::InvalidRange { .. }));
     }
 }

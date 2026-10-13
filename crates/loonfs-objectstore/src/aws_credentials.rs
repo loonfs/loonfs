@@ -244,6 +244,7 @@ mod tests {
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreError};
     use loonfs_types::SecretString;
+    use std::assert_matches;
     use std::fs;
 
     #[tokio::test(flavor = "current_thread")]
@@ -339,7 +340,7 @@ mod tests {
             .await
             .expect_err("isolated chain has no credentials");
 
-        assert!(matches!(error, ObjectStoreError::Configuration(_)));
+        assert_matches!(error, ObjectStoreError::Configuration(_));
         assert_eq!(
             error.to_string(),
             "invalid object store configuration: could not resolve `store.credentials` through the standard AWS credential chain"

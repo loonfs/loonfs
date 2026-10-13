@@ -11,6 +11,7 @@ use loonfs_types::{
     ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,
     PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
 };
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -504,9 +505,14 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
         })
         .await;
     let bytes = view.read_content(&content, 100).await;
-    assert!(
-        matches!(&changes, Err(error) if error.code() == ErrorCode::Forbidden)
-            && matches!(&bytes, Err(error) if error.code() == ErrorCode::Forbidden),
+    assert_matches!(
+        &changes,
+        Err(error) if error.code() == ErrorCode::Forbidden,
+        "revoked snapshot administrator: changes={changes:?}, bytes={bytes:?}"
+    );
+    assert_matches!(
+        &bytes,
+        Err(error) if error.code() == ErrorCode::Forbidden,
         "revoked snapshot administrator: changes={changes:?}, bytes={bytes:?}"
     );
 }

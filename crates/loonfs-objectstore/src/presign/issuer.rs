@@ -34,8 +34,8 @@ pub struct PresignedGetRequest<'a> {
 }
 
 impl PresignedGetRequest<'_> {
-    /// The `Range` header value the capability signs, `bytes={first}-{last}`,
-    /// or `None` for an empty range.
+    /// Returns the `Range` header value the capability signs,
+    /// `bytes={first}-{last}`, or `None` for an empty range.
     pub fn range_header(&self) -> Option<String> {
         (self.range.start_inclusive < self.range.end_exclusive).then(|| {
             format!(

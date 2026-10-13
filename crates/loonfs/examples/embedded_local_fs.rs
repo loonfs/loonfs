@@ -1,3 +1,6 @@
+//! Writes and reads one file through an embedded runtime on the local
+//! filesystem.
+
 use loonfs::{
     ActorId, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PutFileOptions,
     StoreConfig, WriterId,
