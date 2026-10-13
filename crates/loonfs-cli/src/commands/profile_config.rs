@@ -5,9 +5,13 @@ use crate::args::{
     ProfileRemoteArgs, ProfileS3Args, ProfileUpdateActorArgs, ProfileUpdateCommand,
     RuntimeBehavior,
 };
-use crate::config::{absolute_env_path, validate_remote_client_config, ProfileConfig, StoreConfig};
+use crate::config::{
+    absolute_env_path, ensure_subject_pairing, validate_remote_client_config, ProfileConfig,
+    StoreConfig,
+};
 use crate::error::CliError;
 use crate::prompt;
+use crate::resolve::subject_flag_error;
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::config::non_blank;
 use loonfs_types::{ActorId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, SubjectId};
@@ -299,7 +303,8 @@ pub(super) fn build_profile_from_create_spec(
         principal_scope: parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?,
         principals: parse_profile_principals(spec.actor.principals.as_deref())?,
     };
-    validate_profile_subject_fields(actor.principal_scope.as_ref(), actor.principals.as_deref())?;
+    ensure_subject_pairing(actor.principal_scope.as_ref(), actor.principals.as_deref())
+        .map_err(subject_flag_error)?;
     let source = FieldSource::from_runtime(runtime);
     match spec.provider {
         CreateProviderSpec::Local(spec) => {
@@ -796,23 +801,6 @@ fn parse_profile_principals(
         .transpose()
 }
 
-fn validate_profile_subject_fields(
-    principal_scope: Option<&PrincipalScope>,
-    principals: Option<&[PrincipalId]>,
-) -> Result<(), CliError> {
-    match (principal_scope, principals) {
-        (None, Some(_)) => Err(CliError::invalid_request(
-            "`--principal-scope` is required with `--principals`",
-        )
-        .with_param("--principal-scope")),
-        (Some(_), None) => Err(CliError::invalid_request(
-            "`--principal-scope` requires `--principals`",
-        )
-        .with_param("--principals")),
-        (Some(_), Some(_)) | (None, None) => Ok(()),
-    }
-}
-
 fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
     match profile {
         ProfileConfig::Embedded {
@@ -889,10 +877,11 @@ pub(super) fn apply_update_flags(
                     .or(principal_scope);
             let updated_principals =
                 parse_profile_principals(spec.actor.principals.as_deref())?.or(principals);
-            validate_profile_subject_fields(
+            ensure_subject_pairing(
                 updated_principal_scope.as_ref(),
                 updated_principals.as_deref(),
-            )?;
+            )
+            .map_err(subject_flag_error)?;
             Ok(ProfileConfig::Embedded {
                 store,
                 actor_id: spec.actor.actor_id.clone().or(actor),
@@ -927,10 +916,11 @@ pub(super) fn apply_update_flags(
                     .or_else(|| principal_scope.clone());
             let updated_principals = parse_profile_principals(spec.actor.principals.as_deref())?
                 .or_else(|| principals.clone());
-            validate_profile_subject_fields(
+            ensure_subject_pairing(
                 updated_principal_scope.as_ref(),
                 updated_principals.as_deref(),
-            )?;
+            )
+            .map_err(subject_flag_error)?;
             let current = ProfileConfig::Remote {
                 server_url,
                 actor_id: actor,

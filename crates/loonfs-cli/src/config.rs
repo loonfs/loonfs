@@ -5,7 +5,8 @@ use loonfs_client::ClientConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
 use loonfs_types::{
-    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId, REDACTED,
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId, SubjectPart,
+    SubjectPartsError, REDACTED,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -298,20 +299,36 @@ impl ProfileConfig {
     }
 }
 
+/// Refuses a stored principal scope without principals, or principals
+/// without a scope.
+///
+/// This is the pairing half of what `Subject::from_parts` checks for a
+/// request. A profile may also store a subject id alone, because the subject
+/// is used only with principals, so the rest of that rule does not apply here.
+pub(crate) fn ensure_subject_pairing(
+    principal_scope: Option<&PrincipalScope>,
+    principals: Option<&[PrincipalId]>,
+) -> Result<(), SubjectPartsError> {
+    let (part, required_by) = match (principal_scope, principals) {
+        (Some(_), None) => (SubjectPart::Principals, SubjectPart::PrincipalScope),
+        (None, Some(_)) => (SubjectPart::PrincipalScope, SubjectPart::Principals),
+        (Some(_), Some(_)) | (None, None) => return Ok(()),
+    };
+    Err(SubjectPartsError::Missing { part, required_by })
+}
+
+/// Reports a stored subject's missing part under the profile's field names.
 fn validate_profile_subject(
     profile_name: &str,
     principal_scope: Option<&PrincipalScope>,
     principals: Option<&[PrincipalId]>,
 ) -> Result<(), CliError> {
-    match (principal_scope, principals) {
-        (Some(_), None) => Err(CliError::invalid_config(format!(
-            "`profiles.{profile_name}.principal_scope` requires `profiles.{profile_name}.principals`"
-        ))),
-        (None, Some(_)) => Err(CliError::invalid_config(format!(
-            "`profiles.{profile_name}.principal_scope` is required with `profiles.{profile_name}.principals`"
-        ))),
-        (Some(_), Some(_)) | (None, None) => Ok(()),
-    }
+    ensure_subject_pairing(principal_scope, principals).map_err(|error| match error {
+        SubjectPartsError::Missing { part, required_by } => CliError::invalid_config(format!(
+            "`profiles.{profile_name}.{part}` is required with `profiles.{profile_name}.{required_by}`"
+        )),
+        other => CliError::invalid_config(other.to_string()),
+    })
 }
 
 fn validate_profile_default_namespace(

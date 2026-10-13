@@ -6,7 +6,7 @@ use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{AccessSetArgs, CommandKind};
 use crate::error::CliError;
 use loonfs_client::{AccessState, UpdateAccessOptions};
-use loonfs_types::{AccessGrants, AccessRights, PrincipalId};
+use loonfs_types::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -57,8 +57,12 @@ fn parse_grants(grants: &[String]) -> Result<AccessGrants, CliError> {
         })?;
         let principal =
             PrincipalId::parse(principal).map_err(|error| invalid_grant(error.to_string()))?;
-        let rights =
-            AccessRights::parse_list(names).map_err(|error| invalid_grant(error.to_string()))?;
+        let rights = names
+            .split(',')
+            .map(str::parse::<AccessRight>)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(AccessRights::from_distinct)
+            .map_err(|error| invalid_grant(error.to_string()))?;
         if entries.insert(principal, rights).is_some() {
             return Err(invalid_grant(format!(
                 "repeated principal in grant {grant:?}"

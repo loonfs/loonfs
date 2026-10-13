@@ -18,10 +18,10 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::{write_stderr_progress, OutputFormat};
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use loonfs_types::AbsolutePath;
 use loonfs_types::DestinationBehavior;
 use loonfs_types::ErrorCode;
 use loonfs_types::PinId;
-use loonfs_types::{AbsolutePath, DisplayName};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,10 +33,9 @@ use traversal::{local_tree, remote_tree, TreeEntry};
 const TREE_TRANSFERS_IN_FLIGHT: usize = 8;
 
 /// One file in a recursive transfer.
-struct FileJob {
-    local: PathBuf,
-    /// The file's names below the tree root.
-    relative: Vec<DisplayName>,
+struct FileJob<Source, Destination> {
+    source: Source,
+    destination: Destination,
     /// File length, used for progress totals.
     size_bytes: Option<u64>,
 }
@@ -121,24 +120,10 @@ fn create_local_directory(path: &Path) -> std::io::Result<DirectoryOutcome> {
     Ok(DirectoryOutcome::Created)
 }
 
-/// Returns the remote path that `relative` names below `root`.
-fn remote_below(root: &AbsolutePath, relative: &[DisplayName]) -> AbsolutePath {
-    relative
-        .iter()
-        .fold(root.clone(), |path, name| path.join(name))
-}
-
-/// Returns the local path that `relative` names below `root`.
-fn local_below(root: &Path, relative: &[DisplayName]) -> PathBuf {
-    relative
-        .iter()
-        .fold(root.to_path_buf(), |path, name| path.join(name.as_str()))
-}
-
 /// Runs discovery and transfers together. A full transfer set stops discovery;
 /// completed successes are counted and discarded immediately. Directory creation
 /// finishes before discovery resumes into its children.
-async fn transfer_tree<S, F, FF, D, DF>(
+async fn transfer_tree<Source, Destination, S, F, FF, D, DF>(
     entries: S,
     transfer: F,
     create_directory: D,
@@ -147,10 +132,10 @@ async fn transfer_tree<S, F, FF, D, DF>(
     verb: &str,
 ) -> Result<TreeTally, CliError>
 where
-    S: Stream<Item = TreeEntry>,
-    F: Fn(FileJob) -> FF,
+    S: Stream<Item = TreeEntry<Source, Destination>>,
+    F: Fn(FileJob<Source, Destination>) -> FF,
     FF: Future<Output = (String, Result<String, CliError>)>,
-    D: Fn(Vec<DisplayName>) -> DF,
+    D: Fn(Destination) -> DF,
     DF: Future<Output = (String, Result<DirectoryOutcome, CliError>)>,
 {
     futures::pin_mut!(entries);
@@ -174,8 +159,8 @@ where
                             .and_then(|(total, bytes)| total.checked_add(bytes));
                         pending.push(transfer(job));
                     }
-                    Some(TreeEntry::Directory(relative)) => {
-                        let directory = create_directory(relative);
+                    Some(TreeEntry::Directory(destination)) => {
+                        let directory = create_directory(destination);
                         futures::pin_mut!(directory);
                         loop {
                             // A file may hold the embedded writer's lock while
@@ -279,13 +264,12 @@ pub(crate) async fn run_put_tree(
         ProgressOp::Put,
         render_target(context.namespace(), remote_root),
     ));
-    let transfer = |job: FileJob| {
+    let transfer = |job: FileJob<PathBuf, AbsolutePath>| {
         let message = message.clone();
         let progress = Arc::clone(&progress);
-        let remote_path = remote_below(remote_root, &job.relative);
-        let remote = remote_path.to_string();
+        let remote = job.destination.to_string();
         async move {
-            let spec = match remote_spec(context, &remote_path, "local_path") {
+            let spec = match remote_spec(context, &job.destination, "local_path") {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
@@ -293,15 +277,15 @@ pub(crate) async fn run_put_tree(
             // If it was unavailable, try again before uploading this file.
             let size_bytes = match job.size_bytes {
                 Some(size_bytes) => size_bytes,
-                None => match std::fs::metadata(&job.local) {
+                None => match std::fs::metadata(&job.source) {
                     Ok(metadata) => metadata.len(),
-                    Err(error) => return (remote, Err(CliError::io_for_path(&job.local, error))),
+                    Err(error) => return (remote, Err(CliError::io_for_path(&job.source, error))),
                 },
             };
             progress.file_started(&remote, Some(size_bytes));
             // Recursive uploads use the same streaming and resume behavior as
             // single-file uploads.
-            let payload = LocalPayload::file(&job.local, size_bytes);
+            let payload = LocalPayload::file(&job.source, size_bytes);
             let result = super::fs::put_payload(
                 context,
                 &spec,
@@ -329,14 +313,7 @@ pub(crate) async fn run_put_tree(
     let tally = transfer_tree(
         futures::stream::iter(entries),
         transfer,
-        |relative| {
-            create_remote_directory(
-                context,
-                remote_below(remote_root, &relative),
-                true,
-                message.clone(),
-            )
-        },
+        |remote| create_remote_directory(context, remote, true, message.clone()),
         Some(&progress),
         runtime,
         "stored",
@@ -368,21 +345,30 @@ pub(crate) async fn run_get_tree(
 ) -> Result<CommandOutput, CommandFailure> {
     let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
-    let entries = remote_tree(context, remote_root, "remote_path", snapshot_id)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let entries = remote_tree(
+        context,
+        remote_root,
+        "remote_path",
+        snapshot_id,
+        local_root.to_path_buf(),
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Get,
         render_target(context.namespace(), remote_root),
     ));
-    let transfer = |job: FileJob| {
+    let transfer = |job: FileJob<AbsolutePath, PathBuf>| {
         let progress = Arc::clone(&progress);
-        let local = local_root.join(job.local);
-        let remote_path = remote_below(remote_root, &job.relative);
-        let remote = remote_path.to_string();
+        let FileJob {
+            source,
+            destination: local,
+            size_bytes,
+        } = job;
+        let remote = source.to_string();
         async move {
-            let spec = match remote_spec(context, &remote_path, "remote_path") {
+            let spec = match remote_spec(context, &source, "remote_path") {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
@@ -393,7 +379,7 @@ pub(crate) async fn run_get_tree(
                     Ok(opened) => opened,
                     Err(error) => return (remote, Err(error)),
                 };
-            progress.file_started(&remote, job.size_bytes);
+            progress.file_started(&remote, size_bytes);
             let written = super::fs::stream_download_to_file(
                 &mut download,
                 &local,
@@ -412,8 +398,7 @@ pub(crate) async fn run_get_tree(
     let mut tally = transfer_tree(
         entries,
         transfer,
-        |relative| async move {
-            let local = local_below(local_root, &relative);
+        |local| async move {
             let result = create_local_directory(&local)
                 .map_err(|error| CliError::io_for_path(&local, error));
             (local.display().to_string(), result)
@@ -458,18 +443,23 @@ pub(crate) async fn run_copy_tree(
         .map_err(|error| context.fail(kind, error))?;
     // Read the source before creating the destination so a missing source has
     // no remote write side effects.
-    let entries = remote_tree(context, source_root, "source_path", None)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-    let entries = futures::stream::iter([TreeEntry::Directory(Vec::new())]).chain(entries);
-    let transfer = |job: FileJob| {
+    let entries = remote_tree(
+        context,
+        source_root,
+        "source_path",
+        None,
+        destination_root.clone(),
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
+    let entries =
+        futures::stream::iter([TreeEntry::Directory(destination_root.clone())]).chain(entries);
+    let transfer = |job: FileJob<AbsolutePath, AbsolutePath>| {
         let message = message.clone();
-        let source_path = remote_below(source_root, &job.relative);
-        let destination_path = remote_below(destination_root, &job.relative);
-        let source = source_path.to_string();
+        let source = job.source.to_string();
         async move {
-            let from = remote_spec(context, &source_path, "source_path");
-            let to = remote_spec(context, &destination_path, "destination_path");
+            let from = remote_spec(context, &job.source, "source_path");
+            let to = remote_spec(context, &job.destination, "destination_path");
             let (from, to) = match (from, to) {
                 (Ok(from), Ok(to)) => (from, to),
                 (Err(error), _) | (_, Err(error)) => return (source, Err(error)),
@@ -500,13 +490,9 @@ pub(crate) async fn run_copy_tree(
     let tally = transfer_tree(
         entries,
         transfer,
-        |relative| {
-            create_remote_directory(
-                context,
-                remote_below(destination_root, &relative),
-                relative.is_empty(),
-                message.clone(),
-            )
+        |destination| {
+            let parents = destination == *destination_root;
+            create_remote_directory(context, destination, parents, message.clone())
         },
         None,
         runtime,
@@ -631,15 +617,8 @@ mod tests {
         2 * loonfs_types::usize_from_u64(PROVIDER_MULTIPART_PART_BYTES) + 4_096;
     const SMALL_FILE: &[u8] = b"small enough to hold";
 
-    fn names(relative: &str) -> Vec<DisplayName> {
-        relative
-            .split('/')
-            .map(|name| DisplayName::parse(name).expect("display name"))
-            .collect()
-    }
-
-    fn joined(relative: &[DisplayName]) -> String {
-        remote_below(&AbsolutePath::root(), relative).to_string()
+    fn remote(path: &str) -> AbsolutePath {
+        AbsolutePath::parse(path).expect("remote path")
     }
 
     fn payload(len: usize) -> Vec<u8> {
@@ -709,8 +688,8 @@ mod tests {
                 "discovery outran the transfer slots"
             );
             TreeEntry::File(FileJob {
-                local: PathBuf::new(),
-                relative: names(&index.to_string()),
+                source: PathBuf::new(),
+                destination: remote(&format!("/{index}")),
                 size_bytes: Some(1),
             })
         }));
@@ -732,7 +711,7 @@ mod tests {
                     })
                     .await;
                     completed.set(completed.get() + 1);
-                    (joined(&job.relative), Ok(joined(&job.relative)))
+                    (job.destination.to_string(), Ok(job.destination.to_string()))
                 }
             },
             |_| async { panic!("no directories in this stream") },
@@ -753,11 +732,11 @@ mod tests {
         let file_finished = tokio::sync::Notify::new();
         let entries = futures::stream::iter([
             TreeEntry::File(FileJob {
-                local: PathBuf::new(),
-                relative: names("first"),
+                source: PathBuf::new(),
+                destination: remote("/first"),
                 size_bytes: Some(1),
             }),
-            TreeEntry::Directory(names("second")),
+            TreeEntry::Directory(remote("/second")),
         ]);
         let tally = transfer_tree(
             entries,
@@ -767,7 +746,7 @@ mod tests {
                 async move {
                     directory_started.notified().await;
                     file_finished.notify_one();
-                    (joined(&job.relative), Ok(joined(&job.relative)))
+                    (job.destination.to_string(), Ok(job.destination.to_string()))
                 }
             },
             |_| async {
@@ -789,18 +768,18 @@ mod tests {
     async fn recursive_discovery_preserves_successes_and_continues_after_a_listing_failure() {
         let entries = futures::stream::iter([
             TreeEntry::File(FileJob {
-                local: PathBuf::new(),
-                relative: names("first"),
+                source: PathBuf::new(),
+                destination: remote("/first"),
                 size_bytes: Some(1),
             }),
             TreeEntry::Failure(
                 "broken".to_owned(),
                 CliError::invalid_request("cannot list"),
             ),
-            TreeEntry::Directory(names("sibling")),
+            TreeEntry::Directory(remote("/sibling")),
             TreeEntry::File(FileJob {
-                local: PathBuf::new(),
-                relative: names("sibling/last"),
+                source: PathBuf::new(),
+                destination: remote("/sibling/last"),
                 size_bytes: Some(1),
             }),
         ]);
@@ -810,13 +789,13 @@ mod tests {
             |job| {
                 let parent_created = &parent_created;
                 async move {
-                    if joined(&job.relative) == "/sibling/last" {
+                    if job.destination == "/sibling/last" {
                         assert!(
                             parent_created.get(),
                             "parent must exist before its file starts"
                         );
                     }
-                    (joined(&job.relative), Ok(joined(&job.relative)))
+                    (job.destination.to_string(), Ok(job.destination.to_string()))
                 }
             },
             |_| {
@@ -872,7 +851,7 @@ mod tests {
         // must be observed when descent reaches it, and must not lose later
         // siblings or the remaining root pages.
         let up = AbsolutePath::parse("/up").expect("remote root");
-        let entries = remote_tree(&context, &up, "remote_path", None)
+        let entries = remote_tree(&context, &up, "remote_path", None, PathBuf::new())
             .await
             .expect("start discovery");
         let broken = remote_spec(
@@ -889,8 +868,13 @@ mod tests {
             .expect("delete child");
         let tally = transfer_tree(
             entries,
-            |job| async move { (joined(&job.relative), Ok(joined(&job.relative))) },
-            |relative| async move { (joined(&relative), Ok(DirectoryOutcome::AlreadyExists)) },
+            |job| async move { (job.source.to_string(), Ok(job.source.to_string())) },
+            |local| async move {
+                (
+                    local.display().to_string(),
+                    Ok(DirectoryOutcome::AlreadyExists),
+                )
+            },
             None,
             unwatched(),
             "wrote",

@@ -396,18 +396,13 @@ impl AccessRights {
 }
 
 impl AccessRights {
-    /// Parses comma-separated right names, the form the CLI's `--grant`
-    /// takes, refusing a repeated right as the wire decoder does.
-    pub fn parse_list(names: &str) -> Result<Self, AccessRightsError> {
-        Self::from_distinct(
-            names
-                .split(',')
-                .map(str::parse::<AccessRight>)
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-    }
-
-    fn from_distinct(rights: Vec<AccessRight>) -> Result<Self, AccessRightsError> {
+    /// Builds the set from rights named once each, refusing a repeated right.
+    ///
+    /// The wire decoder builds every set this way. Collecting into the set
+    /// instead lets a repeat collapse.
+    pub fn from_distinct(
+        rights: impl IntoIterator<Item = AccessRight>,
+    ) -> Result<Self, AccessRightsError> {
         let mut set = Self::EMPTY;
         for right in rights {
             if set.contains(right) {

@@ -131,7 +131,21 @@ pub(crate) fn resolve_subject(
         Some(actor_id.as_str()),
         principals,
     )
-    .map_err(|error| match error {
+    .map_err(|error| subject_parts_error(error, source))
+}
+
+/// Reports a subject that its flags alone name, as the profile commands'
+/// flags do.
+pub(crate) fn subject_flag_error(error: SubjectPartsError) -> CliError {
+    subject_parts_error(error, |_| SubjectSource::Flag)
+}
+
+/// Reports `error` under the name each part had where it came from.
+fn subject_parts_error(
+    error: SubjectPartsError,
+    source: impl Fn(SubjectPart) -> SubjectSource,
+) -> CliError {
+    match error {
         SubjectPartsError::Missing { part, required_by } => {
             let required = subject_part_name(part, source(required_by));
             let present = subject_part_name(required_by, source(required_by));
@@ -145,7 +159,7 @@ pub(crate) fn resolve_subject(
             named_cli_input_error(name, format!("invalid `{name}`: {message}"))
         }
         other => CliError::invalid_request(other.to_string()),
-    })
+    }
 }
 
 /// Where one part of the subject came from, which decides the name an
