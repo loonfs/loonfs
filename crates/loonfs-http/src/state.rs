@@ -69,8 +69,6 @@ impl JobMode {
 
 #[derive(Clone, Debug)]
 pub struct BindingConfig {
-    /// Whether this binding answers grep queries and maintains the grep index.
-    pub grep: JobMode,
     /// Whether this binding serves the maintenance API group. The host runs
     /// any background maintenance itself.
     pub serves_maintenance: bool,
@@ -89,7 +87,54 @@ pub struct BindingConfig {
     pub auth_policy: AuthPolicy,
 }
 
-/// Hosts supply one runtime over one store, with grep services and permit limits matching `options`.
+/// The grep handles this binding holds, by job: a binding serves
+/// queries only with a service, and maintains the index only with a
+/// worker, so a capability it advertises always has its handle.
+#[derive(Clone)]
+pub enum GrepBinding {
+    Disabled,
+    ServeOnly {
+        service: Arc<GrepService>,
+    },
+    MaintainOnly {
+        worker: GrepWorker<SharedObjectStore>,
+    },
+    ServeAndMaintain {
+        service: Arc<GrepService>,
+        worker: GrepWorker<SharedObjectStore>,
+    },
+}
+
+impl GrepBinding {
+    /// The service that answers grep queries, where this binding serves them.
+    pub fn service(&self) -> Option<&Arc<GrepService>> {
+        match self {
+            Self::ServeOnly { service } | Self::ServeAndMaintain { service, .. } => Some(service),
+            Self::Disabled | Self::MaintainOnly { .. } => None,
+        }
+    }
+
+    /// The worker that maintains the grep index, where this binding maintains it.
+    pub fn worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
+        match self {
+            Self::MaintainOnly { worker } | Self::ServeAndMaintain { worker, .. } => Some(worker),
+            Self::Disabled | Self::ServeOnly { .. } => None,
+        }
+    }
+
+    /// Whether this binding answers grep queries.
+    pub fn serves(&self) -> bool {
+        self.service().is_some()
+    }
+
+    /// Whether this binding maintains the grep index.
+    pub fn maintains(&self) -> bool {
+        self.worker().is_some()
+    }
+}
+
+/// Hosts supply one runtime over one store, with permit limits matching
+/// `options`. The grep handles live in `grep`.
 #[derive(Clone)]
 pub struct BindingState {
     pub options: Arc<BindingConfig>,
@@ -98,21 +143,11 @@ pub struct BindingState {
     pub maintenance: Maintenance,
     pub probe_store: SharedObjectStore,
     pub direct_transfers: Option<DirectTransferIssuers>,
-    pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
-    pub grep_service: Option<Arc<GrepService>>,
+    pub grep: GrepBinding,
     pub request_limit: Option<RequestLimit>,
     pub upload_permits: Arc<Semaphore>,
     pub download_permits: Arc<Semaphore>,
     pub metrics: Arc<HttpMetrics>,
-}
-
-impl BindingState {
-    /// The grep worker, where this binding maintains the grep index.
-    pub(crate) fn grep_index_worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
-        self.grep_worker
-            .as_ref()
-            .filter(|_| self.options.grep.maintains())
-    }
 }
 
 /// The writable handle this host holds for each namespace.

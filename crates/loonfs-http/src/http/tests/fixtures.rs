@@ -1,6 +1,8 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces};
+use crate::{
+    AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, JobMode, Namespaces,
+};
 use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -15,6 +17,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(super) struct TestOptions {
     pub(super) binding: BindingConfig,
+    pub(super) grep: JobMode,
     pub(super) writer_id: WriterId,
     pub(super) store: SharedObjectStore,
 }
@@ -28,7 +31,6 @@ pub(super) struct TestAppOptions {
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
         binding: BindingConfig {
-            grep: JobMode::ServeAndMaintain,
             serves_maintenance: true,
             snapshot_policy: SnapshotPolicy {
                 max_ttl_ms: 86_400_000,
@@ -46,6 +48,7 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
+        grep: JobMode::ServeAndMaintain,
         writer_id: WriterId::parse(writer_id).expect("writer id"),
         store: Arc::new(LocalFsStore::with_key_prefix(root, Some("http-tests")).expect("store")),
     }
@@ -77,21 +80,34 @@ pub(super) async fn test_app(
         WriterId::parse(format!("{}-maintenance", config.writer_id))
             .expect("a suffixed writer id should stay valid"),
     );
-    let grep_worker = (options.grep.serves() || options.grep.maintains()).then(|| {
+    let grep_worker = || {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
             maintenance.clone(),
             loonfs_grep::GrepStepBudget::default(),
         )
-    });
-    let grep_service = options.grep.serves().then(|| {
+    };
+    let grep_service = || {
         let cache = Arc::new(new_grep_block_cache(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             metrics.recorder().as_ref(),
         ));
         Arc::new(GrepService::new(cache, runtime.monotonic_timer()))
-    });
+    };
+    let grep = match config.grep {
+        JobMode::Disabled => GrepBinding::Disabled,
+        JobMode::ServeOnly => GrepBinding::ServeOnly {
+            service: grep_service(),
+        },
+        JobMode::MaintainOnly => GrepBinding::MaintainOnly {
+            worker: grep_worker(),
+        },
+        JobMode::ServeAndMaintain => GrepBinding::ServeAndMaintain {
+            service: grep_service(),
+            worker: grep_worker(),
+        },
+    };
     let state = BindingState {
         request_limit: None,
         upload_permits: crate::transfer_permits(options.max_concurrent_uploads),
@@ -102,8 +118,7 @@ pub(super) async fn test_app(
         runtime,
         maintenance,
         direct_transfers: inputs.direct_transfers,
-        grep_worker,
-        grep_service,
+        grep,
         metrics,
     };
     Ok((crate::router(state.clone()), state))

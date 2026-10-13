@@ -851,7 +851,7 @@ async fn sweep(server: &loonfs_server::AppState) {
 
 /// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.binding.options.grep.maintains()
+    server.binding.grep.maintains()
 }
 
 /// The sequence this namespace's index is built through.

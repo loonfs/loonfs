@@ -62,8 +62,8 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
         state.local_cache.as_ref().map(|cache| cache.foyer_stats()),
         state
             .binding
-            .grep_worker
-            .as_ref()
+            .grep
+            .worker()
             .map(|worker| worker.step_budget().stats()),
         state.binding.upload_permits.available_permits(),
         state.binding.download_permits.available_permits(),

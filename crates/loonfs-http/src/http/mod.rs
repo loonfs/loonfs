@@ -313,8 +313,8 @@ pub fn router(state: BindingState) -> Router {
     // are separately deployable: the query route exists where this server
     // serves grep, and the three routes that mutate a grep manifest exist where
     // it maintains one.
-    let grep_service = state.grep_service.clone();
-    let index_worker = state.grep_index_worker().cloned();
+    let grep_service = state.grep.service().cloned();
+    let index_worker = state.grep.worker().cloned();
     let mut authenticated = Router::new()
         .route(
             "/v0/capabilities",

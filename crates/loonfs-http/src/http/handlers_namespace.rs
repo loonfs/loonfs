@@ -171,9 +171,9 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.options.serves_maintenance && state.options.grep.maintains(),
+        state.options.serves_maintenance && state.grep.maintains(),
     );
-    if state.options.grep.serves() {
+    if state.grep.serves() {
         let pagination = PaginationPolicy::default();
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
@@ -955,7 +955,7 @@ pub(super) async fn run_maintenance(
                 .map(RunMaintenanceResponse::Retention)
         }
         RunMaintenanceRequest::GrepGc {} => {
-            let Some(worker) = state.grep_index_worker() else {
+            let Some(worker) = state.grep.worker() else {
                 return Err(grep_index_not_maintained().await);
             };
             let now_ms = maintenance.now_ms();

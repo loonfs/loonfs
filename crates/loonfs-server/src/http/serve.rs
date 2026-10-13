@@ -3,7 +3,7 @@
 
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use crate::config::{MemorySizing, ServerConfig, ServerConfigError};
+use crate::config::{JobMode, MemorySizing, ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use crate::sweep::Sweep;
 use axum::body::Body;
@@ -17,7 +17,7 @@ use loonfs::{
     StoredMetadataBlockCacheCloseError, TraceMode, Writable, WriterId,
 };
 use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
-use loonfs_http::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
+use loonfs_http::{AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;
@@ -168,7 +168,6 @@ pub async fn app(
         }
     };
     let metrics = HttpMetrics::new();
-    let maintains_grep_index = config.grep.mode.maintains();
     // Opened before the runtime, because the runtime is what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
@@ -185,11 +184,10 @@ pub async fn app(
     )
     .await?;
     let probe_store = runtime.object_store();
-    // A deployment that maintains the index needs a worker whether or not it
-    // answers queries with one. It runs on the runtime's own instrumented
-    // client, so the grep-owned traffic is measured like every other
-    // request instead of escaping on a second, raw client.
-    let grep_worker = (config.grep.mode.serves() || config.grep.mode.maintains()).then(|| {
+    // The worker runs on the runtime's own instrumented client, so the
+    // grep-owned traffic is measured like every other request instead of
+    // escaping on a second, raw client.
+    let grep_worker = || {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
@@ -199,8 +197,8 @@ pub async fn app(
                     .expect("validated grep step limit should be nonzero"),
             ),
         )
-    });
-    let grep_service = config.grep.mode.serves().then(|| {
+    };
+    let grep_service = || {
         let grep_block_cache = Arc::new(new_grep_block_cache(
             memory.grep.bytes,
             metrics.recorder().as_ref(),
@@ -209,7 +207,20 @@ pub async fn app(
             grep_block_cache,
             runtime.monotonic_timer(),
         ))
-    });
+    };
+    let grep = match config.grep.mode {
+        JobMode::Disabled => GrepBinding::Disabled,
+        JobMode::ServeOnly => GrepBinding::ServeOnly {
+            service: grep_service(),
+        },
+        JobMode::MaintainOnly => GrepBinding::MaintainOnly {
+            worker: grep_worker(),
+        },
+        JobMode::ServeAndMaintain => GrepBinding::ServeAndMaintain {
+            service: grep_service(),
+            worker: grep_worker(),
+        },
+    };
     let namespaces = Arc::new(Namespaces::new(runtime.clone()));
     let sweep = config
         .maintenance
@@ -220,15 +231,12 @@ pub async fn app(
                 runtime.object_store(),
                 maintenance.clone(),
                 Arc::clone(&namespaces),
-                // A server that only answers grep queries also has a
-                // worker, and its sweep must not build the index.
-                grep_worker.clone().filter(|_| maintains_grep_index),
+                grep.worker().cloned(),
                 metrics.recorder().as_ref(),
             )
         })
         .transpose()?;
     let options = Arc::new(BindingConfig {
-        grep: config.grep.mode,
         serves_maintenance: config.maintenance.serves(),
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
@@ -262,8 +270,7 @@ pub async fn app(
         maintenance,
         probe_store,
         direct_transfers,
-        grep_worker,
-        grep_service,
+        grep,
         metrics,
     };
     let state = AppState {
