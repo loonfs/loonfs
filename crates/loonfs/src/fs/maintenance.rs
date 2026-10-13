@@ -677,7 +677,7 @@ impl Maintenance {
             self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
                 .await;
         }
-        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed_ms = loonfs_types::saturating_duration_ms(started.elapsed());
         self.core
             .instruments()
             .compaction_finished(&outcome, elapsed_ms);

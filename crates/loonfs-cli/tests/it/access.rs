@@ -214,6 +214,26 @@ fn a_remote_profile_sends_the_subject_headers() {
     assert_failure(&missing_principals);
     assert_eq!(json_error(&missing_principals)["code"], "invalid_request");
     assert_eq!(json_error(&missing_principals)["param"], "--principals");
+    let subject_without_principals =
+        harness.run(&["--json", "mkdir", "/x", "--subject-id", "usr_ada"]);
+    assert_failure(&subject_without_principals);
+    assert_eq!(
+        json_error(&subject_without_principals)["code"],
+        "invalid_request"
+    );
+    assert_eq!(
+        json_error(&subject_without_principals)["param"],
+        "--principals"
+    );
+    let environment_subject_without_principals = harness.run_with_env(
+        &[("LOONFS_SUBJECT_ID", "usr_ada")],
+        &["--json", "mkdir", "/x"],
+    );
+    assert_failure(&environment_subject_without_principals);
+    assert_eq!(
+        json_error(&environment_subject_without_principals)["message"],
+        "`LOONFS_PRINCIPALS` is required with `LOONFS_SUBJECT_ID`"
+    );
     assert_success(&harness.run(&[
         "namespace",
         "create",

@@ -9,7 +9,7 @@ use crate::config::{absolute_env_path, validate_remote_client_config, ProfileCon
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
-use loonfs_types::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
+use loonfs_types::{ActorId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, SubjectId};
 use std::path::{Path, PathBuf};
 
 const AWS_REGIONS: &[&str] = &[
@@ -789,14 +789,12 @@ fn parse_profile_principals(
     principals
         .map(|principals| {
             principals
-                .split(',')
-                .map(|principal| {
-                    PrincipalId::parse(principal).map_err(|error| {
-                        CliError::invalid_request(format!("invalid `--principals`: {error}"))
-                            .with_param("--principals")
-                    })
+                .parse::<PrincipalSet>()
+                .map(|principals| principals.iter().cloned().collect())
+                .map_err(|error| {
+                    CliError::invalid_request(format!("invalid `--principals`: {error}"))
+                        .with_param("--principals")
                 })
-                .collect()
         })
         .transpose()
 }
@@ -1634,6 +1632,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_profile_with_more_principals_than_a_request_accepts_is_refused() {
+        let principals = (0..=loonfs_types::MAX_SUBJECT_PRINCIPALS)
+            .map(|index| format!("prn_{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let error = build_profile_from_create_spec(
+            "default",
+            CreateProfileSpec {
+                provider: CreateProviderSpec::Local(ProfileLocalArgs {
+                    root: Some("/tmp/store".to_owned()),
+                    key_prefix: None,
+                }),
+                actor: ProfileCreateActorArgs {
+                    principal_scope: Some("org".to_owned()),
+                    principals: Some(principals),
+                    ..ProfileCreateActorArgs::default()
+                },
+            },
+            non_interactive_runtime(),
+        )
+        .expect_err("a profile no request could use is refused");
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.param.as_deref(), Some("--principals"));
     }
 
     fn update_spec(provider: CreateProviderSpec) -> ProfileUpdateSpec {

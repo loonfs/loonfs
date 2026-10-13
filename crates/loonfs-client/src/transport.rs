@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use loonfs_types::{transport_retry_backoff, ApiError, ErrorCode, OperationDeadline};
+use loonfs_types::{ApiError, ErrorCode, OperationDeadline, TransportRetryOutcome};
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,15 +51,7 @@ impl Client {
         request
             .header("Loonfs-Principal-Scope", subject.principal_scope.as_str())
             .header("Loonfs-Subject", subject.subject_id.as_str())
-            .header(
-                "Loonfs-Principals",
-                subject
-                    .principals
-                    .iter()
-                    .map(|principal| principal.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )
+            .header("Loonfs-Principals", subject.principals.to_string())
     }
 
     pub(crate) fn get(&self, url: &str) -> WireRequest {
@@ -236,11 +228,10 @@ impl Client {
             if !self.transport_retry_enabled || !retryable {
                 return Err(attempt.error);
             }
-            let Some(backoff) = next_transport_retry_backoff(
-                &self.transport_retry,
-                &mut retries,
-                deadline.as_ref(),
-            ) else {
+            let TransportRetryOutcome::Wait { backoff } = self
+                .transport_retry
+                .next_backoff(&mut retries, deadline.as_ref())
+            else {
                 return Err(attempt.error);
             };
             transport_delay(backoff).await;
@@ -446,23 +437,6 @@ pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) 
         || error
             .code()
             .is_some_and(ErrorCode::retryable_without_operator_action)
-}
-
-/// Returns the delay before the next retry, or `None` when a limit is reached.
-fn next_transport_retry_backoff(
-    policy: &TransportRetryPolicy,
-    retries: &mut u32,
-    deadline: Option<&OperationDeadline<'_>>,
-) -> Option<Duration> {
-    if *retries >= policy.max_retries {
-        return None;
-    }
-    let remaining = match deadline {
-        Some(deadline) => deadline.remaining()?,
-        None => Duration::MAX,
-    };
-    *retries += 1;
-    Some(transport_retry_backoff(policy, *retries).min(remaining))
 }
 
 // This transport timer bounds local I/O and retries without changing protocol time.

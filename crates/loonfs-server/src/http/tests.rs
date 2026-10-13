@@ -62,7 +62,9 @@ async fn app_validates_directly_built_configs() {
     let mut config = test_config(temp_dir.path(), "app-validate-writer");
     config.max_concurrent_uploads = 0;
     match app(config, AppConfig::default()).await {
-        Err(crate::config::ServerConfigError::InvalidField { field, .. }) => {
+        Err(crate::config::ServerConfigError::Field(
+            loonfs_types::config::ConfigFieldError::Invalid { field, .. },
+        )) => {
             assert_eq!(field, "max_concurrent_uploads");
         }
         Err(other) => panic!("expected invalid field error, got {other:?}"),

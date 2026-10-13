@@ -24,6 +24,8 @@ crc-fast.workspace = true
 # Content ids are 128 fully random bits, drawn straight from the system
 # generator (see `ids::ContentId`).
 getrandom.workspace = true
+# Parses config URLs into `Uri` for the shared config field checks.
+http.workspace = true
 icu_casemap.workspace = true
 icu_normalizer.workspace = true
 libc.workspace = true

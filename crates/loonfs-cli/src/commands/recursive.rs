@@ -5,7 +5,7 @@
 //! Transfers use bounded concurrency and report failures per file.
 
 use super::context::{
-    create_directory_tolerating_existing, CommandContext, RemoteDirectoryOutcome,
+    create_directory_tolerating_existing, render_target, CommandContext, RemoteDirectoryOutcome,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadObservation, TreeTransferFailure,
@@ -21,6 +21,7 @@ use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFil
 use loonfs_types::DestinationBehavior;
 use loonfs_types::ErrorCode;
 use loonfs_types::PinId;
+use loonfs_types::{AbsolutePath, DisplayName};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,7 +35,8 @@ const TREE_TRANSFERS_IN_FLIGHT: usize = 8;
 /// One file in a recursive transfer.
 struct FileJob {
     local: PathBuf,
-    relative_remote: String,
+    /// The file's names below the tree root.
+    relative: Vec<DisplayName>,
     /// File length, used for progress totals.
     size_bytes: Option<u64>,
 }
@@ -119,17 +121,18 @@ fn create_local_directory(path: &Path) -> std::io::Result<DirectoryOutcome> {
     Ok(DirectoryOutcome::Created)
 }
 
-fn joined_remote(root: &str, relative: &str) -> String {
-    let mut remote = root.trim_end_matches('/').to_owned();
-    if !relative.is_empty() {
-        remote.push('/');
-        remote.push_str(relative);
-    }
-    if remote.is_empty() {
-        "/".to_owned()
-    } else {
-        remote
-    }
+/// Returns the remote path that `relative` names below `root`.
+fn remote_below(root: &AbsolutePath, relative: &[DisplayName]) -> AbsolutePath {
+    relative
+        .iter()
+        .fold(root.clone(), |path, name| path.join(name))
+}
+
+/// Returns the local path that `relative` names below `root`.
+fn local_below(root: &Path, relative: &[DisplayName]) -> PathBuf {
+    relative
+        .iter()
+        .fold(root.to_path_buf(), |path, name| path.join(name.as_str()))
 }
 
 /// Runs discovery and transfers together. A full transfer set stops discovery;
@@ -147,7 +150,7 @@ where
     S: Stream<Item = TreeEntry>,
     F: Fn(FileJob) -> FF,
     FF: Future<Output = (String, Result<String, CliError>)>,
-    D: Fn(String) -> DF,
+    D: Fn(Vec<DisplayName>) -> DF,
     DF: Future<Output = (String, Result<DirectoryOutcome, CliError>)>,
 {
     futures::pin_mut!(entries);
@@ -223,14 +226,12 @@ where
 
 async fn create_remote_directory(
     context: &CommandContext,
-    remote_root: &str,
-    relative: String,
+    remote: AbsolutePath,
     parents: bool,
     message: Option<String>,
 ) -> (String, Result<DirectoryOutcome, CliError>) {
-    let remote = joined_remote(remote_root, &relative);
     let result = async {
-        let spec = parse_remote(context, &remote, "destination_path")?;
+        let spec = remote_spec(context, &remote, "destination_path")?;
         create_directory_tolerating_existing(
             context,
             &spec,
@@ -250,15 +251,7 @@ async fn create_remote_directory(
         })
     }
     .await;
-    (remote, result)
-}
-
-fn relative_remote(relative: &Path) -> Result<String, CliError> {
-    let parts = relative
-        .components()
-        .map(|part| super::context::utf8_local_name(part.as_os_str()).map(str::to_owned))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parts.join("/"))
+    (remote.to_string(), result)
 }
 
 fn warn_drift(tally: &TreeTally, runtime: RuntimeBehavior) {
@@ -275,7 +268,7 @@ pub(crate) async fn run_put_tree(
     kind: CommandKind,
     context: &CommandContext,
     local_root: &Path,
-    remote_root: &str,
+    remote_root: &AbsolutePath,
     behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
@@ -284,14 +277,15 @@ pub(crate) async fn run_put_tree(
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
-        format!("{}:{}", context.namespace(), remote_root),
+        render_target(context.namespace(), remote_root),
     ));
     let transfer = |job: FileJob| {
         let message = message.clone();
         let progress = Arc::clone(&progress);
-        let remote = joined_remote(remote_root, &job.relative_remote);
+        let remote_path = remote_below(remote_root, &job.relative);
+        let remote = remote_path.to_string();
         async move {
-            let spec = match parse_remote(context, &remote, "local_path") {
+            let spec = match remote_spec(context, &remote_path, "local_path") {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
@@ -335,7 +329,14 @@ pub(crate) async fn run_put_tree(
     let tally = transfer_tree(
         futures::stream::iter(entries),
         transfer,
-        |relative| create_remote_directory(context, remote_root, relative, true, message.clone()),
+        |relative| {
+            create_remote_directory(
+                context,
+                remote_below(remote_root, &relative),
+                true,
+                message.clone(),
+            )
+        },
         Some(&progress),
         runtime,
         "stored",
@@ -346,7 +347,7 @@ pub(crate) async fn run_put_tree(
         kind,
         CommandData::TreeTransfer {
             source: local_root.display().to_string(),
-            destination: format!("{}:{}", context.namespace(), remote_root),
+            destination: render_target(context.namespace(), remote_root),
             files: tally.files,
             directories: tally.directories,
             head_drift: None,
@@ -359,7 +360,7 @@ pub(crate) async fn run_put_tree(
 pub(crate) async fn run_get_tree(
     kind: CommandKind,
     context: &CommandContext,
-    remote_root: &str,
+    remote_root: &AbsolutePath,
     local_root: &Path,
     behavior: DestinationBehavior,
     runtime: RuntimeBehavior,
@@ -373,14 +374,15 @@ pub(crate) async fn run_get_tree(
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Get,
-        format!("{}:{}", context.namespace(), remote_root),
+        render_target(context.namespace(), remote_root),
     ));
     let transfer = |job: FileJob| {
         let progress = Arc::clone(&progress);
         let local = local_root.join(job.local);
-        let remote = joined_remote(remote_root, &job.relative_remote);
+        let remote_path = remote_below(remote_root, &job.relative);
+        let remote = remote_path.to_string();
         async move {
-            let spec = match parse_remote(context, &remote, "remote_path") {
+            let spec = match remote_spec(context, &remote_path, "remote_path") {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
@@ -411,7 +413,7 @@ pub(crate) async fn run_get_tree(
         entries,
         transfer,
         |relative| async move {
-            let local = local_root.join(relative);
+            let local = local_below(local_root, &relative);
             let result = create_local_directory(&local)
                 .map_err(|error| CliError::io_for_path(&local, error));
             (local.display().to_string(), result)
@@ -427,7 +429,7 @@ pub(crate) async fn run_get_tree(
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
-            source: format!("{}:{}", context.namespace(), remote_root),
+            source: render_target(context.namespace(), remote_root),
             destination: local_root.display().to_string(),
             files: tally.files,
             directories: tally.directories,
@@ -441,15 +443,15 @@ pub(crate) async fn run_get_tree(
 pub(crate) async fn run_copy_tree(
     kind: CommandKind,
     context: &CommandContext,
-    source_root: &str,
-    destination_root: &str,
+    source_root: &AbsolutePath,
+    destination_root: &AbsolutePath,
     behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let source = parse_remote(context, source_root, "source_path")
+    let source = remote_spec(context, source_root, "source_path")
         .map_err(|error| context.fail(kind, error))?;
-    let destination = parse_remote(context, destination_root, "destination_path")
+    let destination = remote_spec(context, destination_root, "destination_path")
         .map_err(|error| context.fail(kind, error))?;
     ensure_destination_outside_source(context, &source, &destination)
         .await
@@ -459,14 +461,15 @@ pub(crate) async fn run_copy_tree(
     let entries = remote_tree(context, source_root, "source_path", None)
         .await
         .map_err(|error| context.fail(kind, error))?;
-    let entries = futures::stream::iter([TreeEntry::Directory(String::new())]).chain(entries);
+    let entries = futures::stream::iter([TreeEntry::Directory(Vec::new())]).chain(entries);
     let transfer = |job: FileJob| {
         let message = message.clone();
-        let source = joined_remote(source_root, &job.relative_remote);
-        let destination = joined_remote(destination_root, &job.relative_remote);
+        let source_path = remote_below(source_root, &job.relative);
+        let destination_path = remote_below(destination_root, &job.relative);
+        let source = source_path.to_string();
         async move {
-            let from = parse_remote(context, &source, "source_path");
-            let to = parse_remote(context, &destination, "destination_path");
+            let from = remote_spec(context, &source_path, "source_path");
+            let to = remote_spec(context, &destination_path, "destination_path");
             let (from, to) = match (from, to) {
                 (Ok(from), Ok(to)) => (from, to),
                 (Err(error), _) | (_, Err(error)) => return (source, Err(error)),
@@ -498,12 +501,10 @@ pub(crate) async fn run_copy_tree(
         entries,
         transfer,
         |relative| {
-            let parents = relative.is_empty();
             create_remote_directory(
                 context,
-                destination_root,
-                relative,
-                parents,
+                remote_below(destination_root, &relative),
+                relative.is_empty(),
                 message.clone(),
             )
         },
@@ -517,8 +518,8 @@ pub(crate) async fn run_copy_tree(
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
-            source: format!("{}:{}", context.namespace(), source_root),
-            destination: format!("{}:{}", context.namespace(), destination_root),
+            source: render_target(context.namespace(), source_root),
+            destination: render_target(context.namespace(), destination_root),
             files: tally.files,
             directories: tally.directories,
             head_drift: tally.heads.drift(),
@@ -591,17 +592,23 @@ async fn ensure_destination_outside_source(
     }
 }
 
-fn parse_remote(
+/// Scopes a remote path to the command's namespace, refusing one past the
+/// request bounds under `param`.
+fn remote_spec(
     context: &CommandContext,
-    path: &str,
+    path: &AbsolutePath,
     param: &str,
 ) -> Result<NamespacePath, CliError> {
-    NamespacePath::parse(context.namespace().as_str(), path)
-        .map_err(|error| crate::error::CliError::from(error).with_invalid_request_param(param))
+    path.validate_request_bounds()
+        .map_err(|error| CliError::invalid_request(error.to_string()).with_param(param))?;
+    Ok(NamespacePath::new(
+        context.namespace().clone(),
+        path.clone(),
+    ))
 }
 
 fn spec_target(spec: &NamespacePath) -> String {
-    super::context::render_target(spec.namespace(), spec.absolute_path())
+    render_target(spec.namespace(), spec.absolute_path())
 }
 
 #[cfg(test)]
@@ -623,6 +630,17 @@ mod tests {
     const LARGE_FILE_BYTES: usize =
         2 * loonfs_types::usize_from_u64(PROVIDER_MULTIPART_PART_BYTES) + 4_096;
     const SMALL_FILE: &[u8] = b"small enough to hold";
+
+    fn names(relative: &str) -> Vec<DisplayName> {
+        relative
+            .split('/')
+            .map(|name| DisplayName::parse(name).expect("display name"))
+            .collect()
+    }
+
+    fn joined(relative: &[DisplayName]) -> String {
+        remote_below(&AbsolutePath::root(), relative).to_string()
+    }
 
     fn payload(len: usize) -> Vec<u8> {
         (0..251_u8).cycle().take(len).collect()
@@ -692,7 +710,7 @@ mod tests {
             );
             TreeEntry::File(FileJob {
                 local: PathBuf::new(),
-                relative_remote: index.to_string(),
+                relative: names(&index.to_string()),
                 size_bytes: Some(1),
             })
         }));
@@ -714,7 +732,7 @@ mod tests {
                     })
                     .await;
                     completed.set(completed.get() + 1);
-                    (job.relative_remote.clone(), Ok(job.relative_remote))
+                    (joined(&job.relative), Ok(joined(&job.relative)))
                 }
             },
             |_| async { panic!("no directories in this stream") },
@@ -736,10 +754,10 @@ mod tests {
         let entries = futures::stream::iter([
             TreeEntry::File(FileJob {
                 local: PathBuf::new(),
-                relative_remote: "first".to_owned(),
+                relative: names("first"),
                 size_bytes: Some(1),
             }),
-            TreeEntry::Directory("second".to_owned()),
+            TreeEntry::Directory(names("second")),
         ]);
         let tally = transfer_tree(
             entries,
@@ -749,7 +767,7 @@ mod tests {
                 async move {
                     directory_started.notified().await;
                     file_finished.notify_one();
-                    (job.relative_remote.clone(), Ok(job.relative_remote))
+                    (joined(&job.relative), Ok(joined(&job.relative)))
                 }
             },
             |_| async {
@@ -772,17 +790,17 @@ mod tests {
         let entries = futures::stream::iter([
             TreeEntry::File(FileJob {
                 local: PathBuf::new(),
-                relative_remote: "first".to_owned(),
+                relative: names("first"),
                 size_bytes: Some(1),
             }),
             TreeEntry::Failure(
                 "broken".to_owned(),
                 CliError::invalid_request("cannot list"),
             ),
-            TreeEntry::Directory("sibling".to_owned()),
+            TreeEntry::Directory(names("sibling")),
             TreeEntry::File(FileJob {
                 local: PathBuf::new(),
-                relative_remote: "sibling/last".to_owned(),
+                relative: names("sibling/last"),
                 size_bytes: Some(1),
             }),
         ]);
@@ -792,13 +810,13 @@ mod tests {
             |job| {
                 let parent_created = &parent_created;
                 async move {
-                    if job.relative_remote == "sibling/last" {
+                    if joined(&job.relative) == "/sibling/last" {
                         assert!(
                             parent_created.get(),
                             "parent must exist before its file starts"
                         );
                     }
-                    (job.relative_remote.clone(), Ok(job.relative_remote))
+                    (joined(&job.relative), Ok(joined(&job.relative)))
                 }
             },
             |_| {
@@ -843,7 +861,7 @@ mod tests {
             CommandKind::FilesystemPut,
             &context,
             tree.path(),
-            "/up",
+            &AbsolutePath::parse("/up").expect("remote root"),
             DestinationBehavior::NoReplace,
             None,
             unwatched(),
@@ -853,10 +871,16 @@ mod tests {
         // Only the first root page has been read. Removing a child after that
         // must be observed when descent reaches it, and must not lose later
         // siblings or the remaining root pages.
-        let entries = remote_tree(&context, "/up", "remote_path", None)
+        let up = AbsolutePath::parse("/up").expect("remote root");
+        let entries = remote_tree(&context, &up, "remote_path", None)
             .await
             .expect("start discovery");
-        let broken = parse_remote(&context, "/up/broken", "remote_path").expect("path");
+        let broken = remote_spec(
+            &context,
+            &AbsolutePath::parse("/up/broken").expect("path"),
+            "remote_path",
+        )
+        .expect("path");
         context
             .target
             .client
@@ -865,8 +889,8 @@ mod tests {
             .expect("delete child");
         let tally = transfer_tree(
             entries,
-            |job| async move { (job.relative_remote.clone(), Ok(job.relative_remote)) },
-            |relative| async move { (relative, Ok(DirectoryOutcome::AlreadyExists)) },
+            |job| async move { (joined(&job.relative), Ok(joined(&job.relative))) },
+            |relative| async move { (joined(&relative), Ok(DirectoryOutcome::AlreadyExists)) },
             None,
             unwatched(),
             "wrote",
@@ -907,7 +931,7 @@ mod tests {
             CommandKind::FilesystemPut,
             &context,
             tree.path(),
-            "/up",
+            &AbsolutePath::parse("/up").expect("remote root"),
             DestinationBehavior::NoReplace,
             None,
             unwatched(),

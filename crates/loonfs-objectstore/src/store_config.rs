@@ -14,9 +14,11 @@ use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind, ObjectStoreError};
 use http::Uri;
+use loonfs_types::config::{
+    non_blank, validate_absolute_http_url, validate_non_empty, ConfigFieldError,
+};
 use loonfs_types::SecretString;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// Standard AWS environment credential name for the access-key id.
 pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
@@ -152,39 +154,6 @@ impl<'de> serde::Deserialize<'de> for StoreConfig {
     }
 }
 
-/// Validation failure for a [`StoreConfig`].
-///
-/// Field paths are rooted at the store table (`store.bucket`, ...) so callers
-/// can report them directly or prefix them with their own config path.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum StoreConfigError {
-    /// Reports a required field whose value is absent or blank.
-    #[error("missing `{field}`")]
-    MissingField {
-        /// `store.`-rooted path suitable for direct configuration diagnostics.
-        field: &'static str,
-    },
-    /// Reports a present field whose value violates its provider-specific contract.
-    #[error("invalid `{field}`: {reason}")]
-    InvalidField {
-        /// `store.`-rooted path suitable for direct configuration diagnostics.
-        field: &'static str,
-        /// Specific validation failure without repeating the field path.
-        reason: String,
-    },
-}
-
-impl StoreConfigError {
-    /// The `store.`-rooted path of the offending field.
-    pub fn field(&self) -> &'static str {
-        match self {
-            StoreConfigError::MissingField { field }
-            | StoreConfigError::InvalidField { field, .. } => field,
-        }
-    }
-}
-
 impl StoreConfig {
     /// The provider kind this configuration selects.
     pub fn kind(&self) -> ConfiguredObjectStoreKind {
@@ -275,7 +244,7 @@ impl StoreConfig {
 
     /// Checks required fields and URL shapes, reporting `store.`-rooted field
     /// paths.
-    pub fn validate(&self) -> Result<(), StoreConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigFieldError> {
         match self {
             StoreConfig::LocalFs { root, .. } => {
                 validate_non_empty("store.root", root)?;
@@ -365,7 +334,7 @@ impl StoreConfig {
     }
 }
 
-fn validate_aws_s3_credentials(credentials: &AwsS3Credentials) -> Result<(), StoreConfigError> {
+fn validate_aws_s3_credentials(credentials: &AwsS3Credentials) -> Result<(), ConfigFieldError> {
     if let AwsS3Credentials::Static {
         access_key_id,
         secret_access_key,
@@ -384,7 +353,7 @@ fn validate_aws_s3_credentials(credentials: &AwsS3Credentials) -> Result<(), Sto
     Ok(())
 }
 
-fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), StoreConfigError> {
+fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), ConfigFieldError> {
     if let CloudflareR2Credentials::Static {
         access_key_id,
         secret_access_key,
@@ -430,18 +399,6 @@ fn missing_r2_ambient_credentials() -> ObjectStoreError {
     ))
 }
 
-fn validate_non_empty(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
-    if value.trim().is_empty() {
-        Err(StoreConfigError::MissingField { field })
-    } else {
-        Ok(())
-    }
-}
-
-fn non_blank(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
 /// Refuses a provider's own domain addressed over plain `http`.
 ///
 /// Reaching one of these endpoints without TLS is a misconfiguration, not a
@@ -453,7 +410,7 @@ fn validate_tls_on_proven_domains(
     field: &'static str,
     value: &str,
     domain_families: &[&str],
-) -> Result<(), StoreConfigError> {
+) -> Result<(), ConfigFieldError> {
     let Ok(uri) = value.trim().parse::<Uri>() else {
         // Shape was already reported by the caller's URL validation.
         return Ok(());
@@ -461,7 +418,7 @@ fn validate_tls_on_proven_domains(
     if uri.scheme_str() == Some("https") || !endpoint_host_is_proven(&uri, domain_families) {
         return Ok(());
     }
-    Err(StoreConfigError::InvalidField {
+    Err(ConfigFieldError::Invalid {
         field,
         reason: format!(
             "`{}` is a provider endpoint and must be reached over https: a presigned URL is a \
@@ -471,52 +428,12 @@ fn validate_tls_on_proven_domains(
     })
 }
 
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(StoreConfigError::MissingField { field });
-    }
-
-    let uri: Uri =
-        trimmed.parse().map_err(
-            |err: http::uri::InvalidUri| StoreConfigError::InvalidField {
-                field,
-                reason: err.to_string(),
-            },
-        )?;
-
-    match uri.scheme_str() {
-        Some("http" | "https") => {}
-        Some(other) => {
-            return Err(StoreConfigError::InvalidField {
-                field,
-                reason: format!("scheme must be http or https, got `{other}`"),
-            });
-        }
-        None => {
-            return Err(StoreConfigError::InvalidField {
-                field,
-                reason: "must be an absolute http or https URL".to_owned(),
-            });
-        }
-    }
-
-    if uri.authority().is_none() {
-        return Err(StoreConfigError::InvalidField {
-            field,
-            reason: "must be an absolute http or https URL".to_owned(),
-        });
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{resolve_r2_credentials, CloudflareR2Credentials, StoreConfig, StoreConfigError};
+    use super::{resolve_r2_credentials, CloudflareR2Credentials, ConfigFieldError, StoreConfig};
     use crate::ConfiguredObjectStoreKind;
 
     fn parse(contents: &str) -> StoreConfig {
@@ -610,7 +527,7 @@ secret_access_key = "secret"
             ),
         ] {
             match parse(contents).validate() {
-                Err(StoreConfigError::InvalidField { field, reason }) => {
+                Err(ConfigFieldError::Invalid { field, reason }) => {
                     assert_eq!(field, "store.endpoint_url");
                     assert!(reason.contains(host), "{reason}");
                     assert!(reason.contains("https"), "{reason}");
@@ -718,7 +635,7 @@ secret_access_key = "secret"
         );
         assert_eq!(
             blank_bucket.validate(),
-            Err(StoreConfigError::MissingField {
+            Err(ConfigFieldError::Missing {
                 field: "store.bucket"
             })
         );
@@ -737,7 +654,7 @@ secret_access_key = "secret"
 "#,
         );
         match bad_scheme.validate() {
-            Err(StoreConfigError::InvalidField { field, reason }) => {
+            Err(ConfigFieldError::Invalid { field, reason }) => {
                 assert_eq!(field, "store.endpoint_url");
                 assert!(reason.contains("ftp"));
             }

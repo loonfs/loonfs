@@ -52,11 +52,14 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
 ]);
 
 // CBOR strings, collections, and u64 values need at most nine header bytes.
-const fn cbor_string_bytes(length: usize) -> usize {
+/// Returns the most bytes CBOR uses for a string of `length` bytes.
+pub const fn cbor_string_bytes(length: usize) -> usize {
     9 + length
 }
 
-const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
+/// Returns the most bytes CBOR uses for a map with these field names and
+/// encoded value sizes.
+pub const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
     let mut bytes = 9;
     let mut index = 0;
     while index < fields.len() {

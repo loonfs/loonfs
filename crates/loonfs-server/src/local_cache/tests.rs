@@ -13,6 +13,7 @@ use loonfs::metrics::{
     RESULT_MISS, RESULT_OK,
 };
 use loonfs::{StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind};
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::{MetadataSegmentId, NamespaceId};
 use mixtrics::metrics::RegistryOps;
 use std::path::Path;
@@ -148,7 +149,7 @@ async fn a_second_open_of_one_directory_is_refused_until_the_first_closes() {
     match FoyerStoredMetadataBlockCache::open(&test_config(temp_dir.path()), &NoopMetricsRecorder)
         .await
     {
-        Err(ServerConfigError::InvalidField { field, reason }) => {
+        Err(ServerConfigError::Field(ConfigFieldError::Invalid { field, reason })) => {
             assert_eq!(field, "local_cache.path");
             assert!(reason.contains("locked by another process"), "{reason}");
         }
@@ -195,7 +196,7 @@ async fn an_unusable_path_fails_startup() {
 
     match FoyerStoredMetadataBlockCache::open(&test_config(&file_path), &NoopMetricsRecorder).await
     {
-        Err(ServerConfigError::InvalidField { field, .. }) => {
+        Err(ServerConfigError::Field(ConfigFieldError::Invalid { field, .. })) => {
             assert_eq!(field, "local_cache.path");
         }
         Err(other) => panic!("expected an invalid path error, got {other:?}"),
@@ -352,7 +353,7 @@ async fn an_unreadable_geometry_marker_fails_startup() {
     match FoyerStoredMetadataBlockCache::open(&test_config(temp_dir.path()), &NoopMetricsRecorder)
         .await
     {
-        Err(ServerConfigError::InvalidField { field, reason }) => {
+        Err(ServerConfigError::Field(ConfigFieldError::Invalid { field, reason })) => {
             assert_eq!(field, "local_cache.path");
             assert!(reason.contains("failed to read"), "{reason}");
         }

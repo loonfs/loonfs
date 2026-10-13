@@ -233,6 +233,9 @@ pub fn genesis_commit_id() -> CommitId {
 }
 
 /// Staging progress for a service-proxied upload.
+///
+/// The braces on `Idle` and `Claimed` make serde reject a stray field; a
+/// unit variant would silently accept and discard one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProxiedStaging {

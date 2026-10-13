@@ -15,7 +15,7 @@ use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
+    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
 };
 use thiserror::Error;
@@ -325,6 +325,12 @@ impl MetadataProjectionLoadError {
             Self::WalReplay { .. } => ErrorCode::NamespaceCorrupt,
             Self::ManifestLoad(error) => error.code(),
         }
+    }
+}
+
+impl From<PathError> for CoreError {
+    fn from(error: PathError) -> Self {
+        Self::InvalidPath(error.invalid_path_input().to_owned())
     }
 }
 

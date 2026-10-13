@@ -11,11 +11,8 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_types::{
-    AbsolutePath, ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, Subject,
-    SubjectId,
-};
-use std::collections::BTreeSet;
+use loonfs_objectstore::crypto::constant_time_eq;
+use loonfs_types::{AbsolutePath, ActorId, NamespaceId, Subject, SubjectPart, SubjectPartsError};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -59,16 +56,6 @@ pub(super) fn authorize(policy: &AuthPolicy, headers: &HeaderMap) -> Result<(), 
             "missing or invalid bearer token",
         ))
     }
-}
-
-/// Compares token bytes without short-circuiting on the first mismatch, so
-/// response timing does not narrow down the token byte by byte. Length is
-/// still observable; token values are not.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[derive(Debug)]
@@ -125,55 +112,40 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let invalid = |header: &str, message: String| {
-            ApiResponseError::new(ErrorCode::InvalidRequest, &message).with_param(header)
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()))
         };
-        let Some(value) = parts.headers.get("Loonfs-Principals") else {
-            if parts.headers.contains_key("Loonfs-Subject")
-                || parts.headers.contains_key("Loonfs-Principal-Scope")
-            {
-                return Err(invalid(
-                    "Loonfs-Principals",
-                    "missing required header Loonfs-Principals".to_owned(),
-                ));
-            }
-            return Ok(Self(None));
-        };
-        let value = String::from_utf8_lossy(value.as_bytes());
-        let principals = value
-            .split(',')
-            .map(PrincipalId::parse)
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
-        let principals = PrincipalSet::new(principals)
-            .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
-        let principal_scope = parts.headers.get("Loonfs-Principal-Scope").ok_or_else(|| {
-            invalid(
-                "Loonfs-Principal-Scope",
-                "missing required header Loonfs-Principal-Scope".to_owned(),
-            )
-        })?;
-        let principal_scope = String::from_utf8_lossy(principal_scope.as_bytes());
-        let principal_scope = PrincipalScope::parse(&principal_scope)
-            .map_err(|error| invalid("Loonfs-Principal-Scope", error.to_string()))?;
-        let (header, value) = if let Some(value) = parts.headers.get("Loonfs-Subject") {
-            ("Loonfs-Subject", value)
-        } else if let Some(value) = parts.headers.get("Loonfs-Actor") {
-            ("Loonfs-Actor", value)
-        } else {
-            return Err(invalid(
-                "Loonfs-Subject",
-                "missing required header Loonfs-Subject".to_owned(),
-            ));
-        };
-        let value = String::from_utf8_lossy(value.as_bytes());
-        let subject_id =
-            SubjectId::parse(&value).map_err(|error| invalid(header, error.to_string()))?;
-        Ok(Self(Some(Subject {
-            principal_scope,
-            subject_id,
-            principals,
-        })))
+        Subject::from_parts(
+            header("Loonfs-Principal-Scope").as_deref(),
+            header("Loonfs-Subject").as_deref(),
+            header("Loonfs-Actor").as_deref(),
+            header("Loonfs-Principals").as_deref(),
+        )
+        .map(Self)
+        .map_err(|error| {
+            let (part, message) = match error {
+                SubjectPartsError::Missing { part, .. } => (
+                    part,
+                    format!("missing required header {}", subject_header(part)),
+                ),
+                SubjectPartsError::Invalid { part, message } => (part, message),
+                other => (SubjectPart::Principals, other.to_string()),
+            };
+            ApiResponseError::new(ErrorCode::InvalidRequest, &message)
+                .with_param(subject_header(part))
+        })
+    }
+}
+
+fn subject_header(part: SubjectPart) -> &'static str {
+    match part {
+        SubjectPart::Principals => "Loonfs-Principals",
+        SubjectPart::PrincipalScope => "Loonfs-Principal-Scope",
+        SubjectPart::SubjectId => "Loonfs-Subject",
+        SubjectPart::ActorId => "Loonfs-Actor",
     }
 }
 

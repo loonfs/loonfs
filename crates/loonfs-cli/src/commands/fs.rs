@@ -464,13 +464,13 @@ pub(crate) async fn run_filesystem_get(
                 ))
             }
             Some(destination) => PathBuf::from(destination),
-            None => destination_path_for_get(spec.absolute_path().as_str(), None)
+            None => destination_path_for_get(spec.absolute_path(), None)
                 .map_err(|error| context.fail(kind, error))?,
         };
         return recursive::run_get_tree(
             kind,
             &context,
-            spec.absolute_path().as_str(),
+            spec.absolute_path(),
             &local_root,
             destination_behavior(args.force),
             runtime,
@@ -508,11 +508,9 @@ pub(crate) async fn run_filesystem_get(
     } else {
         DestinationName::Given
     };
-    let destination = destination_path_for_get(
-        spec.absolute_path().as_str(),
-        args.local_destination.as_deref(),
-    )
-    .map_err(|error| context.fail(kind, error))?;
+    let destination =
+        destination_path_for_get(spec.absolute_path(), args.local_destination.as_deref())
+            .map_err(|error| context.fail(kind, error))?;
     let (mut download, meta) = open_resumable_download(
         &context,
         &spec,
@@ -870,7 +868,7 @@ pub(crate) async fn run_filesystem_put(
             kind,
             &context,
             &local_path,
-            remote_root.as_str(),
+            &remote_root,
             destination_behavior(args.force),
             args.commit.message.clone(),
             runtime,
@@ -1553,8 +1551,8 @@ async fn run_filesystem_transfer(
             return recursive::run_copy_tree(
                 kind,
                 &context,
-                from.absolute_path().as_str(),
-                to.absolute_path().as_str(),
+                from.absolute_path(),
+                to.absolute_path(),
                 destination_behavior(args.force),
                 args.commit.message.clone(),
                 runtime,

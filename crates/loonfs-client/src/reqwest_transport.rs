@@ -4,6 +4,7 @@ use crate::transport::IO_INACTIVITY_TIMEOUT;
 use crate::{Body, ClientConfig, ClientError, Result, TransportError};
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
+use loonfs_types::config::ConfigFieldError;
 use std::fs;
 use tower::{Service, ServiceExt as _};
 
@@ -16,12 +17,12 @@ pub(crate) fn service(
     for certificate in extra_root_certificates(config)? {
         builder = builder.add_root_certificate(certificate);
     }
-    let client = builder
-        .build()
-        .map_err(|err| ClientError::ConfigValidation {
+    let client = builder.build().map_err(|err| {
+        ClientError::ConfigField(ConfigFieldError::Invalid {
             field: "http_client",
             reason: format!("failed to build: {err}"),
-        })?;
+        })
+    })?;
     Ok(tower::service_fn(move |request: Request<Body>| {
         let client = client.clone();
         async move {
@@ -60,21 +61,23 @@ fn extra_root_certificates(config: &ClientConfig) -> Result<Vec<reqwest::Certifi
         return Ok(Vec::new());
     };
     let path = path.trim();
-    let pem = fs::read(path).map_err(|err| ClientError::ConfigValidation {
-        field: "ca_cert_path",
-        reason: format!("failed to read `{path}`: {err}"),
+    let pem = fs::read(path).map_err(|err| {
+        ClientError::ConfigField(ConfigFieldError::Invalid {
+            field: "ca_cert_path",
+            reason: format!("failed to read `{path}`: {err}"),
+        })
     })?;
     let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|err| {
-        ClientError::ConfigValidation {
+        ClientError::ConfigField(ConfigFieldError::Invalid {
             field: "ca_cert_path",
             reason: format!("`{path}` is not a PEM certificate bundle: {err}"),
-        }
+        })
     })?;
     if certificates.is_empty() {
-        return Err(ClientError::ConfigValidation {
+        return Err(ClientError::ConfigField(ConfigFieldError::Invalid {
             field: "ca_cert_path",
             reason: format!("`{path}` holds no CERTIFICATE section"),
-        });
+        }));
     }
     Ok(certificates)
 }

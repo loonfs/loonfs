@@ -1,8 +1,8 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use loonfs_client::{ClientConfig, ClientError};
-use loonfs_objectstore::StoreConfigError;
+use loonfs_client::ClientConfig;
+use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
 use loonfs_types::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use serde::{Deserialize, Serialize};
@@ -212,7 +212,7 @@ impl ProfileConfig {
                 validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
                 store
                     .validate()
-                    .map_err(|error| profile_store_error(name, &error))
+                    .map_err(|error| profile_field_error(name, &error))
             }
             ProfileConfig::Remote {
                 server_url,
@@ -249,7 +249,7 @@ impl ProfileConfig {
             }
             store
                 .validate()
-                .map_err(|error| profile_store_error(name, &error))?;
+                .map_err(|error| profile_field_error(name, &error))?;
         }
         Ok(())
     }
@@ -322,16 +322,15 @@ fn validate_profile_default_namespace(
     Ok(())
 }
 
-/// Adds the profile name to a store validation error.
-fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
+/// Reports a store or client config field failure under the profile's path.
+fn profile_field_error(profile_name: &str, error: &ConfigFieldError) -> CliError {
+    let field = profile_field(profile_name, error.field());
     match error {
-        StoreConfigError::MissingField { field } => {
-            CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
+        ConfigFieldError::Missing { .. } => CliError::invalid_config(format!("missing `{field}`")),
+        ConfigFieldError::Invalid { reason, .. } => {
+            CliError::invalid_config(format!("invalid `{field}`: {reason}"))
         }
-        StoreConfigError::InvalidField { field, reason } => {
-            CliError::invalid_config(format!("invalid `{profile_name}.{field}`: {reason}"))
-        }
-        error => CliError::invalid_config(format!("invalid `{profile_name}.store`: {error}")),
+        error => CliError::invalid_config(format!("invalid `{field}`: {error}")),
     }
 }
 
@@ -402,7 +401,7 @@ fn default_config_location() -> Result<ConfigLocation, CliError> {
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
-    validate_non_empty("profile name", name)
+    Ok(validate_non_empty("profile name", name)?)
 }
 
 fn profile_field(name: &str, field: &str) -> String {
@@ -679,13 +678,6 @@ fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value 
     }
 }
 
-fn validate_non_empty(field: &str, value: &str) -> Result<(), CliError> {
-    if value.trim().is_empty() {
-        return Err(CliError::invalid_config(format!("missing `{field}`")));
-    }
-    Ok(())
-}
-
 fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> {
     NamespaceId::parse(value)
         .map(|_| ())
@@ -753,16 +745,9 @@ fn validate_stored_remote_client_config(
 }
 
 fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<(), CliError> {
-    config.validate().map_err(|error| match error {
-        ClientError::MissingConfigField { field } => {
-            CliError::invalid_config(format!("missing `{}`", profile_field(profile_name, field)))
-        }
-        ClientError::ConfigValidation { field, reason } => CliError::invalid_config(format!(
-            "invalid `{}`: {reason}",
-            profile_field(profile_name, field)
-        )),
-        error => CliError::invalid_config(error.to_string()),
-    })
+    config
+        .validate()
+        .map_err(|error| profile_field_error(profile_name, &error))
 }
 
 #[cfg(test)]

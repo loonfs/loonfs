@@ -15,11 +15,9 @@ use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::{
-    ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
-    SubjectId,
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, Subject, SubjectId,
+    SubjectPart, SubjectPartsError,
 };
-use sha2::Digest as _;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
@@ -90,96 +88,100 @@ pub(crate) fn resolve_subject(
     explicit_principals: Option<&str>,
 ) -> Result<Option<Subject>, CliError> {
     let environment_principals = non_empty_env(PRINCIPALS_ENV);
-    let (name, principals) = if let Some(value) = explicit_principals {
-        ("--principals", Some(value))
-    } else {
-        (PRINCIPALS_ENV, environment_principals.as_deref())
-    };
-    let (name, principals) = match principals {
-        Some(value) => (
-            name,
-            value
-                .split(',')
-                .map(|value| {
-                    PrincipalId::parse(value).map_err(|error| {
-                        named_cli_input_error(name, format!("invalid `{name}`: {error}"))
-                    })
-                })
-                .collect::<Result<BTreeSet<_>, _>>()?,
-        ),
-        None => (
-            "principals",
-            profile
-                .principals()
-                .unwrap_or_default()
-                .into_iter()
-                .collect(),
-        ),
-    };
-    let principals = PrincipalSet::new(principals)
-        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?;
+    let profile_principals = profile
+        .principals()
+        .filter(|principals| !principals.is_empty())
+        .map(|principals| {
+            principals
+                .iter()
+                .map(PrincipalId::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+    let (principals_source, principals) = first_subject_part(
+        explicit_principals,
+        environment_principals.as_deref(),
+        profile_principals.as_deref(),
+    );
     let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
-    let (scope_name, principal_scope) = if let Some(value) = explicit_principal_scope {
-        ("--principal-scope", Some(value))
-    } else if let Some(value) = environment_principal_scope.as_deref() {
-        (PRINCIPAL_SCOPE_ENV, Some(value))
-    } else {
-        ("principal_scope", None)
+    let profile_principal_scope = profile.principal_scope();
+    let (principal_scope_source, principal_scope) = first_subject_part(
+        explicit_principal_scope,
+        environment_principal_scope.as_deref(),
+        profile_principal_scope.as_ref().map(PrincipalScope::as_str),
+    );
+    let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
+    let profile_subject_id_with_principals = profile.subject_id().filter(|_| principals.is_some());
+    let (subject_id_source, subject_id) = first_subject_part(
+        explicit_subject_id.map(SubjectId::as_str),
+        environment_subject_id.as_deref(),
+        profile_subject_id_with_principals
+            .as_ref()
+            .map(SubjectId::as_str),
+    );
+    let source = |part| match part {
+        SubjectPart::Principals => principals_source,
+        SubjectPart::PrincipalScope => principal_scope_source,
+        SubjectPart::SubjectId => subject_id_source,
+        SubjectPart::ActorId => SubjectSource::Profile,
     };
-    let principal_scope = match principal_scope {
-        Some(value) => Some(PrincipalScope::parse(value).map_err(|error| {
-            named_cli_input_error(scope_name, format!("invalid `{scope_name}`: {error}"))
-        })?),
-        None => profile.principal_scope(),
-    };
-    let principal_scope = match (principal_scope, principals.is_empty()) {
-        (Some(_), true) => {
-            let required = match scope_name {
-                "--principal-scope" => "--principals",
-                PRINCIPAL_SCOPE_ENV => PRINCIPALS_ENV,
-                _ => "principals",
-            };
-            return Err(named_cli_input_error(
-                required,
-                format!("`{required}` is required with `{scope_name}`"),
-            ));
-        }
-        (None, false) => {
-            let required = match name {
-                "--principals" => "--principal-scope",
-                PRINCIPALS_ENV => PRINCIPAL_SCOPE_ENV,
-                _ => "principal_scope",
-            };
-            return Err(named_cli_input_error(
-                required,
-                format!("`{required}` is required with `{name}`"),
-            ));
-        }
-        (Some(principal_scope), false) => principal_scope,
-        (None, true) => return Ok(None),
-    };
-    let subject_id = if let Some(subject_id) = explicit_subject_id {
-        subject_id.clone()
-    } else if let Some(value) = non_empty_env(SUBJECT_ID_ENV) {
-        SubjectId::parse(&value).map_err(|error| {
-            named_cli_input_error(
-                SUBJECT_ID_ENV,
-                format!("invalid `{SUBJECT_ID_ENV}`: {error}"),
-            )
-        })?
-    } else {
-        match profile.subject_id() {
-            Some(subject_id) => subject_id,
-            None => SubjectId::parse(actor_id.as_str()).map_err(|error| {
-                named_cli_input_error("subject_id", format!("invalid subject_id: {error}"))
-            })?,
-        }
-    };
-    Ok(Some(Subject {
+    Subject::from_parts(
         principal_scope,
         subject_id,
+        Some(actor_id.as_str()),
         principals,
-    }))
+    )
+    .map_err(|error| match error {
+        SubjectPartsError::Missing { part, required_by } => {
+            let required = subject_part_name(part, source(required_by));
+            let present = subject_part_name(required_by, source(required_by));
+            named_cli_input_error(
+                required,
+                format!("`{required}` is required with `{present}`"),
+            )
+        }
+        SubjectPartsError::Invalid { part, message } => {
+            let name = subject_part_name(part, source(part));
+            named_cli_input_error(name, format!("invalid `{name}`: {message}"))
+        }
+        other => CliError::invalid_request(other.to_string()),
+    })
+}
+
+/// Where one part of the subject came from, which decides the name an
+/// error gives it.
+#[derive(Debug, Clone, Copy)]
+enum SubjectSource {
+    Flag,
+    Environment,
+    Profile,
+}
+
+/// Returns the first present value among the flag, the environment, and the
+/// profile, with where it came from.
+fn first_subject_part<'a>(
+    flag: Option<&'a str>,
+    environment: Option<&'a str>,
+    profile: Option<&'a str>,
+) -> (SubjectSource, Option<&'a str>) {
+    match (flag, environment) {
+        (Some(value), _) => (SubjectSource::Flag, Some(value)),
+        (None, Some(value)) => (SubjectSource::Environment, Some(value)),
+        (None, None) => (SubjectSource::Profile, profile),
+    }
+}
+
+fn subject_part_name(part: SubjectPart, source: SubjectSource) -> &'static str {
+    match (part, source) {
+        (SubjectPart::Principals, SubjectSource::Flag) => "--principals",
+        (SubjectPart::Principals, SubjectSource::Environment) => PRINCIPALS_ENV,
+        (SubjectPart::PrincipalScope, SubjectSource::Flag) => "--principal-scope",
+        (SubjectPart::PrincipalScope, SubjectSource::Environment) => PRINCIPAL_SCOPE_ENV,
+        (SubjectPart::SubjectId, SubjectSource::Flag) => "--subject-id",
+        (SubjectPart::SubjectId, SubjectSource::Environment) => SUBJECT_ID_ENV,
+        (SubjectPart::ActorId, _) => SubjectPart::SubjectId.as_str(),
+        (_, SubjectSource::Profile) => part.as_str(),
+    }
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {
@@ -291,11 +293,10 @@ impl ResolvedTarget {
             no_retry,
         )
         .await?;
-        target.journal_identity =
-            loonfs_types::format::hex::hex_encode_bytes(&sha2::Sha256::digest(
-                &serde_json::to_vec(store_config)
-                    .map_err(|error| CliError::invalid_config(error.to_string()))?,
-            ));
+        target.journal_identity = loonfs_types::sha256_hex(
+            &serde_json::to_vec(store_config)
+                .map_err(|error| CliError::invalid_config(error.to_string()))?,
+        );
         Ok(target)
     }
 

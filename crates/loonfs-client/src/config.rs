@@ -3,6 +3,7 @@
 
 use crate::{ClientError, Result};
 use http::Uri;
+use loonfs_types::config::{validate_absolute_http_url, ConfigFieldError};
 use loonfs_types::SecretString;
 use serde::Deserialize;
 use std::fs;
@@ -66,31 +67,31 @@ impl ClientConfig {
     /// Validates field invariants. [`Self::load`] and
     /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
     /// config and a directly built one cannot diverge in what they accept.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
             if token.is_blank() {
-                return Err(ClientError::ConfigValidation {
+                return Err(ConfigFieldError::Invalid {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),
                 });
             }
             if server_uri.scheme_str() == Some("http") && !is_literal_loopback_host(&server_uri) {
-                return Err(ClientError::ConfigValidation {
+                return Err(ConfigFieldError::Invalid {
                     field: "server_url",
                     reason: "bearer tokens require https except for loopback http URLs".to_owned(),
                 });
             }
         }
         if self.request_timeout_ms == Some(0) {
-            return Err(ClientError::ConfigValidation {
+            return Err(ConfigFieldError::Invalid {
                 field: "request_timeout_ms",
                 reason: "must be greater than zero; omit it for built-in deadlines only".to_owned(),
             });
         }
         if let Some(path) = &self.ca_cert_path {
             if path.trim().is_empty() {
-                return Err(ClientError::ConfigValidation {
+                return Err(ConfigFieldError::Invalid {
                     field: "ca_cert_path",
                     reason: "must not be empty; omit it to trust only the platform roots"
                         .to_owned(),
@@ -99,46 +100,6 @@ impl ClientConfig {
         }
         Ok(())
     }
-}
-
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<Uri> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ClientError::MissingConfigField { field });
-    }
-
-    let uri: Uri =
-        trimmed
-            .parse()
-            .map_err(|err: http::uri::InvalidUri| ClientError::ConfigValidation {
-                field,
-                reason: err.to_string(),
-            })?;
-
-    match uri.scheme_str() {
-        Some("http" | "https") => {}
-        Some(other) => {
-            return Err(ClientError::ConfigValidation {
-                field,
-                reason: format!("scheme must be http or https, got `{other}`"),
-            });
-        }
-        None => {
-            return Err(ClientError::ConfigValidation {
-                field,
-                reason: "must be an absolute http or https URL".to_owned(),
-            });
-        }
-    }
-
-    if uri.authority().is_none() {
-        return Err(ClientError::ConfigValidation {
-            field,
-            reason: "must be an absolute http or https URL".to_owned(),
-        });
-    }
-
-    Ok(uri)
 }
 
 fn is_literal_loopback_host(uri: &Uri) -> bool {
@@ -201,7 +162,7 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    ClientError::ConfigValidation {
+                    ConfigFieldError::Invalid {
                         field: "server_url",
                         ref reason,
                     } if reason == "bearer tokens require https except for loopback http URLs"

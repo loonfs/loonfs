@@ -700,10 +700,10 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                super::ClientError::ConfigValidation {
+                super::ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
                     field: "server_url",
                     ..
-                }
+                })
             ),
             "unexpected error: {error:?}"
         );
@@ -748,10 +748,12 @@ mod tests {
             })
             .expect_err("unusable ca bundle");
             match &error {
-                super::ClientError::ConfigValidation {
-                    field: "ca_cert_path",
-                    reason,
-                } => assert!(
+                super::ClientError::ConfigField(
+                    loonfs_types::config::ConfigFieldError::Invalid {
+                        field: "ca_cert_path",
+                        reason,
+                    },
+                ) => assert!(
                     reason.contains(&display),
                     "the reason must name the path, got: {reason}"
                 ),
@@ -1244,7 +1246,7 @@ auth_token = "   "
         let error = ClientConfig::load(&path).expect_err("blank auth token");
 
         assert!(
-            matches!(error, ClientError::ConfigValidation { field, .. } if field == "auth_token"),
+            matches!(error, ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid { field, .. }) if field == "auth_token"),
             "expected config validation error, got {error:?}"
         );
     }

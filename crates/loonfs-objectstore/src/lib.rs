@@ -53,6 +53,6 @@ pub use provider_object_store::{
     PROVIDER_PUBLICATION_REQUEST_BOUND, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use store_config::{
-    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, StoreConfigError,
-    ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, ACCESS_KEY_ID_ENV,
+    SECRET_ACCESS_KEY_ENV,
 };

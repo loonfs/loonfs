@@ -247,7 +247,7 @@ pub fn verify_content_token(
         .map_err(|_| ContentTokenError::Malformed)?;
     let expected_signature =
         loonfs_objectstore::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
-    if !constant_time_eq(&actual_signature, &expected_signature) {
+    if !loonfs_objectstore::crypto::constant_time_eq(&actual_signature, &expected_signature) {
         return Err(ContentTokenError::BadSignature);
     }
 
@@ -280,17 +280,6 @@ pub fn verify_content_token(
 
 fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let diff = left
-        .iter()
-        .zip(right)
-        .fold(0_u8, |acc, (left, right)| acc | (*left ^ *right));
-    diff == 0
 }
 
 #[cfg(test)]

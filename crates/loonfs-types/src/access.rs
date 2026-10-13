@@ -8,6 +8,7 @@ use crate::ids::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::str::FromStr;
 use thiserror::Error;
 
 const MAX_PRINCIPAL_ID_BYTES: usize = 256;
@@ -55,6 +56,125 @@ pub struct Subject {
     pub subject_id: SubjectId,
     /// Principals whose grants apply to the request.
     pub principals: PrincipalSet,
+}
+
+impl Subject {
+    /// Builds the subject a request acts as from its four parts, or returns
+    /// `None` when no part is present and the request acts with service
+    /// authority.
+    ///
+    /// Principals are required with a principal scope or a subject id, and a
+    /// principal scope is required with principals. The subject id defaults
+    /// to the actor id, which must then also be a valid subject id. The parts
+    /// are checked in that order, so every surface reports the same first
+    /// failure under its own name for the part.
+    pub fn from_parts(
+        principal_scope: Option<&str>,
+        subject_id: Option<&str>,
+        actor_id: Option<&str>,
+        principals: Option<&str>,
+    ) -> Result<Option<Self>, SubjectPartsError> {
+        let Some(principals) = principals else {
+            let required_by = match (principal_scope, subject_id) {
+                (Some(_), _) => SubjectPart::PrincipalScope,
+                (None, Some(_)) => SubjectPart::SubjectId,
+                (None, None) => return Ok(None),
+            };
+            return Err(SubjectPartsError::Missing {
+                part: SubjectPart::Principals,
+                required_by,
+            });
+        };
+        let principals = principals
+            .parse::<PrincipalSet>()
+            .map_err(|error| SubjectPartsError::invalid(SubjectPart::Principals, &error))?;
+        let principal_scope = principal_scope.ok_or(SubjectPartsError::Missing {
+            part: SubjectPart::PrincipalScope,
+            required_by: SubjectPart::Principals,
+        })?;
+        let principal_scope = PrincipalScope::parse(principal_scope)
+            .map_err(|error| SubjectPartsError::invalid(SubjectPart::PrincipalScope, &error))?;
+        let subject_id = match (subject_id, actor_id) {
+            (Some(subject_id), _) => SubjectId::parse(subject_id)
+                .map_err(|error| SubjectPartsError::invalid(SubjectPart::SubjectId, &error))?,
+            (None, Some(actor_id)) => SubjectId::parse(actor_id)
+                .map_err(|error| SubjectPartsError::invalid(SubjectPart::ActorId, &error))?,
+            (None, None) => {
+                return Err(SubjectPartsError::Missing {
+                    part: SubjectPart::SubjectId,
+                    required_by: SubjectPart::Principals,
+                })
+            }
+        };
+        Ok(Some(Self {
+            principal_scope,
+            subject_id,
+            principals,
+        }))
+    }
+}
+
+/// One part of the subject a request acts as. Each surface names a part
+/// after its own input: a header, a flag, or an environment variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectPart {
+    /// The comma-separated principal ids.
+    Principals,
+    /// The identity domain the principals belong to.
+    PrincipalScope,
+    /// The stable subject id.
+    SubjectId,
+    /// The actor id, which stands in for an absent subject id.
+    ActorId,
+}
+
+impl SubjectPart {
+    /// Returns the part's field name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Principals => "principals",
+            Self::PrincipalScope => "principal_scope",
+            Self::SubjectId => "subject_id",
+            Self::ActorId => "actor_id",
+        }
+    }
+}
+
+impl fmt::Display for SubjectPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Why the parts of a request do not form a subject.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum SubjectPartsError {
+    /// A part is absent, and another present part requires it.
+    #[error("`{part}` is required with `{required_by}`")]
+    Missing {
+        /// The absent part.
+        part: SubjectPart,
+        /// The present part that requires it.
+        required_by: SubjectPart,
+    },
+    /// A part is present but does not parse.
+    #[error("invalid `{part}`: {message}")]
+    Invalid {
+        /// The part that does not parse.
+        part: SubjectPart,
+        /// The parse failure for the part's value.
+        message: String,
+    },
+}
+
+impl SubjectPartsError {
+    fn invalid(part: SubjectPart, error: &dyn std::error::Error) -> Self {
+        Self::Invalid {
+            part,
+            message: error.to_string(),
+        }
+    }
 }
 
 validation_error!(
@@ -464,6 +584,34 @@ impl TryFrom<BTreeSet<PrincipalId>> for PrincipalSet {
     }
 }
 
+impl FromStr for PrincipalSet {
+    type Err = PrincipalSetError;
+
+    /// Parses comma-separated principal ids, the form the `Loonfs-Principals`
+    /// header and the CLI use. A repeated id counts once.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let principals = value
+            .split(',')
+            .map(PrincipalId::parse)
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        Self::new(principals)
+    }
+}
+
+impl fmt::Display for PrincipalSet {
+    /// Writes the ids comma-separated in principal order, the form
+    /// [`PrincipalSet::from_str`] reads.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, principal_id) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(",")?;
+            }
+            formatter.write_str(principal_id.as_str())?;
+        }
+        Ok(())
+    }
+}
+
 /// Why a request's principal set was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -474,6 +622,9 @@ pub enum PrincipalSetError {
         /// Number of identities the rejected set held.
         principals: usize,
     },
+    /// One of the ids is not a valid principal id.
+    #[error(transparent)]
+    InvalidPrincipalId(#[from] PrincipalIdValidationError),
 }
 
 #[cfg(test)]

@@ -335,13 +335,13 @@ pub(crate) fn default_remote_put_path(local_path: &Path) -> Result<AbsolutePath,
 }
 
 pub(crate) fn destination_path_for_get(
-    remote_path: &str,
+    remote_path: &AbsolutePath,
     explicit_destination: Option<&str>,
 ) -> Result<PathBuf, CliError> {
     let remote_leaf = || {
-        Path::new(remote_path)
-            .file_name()
-            .map(PathBuf::from)
+        remote_path
+            .final_component()
+            .map(|component| PathBuf::from(component.as_str()))
             .ok_or_else(|| {
                 CliError::invalid_request(format!(
                     "unable to derive local destination from `{remote_path}`"

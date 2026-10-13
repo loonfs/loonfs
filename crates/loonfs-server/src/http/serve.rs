@@ -20,6 +20,7 @@ use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
 use loonfs_http::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
+use loonfs_types::config::ConfigFieldError;
 use std::ffi::OsString;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
@@ -307,9 +308,11 @@ pub(super) async fn build_handles(
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
-    let invalid_runtime = |error: loonfs::Error| ServerConfigError::InvalidField {
-        field: "runtime",
-        reason: error.to_string(),
+    let invalid_runtime = |error: loonfs::Error| {
+        ServerConfigError::Field(ConfigFieldError::Invalid {
+            field: "runtime",
+            reason: error.to_string(),
+        })
     };
 
     let mut builder = LoonFs::builder_with_store(store.clone())
@@ -336,9 +339,11 @@ pub(super) async fn build_handles(
     }
     let runtime = builder.build().await.map_err(invalid_runtime)?;
     let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", config.writer_id))
-        .map_err(|error| ServerConfigError::InvalidField {
-            field: "writer_id",
-            reason: error.to_string(),
+        .map_err(|error| {
+            ServerConfigError::Field(ConfigFieldError::Invalid {
+                field: "writer_id",
+                reason: error.to_string(),
+            })
         })?;
     let maintenance = runtime.maintenance(maintenance_writer_id);
 
@@ -357,9 +362,11 @@ fn object_store_metrics_recorder(
     let path = std::path::PathBuf::from(path);
     JsonlObjectStoreMetricsRecorder::create(&path)
         .map(|recorder| Some(Arc::new(recorder) as Arc<dyn ObjectStoreMetricsRecorder>))
-        .map_err(|error| ServerConfigError::InvalidField {
-            field: OBJECT_STORE_METRICS_JSONL_ENV,
-            reason: error.to_string(),
+        .map_err(|error| {
+            ServerConfigError::Field(ConfigFieldError::Invalid {
+                field: OBJECT_STORE_METRICS_JSONL_ENV,
+                reason: error.to_string(),
+            })
         })
 }
 
@@ -414,9 +421,11 @@ pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
         let path = std::path::Path::new(local_cache.path.trim());
         std::fs::create_dir_all(path)
             .and_then(|()| tempfile::tempfile_in(path))
-            .map_err(|error| ServerConfigError::InvalidField {
-                field: "local_cache.path",
-                reason: format!("cannot write to `{}`: {error}", path.display()),
+            .map_err(|error| {
+                ServerConfigError::Field(ConfigFieldError::Invalid {
+                    field: "local_cache.path",
+                    reason: format!("cannot write to `{}`: {error}", path.display()),
+                })
             })?;
     }
     Ok(())

@@ -262,8 +262,7 @@ impl ReadView {
                 self.head_seq(),
                 self.pin_id(),
             )?;
-            let listed_path = AbsolutePath::parse(absolute_path)
-                .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+            let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
             let mut page = self
                 .engine
                 .list_path_page(listed_path.as_str(), request, options, &self.context)
@@ -882,8 +881,7 @@ impl<M: crate::Mode> Namespace<M> {
         }
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
-        let listed_path = AbsolutePath::parse(absolute_path)
-            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+        let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
             .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
@@ -1475,8 +1473,7 @@ impl<M: crate::Mode> Namespace<M> {
     ) -> Result<ListFileRevisionsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let absolute_path = AbsolutePath::parse(absolute_path)
-            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+        let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
             .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();

@@ -163,11 +163,10 @@ impl Sweep {
     pub(crate) fn start(&self) -> RunningSweep {
         let inner = &self.inner;
         tracing::info!(
-            tick_interval_ms = u64::try_from(inner.tick_interval.as_millis()).unwrap_or(u64::MAX),
+            tick_interval_ms = loonfs_types::saturating_duration_ms(inner.tick_interval),
             maintenance_interval_ms = inner.metadata_retry_interval_ms,
             gc_interval_ms = inner.collection_interval_ms,
-            full_sweep_interval_ms =
-                u64::try_from(inner.full_interval.as_millis()).unwrap_or(u64::MAX),
+            full_sweep_interval_ms = loonfs_types::saturating_duration_ms(inner.full_interval),
             max_concurrent_maintenance = inner.max_concurrent_visits,
             maintains_grep_index = inner.grep.is_some(),
             "maintenance sweep started"
