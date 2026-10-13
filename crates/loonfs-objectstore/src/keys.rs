@@ -232,7 +232,6 @@ mod tests {
                 .replace("{end:020}", "00000000000000000019")
                 .replace("{content_id}", CONTENT_ID)
                 .replace("{temporary_id}", &temporary_id)
-                .replace("{run_id}", PROBE_RUN_ID)
         };
 
         let built = [
@@ -260,10 +259,6 @@ mod tests {
                 super::content_span(&namespace_id(), &content_id(), 2, 19),
             ),
             ("Temporary objects", temporary),
-            (
-                "Store probe scratch prefix",
-                probe_run_prefix(&ProbeRunId::parse(PROBE_RUN_ID).expect("valid probe run id")),
-            ),
         ];
 
         let expected: std::collections::BTreeMap<String, String> = built
