@@ -15,7 +15,7 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec, MetadataMergeReport,
 };
 use super::*;
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
@@ -161,9 +161,15 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
         },
     )
     .await;
-    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance the floor past the deletions");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor past the deletions");
 
     // Above the floor: fresh directories and one more deletion, published as
     // delta runs the job merges with the base.
@@ -252,9 +258,15 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         },
     )
     .await;
-    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance the floor past the renames");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor past the renames");
 
     write_file_bytes(
         store,
@@ -581,6 +593,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         merge_everything_policy(),
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("merge the group whole");
@@ -672,6 +685,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         starving_policy(),
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("budgeted step");
@@ -724,6 +738,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
             policy,
             MetadataCompactionPolicy::SizeTiered,
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("maintenance pass");
@@ -785,6 +800,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("maintenance pass");
@@ -833,6 +849,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("maintenance pass");
@@ -1037,9 +1054,15 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the deletion");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance the floor past the deletion");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor past the deletion");
     // Above the floor: two more revisions of the file that stays.
     for body in ["four", "five"] {
         write_file_bytes(
@@ -1405,9 +1428,15 @@ async fn seed_binding_history(
         },
     )
     .await;
-    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance the floor past the deletions");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor past the deletions");
     write_file_bytes(store, namespace_id, "/late.txt", b"late\n", &context, None)
         .await
         .expect("write a late file");
@@ -1956,7 +1985,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
     assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
     assert!(data_gets * 8 < old_gets);
-    assert!((2..=STORE_READ_WAVE).contains(&store.reads().peak_in_flight));
+    assert!((2..=STORE_READS_IN_FLIGHT).contains(&store.reads().peak_in_flight));
 
     let local = store.inner().inner();
     let mut actual = Vec::new();
@@ -2016,7 +2045,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     assert_eq!(data_gets, iterators.len());
     assert!(decoded_bytes <= max_decoded_input_bytes);
     assert!(decoded_bytes > max_decoded_input_bytes / 2);
-    assert!(store.reads().peak_in_flight <= STORE_READ_WAVE);
+    assert!(store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
 }
 
 #[tokio::test]
@@ -2054,7 +2083,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
 
     let reads = store.reads();
     assert!(
-        reads.peak_in_flight <= STORE_READ_WAVE,
+        reads.peak_in_flight <= STORE_READS_IN_FLIGHT,
         "the job overlapped {} reads at once",
         reads.peak_in_flight
     );
@@ -2113,7 +2142,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     .await
     .expect("merge the window inside a step");
     assert!(
-        store.reads().peak_in_flight <= STORE_READ_WAVE,
+        store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT,
         "the step's merge overlapped {} reads at once",
         store.reads().peak_in_flight
     );
@@ -2298,6 +2327,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("maintenance pass");
@@ -2436,6 +2466,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("maintenance pass");
@@ -2487,6 +2518,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             &spec,
             policy,
             &cancellation,
+            crate::test_support::std_timer(),
         )
         .await
         .expect("run the job");
@@ -2893,9 +2925,13 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace = NamespaceId::parse("fencing").expect("namespace");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
-        .await
-        .expect("claim");
+    let epoch = super::super::compactor::claim_compactor(
+        &store,
+        &namespace,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("claim");
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let input = input_keys_now(&store, &namespace, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
@@ -2914,9 +2950,13 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
     };
-    let next_epoch = super::super::compactor::claim_compactor(&store, &namespace)
-        .await
-        .expect("another claim");
+    let next_epoch = super::super::compactor::claim_compactor(
+        &store,
+        &namespace,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("another claim");
     assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = finalize_metadata_compaction(
@@ -2949,6 +2989,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         merge_everything_policy(),
         MetadataCompactionPolicy::CompactImmediately,
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("bounded fence");
@@ -2961,6 +3002,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         &spec,
         small_segment_policy(),
         &cancellation,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("job fence");
@@ -3037,9 +3079,13 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let namespace = NamespaceId::parse("concurrent-groups").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
-        .await
-        .expect("claim");
+    let epoch = super::super::compactor::claim_compactor(
+        &store,
+        &namespace,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("claim");
     let before = current_manifest_number(&store, &namespace).await;
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let second =
@@ -3144,9 +3190,13 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let namespace = NamespaceId::parse("direct-output").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
-        .await
-        .expect("claim");
+    let epoch = super::super::compactor::claim_compactor(
+        &store,
+        &namespace,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("claim");
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());
@@ -3157,6 +3207,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         &spec,
         small_segment_policy(),
         &MetadataCompactionCancellation::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("publish");
@@ -3220,7 +3271,8 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         epoch,
         &spec,
         small_segment_policy(),
-        &MetadataCompactionCancellation::default()
+        &MetadataCompactionCancellation::default(),
+        crate::test_support::std_timer()
     )
     .await
     .is_err());
@@ -3247,6 +3299,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
             &namespace,
             &options,
             &mutation_context("collector", age_ms),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("collect");

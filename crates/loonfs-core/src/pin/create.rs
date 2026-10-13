@@ -7,7 +7,7 @@ use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::manifest::{try_fold_wal, MetadataRunPolicy, TryFoldWalOutcome};
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::WalPublishError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
@@ -18,6 +18,10 @@ use std::sync::Arc;
 /// format limit.
 const MAX_CHECKPOINT_NAME_CHARS: usize = 128;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pin creation folds first, so it takes the caller's fold policy, cache, write permits, and timer"
+)]
 pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -26,9 +30,10 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<PinPayload> {
     validate_pin_owner(&owner)?;
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(timer);
     let deadline = &deadline;
     let owner = &owner;
     let created = retry_while_contended(|| async move {

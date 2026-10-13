@@ -14,7 +14,7 @@ use crate::manifest::{load_namespace_manifest_envelope_if_present, MetadataSegme
 use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
 use crate::namespace::read_anchor::{load_read_anchor_from_manifest, project_anchor_tail};
 use crate::pin::record::pin_key_ids;
-use crate::time::{Observation, StdMonotonicTimer};
+use crate::time::{MonotonicTimer, Observation};
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
@@ -60,8 +60,9 @@ impl LiveSet {
         namespace_id: &NamespaceId,
         grace_window_ms: u64,
         context: &MutationContext,
+        timer: Arc<dyn MonotonicTimer>,
     ) -> Result<Self> {
-        let observed = Observation::now(Arc::new(StdMonotonicTimer::default()));
+        let observed = Observation::now(timer);
         let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and

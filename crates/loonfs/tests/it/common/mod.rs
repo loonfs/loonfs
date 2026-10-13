@@ -113,11 +113,15 @@ pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<
 }
 
 pub(crate) async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> u64 {
-    loonfs::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .expect("load namespace head")
-        .writer_epoch
-        .0
+    loonfs::control::load_namespace_read_state(
+        store,
+        namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load namespace head")
+    .writer_epoch
+    .0
 }
 
 pub(crate) fn expect_code<T: std::fmt::Debug>(result: loonfs::Result<T>, code: ErrorCode) {

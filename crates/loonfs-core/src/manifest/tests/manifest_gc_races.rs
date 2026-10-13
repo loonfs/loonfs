@@ -71,6 +71,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
                     now_ms: options.grace_window_ms + 1,
                     ..context.clone()
                 },
+                crate::test_support::std_timer(),
             )
             .await
             .expect("collect old manifests");
@@ -186,6 +187,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
                     now_ms: timer.now_ms(),
                     ..context.clone()
                 },
+                timer.clone(),
             )
             .await
             .expect("collect old manifests");

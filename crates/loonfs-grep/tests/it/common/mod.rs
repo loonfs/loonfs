@@ -57,7 +57,7 @@ impl GrepHost {
             store: store.clone(),
             reader: reader.clone(),
             maintenance: maintenance.clone(),
-            service: GrepService::new(Arc::clone(&block_cache)),
+            service: GrepService::new(Arc::clone(&block_cache), reader.monotonic_timer()),
             worker: GrepWorker::new(
                 store.clone(),
                 reader,
@@ -213,9 +213,13 @@ pub(crate) mod control {
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> NamespaceReadState {
-        loonfs::control::load_namespace_read_state(store, namespace_id)
-            .await
-            .expect("namespace state")
+        loonfs::control::load_namespace_read_state(
+            store,
+            namespace_id,
+            std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
+        )
+        .await
+        .expect("namespace state")
     }
 
     pub(crate) async fn metadata_manifest(

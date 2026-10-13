@@ -38,9 +38,8 @@ impl NamespaceReadAnchor {
 pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    observed: crate::time::Observation,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
-    let observed =
-        crate::time::Observation::now(Arc::new(crate::time::StdMonotonicTimer::default()));
     let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
     load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await
 }
@@ -49,8 +48,9 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
 pub async fn load_live_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    observed: crate::time::Observation,
 ) -> CoreResult<NamespaceReadAnchor> {
-    let anchor = load_read_anchor(store, namespace_id).await?;
+    let anchor = load_read_anchor(store, namespace_id, observed).await?;
     crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
     Ok(anchor)
 }

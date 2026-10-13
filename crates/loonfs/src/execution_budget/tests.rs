@@ -14,6 +14,7 @@ use crate::{
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
 use std::num::NonZeroUsize;
@@ -22,7 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 const TWO: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
@@ -156,7 +156,7 @@ fn start_directory(namespace: &Namespace<Writable>) -> JoinHandle<()> {
 }
 
 async fn wait_until(budget: &ExecutionBudget, done: impl Fn(ExecutionBudgetStats) -> bool) {
-    if timeout(Duration::from_secs(10), async {
+    if bounded(Duration::from_secs(10), async {
         while !done(budget.stats()) {
             tokio::task::yield_now().await;
         }
@@ -193,7 +193,7 @@ async fn wait_for_counts(budget: &ExecutionBudget, expected: ExecutionBudgetStat
 
 async fn finish(work: Vec<JoinHandle<()>>) {
     for task in work {
-        timeout(Duration::from_secs(30), task)
+        bounded(Duration::from_secs(30), task)
             .await
             .expect("the work finishes")
             .expect("join the work");
@@ -543,7 +543,7 @@ async fn a_dropped_wait_gives_up_its_place_and_its_count() {
     drop(dropped);
     assert_eq!(budget.stats().folds_waiting, 1);
     drop(held);
-    let kept = timeout(Duration::from_secs(10), kept)
+    let kept = bounded(Duration::from_secs(10), kept)
         .await
         .expect("the wait behind the dropped one takes the permit");
     assert_eq!(

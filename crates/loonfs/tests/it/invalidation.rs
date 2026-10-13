@@ -109,9 +109,13 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
 }
 
 async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> NamespaceReadState {
-    loonfs_core::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .expect("load head")
+    loonfs_core::control::load_namespace_read_state(
+        store,
+        namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load head")
 }
 
 #[tokio::test]

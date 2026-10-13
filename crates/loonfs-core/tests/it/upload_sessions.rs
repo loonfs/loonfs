@@ -413,9 +413,16 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &aged)
-                    .await
-                    .expect("collect aborted session");
+                loonfs_core::gc_namespace(
+                    &store,
+                    None,
+                    &namespace_id,
+                    &options,
+                    &aged,
+                    loonfs_core::test_support::std_timer(),
+                )
+                .await
+                .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
             }
             assert!(store.get(&content_key, None).await.expect("get").is_none());
@@ -433,6 +440,7 @@ mod streamed_content {
             &namespace_id,
             &loonfs_core::GcOptions::default(),
             &aged,
+            loonfs_core::test_support::std_timer(),
         )
         .await
         .expect("repeat GC after late content write");
@@ -507,9 +515,16 @@ mod streamed_content {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &expired)
-                .await
-                .expect("GC aborts expired implicit session");
+            loonfs_core::gc_namespace(
+                &store,
+                None,
+                &namespace_id,
+                &options,
+                &expired,
+                loonfs_core::test_support::std_timer(),
+            )
+            .await
+            .expect("GC aborts expired implicit session");
             let encoded = store
                 .get(&session_key, None)
                 .await
@@ -531,9 +546,16 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &aged)
-                    .await
-                    .expect("forget expired implicit owner");
+                loonfs_core::gc_namespace(
+                    &store,
+                    None,
+                    &namespace_id,
+                    &options,
+                    &aged,
+                    loonfs_core::test_support::std_timer(),
+                )
+                .await
+                .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
             }
             assert!(store.get(&content_key, None).await.expect("get").is_none());
@@ -551,6 +573,7 @@ mod streamed_content {
             &namespace_id,
             &loonfs_core::GcOptions::default(),
             &aged,
+            loonfs_core::test_support::std_timer(),
         )
         .await
         .expect("GC after failed late completion");
@@ -1404,9 +1427,16 @@ mod direct_multipart {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        gc_namespace(&store, None, &session.namespace_id, &options, &expired)
-            .await
-            .expect("garbage collection");
+        gc_namespace(
+            &store,
+            None,
+            &session.namespace_id,
+            &options,
+            &expired,
+            loonfs_core::test_support::std_timer(),
+        )
+        .await
+        .expect("garbage collection");
 
         assert!(matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)

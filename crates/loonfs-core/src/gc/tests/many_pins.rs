@@ -77,6 +77,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         &namespace_id,
         &options(),
         &context(2_000 + GRACE_MS),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("complete pass");

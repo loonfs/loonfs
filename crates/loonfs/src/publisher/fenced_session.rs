@@ -104,7 +104,7 @@ async fn assert_old_handle_refuses_submission(delete: bool) {
     assert_eq!(writer.execution_budget().stats(), before);
     assert_eq!(store.counts(), requests);
     assert_no_work(publisher);
-    timeout(Duration::from_secs(10), writer.shutdown())
+    bounded(Duration::from_secs(10), writer.shutdown())
         .await
         .expect("shutdown completes")
         .expect("shutdown");
@@ -222,7 +222,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
     let engine = publisher.engine.lock().await;
     let mut discovery = Box::pin(discover_fence(&old));
     assert!(futures::poll!(discovery.as_mut()).is_pending());
-    timeout(Duration::from_secs(10), async {
+    bounded(Duration::from_secs(10), async {
         while writer.execution_budget().stats().publications_running != 1 {
             tokio::task::yield_now().await;
         }
@@ -282,7 +282,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
             .to_api_error(),
         first_error.to_api_error()
     );
-    timeout(Duration::from_secs(10), shutdown)
+    bounded(Duration::from_secs(10), shutdown)
         .await
         .expect("shutdown drains queued work")
         .expect("shutdown");

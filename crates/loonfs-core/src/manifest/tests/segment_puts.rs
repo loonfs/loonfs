@@ -136,9 +136,14 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 }
             },
         );
-        let projection = load_manifest_projection(&store, &namespace_id, None)
-            .await
-            .expect("projection");
+        let projection = load_manifest_projection(
+            &store,
+            &namespace_id,
+            None,
+            crate::test_support::observed_now(),
+        )
+        .await
+        .expect("projection");
         let tail_rows = projection.tail_state.merged_rows();
         let expected = MANIFEST_ROW_FAMILIES
             .into_iter()
@@ -248,9 +253,14 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         ConcurrencyWatchStore::new(failing, KeyPredicate::metadata_segment()),
         KeyPredicate::any(),
     );
-    let projection = load_manifest_projection(&store, &namespace_id, None)
-        .await
-        .expect("projection");
+    let projection = load_manifest_projection(
+        &store,
+        &namespace_id,
+        None,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("projection");
     store.reset();
     let result = try_fold_wal_projection(
         &store,

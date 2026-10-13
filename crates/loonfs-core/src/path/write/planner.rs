@@ -1126,6 +1126,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            crate::test_support::std_timer(),
         )
         .await
         .expect("bootstrap a restricted namespace");

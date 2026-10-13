@@ -332,7 +332,7 @@ mod tests {
         .await
         .expect("bootstrap");
         let limit = EffectiveLimit::new(NonZeroU32::MIN);
-        let loaded = load_read_anchor(&store, &namespace_id)
+        let loaded = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
             .await
             .expect("load read basis");
         let context = RuntimeReadContext {

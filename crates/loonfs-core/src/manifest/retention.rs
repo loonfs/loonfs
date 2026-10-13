@@ -5,11 +5,11 @@ use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
 use crate::namespace::state::NamespaceReadState;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -64,7 +64,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
                 None => Err(ManifestLoadError::MissingSegment { object_key }),
             }
         })
-        .buffer_unordered(STORE_READ_WAVE)
+        .buffer_unordered(STORE_READS_IN_FLIGHT)
         .try_collect()
         .await
 }
@@ -74,6 +74,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     target: RetentionTarget,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<AdvanceRetentionResponse> {
     let target_seq = match target {
         RetentionTarget::Head => None,
@@ -82,7 +83,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             Some(last_commit_at_or_before(store, segment_cache, namespace_id, cutoff_at_ms).await?)
         }
     };
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(timer);
     let (floor, _, _) = update_manifest(store, namespace_id, &deadline, |mut payload| async move {
         ensure_namespace_live(&NamespaceReadState::from(&payload))?;
         let target = target_seq.map_or(payload.head_seq, |seq| seq.min(payload.head_seq));

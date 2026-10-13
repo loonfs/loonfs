@@ -25,7 +25,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
@@ -103,8 +103,9 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
     pool: Arc<ReadWorkingMemory>,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<CompactionStepOutcome> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(timer);
     compaction_step_with_deadline(
         store,
         namespace_id,

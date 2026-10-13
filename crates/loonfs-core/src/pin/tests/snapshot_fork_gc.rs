@@ -50,6 +50,7 @@ impl Fixture {
             Default::default(),
             None,
             &content_writes,
+            crate::test_support::std_timer(),
         )
         .await
         .expect("snapshot");
@@ -67,6 +68,7 @@ impl Fixture {
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("replace old runs");
@@ -152,6 +154,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
             &fixture.source,
             &GcOptions::default(),
             &fixture.context,
+            crate::test_support::std_timer(),
         )
         .await
         .expect("old collector keeps its captured snapshot root");
@@ -188,6 +191,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
         &fixture.source,
         &GcOptions::default(),
         &fixture.context,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("new collector keeps the fork root");
@@ -254,6 +258,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
                 &fixture.source,
                 &GcOptions::default(),
                 &fixture.context,
+                crate::test_support::std_timer(),
             )
             .await
             .expect("tentative pin remains a root during verification");
@@ -280,6 +285,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         &fixture.source,
         &GcOptions::default(),
         &fixture.context,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("later collection sees no historical root");
@@ -372,6 +378,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         Default::default(),
         None,
         &content_writes,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("snapshot");

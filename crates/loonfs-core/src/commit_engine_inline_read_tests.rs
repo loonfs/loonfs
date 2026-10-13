@@ -25,7 +25,7 @@ async fn fresh_context(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = load_read_anchor(store, namespace_id)
+    let loaded = load_read_anchor(store, namespace_id, crate::test_support::observed_now())
         .await
         .expect("read basis");
     let basis = loaded.basis();

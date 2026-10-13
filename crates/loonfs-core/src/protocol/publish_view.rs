@@ -169,13 +169,17 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
+    timer: std::sync::Arc<dyn crate::time::MonotonicTimer>,
 ) -> Result<PublishMetadataView<'a, S>> {
     let source = if let Some(anchor) = acquired_anchor {
         ViewSource::Cold(Box::new(anchor))
     } else if let Some(cached) = cached_projection {
         ViewSource::Cached(Box::new(cached))
     } else {
-        ViewSource::Cold(Box::new(load_read_anchor(store, namespace_id).await?))
+        let observed = crate::time::Observation::now(timer);
+        ViewSource::Cold(Box::new(
+            load_read_anchor(store, namespace_id, observed).await?,
+        ))
     };
     let (basis, loaded_basis, head) = match &source {
         ViewSource::Cached(cached) => {

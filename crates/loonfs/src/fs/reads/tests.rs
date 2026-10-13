@@ -11,7 +11,7 @@ use crate::{
     CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
     SharedObjectStore,
 };
-use loonfs_core::test_support::STORE_READ_WAVE;
+use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -272,7 +272,7 @@ async fn compacted_directory_page_overlaps_segment_reads(
         "{concurrency:?}; read_started_at_ms={read_started_at_ms:?}"
     );
     assert!(
-        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
         "{concurrency:?}"
     );
     let serial_ms = touched as u128 * latency.as_millis();

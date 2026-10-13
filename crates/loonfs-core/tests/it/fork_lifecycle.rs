@@ -137,6 +137,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         &source,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("collect source before fork");
@@ -175,6 +176,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         &source,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("collect source past grace window");
@@ -318,7 +320,7 @@ async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> loonfs_core::control::NamespaceReadState {
-    load_namespace_read_state(store, namespace_id)
+    load_namespace_read_state(store, namespace_id, loonfs_core::test_support::std_timer())
         .await
         .expect("load head")
 }
@@ -362,9 +364,13 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         root_entry.inode_kind(),
         loonfs_types::EntryInodeKind::Directory
     );
-    let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
-        .await
-        .expect("status");
+    let status = loonfs_core::cache::load_namespace_diagnostics(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -412,9 +418,13 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
             .bytes,
         b"hello"
     );
-    let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
-        .await
-        .expect("status after fold");
+    let status = loonfs_core::cache::load_namespace_diagnostics(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("status after fold");
     assert_eq!(status.current_manifest_no, ManifestNo(3));
 }
 
@@ -866,6 +876,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         &ancestor,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("collect ancestor");
@@ -878,56 +889,107 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         b"base"
     );
     let options = loonfs_core::GcOptions::default();
-    let parent_deadline = load_namespace_read_state(&store, &parent)
-        .await
-        .expect("parent tombstone")
-        .status
-        .deleted_at_ms()
-        .expect("deletion stamp")
-        + options
-            .grace_window_ms
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
-    let parent_waiting = loonfs_core::gc_namespace(&store, None, &parent, &options, &aged)
-        .await
-        .expect("parent waits");
+    let parent_deadline =
+        load_namespace_read_state(&store, &parent, loonfs_core::test_support::std_timer())
+            .await
+            .expect("parent tombstone")
+            .status
+            .deleted_at_ms()
+            .expect("deletion stamp")
+            + options
+                .grace_window_ms
+                .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+    let parent_waiting = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &parent,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("parent waits");
     assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
-    let ancestor_waiting = loonfs_core::gc_namespace(&store, None, &ancestor, &options, &aged)
-        .await
-        .expect("ancestor waits");
+    let ancestor_waiting = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &ancestor,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("ancestor waits");
     assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
         .delete_namespace(Default::default())
         .await
         .expect("delete descendant");
-    aged.now_ms = load_namespace_read_state(&store, &descendant)
-        .await
-        .expect("descendant tombstone")
-        .status
-        .deleted_at_ms()
-        .expect("deletion stamp");
-    let retired = loonfs_core::gc_namespace(&store, None, &descendant, &options, &aged)
-        .await
-        .expect("retire descendant");
+    aged.now_ms =
+        load_namespace_read_state(&store, &descendant, loonfs_core::test_support::std_timer())
+            .await
+            .expect("descendant tombstone")
+            .status
+            .deleted_at_ms()
+            .expect("deletion stamp");
+    let retired = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &descendant,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("retire descendant");
     let descendant_deadline = retired
         .reclaimable_at_ms
         .expect("descendant retired despite compaction");
     assert_eq!(retired.deleted.content_objects, 0);
-    let waiting = loonfs_core::gc_namespace(&store, None, &parent, &options, &aged)
-        .await
-        .expect("wait for descendant grace");
+    let waiting = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &parent,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("wait for descendant grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
-    loonfs_core::gc_namespace(&store, None, &descendant, &options, &aged)
-        .await
-        .expect("descendant releases its source pin");
-    let released = loonfs_core::gc_namespace(&store, None, &parent, &options, &aged)
-        .await
-        .expect("parent releases its source pin");
+    loonfs_core::gc_namespace(
+        &store,
+        None,
+        &descendant,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("descendant releases its source pin");
+    let released = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &parent,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("parent releases its source pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
-    let released = loonfs_core::gc_namespace(&store, None, &ancestor, &options, &aged)
-        .await
-        .expect("collect ancestor after parent releases its pin");
+    let released = loonfs_core::gc_namespace(
+        &store,
+        None,
+        &ancestor,
+        &options,
+        &aged,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("collect ancestor after parent releases its pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
     assert!(released.reclaimable_at_ms.is_some());
 }
@@ -943,8 +1005,14 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
 
     let gc_options = loonfs_core::GcOptions::default();
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
-    let collecting =
-        loonfs_core::gc_namespace(store.as_ref(), None, &source, &gc_options, &context);
+    let collecting = loonfs_core::gc_namespace(
+        store.as_ref(),
+        None,
+        &source,
+        &gc_options,
+        &context,
+        loonfs_core::test_support::std_timer(),
+    );
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
     collected.expect("the pass finishes");
@@ -1198,6 +1266,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         &namespace_id,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("gc a namespace with no root");
@@ -1220,6 +1289,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         &namespace_id,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("gc the tombstone");
@@ -1230,6 +1300,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         &namespace_id,
         &loonfs_core::GcOptions::default(),
         &aged,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("collect obsolete tombstone version");
@@ -1515,9 +1586,16 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("delete leaf");
         store.reset();
-        let report = loonfs_core::gc_namespace(&store, None, &leaf, &options, &aged)
-            .await
-            .expect("collect leaf");
+        let report = loonfs_core::gc_namespace(
+            &store,
+            None,
+            &leaf,
+            &options,
+            &aged,
+            loonfs_core::test_support::std_timer(),
+        )
+        .await
+        .expect("collect leaf");
         assert_eq!(report.deleted.retired_content_objects, 1);
         let content_lists = store
             .snapshot()
@@ -1560,20 +1638,28 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .delete_namespace(Default::default())
         .await
         .expect("delete source");
-    let source_deadline = load_namespace_read_state(&store, &source)
-        .await
-        .expect("source tombstone")
-        .status
-        .deleted_at_ms()
-        .expect("deletion stamp")
-        + options
-            .grace_window_ms
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+    let source_deadline =
+        load_namespace_read_state(&store, &source, loonfs_core::test_support::std_timer())
+            .await
+            .expect("source tombstone")
+            .status
+            .deleted_at_ms()
+            .expect("deletion stamp")
+            + options
+                .grace_window_ms
+                .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     for _ in 0..3 {
         aged.now_ms += options.grace_window_ms;
-        let report = loonfs_core::gc_namespace(&store, None, &source, &options, &aged)
-            .await
-            .expect("collect deleted source");
+        let report = loonfs_core::gc_namespace(
+            &store,
+            None,
+            &source,
+            &options,
+            &aged,
+            loonfs_core::test_support::std_timer(),
+        )
+        .await
+        .expect("collect deleted source");
         assert_eq!(report.reclaimable_at_ms, Some(source_deadline));
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert!(store

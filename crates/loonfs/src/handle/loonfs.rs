@@ -162,6 +162,12 @@ impl<M> LoonFs<M> {
         self.core.shared_store()
     }
 
+    /// Returns the monotonic timer this runtime measures its deadlines and
+    /// revalidation checks with, for an extension that runs beside it.
+    pub fn monotonic_timer(&self) -> Arc<dyn loonfs_types::MonotonicTimer> {
+        Arc::clone(&self.core.inner.timer)
+    }
+
     /// Returns this runtime's view of the decoded segment blocks.
     #[cfg(test)]
     pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {

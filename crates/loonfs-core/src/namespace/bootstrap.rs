@@ -5,7 +5,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
@@ -19,8 +19,9 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     actor_id: &loonfs_types::ActorId,
     options: &CreateNamespaceOptions,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<NamespaceMetadata> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(Arc::clone(&timer));
     let start = NamespaceManifestPayload::initial(
         namespace_id.clone(),
         context.now_ms,
@@ -33,7 +34,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {}
         Err(error) => return Err(error),
     }
-    super::status::load_namespace(store, namespace_id).await
+    super::status::load_namespace(store, namespace_id, timer).await
 }
 
 pub(crate) fn bootstrap_metadata_state(

@@ -252,7 +252,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
             .await
             .expect("read slow response");
     });
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(1),
         handler_started.notified(),
     )
@@ -260,7 +260,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
     .expect("slow handler starts");
 
     shutdown_tx.send(()).expect("trigger shutdown");
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_millis(shutdown_deadline_ms + 1_000),
         server,
     )
@@ -390,7 +390,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
             let _ = shutdown_rx.await;
         },
     ));
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(10),
         store.inner().wait_until_blocked(),
     )
@@ -402,7 +402,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         tokio::task::yield_now().await;
     }
     store.inner().release();
-    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), server)
         .await
         .expect("shutdown waits only for the compaction's next block")
         .expect("join the server task")
@@ -463,7 +463,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
             let _ = shutdown_rx.await;
         },
     ));
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(10),
         store.wait_until_blocked(),
     )
@@ -471,7 +471,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     .expect("the sweep's collection reaches the parked pin listing");
 
     shutdown_tx.send(()).expect("trigger shutdown");
-    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), server)
         .await
         .expect("shutdown does not wait for a parked visit past its deadline")
         .expect("join the server task")
@@ -740,13 +740,13 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     ));
 
     let slow = tokio::spawn(get(addr, "/slow"));
-    tokio::time::timeout(std::time::Duration::from_secs(1), slow_started.notified())
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), slow_started.notified())
         .await
         .expect("slow request starts");
 
     let shutdown_started = tokio::time::Instant::now();
     shutdown_tx.send(()).expect("trigger shutdown");
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), async {
         while !state.runtime.is_shutting_down() {
             tokio::task::yield_now().await;
         }
@@ -778,7 +778,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     );
 
     slow_release.notify_one();
-    let slow = tokio::time::timeout(std::time::Duration::from_secs(1), slow)
+    let slow = loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), slow)
         .await
         .expect("slow request completes")
         .expect("join slow request");
@@ -786,7 +786,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     assert!(slow.starts_with("HTTP/1.1 200 OK\r\n"), "{slow}");
     assert!(slow.contains("slow request finished"), "{slow}");
 
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_millis(shutdown_deadline_ms),
         server,
     )

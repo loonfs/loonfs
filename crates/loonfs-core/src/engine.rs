@@ -137,6 +137,7 @@ pub struct NamespaceEngine<S, M> {
     mode: M,
     content_writes: Arc<tokio::sync::Semaphore>,
     wall_clock: Arc<dyn crate::time::WallClock>,
+    timer: Arc<dyn crate::time::MonotonicTimer>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
     run_policy: crate::manifest::MetadataRunPolicy,
@@ -175,6 +176,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Supplies the wall clock behind every timestamp this engine records.
     pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
         self.wall_clock = wall_clock;
+        self
+    }
+
+    /// Supplies the monotonic timer behind every deadline and observation
+    /// this engine starts.
+    pub fn with_monotonic_timer(mut self, timer: Arc<dyn loonfs_types::MonotonicTimer>) -> Self {
+        self.timer = timer;
         self
     }
 
@@ -374,6 +382,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             content_writes,
             mode,
             wall_clock: Arc::new(crate::time::SystemWallClock),
+            timer: Arc::new(crate::time::StdMonotonicTimer::default()),
             subject: None,
             authorization_head: None,
             run_policy: crate::manifest::MetadataRunPolicy::default(),
@@ -490,6 +499,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.mutation_context(),
             actor_id,
             options,
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -511,7 +521,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             actor_id,
             snapshot_id,
             &self.mutation_context(),
-            Arc::new(crate::time::StdMonotonicTimer::default()),
+            Arc::clone(&self.timer),
             self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
@@ -1316,6 +1326,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
+            Arc::clone(&self.timer),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1339,6 +1350,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
+            Arc::clone(&self.timer),
         )
         .await
         .map(crate::pin::snapshot_summary)
@@ -1382,7 +1394,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             requested_expires_at_ms,
             max_lifetime_ms,
             &self.mutation_context(),
-            Arc::new(crate::time::StdMonotonicTimer::default()),
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -1403,7 +1415,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         crate::manifest::fold_wal_with_deadline(
             &self.store,
             &self.namespace_id,
-            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+            &crate::time::Deadline::start(Arc::clone(&self.timer)),
             self.effective_run_policy(),
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
             &self.content_writes,
@@ -1413,7 +1425,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Claims the namespace compactor epoch for a maintenance runtime.
     pub async fn claim_compactor(&self) -> Result<CompactorEpoch> {
-        crate::manifest::claim_compactor(&self.store, &self.namespace_id).await
+        crate::manifest::claim_compactor(&self.store, &self.namespace_id, Arc::clone(&self.timer))
+            .await
     }
 
     /// Merges one bounded run window under the claimed compactor epoch.
@@ -1429,6 +1442,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.effective_run_policy(),
             compaction_policy,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -1447,6 +1461,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             spec,
             self.effective_run_policy(),
             cancellation,
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -1462,6 +1477,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.segment_cache.as_deref(),
             &self.namespace_id,
             target,
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -1517,9 +1533,13 @@ mod tests {
             namespace_id.clone(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
-        let loaded = crate::namespace::read_anchor::load_read_anchor(&reader.store, &namespace_id)
-            .await
-            .expect("read basis");
+        let loaded = crate::namespace::read_anchor::load_read_anchor(
+            &reader.store,
+            &namespace_id,
+            crate::test_support::observed_now(),
+        )
+        .await
+        .expect("read basis");
         let context = RuntimeReadContext {
             basis: loaded.basis(),
             head: loaded.read_state,

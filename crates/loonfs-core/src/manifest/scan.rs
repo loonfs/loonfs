@@ -7,7 +7,7 @@ use super::error::ManifestLoadError;
 use super::load::{load_segment_filter, SessionBlockMemo};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
 use super::scan_load::{ScanDescriptor, ScanLoader};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -334,7 +334,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .map_or(lower_bound, |(key, _)| key.as_str());
             if iterators.is_empty() && rows.len() < limit {
                 if let Some(candidate) =
-                    descriptors.as_slice()[..descriptors.len().min(STORE_READ_WAVE)].last()
+                    descriptors.as_slice()[..descriptors.len().min(STORE_READS_IN_FLIGHT)].last()
                 {
                     open_through = open_through.max(&candidate.descriptor.min_row_key);
                 }
@@ -427,7 +427,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                     Ok::<_, ManifestLoadError>(admits.then_some(descriptor))
                 }
             })
-            .buffered(STORE_READ_WAVE);
+            .buffered(STORE_READS_IN_FLIGHT);
         while let Some(descriptor) = checks.try_next().await? {
             admitted.extend(descriptor);
         }

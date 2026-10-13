@@ -102,7 +102,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             namespace_writer.create_directory_with_options("/warmup", &actor, &warmup_options),
             first,
             async {
-                timeout(
+                bounded(
                     Duration::from_secs(10),
                     wait_for_queued_candidates(&publisher, 2),
                 )
@@ -225,7 +225,7 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
         namespace_writer.put_file_with_options("/c", b"cccc", &actor, &c),
         async {
             let publisher = namespace_writer.session().publisher.clone();
-            timeout(
+            bounded(
                 Duration::from_secs(10),
                 wait_for_queued_candidates(&publisher, 3),
             )
@@ -981,7 +981,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
             namespace.put_file_with_options("/one", b"one", &actor, &one),
             namespace.put_file_with_options("/two", b"two", &actor, &two),
             async {
-                timeout(Duration::from_secs(10), async {
+                bounded(Duration::from_secs(10), async {
                     while queued_candidates(&publisher.lock_state()) < 2 {
                         tokio::task::yield_now().await;
                     }
@@ -1401,7 +1401,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     store.block_next();
     let fold = maintenance.fold_wal(&namespace);
     let publish_after_fold = async {
-        timeout(Duration::from_secs(10), store.wait_until_blocked())
+        bounded(Duration::from_secs(10), store.wait_until_blocked())
             .await
             .expect("fold reached its hint update");
         // The immutable manifest is durable; its best-effort hint update waits.

@@ -78,7 +78,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         }
         deadline.ensure_metadata_publication_budget(namespace_id)?;
         tip = deadline.observe();
-        anchor = load_read_anchor(store, namespace_id).await?;
+        anchor = load_read_anchor(store, namespace_id, deadline.observe()).await?;
     }
 }
 

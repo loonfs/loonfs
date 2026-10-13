@@ -90,6 +90,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &setup,
+            crate::test_support::std_timer(),
         )
         .await
         .expect_err("young pin remains protected");
@@ -104,6 +105,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
                 "collector",
                 crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
             ),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("reap abandoned pin once owner rules permit deletion");
@@ -122,6 +124,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
                 "collector",
                 crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
             ),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("next pass also succeeds");
@@ -163,7 +166,14 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
     let options = crate::gc::GcOptions::default();
     store.block_next();
     let (collection, ()) = tokio::join!(
-        crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged),
+        crate::gc::gc_namespace(
+            &store,
+            None,
+            &namespace_id,
+            &options,
+            &aged,
+            crate::test_support::std_timer()
+        ),
         async {
             store.wait_until_blocked().await;
             store
@@ -171,9 +181,16 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
                 .delete(&keys::pin(&namespace_id, &pin.checkpoint_id))
                 .await
                 .expect("release pin");
-            crate::gc::gc_namespace(store.inner(), None, &namespace_id, &options, &aged)
-                .await
-                .expect("other collector");
+            crate::gc::gc_namespace(
+                store.inner(),
+                None,
+                &namespace_id,
+                &options,
+                &aged,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("other collector");
             assert!(store
                 .inner()
                 .head(&old_manifest)
@@ -241,15 +258,29 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
     let options = crate::gc::GcOptions::default();
-    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
-        .await
-        .expect_err("second pin still requires the missing basis");
+    let error = crate::gc::gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options,
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect_err("second pin still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(ids[1].as_str()));
     store.fail_all();
-    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
-        .await
-        .expect_err("unreadable pin is not absent");
+    let error = crate::gc::gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options,
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect_err("unreadable pin is not absent");
     assert_eq!(error.code(), ErrorCode::ServerError);
     store.clear();
     let key = keys::pin(&namespace_id, &ids[0]);
@@ -257,9 +288,16 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .put_overwrite(&key, Bytes::from_static(b"not json"))
         .await
         .expect("malformed pin");
-    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
-        .await
-        .expect_err("malformed pin is not deletable");
+    let error = crate::gc::gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options,
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect_err("malformed pin is not deletable");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     for id in ids {
         assert!(store

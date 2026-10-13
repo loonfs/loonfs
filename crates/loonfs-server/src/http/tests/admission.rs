@@ -35,7 +35,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     let refused = router
         .clone()
         .oneshot(create_namespace_request(unsent_body(&refused_polls)));
-    let refused = tokio::time::timeout(std::time::Duration::from_secs(1), refused)
+    let refused = loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), refused)
         .await
         .expect("refusal must not wait for a body")
         .expect("response");
@@ -160,7 +160,7 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
         .expect("connect");
     refused.write_all(b"POST /v0/namespaces HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nContent-Type: application/json\r\nContent-Length: 128\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n").await.expect("send headers only");
     let mut response = Vec::new();
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(1),
         refused.read_to_end(&mut response),
     )
@@ -183,7 +183,7 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
         .await
         .expect("probe headers");
     let mut response = Vec::new();
-    tokio::time::timeout(
+    loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(1),
         probe.read_to_end(&mut response),
     )

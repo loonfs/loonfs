@@ -101,13 +101,27 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     );
     store.block_next();
     let (delayed, ()) = tokio::join!(
-        gc_namespace(&store, None, &target, &gc_options, &deadline),
+        gc_namespace(
+            &store,
+            None,
+            &target,
+            &gc_options,
+            &deadline,
+            crate::test_support::std_timer()
+        ),
         async {
             store.wait_until_blocked().await;
             store.inner().fail_next(1);
-            gc_namespace(store.inner(), None, &target, &gc_options, &deadline)
-                .await
-                .expect_err("a delete landed but its acknowledgement was lost");
+            gc_namespace(
+                store.inner(),
+                None,
+                &target,
+                &gc_options,
+                &deadline,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect_err("a delete landed but its acknowledgement was lost");
             assert!(store
                 .inner()
                 .head(&target_keys[0])
@@ -119,9 +133,16 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
                 "failed sweep does not release its source pin"
             );
             store.inner().clear();
-            gc_namespace(store.inner(), None, &source, &gc_options, &deadline)
-                .await
-                .expect("source stays pinned");
+            gc_namespace(
+                store.inner(),
+                None,
+                &source,
+                &gc_options,
+                &deadline,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("source stays pinned");
             for key in &source_keys {
                 assert!(store
                     .inner()
@@ -131,9 +152,16 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
                     .is_some());
             }
 
-            gc_namespace(store.inner(), None, &target, &gc_options, &deadline)
-                .await
-                .expect("second collector retries from the beginning");
+            gc_namespace(
+                store.inner(),
+                None,
+                &target,
+                &gc_options,
+                &deadline,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("second collector retries from the beginning");
             assert!(!pin_exists(store.inner(), &source, &target_pin).await);
             assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
             assert!(store
@@ -181,12 +209,26 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("inherited file stays visible");
     }
-    gc_namespace(&store, None, &target, &gc_options, &deadline)
-        .await
-        .expect("repeated target retirement");
-    gc_namespace(&store, None, &source, &gc_options, &deadline)
-        .await
-        .expect("sibling continues to retain source");
+    gc_namespace(
+        &store,
+        None,
+        &target,
+        &gc_options,
+        &deadline,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("repeated target retirement");
+    gc_namespace(
+        &store,
+        None,
+        &source,
+        &gc_options,
+        &deadline,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("sibling continues to retain source");
     for key in source_keys {
         assert!(store.head(&key).await.expect("source content").is_some());
     }

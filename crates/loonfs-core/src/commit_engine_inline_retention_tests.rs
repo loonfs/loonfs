@@ -48,6 +48,7 @@ async fn compact_and_check_pair(
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("compact a family group");
@@ -101,12 +102,19 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("pin the original history");
-    let floor = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("floor exactly at original commit");
+    let floor = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("floor exactly at original commit");
     assert_eq!(floor.retention_floor_seq, original.committed_seq);
     compact_and_check_pair(
         &store,
@@ -159,10 +167,16 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("fold later history");
     assert_eq!(
-        advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-            .await
-            .expect("advance floor")
-            .retention_floor_seq,
+        advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            RetentionTarget::Head,
+            crate::test_support::std_timer()
+        )
+        .await
+        .expect("advance floor")
+        .retention_floor_seq,
         later.committed_seq
     );
     compact_and_check_pair(
@@ -222,6 +236,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
             ..context.clone()
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect old WAL and unpinned segments");

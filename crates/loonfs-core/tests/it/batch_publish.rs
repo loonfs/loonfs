@@ -544,9 +544,13 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .expect_err("alias of an accepted candidate fails with it");
     assert!(matches!(accepted_alias, CoreError::WalWrite { .. }));
 
-    let head = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("load head");
+    let head = load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load head");
     assert_eq!(head.seq, ChangeSeq(0));
 
     let retried =
@@ -1252,9 +1256,13 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         ));
     }
 
-    let head = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("load head");
+    let head = load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load head");
     assert_eq!(head.seq, ChangeSeq(8));
 }
 
@@ -1494,9 +1502,13 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
             results[2].as_ref().expect("next commit").committed_seq,
             ChangeSeq(next_seq)
         );
-        let head = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("head");
+        let head = load_namespace_read_state(
+            &store,
+            &namespace_id,
+            loonfs_core::test_support::std_timer(),
+        )
+        .await
+        .expect("head");
         assert_eq!(head.next_inode_id, InodeId(next_seq + 2));
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
@@ -1622,9 +1634,13 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
         results[6].as_ref().expect("later").committed_seq,
         ChangeSeq(6)
     );
-    let head = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head = load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("head");
     assert_eq!(head.next_inode_id, InodeId(6));
 }
 

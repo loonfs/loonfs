@@ -7,6 +7,7 @@ use loonfs::{
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::bounded;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
@@ -20,7 +21,6 @@ use loonfs_types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
 
 fn namespace() -> NamespaceId {
     loonfs_test_support::ids::namespace_id("inline-retry")
@@ -303,7 +303,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
             .expect("another submission can use the publisher engine");
         blocking.release();
     };
-    let (replay, ()) = timeout(Duration::from_secs(10), async {
+    let (replay, ()) = bounded(Duration::from_secs(10), async {
         tokio::join!(retry, submissions)
     })
     .await

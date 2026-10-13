@@ -5,7 +5,7 @@ use super::data_block_load::load_segment_data_block_span;
 use super::index_block_load::load_segment_index_for_compaction;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -334,7 +334,7 @@ where
         .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes)))
         .collect();
     stream::iter(fills)
-        .buffer_unordered(STORE_READ_WAVE)
+        .buffer_unordered(STORE_READS_IN_FLIGHT)
         .try_collect::<()>()
         .await?;
     Ok(iterators

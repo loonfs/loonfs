@@ -9,11 +9,12 @@ use loonfs::{
     Commit, CommitId, DestinationBehavior, LoonFs, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::bounded;
 use loonfs_test_support::stores::BlockingStore;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 struct ParkedPuts {
     store: Arc<BlockingStore<LocalFsStore>>,
@@ -139,7 +140,7 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
     let _ = parked.first.await;
     parked.store.release();
 
-    let second = timeout(Duration::from_secs(15), parked.second)
+    let second = bounded(Duration::from_secs(15), parked.second)
         .await
         .expect("queued put must settle")
         .expect("queued put publishes normally");
@@ -168,7 +169,7 @@ async fn all_callers_cancelled_publication_still_lands() {
     parked.store.release();
 
     // The writer drain settles the publish tasks the callers left behind.
-    timeout(Duration::from_secs(15), parked.writer.shutdown())
+    bounded(Duration::from_secs(15), parked.writer.shutdown())
         .await
         .expect("drain must settle")
         .expect("drain surfaces no panics");

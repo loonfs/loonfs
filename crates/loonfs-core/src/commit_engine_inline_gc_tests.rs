@@ -25,6 +25,7 @@ async fn collect_aged_wal(
             now_ms: options.grace_window_ms + 1,
             ..context.clone()
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect aged WAL");

@@ -165,7 +165,7 @@ impl Fixture {
 }
 
 async fn finish<T>(work: impl Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(10), work)
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), work)
         .await
         .expect("operation completes")
 }

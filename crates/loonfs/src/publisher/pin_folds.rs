@@ -18,10 +18,14 @@ async fn seed_unfolded_tail<S: ObjectStore + ?Sized>(store: &S, namespace_id: &N
 }
 
 async fn wal_tail_objects<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
-    loonfs_core::cache::load_namespace_diagnostics(store, namespace_id)
-        .await
-        .expect("load namespace diagnostics")
-        .wal_tail_objects
+    loonfs_core::cache::load_namespace_diagnostics(
+        store,
+        namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load namespace diagnostics")
+    .wal_tail_objects
 }
 
 async fn writer_over(
@@ -81,7 +85,7 @@ fn start_creations(
 
 async fn finish(creations: Vec<JoinHandle<crate::Result<()>>>) {
     for creation in creations {
-        timeout(Duration::from_secs(10), creation)
+        bounded(Duration::from_secs(10), creation)
             .await
             .expect("the creation finishes")
             .expect("join the creation")
@@ -120,7 +124,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let mut creations = start_creations(&writer, &unfolded);
     creations.extend(start_creations(&writer, &folded));
     wait_for_fold_waiters(&writer, creations.len()).await;
-    timeout(
+    bounded(
         Duration::from_secs(10),
         writer.fork_namespace_with_options(
             &folded,

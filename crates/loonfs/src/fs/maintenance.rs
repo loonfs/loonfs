@@ -21,7 +21,7 @@ use loonfs_core::control::NamespaceReadAnchor;
 use loonfs_core::CheckpointPageCursor;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
-use tokio::time::Instant;
+use std::sync::Arc;
 use tracing::Instrument;
 
 #[cfg(test)]
@@ -150,8 +150,12 @@ impl Maintenance {
     pub async fn diagnostics(&self, namespace_id: &NamespaceId) -> Result<NamespaceDiagnostics> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let diagnostics =
-            loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
+        let diagnostics = loonfs_core::cache::load_namespace_diagnostics(
+            self.core.store(),
+            namespace_id,
+            Arc::clone(&self.core.inner.timer),
+        )
+        .await?;
         let (live_checkpoints, live_snapshots) = self.count_live_checkpoints(namespace_id).await?;
         Ok(Self::namespace_diagnostics(
             diagnostics,
@@ -211,7 +215,11 @@ impl Maintenance {
     }
 
     async fn load_live_anchor(&self, namespace_id: &NamespaceId) -> Result<NamespaceReadAnchor> {
-        Ok(loonfs_core::control::load_live_read_anchor(self.core.store(), namespace_id).await?)
+        let observed = loonfs_core::time::Observation::now(Arc::clone(&self.core.inner.timer));
+        Ok(
+            loonfs_core::control::load_live_read_anchor(self.core.store(), namespace_id, observed)
+                .await?,
+        )
     }
 
     /// Runs [`Self::maintain_metadata_with_options`] with the default
@@ -655,8 +663,6 @@ impl Maintenance {
     }
 
     /// Runs a planned compaction under this runtime's remembered epoch.
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to record compaction duration.
     pub(crate) async fn run_streaming_compaction(
         &self,
         namespace_id: &NamespaceId,
@@ -664,7 +670,7 @@ impl Maintenance {
         cancellation: &loonfs_core::MetadataCompactionCancellation,
     ) -> Result<loonfs_core::MetadataCompactionJobOutcome> {
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
-        let started = Instant::now();
+        let started_at_ms = self.core.inner.timer.monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
             .run_metadata_compaction(spec, compactor_epoch, cancellation)
@@ -677,7 +683,12 @@ impl Maintenance {
             self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
                 .await;
         }
-        let elapsed_ms = loonfs_types::saturating_duration_ms(started.elapsed());
+        let elapsed_ms = self
+            .core
+            .inner
+            .timer
+            .monotonic_now_ms()
+            .saturating_sub(started_at_ms);
         self.core
             .instruments()
             .compaction_finished(&outcome, elapsed_ms);
@@ -734,6 +745,7 @@ impl Maintenance {
             namespace_id,
             options,
             &self.core.mutation_context(&self.actor),
+            Arc::clone(&self.core.inner.timer),
         )
         .await
         .map_err(Error::Core)?;

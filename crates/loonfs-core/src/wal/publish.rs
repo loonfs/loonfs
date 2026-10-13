@@ -5,8 +5,6 @@ use crate::wal::WalPublishError;
 use bytes::Bytes;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-// This function owns physical WAL publication.
-#[allow(clippy::disallowed_methods)]
 pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     store: &S,
     wal: &PreparedWalObject,
@@ -21,7 +19,7 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
         });
     }
     let payload = wal.envelope().payload();
-    let object_key = loonfs_objectstore::keys::wal_object(&payload.namespace_id, &payload.wal_no);
+    let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);
     let elapsed_ms = tip.age_ms();
     if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
         return Err(WalPublishError::PublishBudgetExceeded {

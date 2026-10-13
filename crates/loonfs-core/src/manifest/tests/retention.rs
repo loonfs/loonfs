@@ -190,9 +190,15 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("bootstrap");
 
     store.reset();
-    let unchanged = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("initial manifest already covers floor zero");
+    let unchanged = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         store.count(OperationSelector::Read),
@@ -234,9 +240,15 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .collect::<BTreeSet<_>>()
     .len();
     store.reset();
-    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance retention");
+    let advanced = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store.count(OperationSelector::Read),
@@ -319,10 +331,16 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         (RetentionTarget::Seq(ChangeSeq(99)), ChangeSeq(4)),
     ] {
         let before = current_manifest_no(&store, &namespace_id).await;
-        let floor = advance_retention_floor(&store, None, &namespace_id, target)
-            .await
-            .expect("advance the floor")
-            .retention_floor_seq;
+        let floor = advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            target,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor")
+        .retention_floor_seq;
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, expected_floor);
         if target == RetentionTarget::Seq(ChangeSeq(2)) {
@@ -381,6 +399,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
         RetentionTarget::Cutoff {
             cutoff_at_ms: u64::MAX,
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("advance to the newest commit")
@@ -441,9 +460,15 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("delete referenced segment");
 
-    let error = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect_err("missing basis segment blocks floor advancement");
+    let error = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect_err("missing basis segment blocks floor advancement");
     assert!(matches!(
         error,
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
@@ -515,9 +540,15 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     );
     store.fail_next(1);
 
-    let error = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect_err("failed basis probe blocks floor advancement");
+    let error = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect_err("failed basis probe blocks floor advancement");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(matches!(
         error,
@@ -560,9 +591,15 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .expect("load before retention")
         .head;
 
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance retention");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention");
     let after = load_current_projection(&store, &namespace_id)
         .await
         .expect("load after retention")
@@ -582,7 +619,12 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
     let page = crate::pin::list_checkpoint_files_page(
         store,
         None,
-        &crate::namespace::control::load_namespace_read_state(store, namespace_id).await?,
+        &crate::namespace::control::load_namespace_read_state(
+            store,
+            namespace_id,
+            crate::test_support::std_timer(),
+        )
+        .await?,
         checkpoint_id,
         loonfs_types::PageRequest {
             cursor: None,
@@ -696,6 +738,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -714,6 +757,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             Default::default(),
             None,
             &tokio::sync::Semaphore::new(32),
+            crate::test_support::std_timer(),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -777,6 +821,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -804,6 +849,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
             "expired",
             context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
         ),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("gc pass");
@@ -848,6 +894,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &distant,
+            crate::test_support::std_timer(),
         )
         .await
         .expect("gc pass");
@@ -881,18 +928,28 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("initial manifest");
+    let initial = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("initial manifest");
     write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
         .await
         .expect("write");
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance floor");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
         store,
         loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
@@ -983,9 +1040,13 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("initial manifest");
+    let initial = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("initial manifest");
     let store = loonfs_test_support::stores::FailStore::new(
         store,
         loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
@@ -1240,6 +1301,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("compaction step");
@@ -1327,6 +1389,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         tiny_byte_policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("budgeted step");
@@ -1359,6 +1422,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("bounded step");
@@ -1431,6 +1495,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         bounded_policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("first bounded step");
@@ -1512,6 +1577,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         bounded_policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("below-trigger step");
@@ -1757,6 +1823,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("first unit");
@@ -1781,6 +1848,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("resumed unit");
@@ -1826,9 +1894,13 @@ async fn a_namespace_retains_from_birth_before_retention_advances() {
         .await
         .expect("bootstrap");
 
-    let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head = crate::namespace::control::load_namespace_read_state(
+        &store,
+        &namespace_id,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("head");
     let floor = load_current_manifest(&store, &head.namespace_id)
         .await
         .expect("missing floor defaults")
@@ -1865,9 +1937,22 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         .expect("read manifest")
         .state;
 
-    // Every reading advances 20 minutes against the 15-minute budget: the
-    // pre-CAS check observes the publication as over budget.
-    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    // The clock advances 20 minutes, past the 15-minute budget, while the
+    // fold writes its segments, so the pre-CAS check observes the
+    // publication as over budget.
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let advancing = Arc::clone(&clock);
+    let store = loonfs_test_support::stores::MetadataMapStore::new(
+        store,
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_segment_prefix(
+            &namespace_id,
+        )),
+        move |metadata| {
+            advancing.advance_ms(20 * 60 * 1000);
+            metadata
+        },
+    );
+    let overrun = Deadline::start(clock);
     let error = super::fold::fold_wal_with_deadline(
         &store,
         &namespace_id,
@@ -1965,6 +2050,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         merge_everything,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("in-budget retry merges the unit");
@@ -2214,9 +2300,15 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the extra file");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance the floor");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor");
     assert!(
         read_floor_seq(&store, &namespace_id).await >= deleted.committed_seq,
         "the floor must sit past the cancelling row for this test to mean anything"
@@ -2432,6 +2524,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("compaction step");
@@ -2500,9 +2593,15 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the deletions");
-        advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-            .await
-            .expect("advance the floor past the deletions");
+        advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            RetentionTarget::Head,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor past the deletions");
         let visible = visible_namespace(&store, &namespace_id).await;
 
         let mut settled = false;
@@ -2514,6 +2613,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 policy,
                 MetadataCompactionPolicy::default(),
                 Arc::default(),
+                crate::test_support::std_timer(),
             )
             .await
             .expect("compaction step");
@@ -2611,9 +2711,15 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .cloned()
         .collect();
     assert!(!only_pinned.is_empty());
-    let floor = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance floor");
+    let floor = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance floor");
     assert!(floor.retention_floor_seq > pin.captured_seq);
     let aged = mutation_context("gc", u64::MAX / 2);
     crate::gc::gc_namespace(
@@ -2622,6 +2728,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &namespace_id,
         &crate::gc::GcOptions::default(),
         &aged,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect past the floor");
@@ -2649,6 +2756,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &namespace_id,
         &crate::gc::GcOptions::default(),
         &aged,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect deleted basis");

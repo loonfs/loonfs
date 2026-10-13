@@ -62,6 +62,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
             now_ms: options.grace_window_ms + 1,
             ..context.clone()
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect folded WAL");

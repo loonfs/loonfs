@@ -456,9 +456,15 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         .await
         .expect("current");
     store.reset();
-    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance");
+    let advanced = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance");
     assert_eq!(store.counts().create_if_absent_puts, 1);
     assert_eq!(store.counts().overwrite_puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 1);
@@ -470,14 +476,24 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     expected.retention_floor_seq = expected.head_seq;
     assert_eq!(after.state.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
-    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("writer floor");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("writer floor");
     assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
     store.reset();
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("already advanced");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("already advanced");
     assert_eq!(store.counts().puts, 0);
 }
 
@@ -840,18 +856,28 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&inner, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance retention");
+    advance_retention_floor(
+        &inner,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention");
 
     let status_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("status store"),
         key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head.clone())),
     };
-    let namespace = crate::namespace::status::load_namespace(&status_store, &namespace_id)
-        .await
-        .expect("status reloads the stale head");
+    let namespace = crate::namespace::status::load_namespace(
+        &status_store,
+        &namespace_id,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("status reloads the stale head");
     assert_eq!(namespace.head_seq, ChangeSeq(1));
     assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
 
@@ -894,9 +920,13 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         .expect("create");
     // The claim landed, but a rival could have written the same bytes, so the
     // claimant reads it as the rival's and takes the next epoch.
-    let epoch = super::super::compactor::claim_compactor(&store, &namespace_id)
-        .await
-        .expect("claim");
+    let epoch = super::super::compactor::claim_compactor(
+        &store,
+        &namespace_id,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("claim");
     assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
     let current = load_current_manifest(&store, &namespace_id)
         .await

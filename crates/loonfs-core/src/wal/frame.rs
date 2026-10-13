@@ -96,14 +96,9 @@ impl ValidatedWalTail {
             .map(|commit| commit.committed_at_ms)
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "published WAL framing owns its numbered object key"
-    )]
     pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope) {
         let payload = envelope.payload();
-        let object_key =
-            loonfs_objectstore::keys::wal_object(&payload.namespace_id, &payload.wal_no);
+        let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);
         self.objects
             .push(ValidatedWalObject::new(object_key, envelope));
     }

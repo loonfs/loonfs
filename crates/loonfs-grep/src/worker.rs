@@ -27,7 +27,7 @@ use loonfs::{
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance,
     ObjectStoreErrorKind, ReadOnly,
 };
-use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::format::segment_blocks::{
@@ -59,7 +59,7 @@ const GRAM_POSTING_BATCH_TARGET: usize = 256;
 /// Content reads and index segment writes the worker runs at once. Eight
 /// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
 /// as one backfill step's content budget.
-const GREP_WORKER_READS_IN_FLIGHT: usize = 8;
+const GREP_WORKER_REQUESTS_IN_FLIGHT: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
@@ -170,6 +170,7 @@ pub struct GrepWorker<S> {
     reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
     step_budget: GrepStepBudget,
+    timer: Arc<dyn MonotonicTimer>,
 }
 
 /// The runtime and its maintenance carry no debug representation — they are
@@ -187,19 +188,27 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
     /// handles it reads and checkpoints through. Its steps share
-    /// `step_budget` with every other worker given a clone of it.
+    /// `step_budget` with every other worker given a clone of it, and its
+    /// deadlines run on `reader`'s monotonic timer.
     pub fn new(
         store: S,
         reader: LoonFs<ReadOnly>,
         maintenance: Maintenance,
         step_budget: GrepStepBudget,
     ) -> Self {
+        let timer = reader.monotonic_timer();
         Self {
             store,
             reader,
             maintenance,
             step_budget,
+            timer,
         }
+    }
+
+    /// The monotonic timer this worker's deadlines and observations run on.
+    pub(crate) fn timer(&self) -> Arc<dyn MonotonicTimer> {
+        Arc::clone(&self.timer)
     }
 
     /// The budget this worker's build and reorganize steps draw from.
@@ -221,7 +230,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// backfilling manifest. Enabling an active manifest is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         self.reads(namespace_id).head().await?;
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = Deadline::start(self.timer());
         let current =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
         if let Some(current) = &current {
@@ -268,7 +277,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         self.reads(namespace_id).head().await?;
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = Deadline::start(self.timer());
         let Some(current) =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
         else {
@@ -320,7 +329,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = Deadline::start(self.timer());
         let Some(current) =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
         else {
@@ -397,13 +406,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<GrepManifestState>> {
-        Ok(load_current_grep_manifest(
-            &self.store,
-            namespace_id,
-            Observation::now(Arc::new(StdMonotonicTimer::default())),
+        Ok(
+            load_current_grep_manifest(&self.store, namespace_id, Observation::now(self.timer()))
+                .await?
+                .map(|manifest| manifest.manifest_state().clone()),
         )
-        .await?
-        .map(|manifest| manifest.manifest_state().clone()))
     }
 
     /// Returns the grep index's state and maintenance progress.
@@ -908,7 +915,7 @@ async fn index_planned_unit(
                 .read_content(&revision.content_ref, MAX_INDEX_GRAMS_FILE_BYTES)
                 .map_ok(move |content| (revision, content))
         })
-        .buffered(GREP_WORKER_READS_IN_FLIGHT);
+        .buffered(GREP_WORKER_REQUESTS_IN_FLIGHT);
     while let Some((revision, content)) = contents.try_next().await? {
         if !is_indexable_text_content(&content) {
             stats.skipped_revisions += 1;
@@ -962,7 +969,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
         .collect();
     stream::iter(requests)
         .map(|segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level))
-        .buffered(GREP_WORKER_READS_IN_FLIGHT)
+        .buffered(GREP_WORKER_REQUESTS_IN_FLIGHT)
         .try_collect()
         .await
 }
@@ -1014,7 +1021,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = Deadline::start(self.timer());
         let Some(current) =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
         else {

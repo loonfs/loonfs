@@ -202,7 +202,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     namespace.wait_for_fold().await.expect("the fold settles");
     store.block_next();
     drop(permits);
-    timeout(Duration::from_secs(10), store.wait_until_blocked())
+    bounded(Duration::from_secs(10), store.wait_until_blocked())
         .await
         .expect("the streaming compaction reaches its first segment write");
     ParkedCompaction {
@@ -280,7 +280,7 @@ async fn closing_a_session_cancels_its_compaction_and_returns() {
         "close waits for the parked compaction"
     );
     parked.store.release();
-    let report = timeout(Duration::from_secs(10), close)
+    let report = bounded(Duration::from_secs(10), close)
         .await
         .expect("close returns once the job reaches its next block")
         .expect("close the session");
@@ -307,7 +307,7 @@ async fn shutdown_drains_session_compactions() {
         "shutdown waits for the parked compaction"
     );
     parked.store.release();
-    timeout(Duration::from_secs(10), shutdown)
+    bounded(Duration::from_secs(10), shutdown)
         .await
         .expect("shutdown returns once the job reaches its next block")
         .expect("shut down writer");
@@ -412,7 +412,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     }
     store.reset_peak();
     drop(permit);
-    timeout(Duration::from_secs(60), writer.drain())
+    bounded(Duration::from_secs(60), writer.drain())
         .await
         .expect("every session's compaction finishes")
         .expect("drain");
@@ -463,7 +463,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     merging.wait_for_fold().await.expect("the fold settles");
     store.block_next();
     drop(permit);
-    timeout(Duration::from_secs(10), store.wait_until_blocked())
+    bounded(Duration::from_secs(10), store.wait_until_blocked())
         .await
         .expect("the other merge parks holding the permit");
     let parked_manifest_no = current_manifest(store.inner(), merging.id())
@@ -477,7 +477,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
         .await
         .expect("put the file whose fold makes compaction due");
     closing.wait_for_fold().await.expect("the fold settles");
-    let report = timeout(Duration::from_secs(10), closing.clone().close())
+    let report = bounded(Duration::from_secs(10), closing.clone().close())
         .await
         .expect("close does not wait for the other session's merge")
         .expect("close the session");

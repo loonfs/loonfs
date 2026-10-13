@@ -29,3 +29,15 @@ pub(crate) use self::writer::prepare_wal_object;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// The key of the WAL object at `wal_no`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the wal module is the physical WAL boundary, so only it builds WAL object keys"
+)]
+fn wal_object_key(
+    namespace_id: &loonfs_types::NamespaceId,
+    wal_no: &loonfs_types::WalNo,
+) -> String {
+    loonfs_objectstore::keys::wal_object(namespace_id, wal_no)
+}

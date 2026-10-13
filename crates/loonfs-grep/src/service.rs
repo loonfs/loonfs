@@ -19,7 +19,7 @@ use futures::future::join_all;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::{CoreError, CurrentFile, CurrentFileState};
-use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::segment_blocks::{
@@ -76,6 +76,7 @@ pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
     current_manifests: Mutex<BTreeMap<NamespaceId, (Weak<GrepManifestState>, Observation)>>,
+    timer: Arc<dyn MonotonicTimer>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,11 +86,13 @@ struct MaterializedGrepIndexSnapshot {
 }
 
 impl GrepService {
-    /// Creates a service over a host-composed process-wide grep block cache.
-    pub fn new(block_cache: Arc<GrepBlockCache>) -> Self {
+    /// Creates a service over a host-composed process-wide grep block cache,
+    /// whose manifest checks run on `timer`, the runtime's monotonic timer.
+    pub fn new(block_cache: Arc<GrepBlockCache>, timer: Arc<dyn MonotonicTimer>) -> Self {
         Self {
             block_cache,
             current_manifests: Mutex::new(BTreeMap::new()),
+            timer,
         }
     }
 
@@ -105,7 +108,7 @@ impl GrepService {
             .get(namespace_id)
             .filter(|(_, checked)| checked.is_within_revalidation_bound())
             .and_then(|(state, checked)| Some((state.upgrade()?, checked.clone())));
-        let observed = Observation::now(Arc::new(StdMonotonicTimer::default()));
+        let observed = Observation::now(Arc::clone(&self.timer));
         let confirmed = match cached {
             Some((state, checked)) => {
                 let successor_present = match state.manifest_no().successor() {
@@ -346,9 +349,14 @@ fn materialized_snapshot_from_state(
 
 impl Default for GrepService {
     fn default() -> Self {
-        Self::new(Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
-        )))
+        Self::new(
+            Arc::new(GrepBlockCache::new(
+                loonfs::engine::DecodedBlockCacheConfig::new(
+                    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+                ),
+            )),
+            Arc::new(StdMonotonicTimer::default()),
+        )
     }
 }
 

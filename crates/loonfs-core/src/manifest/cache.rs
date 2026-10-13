@@ -617,7 +617,7 @@ mod tests {
             Ok::<_, String>(block(400))
         });
         let (from_first, from_second) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), async {
                 tokio::join!(first_load, second_load)
             })
             .await

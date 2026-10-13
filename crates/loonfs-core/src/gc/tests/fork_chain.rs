@@ -78,9 +78,16 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     }
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
-        let report = gc_namespace(&store, None, &namespaces[index], &options(), &aged)
-            .await
-            .expect("collect ancestor while grandchild lives");
+        let report = gc_namespace(
+            &store,
+            None,
+            &namespaces[index],
+            &options(),
+            &aged,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
         assert!(pin_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
@@ -99,15 +106,29 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     .expect("delete leaf");
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
-        let report = gc_namespace(&store, None, &namespaces[index], &options(), &aged)
-            .await
-            .expect("ancestors still pinned by unretired descendants");
+        let report = gc_namespace(
+            &store,
+            None,
+            &namespaces[index],
+            &options(),
+            &aged,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("ancestors still pinned by unretired descendants");
         assert_eq!(report.deleted.retired_content_objects, 0);
     }
     for index in [2, 1, 0] {
-        gc_namespace(&store, None, &namespaces[index], &options(), &aged)
-            .await
-            .expect("retire from leaf to root");
+        gc_namespace(
+            &store,
+            None,
+            &namespaces[index],
+            &options(),
+            &aged,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("retire from leaf to root");
         assert!(store
             .head(&keys[index])
             .await

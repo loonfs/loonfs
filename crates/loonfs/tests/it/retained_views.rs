@@ -303,6 +303,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                             .expect("writer id"),
                         now_ms,
                     },
+                    loonfs_core::test_support::std_timer(),
                 )
                 .await
                 .expect("collect aged objects");

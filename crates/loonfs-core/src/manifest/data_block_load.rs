@@ -16,7 +16,7 @@ use super::index_block_load::{
 use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -300,7 +300,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         })
         .collect();
     stream::iter(span_loads)
-        .buffer_unordered(STORE_READ_WAVE)
+        .buffer_unordered(STORE_READS_IN_FLIGHT)
         .try_collect::<()>()
         .await?;
 

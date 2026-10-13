@@ -53,6 +53,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -493,6 +494,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -545,6 +547,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
             Default::default(),
             None,
             &tokio::sync::Semaphore::new(32),
+            crate::test_support::std_timer(),
         )
         .await
         .map(crate::pin::checkpoint_summary)

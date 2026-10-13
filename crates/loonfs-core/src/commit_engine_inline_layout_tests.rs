@@ -66,9 +66,13 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         .await
         .expect("commit");
     }
-    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("anchor");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("anchor");
     let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
         .await
         .expect("tail");
@@ -277,9 +281,13 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
-    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("anchor");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("anchor");
     let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
         .await
         .expect("tail");
@@ -315,9 +323,13 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     )
     .await
     .expect("first commit");
-    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("anchor");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("anchor");
     let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
         .await
         .expect("tail");
@@ -723,6 +735,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             now_ms: options.grace_window_ms + 1,
             ..context.clone()
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect");
@@ -786,6 +799,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             now_ms: options.grace_window_ms + 1,
             ..context
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect pruned chains");
@@ -799,9 +813,15 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
     use crate::manifest::{
         advance_retention_floor, compaction_step, MetadataCompactionPolicy, RetentionTarget,
     };
-    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
-        .await
-        .expect("floor");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("floor");
     for _ in 0..16 {
         if matches!(
             compaction_step(
@@ -810,7 +830,8 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
                 loonfs_types::CompactorEpoch(0),
                 Default::default(),
                 MetadataCompactionPolicy::CompactImmediately,
-                Arc::default()
+                Arc::default(),
+                crate::test_support::std_timer()
             )
             .await
             .expect("compact"),
@@ -943,6 +964,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
             now_ms: options.grace_window_ms + 1,
             ..context
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect after grace");
@@ -1463,6 +1485,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 now_ms: options.grace_window_ms + 1,
                 ..context
             },
+            crate::test_support::std_timer(),
         )
         .await
         .expect("collect");

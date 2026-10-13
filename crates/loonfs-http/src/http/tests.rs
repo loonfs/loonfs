@@ -1539,10 +1539,13 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         .expect("first write takes over the namespace");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let head =
-        loonfs::control::load_namespace_read_state(store_for_check.as_ref(), &namespace_id("demo"))
-            .await
-            .expect("read head");
+    let head = loonfs::control::load_namespace_read_state(
+        store_for_check.as_ref(),
+        &namespace_id("demo"),
+        std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
+    )
+    .await
+    .expect("read head");
     assert_eq!(
         head.writer.expect("writer block").writer_id,
         loonfs_types::WriterId::parse("server-writer").expect("writer id")

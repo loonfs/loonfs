@@ -7,5 +7,8 @@ disallowed-methods = [
   { path = "tokio::time::sleep", reason = "use deterministic coordination where possible and isolate coalescing timers" },
   { path = "tokio::time::Instant::now", reason = "use an explicit timing boundary so async protocol code does not grow ambient time dependencies" },
   { path = "tokio::time::sleep_until", reason = "use deterministic coordination where possible and isolate deadline timers" },
+  { path = "tokio::time::interval", reason = "use a named host timer boundary so protocol code does not grow ambient time dependencies" },
+  { path = "tokio::time::interval_at", reason = "use a named host timer boundary so protocol code does not grow ambient time dependencies" },
+  { path = "tokio::time::timeout", reason = "use a named timer boundary, or the test-support bound in tests, so protocol code does not grow ambient time dependencies" },
   { path = "rand::random", reason = "use explicit seeded randomness or generated IDs with named entropy boundaries" },
 ]

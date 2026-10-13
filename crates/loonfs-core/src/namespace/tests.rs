@@ -104,7 +104,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         .await
         .expect_err("plain create cannot prove authorship from matching bytes");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    let existing = super::status::load_namespace(&store, &source)
+    let existing = super::status::load_namespace(&store, &source, crate::test_support::std_timer())
         .await
         .expect("landed namespace");
     let adopted = bootstrap_namespace(
@@ -116,6 +116,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
             allow_existing: true,
             ..Default::default()
         },
+        crate::test_support::std_timer(),
     )
     .await
     .expect("allow existing returns the landed namespace");
@@ -306,6 +307,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 None,
                 &namespace_id,
                 crate::manifest::RetentionTarget::Head,
+                crate::test_support::std_timer(),
             )
             .await
             .expect("advance floor");
@@ -313,9 +315,16 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 now_ms: grace + 1,
                 ..context()
             };
-            crate::gc::gc_namespace(store.inner(), None, &namespace_id, &options, &aged)
-                .await
-                .expect("collect during pending hint");
+            crate::gc::gc_namespace(
+                store.inner(),
+                None,
+                &namespace_id,
+                &options,
+                &aged,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("collect during pending hint");
             store.release();
         }
     );
@@ -334,9 +343,16 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         now_ms: 2 * grace + 2,
         ..context()
     };
-    crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
-        .await
-        .expect("collect after grace");
+    crate::gc::gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options,
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect after grace");
     assert!(store
         .head(&metadata_manifest_object(&namespace_id, &ManifestNo(2)))
         .await

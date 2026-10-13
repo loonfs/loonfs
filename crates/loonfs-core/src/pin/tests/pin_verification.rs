@@ -56,9 +56,13 @@ async fn pin_creation_retries_after_compaction_and_collection() {
         let page = crate::pin::list_checkpoint_files_page(
             &store,
             None,
-            &crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
-                .await
-                .expect("head"),
+            &crate::namespace::control::load_namespace_read_state(
+                &store,
+                &namespace_id,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("head"),
             &checkpoint.checkpoint_id,
             loonfs_types::PageRequest {
                 cursor: None,
@@ -96,6 +100,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("compact");
@@ -152,6 +157,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
             (successor_modified_ms + options.grace_window_ms + 1)
                 .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
         ),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("collect before pin write");
@@ -337,6 +343,7 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
             Default::default(),
             None,
             &tokio::sync::Semaphore::new(32),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("pin");
@@ -345,7 +352,7 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
     let [user, snapshot, fork] = &pins[..] else {
         panic!("expected three pins, got {pins:?}");
     };
-    let head = load_namespace_read_state(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
         .await
         .expect("head");
     let checkpoint_read = |id| crate::pin::load_checkpoint_read_basis(&store, None, &head, id);

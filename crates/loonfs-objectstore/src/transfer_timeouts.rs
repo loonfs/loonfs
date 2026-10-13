@@ -104,6 +104,10 @@ impl HttpService for TransferTimeoutService {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the provider request-phase timer, so time only fails one transport attempt that the retry policy already handles"
+)]
 async fn request_phase_timeout<T>(bound: Duration, request: impl Future<Output = T>) -> Option<T> {
     // Dropping the timed-out future aborts the spawned provider request; the
     // caller's retry layers own what happens next.
