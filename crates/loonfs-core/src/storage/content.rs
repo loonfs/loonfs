@@ -992,14 +992,16 @@ mod tests {
 
     /// Chunk size the streaming tests read in, small enough that a
     /// many-chunk object is a few kilobytes rather than tens of megabytes.
-    const TEST_CHUNK_BYTES: u64 = 1024;
+    const TEST_CHUNK_BYTES: usize = 1024;
 
     fn test_chunk_bytes() -> NonZeroU64 {
-        NonZeroU64::new(TEST_CHUNK_BYTES).expect("non-zero test chunk size")
+        NonZeroU64::new(TEST_CHUNK_BYTES as u64).expect("non-zero test chunk size")
     }
 
     fn payload(len: usize) -> Vec<u8> {
-        (0..len).map(|offset| (offset % 251) as u8).collect()
+        (0..len)
+            .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+            .collect()
     }
 
     fn test_entry() -> PathEntry {
@@ -1055,7 +1057,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_read_returns_the_object_one_chunk_at_a_time() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(3 * TEST_CHUNK_BYTES as usize + 7);
+        let bytes = payload(3 * TEST_CHUNK_BYTES + 7);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
 
@@ -1069,7 +1071,7 @@ mod tests {
 
         assert_eq!(chunks.len(), 4, "three full chunks and the remainder");
         for chunk in &chunks[..3] {
-            assert_eq!(chunk.len() as u64, TEST_CHUNK_BYTES);
+            assert_eq!(chunk.len(), TEST_CHUNK_BYTES);
         }
         assert_eq!(chunks[3].len(), 7);
         assert_eq!(chunks.concat(), bytes, "the object arrives byte-identical");
@@ -1078,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn a_finished_stream_repeats_its_verdict() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(TEST_CHUNK_BYTES as usize + 3);
+        let bytes = payload(TEST_CHUNK_BYTES + 3);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
 
@@ -1094,11 +1096,11 @@ mod tests {
     async fn a_resumed_read_fetches_only_the_rest_and_verifies_all_of_it() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
-        let bytes = payload(3 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(3 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
 
-        let held = 2 * TEST_CHUNK_BYTES as usize;
+        let held = 2 * TEST_CHUNK_BYTES;
         store.reset();
         let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
@@ -1126,10 +1128,10 @@ mod tests {
     async fn a_resumed_read_holds_the_prefix_to_the_same_verdict() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
-        let held = TEST_CHUNK_BYTES as usize;
+        let held = TEST_CHUNK_BYTES;
 
         store.reset();
         let mut unfed = open_stream_at(&store, &content_ref, held as u64)
@@ -1183,10 +1185,10 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_prefix_may_be_folded_in_pieces() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
-        let held = TEST_CHUNK_BYTES as usize;
+        let held = TEST_CHUNK_BYTES;
 
         let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
@@ -1205,10 +1207,10 @@ mod tests {
     async fn a_prefix_longer_than_the_content_is_refused() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
-        let held = TEST_CHUNK_BYTES as usize;
+        let held = TEST_CHUNK_BYTES;
 
         store.reset();
         let mut stream = open_stream_at(&store, &content_ref, held as u64)
@@ -1239,7 +1241,7 @@ mod tests {
     #[should_panic(expected = "should arrive before the stream fetches content")]
     async fn a_prefix_offered_after_a_fetch_panics() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
 
@@ -1288,7 +1290,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize + 5);
+        let bytes = payload(2 * TEST_CHUNK_BYTES + 5);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
@@ -1347,7 +1349,7 @@ mod tests {
     async fn assert_resumed_checksum_verification(checksum: fn(&[u8]) -> Checksum) {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
@@ -1356,7 +1358,7 @@ mod tests {
             checksum: checksum(&bytes),
         };
         put_content_object(&store, &content_ref, &bytes).await;
-        let held = TEST_CHUNK_BYTES as usize;
+        let held = TEST_CHUNK_BYTES;
 
         store.reset();
         let mut stream = open_stream_at(&store, &content_ref, held as u64)
@@ -1407,7 +1409,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_that_does_not_match_its_reference() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let bytes = payload(2 * TEST_CHUNK_BYTES);
         let expected = content_ref(&bytes);
         // Same id and same length, different bytes: only the digest can tell.
         let mut planted = bytes.clone();
@@ -1457,7 +1459,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_of_the_wrong_length() {
         let (_temp_dir, store) = test_store();
-        let bytes = payload(TEST_CHUNK_BYTES as usize + 1);
+        let bytes = payload(TEST_CHUNK_BYTES + 1);
         let mut content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
         content_ref.size_bytes += 1;

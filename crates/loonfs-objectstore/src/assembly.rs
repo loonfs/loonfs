@@ -83,12 +83,11 @@ pub(crate) fn stream_sources<'a, S: ObjectStore + ?Sized>(
         .then(move |source| async move { source_stream(store, source).await })
         .try_flatten()
         .chain(stream::iter(tail).flat_map(|piece| {
+            let read_bytes = usize::try_from(READ_BYTES).expect("the read size should fit usize");
             stream::iter(
-                (0..piece.len())
-                    .step_by(READ_BYTES as usize)
-                    .map(move |start| {
-                        Ok(piece.slice(start..(start + READ_BYTES as usize).min(piece.len())))
-                    }),
+                (0..piece.len()).step_by(read_bytes).map(move |start| {
+                    Ok(piece.slice(start..(start + read_bytes).min(piece.len())))
+                }),
             )
         }))
         .boxed()
@@ -246,7 +245,12 @@ mod tests {
 
         let directory = tempfile::tempdir().expect("directory");
         let local = LocalFsStore::new(directory.path()).expect("store");
-        let first = Bytes::from(vec![b'a'; READ_BYTES as usize + 7]);
+        let first = Bytes::from(vec![
+            b'a';
+            usize::try_from(READ_BYTES)
+                .expect("the test value should fit usize")
+                + 7
+        ]);
         let second = Bytes::from_static(b"second");
         local
             .put_immutable_verified("source/first", first.clone())

@@ -91,7 +91,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     let namespace_id = NamespaceId::parse("grams-runtime").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -195,7 +195,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     let namespace_id = NamespaceId::parse("grams-auto-step").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-auto-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-auto-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -272,7 +272,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-config-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-config-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -356,7 +356,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-thousand-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-thousand-writer"))
         .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
@@ -607,7 +607,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     let namespace_id = NamespaceId::parse("grams-tiered").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-tiered-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-tiered-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -691,7 +691,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-cache-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -763,7 +763,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let namespace_id = NamespaceId::parse("grams-read-fault").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-fault-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-fault-writer"))
         .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
@@ -878,7 +878,9 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-oversized-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "grams-oversized-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -907,7 +909,10 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     // Oversized and full of matches: were it ever fetched and scanned, it
     // would flood the results instead of being skipped.
-    let oversized_bytes = b"needle\n".repeat(MAX_INDEX_GRAMS_FILE_BYTES as usize / 7 + 1);
+    let oversized_bytes = b"needle\n".repeat(
+        usize::try_from(MAX_INDEX_GRAMS_FILE_BYTES).expect("the test value should fit usize") / 7
+            + 1,
+    );
     assert!(oversized_bytes.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
     namespace
@@ -1000,7 +1005,9 @@ async fn reorganization_does_not_warm_the_query_cache() {
     let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-shared-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "grams-shared-cache-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1087,7 +1094,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grams-fan-out-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grams-fan-out-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await

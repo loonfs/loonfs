@@ -1939,7 +1939,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.inline_content.inline_content_threshold_bytes = None;
-    config.binding.max_upload_bytes = 1024;
+    config.binding.max_upload_bytes = Some(1024);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -2014,15 +2014,17 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 
 /// A payload with a distinct byte at every offset, so bytes landing in the
 /// wrong order or twice cannot go unnoticed.
-fn distinct_bytes(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+fn distinct_bytes(len: u64) -> Vec<u8> {
+    (0..len)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+        .collect()
 }
 
 /// What the write path is allowed to hold at once, and what it is asked to
 /// carry: three internal parts' worth, so a path that materializes its
 /// payload is caught by more than a rounding error.
 const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
-const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
+const MEMORY_BOUND_PAYLOAD_BYTES: u64 = 3 * MEMORY_BOUND_PART_BYTES + 4_096;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxied_upload_route_never_holds_the_whole_payload() {
@@ -2049,7 +2051,7 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
 
     let peaks = watched.peaks();
     assert_eq!(
-        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64,
+        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES,
         "every payload byte crossed the store boundary exactly once"
     );
     assert!(
@@ -2100,9 +2102,9 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
         .await
         .expect("stream a multi-part payload into the store");
 
-    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES);
     let peaks = watched.peaks();
-    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES);
     assert!(
         peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
         "no single buffer may exceed one part: largest was {}",
@@ -2585,7 +2587,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         .expect("stat small file")
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.max_download_bytes = 16;
+    config.binding.max_download_bytes = Some(16);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -2687,7 +2689,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .await
         .expect("build reader");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(actor)
+        .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
         .expect("build maintenance")
@@ -2832,7 +2834,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
@@ -3370,9 +3372,9 @@ mod direct_download {
         max_upload_bytes: Option<u64>,
     ) -> Client {
         let mut config = test_options(root, writer_id);
-        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
         if let Some(max_upload_bytes) = max_upload_bytes {
-            config.binding.max_upload_bytes = max_upload_bytes;
+            config.binding.max_upload_bytes = Some(max_upload_bytes);
         }
         let (router, _state) = test_app(
             config,
@@ -3449,8 +3451,8 @@ mod direct_download {
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
         // Past the cap by enough that a truncation would show, and cheap.
-        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 3)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..PROXY_CAP_BYTES * 3)
+            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
             .collect();
         client
             .put_file_with_options(
@@ -3540,8 +3542,10 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
-        let first = vec![b'a'; PROXY_CAP_BYTES as usize * 2];
-        let second = vec![b'b'; PROXY_CAP_BYTES as usize * 2];
+        let first =
+            vec![b'a'; usize::try_from(PROXY_CAP_BYTES).expect("the cap should fit usize") * 2];
+        let second =
+            vec![b'b'; usize::try_from(PROXY_CAP_BYTES).expect("the cap should fit usize") * 2];
         client
             .put_file_with_options(
                 &target,
@@ -3615,7 +3619,7 @@ mod direct_download {
         let store = object_store_at(temp_dir.path());
         let objects = object_router(store.clone());
         let mut config = test_options(temp_dir.path(), "grant-ranges");
-        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
         let (router, state) = test_app(
             config,
             TestAppOptions {
@@ -3729,13 +3733,18 @@ mod direct_download {
             .await
             .expect("open the grant");
         download
-            .fold_resumed_prefix(&payload[..held as usize])
+            .fold_resumed_prefix(
+                &payload[..usize::try_from(held).expect("the held prefix should fit usize")],
+            )
             .expect("fold the held prefix");
         let mut received = Vec::new();
         while let Some(chunk) = download.next_chunk().await.expect("read the grant") {
             received.extend_from_slice(&chunk);
         }
-        assert_eq!(received, payload[held as usize..]);
+        assert_eq!(
+            received,
+            payload[usize::try_from(held).expect("the held prefix should fit usize")..]
+        );
 
         for start_offset in [payload.len() as u64, payload.len() as u64 + 1] {
             let past = DownloadOptions {
@@ -4010,8 +4019,8 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES as usize)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES)
+            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
             .collect();
 
         client
@@ -4070,8 +4079,8 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES as usize)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES)
+            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
             .collect();
 
         client
@@ -4124,7 +4133,11 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
-        let payload = vec![7u8; loonfs_client::MIN_STREAMING_PUT_BYTES as usize];
+        let payload = vec![
+            7u8;
+            usize::try_from(loonfs_client::MIN_STREAMING_PUT_BYTES)
+                .expect("the threshold should fit usize")
+        ];
 
         let error = client
             .put_file_with_options(
@@ -4157,7 +4170,13 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
     let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let ns = namespace_id("demo");
     let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
-    let payload = vec![42; loonfs::CONTENT_READ_CHUNK_BYTES as usize * 3 + 17];
+    let payload = vec![
+        42;
+        usize::try_from(loonfs::CONTENT_READ_CHUNK_BYTES)
+            .expect("the chunk should fit usize")
+            * 3
+            + 17
+    ];
     write_file_bytes(
         &seed_writer,
         &ns,
@@ -4223,7 +4242,8 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();
-            changed[loonfs::CONTENT_READ_CHUNK_BYTES as usize] ^= 1;
+            changed[usize::try_from(loonfs::CONTENT_READ_CHUNK_BYTES)
+                .expect("the chunk should fit usize")] ^= 1;
             plain
                 .put_overwrite(&key, changed.into())
                 .await

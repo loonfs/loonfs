@@ -47,7 +47,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let store: SharedObjectStore = store_impl.clone();
     let writer = Arc::new(
         LoonFs::builder_with_store(store.clone())
-            .writer_id("parked-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("parked-writer"))
             .min_publish_interval_ms(0)
             .build()
             .await

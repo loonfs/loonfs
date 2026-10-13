@@ -33,7 +33,7 @@ async fn writer_with_cache(
 ) -> LoonFs<Writable> {
     cache(
         LoonFs::builder_with_store(store.clone())
-            .writer_id(writer_id)
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id))
             .min_publish_interval_ms(0),
     )
     .build()
@@ -48,7 +48,7 @@ async fn writer_with_cache_and_metrics(
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .min_publish_interval_ms(0)
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
@@ -772,7 +772,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("reseeded-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("reseeded-maintenance"))
         .build()
         .await
         .expect("build maintenance")

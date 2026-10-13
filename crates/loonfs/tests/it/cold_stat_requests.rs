@@ -45,13 +45,13 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("coldstat-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("coldstat-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("coldstat-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("coldstat-maintenance"))
         .build()
         .await
         .expect("build maintenance")

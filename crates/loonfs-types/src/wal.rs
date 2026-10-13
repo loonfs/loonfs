@@ -908,7 +908,9 @@ mod tests {
             if let Some(offset) = piece_offset {
                 let piece = &mut payload.records[0].inline_content[0];
                 piece.offset = offset;
-                piece.bytes.drain(..offset as usize);
+                piece
+                    .bytes
+                    .drain(..usize::try_from(offset).expect("the offset should fit usize"));
             } else {
                 payload.records[0].inline_content.clear();
             }

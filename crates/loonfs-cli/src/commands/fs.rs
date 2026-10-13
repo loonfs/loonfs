@@ -3,9 +3,9 @@
 
 use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
-    destination_user_path, directory_intent, fail, namespace_path, parse_public_ordinal_arg,
-    parse_snapshot_id_arg, parse_user_path_arg, render_target, resolve_command_context,
-    resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, RootPath, UndeleteHint,
+    destination_user_path, directory_intent, fail, namespace_path, parse_user_path_arg,
+    render_target, resolve_command_context, resolve_mutation_context, CommandContext,
+    RemoteDirectoryOutcome, RootPath, UndeleteHint,
 };
 use super::download::FileDownload;
 use super::output::{
@@ -38,9 +38,8 @@ use loonfs_types::api::v0::UploadSessionStatus;
 use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_types::PinId;
 use loonfs_types::{
-    AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
-    DeleteDirectoryBehavior, DestinationBehavior, EntryInodeKind, ListPathEntriesResponse,
-    NamespaceId, RevisionNo,
+    AbsolutePath, AttributeKey, AttributeValue, ChangeSeq, Commit, DeleteDirectoryBehavior,
+    DestinationBehavior, EntryInodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,23 +49,12 @@ use std::sync::Arc;
 
 // --- filesystem ---
 
-fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliError> {
-    commit_id
-        .map(|value| {
-            CommitId::parse(value).map_err(|error| {
-                CliError::invalid_request(format!("invalid `--commit-id`: {error}"))
-                    .with_param("--commit-id")
-            })
-        })
-        .transpose()
-}
-
-pub(crate) fn commit_options(args: &CommitArgs) -> Result<CommitOptions, CliError> {
-    Ok(CommitOptions {
+pub(crate) fn commit_options(args: &CommitArgs) -> CommitOptions {
+    CommitOptions {
         preconditions: Vec::new(),
-        commit_id: parse_commit_id_arg(args.commit_id.as_deref())?,
+        commit_id: args.commit_id.clone(),
         message: args.message.clone(),
-    })
+    }
 }
 
 struct FollowedPathEntryPages {
@@ -130,12 +118,7 @@ pub(crate) async fn run_filesystem_ls(
         root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args.snapshot_id.clone();
     let streams_pages = args.pagination.page_limits.jsonl
         || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
     if streams_pages {
@@ -200,12 +183,7 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args.snapshot_id.clone();
     let entry = match args.inode {
         Some(inode_id) => {
             context
@@ -292,18 +270,9 @@ fn attribute_update(
         ),
     };
     let options = UpdateAttributesOptions {
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_attributes_revision_no: args
-            .expected_attributes_revision
-            .map(|value| {
-                parse_public_ordinal_arg(
-                    "--expected-attributes-revision",
-                    value,
-                    AttributesRevisionNo::parse,
-                )
-            })
-            .transpose()?,
+        expected_attributes_revision_no: args.expected_attributes_revision,
     };
     Ok((AttributeChanges { set, remove }, options))
 }
@@ -425,17 +394,8 @@ pub(crate) async fn run_filesystem_cat(
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args
-        .revision
-        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let revision_no = args.revision;
+    let snapshot_id = args.snapshot_id.clone();
     let mut download = context
         .target
         .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
@@ -470,17 +430,8 @@ pub(crate) async fn run_filesystem_get(
     };
     let spec = namespace_path(context.namespace(), "remote_path", &args.remote_path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args
-        .revision
-        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let revision_no = args.revision;
+    let snapshot_id = args.snapshot_id.clone();
     let entry = context
         .target
         .stat_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
@@ -1178,10 +1129,7 @@ async fn commit_a_finished_upload(
 }
 
 fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
-    let expected_revision_no = args
-        .expected_revision
-        .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
-        .transpose()?;
+    let expected_revision_no = args.expected_revision;
     let behavior =
         if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
             DestinationBehavior::Replace
@@ -1190,7 +1138,7 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
         };
     Ok(PutFileOptions {
         behavior,
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
@@ -1250,12 +1198,9 @@ async fn read_append_content(local_path: &str) -> Result<Vec<u8>, CliError> {
 
 fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions, CliError> {
     Ok(AppendFileOptions {
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_revision_no: args
-            .expected_revision
-            .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
-            .transpose()?,
+        expected_revision_no: args.expected_revision,
     })
 }
 
@@ -1268,7 +1213,7 @@ pub(crate) async fn run_filesystem_rm(
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
@@ -1332,9 +1277,8 @@ pub(crate) async fn run_filesystem_restore(
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let revision_no = args.revision;
     let result = context
         .target
         .client
@@ -1370,10 +1314,8 @@ pub(crate) async fn run_filesystem_undelete(
         .map(|path| namespace_path(context.namespace(), "destination_path", path, root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let deletion_seq =
-        parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
-            .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let deletion_seq = args.deletion_seq;
     let destination = spec.as_ref().map_or(UndeleteDestination::Recorded, |spec| {
         UndeleteDestination::Path(spec.absolute_path().clone())
     });
@@ -1421,7 +1363,7 @@ pub(crate) async fn run_filesystem_mkdir(
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
     let options = CreateDirectoryOptions {
         parents: args.parents,
         commit,
@@ -1572,14 +1514,8 @@ async fn run_filesystem_transfer(
             .map_err(|error| context.fail(kind, error))?
     };
 
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let expected_destination_revision_no = args
-        .expected_destination_revision
-        .map(|value| {
-            parse_public_ordinal_arg("--expected-destination-revision", value, RevisionNo::parse)
-        })
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let expected_destination_revision_no = args.expected_destination_revision;
     let behavior = if args.force
         || args.expected_destination_inode_id.is_some()
         || expected_destination_revision_no.is_some()

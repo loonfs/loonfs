@@ -223,7 +223,7 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         .await
         .expect("claim compactor");
     let other = loonfs::LoonFs::builder_with_store(store.clone())
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("other runtime");
@@ -497,7 +497,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         0,
     )));
     let runtime = loonfs::LoonFs::builder_with_store(store.clone())
-        .writer_id("self-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())
         .monotonic_timer(clock.clone())
         .inline_content(loonfs::InlineContentPolicy {

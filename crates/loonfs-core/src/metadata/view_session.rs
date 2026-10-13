@@ -62,7 +62,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     fn tail_direntry_bind_page_candidates(
         &self,
         parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
+        start_after_name_key: Option<&NameKey>,
     ) -> Vec<DirentryBindingPageCandidate> {
         let mut candidates = self
             .row_states()
@@ -70,12 +70,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
                     && start_after_name_key
-                        .is_none_or(|last_name_key| direntry.name_key.as_str() > last_name_key)
+                        .is_none_or(|last_name_key| &direntry.name_key > last_name_key)
             })
             .map(|record| DirentryBindingPageCandidate {
                 row_key: lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
-                    record.name_key.as_str(),
+                    &record.name_key,
                     record.child_inode_id,
                     record.committed_seq,
                     record.delta_index,
@@ -267,7 +267,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn visible_children_page_by_name_key(
         &mut self,
         parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
+        start_after_name_key: Option<&NameKey>,
         limit: usize,
     ) -> Result<Vec<VisibleChildEntry>> {
         if limit == 0 {
@@ -327,7 +327,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         stream: &mut DirentryBindingNameGroupStream,
         parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
+        start_after_name_key: Option<&NameKey>,
         group_limit: usize,
     ) -> Result<Vec<DirentryBindingNameGroup>> {
         let mut groups: Vec<DirentryBindingNameGroup> = Vec::new();

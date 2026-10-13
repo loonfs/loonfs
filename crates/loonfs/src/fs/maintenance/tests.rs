@@ -47,12 +47,14 @@ async fn manual_deployment(
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(Arc::clone(&store))
-        .writer_id("manual-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("manual-writer"))
         .build()
         .await
         .expect("build the writer");
     let standalone = LoonFs::builder_with_store(Arc::clone(&store))
-        .writer_id("standalone-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "standalone-maintenance",
+        ))
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -381,7 +383,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     let fresh_store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let fresh_writer = LoonFs::builder_with_store(Arc::clone(&fresh_store))
-        .writer_id("fresh-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("fresh-writer"))
         .build()
         .await
         .expect("build a fresh writer");
@@ -521,7 +523,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         LocalFsStore::new(directory.path()).expect("store"),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -705,7 +707,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     ));
     let shared: SharedObjectStore = store.clone();
     let writer = LoonFs::builder_with_store(shared.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -714,7 +716,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .await
         .expect("namespace");
     let maintenance = LoonFs::builder_with_store(shared.clone())
-        .writer_id("maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .build()
         .await
         .expect("maintenance")
@@ -749,7 +751,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         expected
     );
     let other = LoonFs::builder_with_store(shared)
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("other process")
@@ -847,7 +849,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         races_run: 0.into(),
     });
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -880,7 +882,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
 
     store.races_left.store(0, SeqCst);
     LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("another process")
@@ -908,7 +910,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -997,7 +999,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     let [idle, claimed, retired, missing] =
         ["idle", "claimed", "retired", "missing"].map(namespace_id);
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -1023,7 +1025,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
     let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .wall_clock(Arc::new(WeekAheadClock(week_ahead_ms)))
         .build()
         .await
@@ -1106,7 +1108,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     }
 
     LoonFs::builder_with_store(store.clone())
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("another process")
@@ -1139,7 +1141,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     ));
     let namespace_id = namespace_id("retired");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("retirement-test")
+        .writer_id(loonfs_test_support::ids::writer_id("retirement-test"))
         .build()
         .await
         .expect("writer");

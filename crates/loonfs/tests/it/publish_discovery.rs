@@ -20,7 +20,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         KeyPredicate::any(),
     ));
     let creator = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .build()
         .await
         .expect("creator");
@@ -30,7 +30,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -123,7 +123,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         KeyPredicate::any(),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .min_publish_interval_ms(0)
         .build()
         .await

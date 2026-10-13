@@ -37,7 +37,7 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
+    CommitId, ContentId, ContentRef, ContentRefKind, HexDigest, InodeId, InodeKind, ManifestNo,
     MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
     RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
@@ -142,7 +142,7 @@ fn sample_crc_content_ref() -> ContentRef {
         size_bytes: 11_534_336,
         checksum: Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "bbb7305bdf118bcb".to_owned(),
+            value: HexDigest::parse("bbb7305bdf118bcb").expect("hex digest"),
         },
     }
 }
@@ -159,7 +159,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
             size_bytes: 4_096,
             checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
-                value: "1a2b3c4d".to_owned(),
+                value: HexDigest::parse("1a2b3c4d").expect("hex digest"),
             },
         },
     ];
@@ -2137,7 +2137,8 @@ fn segment_section<'a>(
     bytes: &'a [u8],
     handle: &loonfs_types::format::segment_blocks::BlockHandle,
 ) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+    let start = usize::try_from(handle.offset).expect("the offset should fit usize");
+    &bytes[start..start + handle.stored_bytes as usize]
 }
 
 fn sample_segment_index(
@@ -2192,8 +2193,8 @@ fn decode_golden_data_block(name: &str) -> loonfs_types::format::segment_blocks:
     let stored = rezstd(&payload);
     let handle = BlockHandle {
         offset: 0,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
+        decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block(&stored, &handle).expect("decode golden data block")

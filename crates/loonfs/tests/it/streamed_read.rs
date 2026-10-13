@@ -26,10 +26,12 @@ const PATH: &str = "/big.bin";
 /// that a read holding the file whole could not hide inside one.
 const CHUNK_BYTES: u64 = 64 * 1024;
 const CHUNKS: u64 = 10;
-const PAYLOAD_BYTES: usize = (CHUNK_BYTES * CHUNKS) as usize + 17;
+const PAYLOAD_BYTES: u64 = CHUNK_BYTES * CHUNKS + 17;
 
-fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+fn payload(len: u64) -> Vec<u8> {
+    (0..len)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+        .collect()
 }
 
 fn chunked() -> ReadFileStreamOptions {
@@ -100,10 +102,11 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
         .read_file_stream_with_options(PATH, &chunked())
         .await
         .expect("open stream");
-    assert_eq!(stream.size_bytes(), PAYLOAD_BYTES as u64);
+    assert_eq!(stream.size_bytes(), PAYLOAD_BYTES);
     assert_eq!(stream.entry().expect("path metadata").path.as_str(), PATH);
 
-    let mut read = Vec::with_capacity(PAYLOAD_BYTES);
+    let mut read =
+        Vec::with_capacity(usize::try_from(PAYLOAD_BYTES).expect("the payload should fit usize"));
     let mut chunks = 0u64;
     // Each chunk is dropped before the next is asked for, which is what a
     // consumer writing to a file or a pipe does, and what the liveness
@@ -127,7 +130,7 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
     assert_eq!(chunks, CHUNKS + 1, "ten full chunks and the remainder");
     let peaks = watched.peaks();
     assert_eq!(
-        peaks.total_bytes, PAYLOAD_BYTES as u64,
+        peaks.total_bytes, PAYLOAD_BYTES,
         "every byte crossed the store boundary exactly once"
     );
     assert!(
@@ -149,7 +152,7 @@ async fn a_buffered_read_holds_the_whole_file() {
     assert_eq!(read.bytes, payload);
     assert_eq!(
         watched.peaks().largest_buffer_bytes,
-        PAYLOAD_BYTES as u64,
+        PAYLOAD_BYTES,
         "the buffered read materializes the file in one buffer"
     );
 }

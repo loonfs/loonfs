@@ -10,7 +10,6 @@ use crate::resolve::{
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, Commit, EntryInodeKind, ErrorCode, InodeId, NamespaceId,
-    PinId, PublicOrdinalRangeError,
 };
 use std::path::{Path, PathBuf};
 
@@ -71,31 +70,6 @@ pub(crate) fn fail_for(
         Some(mode.to_owned()),
         error,
     )
-}
-
-/// Validates an ordinal argument before dispatching the command.
-pub(crate) fn parse_public_ordinal_arg<T>(
-    argument: &str,
-    value: u64,
-    constructor: impl FnOnce(u64) -> Result<T, PublicOrdinalRangeError>,
-) -> Result<T, CliError> {
-    constructor(value).map_err(|error| {
-        CliError::new(
-            ErrorCode::InvalidRequest.as_str(),
-            format!("invalid `{argument}` {value:?}: {error}"),
-        )
-        .with_param(argument)
-    })
-}
-
-pub(crate) fn parse_snapshot_id_arg(argument: &str, value: &str) -> Result<PinId, CliError> {
-    PinId::parse(value).map_err(|error| {
-        CliError::invalid_request(format!(
-            "invalid `{argument}`: invalid snapshot_id {value:?}: {}",
-            error.reason()
-        ))
-        .with_param(argument)
-    })
 }
 
 impl CommandContext {

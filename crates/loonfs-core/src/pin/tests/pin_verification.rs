@@ -155,7 +155,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     )
     .await
     .expect("collect before pin write");
-    assert!(collection.deleted.metadata_segments as usize >= replaced.len());
+    assert!(collection.deleted.metadata_segments >= replaced.len() as u64);
     for key in replaced {
         assert!(store.head(&key).await.expect("replaced segment").is_none());
     }

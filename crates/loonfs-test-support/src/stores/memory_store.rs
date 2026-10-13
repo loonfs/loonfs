@@ -78,8 +78,12 @@ impl ObjectStore for MemoryStore {
                         object_key: key.to_owned(),
                     });
                 }
-                let end = range.end_exclusive.min(object.bytes.len() as u64) as usize;
-                Bytes::from(object.bytes).slice(range.start_inclusive as usize..end)
+                let end = usize::try_from(range.end_exclusive.min(object.bytes.len() as u64))
+                    .expect("the test value should fit usize");
+                Bytes::from(object.bytes).slice(
+                    usize::try_from(range.start_inclusive).expect("the test value should fit usize")
+                        ..end,
+                )
             }
             None => Bytes::from(object.bytes),
         };

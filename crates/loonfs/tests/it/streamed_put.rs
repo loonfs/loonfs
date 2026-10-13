@@ -19,13 +19,15 @@ use tempfile::tempdir;
 const PATH: &str = "/big.bin";
 /// Three parts and a bit: enough that holding the payload whole would show
 /// up plainly against holding one part of it.
-const PAYLOAD_BYTES: usize = 3 * PROVIDER_MULTIPART_PART_BYTES as usize + 4_096;
+const PAYLOAD_BYTES: u64 = 3 * PROVIDER_MULTIPART_PART_BYTES + 4_096;
 /// Chunks the size of a source's reads, not the store's parts, so the
 /// store's own regrouping is what the bound has to survive.
 const CHUNK_BYTES: usize = 64 * 1024;
 
-fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+fn payload(len: u64) -> Vec<u8> {
+    (0..len)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+        .collect()
 }
 
 fn streamed(payload: &[u8]) -> ByteStream {
@@ -76,7 +78,7 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
 
     let peaks = watched.peaks();
     assert_eq!(
-        peaks.total_bytes, PAYLOAD_BYTES as u64,
+        peaks.total_bytes, PAYLOAD_BYTES,
         "every payload byte crossed the store boundary exactly once"
     );
     assert!(

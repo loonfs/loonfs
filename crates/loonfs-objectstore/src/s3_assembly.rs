@@ -71,7 +71,9 @@ impl S3RequestSigner {
         let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
         let mut parts = Vec::with_capacity(plan.len());
         for planned in &plan {
-            let number = parts.len() as u32 + 1;
+            let number = u32::try_from(parts.len())
+                .expect("a plan within the provider part limit should fit u32")
+                + 1;
             let part = if let Some(index) = planned.source {
                 let start: u64 = lengths[..index].iter().sum();
                 let range = ByteRange {
@@ -191,7 +193,10 @@ impl S3RequestSigner {
         tail: &[Bytes],
         part: &ByteRange,
     ) -> Result<Bytes> {
-        let mut bytes = Vec::with_capacity((part.end_exclusive - part.start_inclusive) as usize);
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(part.end_exclusive - part.start_inclusive)
+                .expect("a planned part should fit usize"),
+        );
         let mut start = 0;
         for ((source, range), etag) in sources.iter().zip(ranges).zip(etags) {
             let end = start + range.end_exclusive - range.start_inclusive;
@@ -225,7 +230,11 @@ impl S3RequestSigner {
             let first = start.max(part.start_inclusive);
             let last = end.min(part.end_exclusive);
             if first < last {
-                bytes.extend_from_slice(&piece[(first - start) as usize..(last - start) as usize]);
+                let first = usize::try_from(first - start)
+                    .expect("a range inside the piece should fit usize");
+                let last = usize::try_from(last - start)
+                    .expect("a range inside the piece should fit usize");
+                bytes.extend_from_slice(&piece[first..last]);
             }
             start = end;
         }

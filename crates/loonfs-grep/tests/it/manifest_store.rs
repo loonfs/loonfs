@@ -488,7 +488,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         KeyPredicate::prefix(manifests_prefix(&namespace_id)),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("late-manifest")
+        .writer_id(loonfs_test_support::ids::writer_id("late-manifest"))
         .build()
         .await
         .expect("writer");

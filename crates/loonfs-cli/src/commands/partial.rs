@@ -2,7 +2,7 @@
 
 use super::download::FileDownload;
 use crate::error::CliError;
-use loonfs_types::{Checksum, ContentRef, DestinationBehavior, RevisionNo};
+use loonfs_types::{Checksum, ContentId, ContentRef, DestinationBehavior, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -18,11 +18,11 @@ const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PartialDownloadMetadata {
-    content_id: String,
+    content_id: ContentId,
     size_bytes: u64,
     checksum: Checksum,
     #[serde(deserialize_with = "required_option")]
-    revision_no: Option<u64>,
+    revision_no: Option<RevisionNo>,
 }
 
 fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -37,10 +37,10 @@ impl PartialDownloadMetadata {
     /// Describes the content a download is about to fetch.
     pub(super) fn describe(content_ref: &ContentRef, revision_no: Option<RevisionNo>) -> Self {
         Self {
-            content_id: content_ref.content_id.to_string(),
+            content_id: content_ref.content_id.clone(),
             size_bytes: content_ref.size_bytes,
             checksum: content_ref.checksum.clone(),
-            revision_no: revision_no.map(|revision_no| revision_no.0),
+            revision_no,
         }
     }
 }
@@ -146,7 +146,8 @@ impl PartialDownload {
         let mut buffer = vec![0u8; FOLD_CHUNK_BYTES];
         let mut remaining = self.resumed_from;
         while remaining > 0 {
-            let wanted = buffer.len().min(remaining as usize);
+            let wanted = usize::try_from(remaining)
+                .map_or(buffer.len(), |remaining| buffer.len().min(remaining));
             reader
                 .read_exact(&mut buffer[..wanted])
                 .map_err(&local_error)?;

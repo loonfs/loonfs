@@ -100,7 +100,7 @@ impl Fixture {
             .metrics_recorder(recorder.clone())
             .build();
         let runtime = LoonFs::builder_with_store(store.clone())
-            .writer_id("read-budget")
+            .writer_id(loonfs_test_support::ids::writer_id("read-budget"))
             .execution_budget(budget)
             .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: None,

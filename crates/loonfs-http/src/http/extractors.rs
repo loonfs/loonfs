@@ -509,7 +509,7 @@ impl<const MAX_BYTES: usize> FromRequest<BindingState> for UploadBodyBytes<MAX_B
 /// oversized body (`413 content_too_large`) from an unreadable body (`400`).
 pub(super) struct UploadBodyStream {
     body: axum::body::Body,
-    max_bytes: u64,
+    max_bytes: Option<u64>,
     abort: Arc<Mutex<Option<UploadStreamAbort>>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -542,7 +542,7 @@ impl UploadBodyStream {
             .map(move |chunk| match chunk {
                 Ok(chunk) => {
                     read_bytes += chunk.len() as u64;
-                    if read_bytes > max_bytes {
+                    if max_bytes.is_some_and(|max_bytes| read_bytes > max_bytes) {
                         return Err(record_abort(&abort, UploadStreamAbort::TooLarge));
                     }
                     Ok(chunk)
@@ -619,7 +619,10 @@ impl FromRequest<BindingState> for UploadBodyStream {
         // A declared length past the limit is refused before a byte moves.
         // The incremental count still runs: a chunked body declares nothing,
         // and a declared length is a claim rather than a measurement.
-        if declared_content_length(req.headers()).is_some_and(|length| length > max_bytes) {
+        if declared_content_length(req.headers())
+            .zip(max_bytes)
+            .is_some_and(|(length, max_bytes)| length > max_bytes)
+        {
             return Err(upload_body_too_large_error());
         }
         Ok(UploadBodyStream {

@@ -20,7 +20,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("publication-recovery");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("publication-recovery")
+        .writer_id(loonfs_test_support::ids::writer_id("publication-recovery"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -116,7 +116,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("unknown-enable")
+        .writer_id(loonfs_test_support::ids::writer_id("unknown-enable"))
         .build()
         .await
         .expect("writer");

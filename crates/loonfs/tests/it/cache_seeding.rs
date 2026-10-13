@@ -135,7 +135,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let writer = loonfs::LoonFs::builder_with_store(recording.clone())
-        .writer_id("fold-projection")
+        .writer_id(loonfs_test_support::ids::writer_id("fold-projection"))
         .build()
         .await
         .expect("writer");

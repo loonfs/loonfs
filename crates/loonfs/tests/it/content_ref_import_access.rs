@@ -70,7 +70,9 @@ async fn open_writer() -> (
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store)
-        .writer_id("content-ref-import-access")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "content-ref-import-access",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -136,7 +138,9 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let private_ref = publish_inline(&writer, &source).await;
     loonfs::LoonFs::builder_with_store(recording.clone())
-        .writer_id(loonfs_test_support::test_actor().as_str())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            loonfs_test_support::test_actor().as_str(),
+        ))
         .build()
         .await
         .expect("maintenance")
@@ -399,7 +403,9 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     collect_aged_segments(recording.as_ref(), &source).await;
     let store: SharedObjectStore = recording.clone();
     let importer = LoonFs::builder_with_store(store)
-        .writer_id("content-ref-import-access-cold")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "content-ref-import-access-cold",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await

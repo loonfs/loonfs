@@ -74,8 +74,12 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     let recording = Arc::new(RecordingStore::new(Arc::clone(&watched), keys));
     let store: SharedObjectStore = recording.clone();
     let (expected_rows, built) = many_block_segment();
-    let index = decode_index_block(&built.bytes[built.index.offset as usize..], &built.index)
-        .expect("decode input index");
+    let index = decode_index_block(
+        &built.bytes
+            [usize::try_from(built.index.offset).expect("the test value should fit usize")..],
+        &built.index,
+    )
+    .expect("decode input index");
     assert!(index.len() >= 24, "each refill should cover many blocks");
     assert!((128 * 1024..2 * 1024 * 1024).contains(&built.filter.offset));
     assert!(
@@ -148,7 +152,8 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
                 );
             }
             for entry in index.iter().step_by(2) {
-                let start = entry.block.offset as usize;
+                let start =
+                    usize::try_from(entry.block.offset).expect("the test value should fit usize");
                 let block = decode_data_block_rows::<IndexRow>(
                     &built.bytes[start..start + entry.block.stored_bytes as usize],
                     &entry.block,
@@ -232,12 +237,14 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             .expect("read output")
             .expect("output exists");
         let index = decode_index_block(
-            &bytes[segment.index_block.offset as usize..],
+            &bytes[usize::try_from(segment.index_block.offset)
+                .expect("the test value should fit usize")..],
             &segment.index_block,
         )
         .expect("decode output index");
         for entry in index {
-            let start = entry.block.offset as usize;
+            let start =
+                usize::try_from(entry.block.offset).expect("the test value should fit usize");
             let block = decode_data_block_rows::<IndexRow>(
                 &bytes[start..start + entry.block.stored_bytes as usize],
                 &entry.block,

@@ -210,7 +210,9 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .await
         .expect("first fold completes");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("cold-handoff-inspection")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "cold-handoff-inspection",
+        ))
         .build()
         .await
         .expect("build maintenance handle")

@@ -159,7 +159,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         root: store_root.display().to_string(),
         key_prefix: Some("http-commits".to_owned()),
     })
-    .writer_id("loonfs-embedded-batch")
+    .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-batch"))
     .build()
     .await
     .expect("embedded writer");
@@ -968,7 +968,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             root: store_root.display().to_string(),
             key_prefix: Some("http-cross-transport".to_owned()),
         })
-        .writer_id("loonfs-embedded-cross")
+        .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-cross"))
         .build()
         .await
         .expect("embedded writer");

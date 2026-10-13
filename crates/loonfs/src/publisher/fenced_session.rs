@@ -5,7 +5,7 @@ use crate::{ExecutionBudgetStats, LoonFs, Namespace, Writable};
 
 async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<Writable>) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
         .execution_budget(
             ExecutionBudget::builder()
@@ -28,7 +28,7 @@ async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<
         .expect("first writer");
     writer.drain().await.expect("first publication ends");
     let rival = LoonFs::builder_with_store(store)
-        .writer_id("writer-b")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
         .build()
         .await
         .expect("rival");

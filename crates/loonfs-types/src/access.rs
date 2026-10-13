@@ -201,7 +201,7 @@ impl AccessRights {
     pub const EMPTY: Self = Self(0);
 
     /// Every right.
-    pub const ALL: Self = Self(((1_u16 << AccessRight::ALL.len()) - 1) as u8);
+    pub const ALL: Self = Self(u8::MAX >> (8 - AccessRight::ALL.len()));
     /// The set holding only `admin`.
     pub const ADMIN: Self = Self(AccessRight::Admin.bit());
 

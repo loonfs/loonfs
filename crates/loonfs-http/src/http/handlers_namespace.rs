@@ -61,6 +61,12 @@ pub(super) struct CheckpointPageQuery {
     cursor: Option<String>,
 }
 
+/// The capability value for a transfer limit. The API lists these limits on
+/// every deployment, so no limit is advertised as `u64::MAX`.
+fn advertised_limit(limit: Option<u64>) -> u64 {
+    limit.unwrap_or(u64::MAX)
+}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -126,7 +132,7 @@ pub(super) async fn get_capabilities(
     }
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.options.max_upload_bytes,
+        advertised_limit(state.options.max_upload_bytes),
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES.to_owned(),
@@ -138,7 +144,7 @@ pub(super) async fn get_capabilities(
     );
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.options.max_download_bytes,
+        advertised_limit(state.options.max_download_bytes),
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),

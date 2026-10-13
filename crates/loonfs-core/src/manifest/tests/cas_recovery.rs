@@ -415,10 +415,10 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
             .expect("discover");
         assert_eq!(actual.state, expected.state);
         assert_eq!(
-            store.counts().gets,
-            (expected.state.manifest().manifest_no.0 - manifest_no.0
+            store.counts().gets as u64,
+            expected.state.manifest().manifest_no.0 - manifest_no.0
                 + 1
-                + u64::from(manifest_no.0 > 0)) as usize
+                + u64::from(manifest_no.0 > 0)
         );
         assert_eq!(store.counts().lists, 0);
         assert_eq!(store.counts().puts, 0);

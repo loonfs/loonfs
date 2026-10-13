@@ -432,7 +432,7 @@ mod tests {
             loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store"),
         );
         let writer = crate::LoonFs::builder_with_store(store)
-            .writer_id("default-budget")
+            .writer_id(loonfs_test_support::ids::writer_id("default-budget"))
             .build()
             .await
             .expect("writer");

@@ -482,7 +482,7 @@ fn embedded_and_remote_profiles_emit_the_same_error_codes() {
     ]);
     assert_failure(&embedded);
     assert_failure(&remote);
-    assert_eq!(json_error(&embedded)["code"], "invalid_request");
+    assert_eq!(json_error(&embedded)["code"], "invalid_usage");
     assert_eq!(json_error(&embedded)["code"], json_error(&remote)["code"]);
 }
 

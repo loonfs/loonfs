@@ -92,7 +92,7 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
 
 async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id("inline-retry")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-retry"))
         .min_publish_interval_ms(0)
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .inline_content(InlineContentPolicy {

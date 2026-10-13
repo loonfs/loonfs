@@ -132,13 +132,13 @@ async fn warm_phase_request_accounting() {
     // steps a few times so the manifest ends with a seed base plus a few delta
     // runs and a WAL tail, like the 10k benchmark build.
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-maintenance"))
         .build()
         .await
         .expect("build maintenance")
@@ -259,7 +259,7 @@ async fn warm_phase_request_accounting() {
     report("warm read", &log.take_gets(), &segments);
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-writer-2")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-writer-2"))
         .min_publish_interval_ms(0)
         .build()
         .await

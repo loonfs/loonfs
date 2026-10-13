@@ -296,7 +296,8 @@ pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
                 .into_iter()
                 .enumerate()
                 .map(|(index, delta)| WalCommitDelta {
-                    semantic_operation_index: index as u32,
+                    semantic_operation_index: u32::try_from(index)
+                        .expect("the test value should fit u32"),
                     delta,
                 })
                 .collect(),

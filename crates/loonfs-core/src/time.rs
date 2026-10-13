@@ -139,7 +139,9 @@ pub fn current_time_ms() -> u64 {
 /// LoonFS can't run in that environment.
 fn unix_ms(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
+        .map(|elapsed| {
+            u64::try_from(elapsed.as_millis()).expect("unix milliseconds should fit u64")
+        })
         .expect("the system clock should be after the unix epoch")
 }
 

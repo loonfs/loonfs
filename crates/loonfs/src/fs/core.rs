@@ -64,15 +64,6 @@ pub(crate) struct WriterBits {
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
-impl WriterIdentity {
-    /// Mints an identity, rejecting a blank writer id.
-    pub(crate) fn new(writer_id: String) -> Result<Self> {
-        let writer_id =
-            WriterId::parse(writer_id).map_err(|error| Error::Config(error.to_string()))?;
-        Ok(Self { writer_id })
-    }
-}
-
 impl RuntimeCore {
     pub(crate) fn with_subject(&self, subject: Subject) -> Self {
         Self {

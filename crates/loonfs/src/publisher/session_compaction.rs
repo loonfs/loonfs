@@ -123,7 +123,7 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
         .build()
         .await
@@ -174,7 +174,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
         // No run fits a one-byte step, so every compaction streams.
         .execution_budget(
@@ -326,7 +326,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
         .build()
         .await
@@ -383,7 +383,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(SegmentWriteWatch::new(temp_dir.path()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
         .execution_budget(one_merge_at_a_time())
         .build()
@@ -443,7 +443,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
         OperationSelector::Put,
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
         .execution_budget(one_merge_at_a_time())
         .build()

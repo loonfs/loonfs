@@ -51,7 +51,8 @@ pub(super) async fn rewrite_manifest_segment(
     descriptor.filter_inline = (built.filter.stored_bytes
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
-            let start = built.filter.offset as usize;
+            let start =
+                usize::try_from(built.filter.offset).expect("the test value should fit usize");
             loonfs_types::format::hex::hex_encode_bytes(
                 &built.bytes[start..start + built.filter.stored_bytes as usize],
             )
@@ -791,7 +792,8 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     descriptor.filter_inline = (built.filter.stored_bytes
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
-            let start = built.filter.offset as usize;
+            let start =
+                usize::try_from(built.filter.offset).expect("the test value should fit usize");
             loonfs_types::format::hex::hex_encode_bytes(
                 &built.bytes[start..start + built.filter.stored_bytes as usize],
             )

@@ -49,7 +49,7 @@ async fn create_namespace() -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let writer =
         LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-            .writer_id("access-namespace")
+            .writer_id(loonfs_test_support::ids::writer_id("access-namespace"))
             .min_publish_interval_ms(0)
             .build()
             .await
@@ -325,7 +325,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .await
         .expect("publish after snapshot creation");
     let peer = LoonFs::builder_with_store(writer.object_store())
-        .writer_id("peer")
+        .writer_id(loonfs_test_support::ids::writer_id("peer"))
         .min_publish_interval_ms(0)
         .build()
         .await

@@ -36,8 +36,8 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
                 max_lifetime_ms: 604_800_000,
                 max_live_per_namespace: 16,
             },
-            max_upload_bytes: 256 * 1024 * 1024,
-            max_download_bytes: 256 * 1024 * 1024,
+            max_upload_bytes: Some(256 * 1024 * 1024),
+            max_download_bytes: Some(256 * 1024 * 1024),
             max_concurrent_uploads: 8,
             max_concurrent_downloads: 16,
             inline_content: Default::default(),
@@ -61,10 +61,16 @@ pub(super) async fn test_app(
     let options = Arc::new(config.binding);
     let metrics = HttpMetrics::new();
     let runtime = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store))
-        .writer_id(config.writer_id.as_str())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            config.writer_id.as_str(),
+        ))
         .min_publish_interval_ms(0)
         .inline_content(options.inline_content.clone())
-        .max_read_content_bytes(options.max_download_bytes)
+        .max_read_content_bytes(
+            options
+                .max_download_bytes
+                .expect("test bindings should cap proxied reads"),
+        )
         .trace_mode(TraceMode::Remote)
         .store_kind(options.store_kind)
         .metrics_recorder(metrics.recorder())

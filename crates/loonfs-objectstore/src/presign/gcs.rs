@@ -16,8 +16,7 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_types::format::hex::hex_encode_bytes;
-use loonfs_types::{Checksum, ChecksumAlgorithm};
+use loonfs_types::{Checksum, ChecksumAlgorithm, HexDigest};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use std::collections::BTreeMap;
@@ -272,7 +271,7 @@ pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
         }
         return Some(Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
-            value: hex_encode_bytes(&raw),
+            value: HexDigest::encode(&raw),
         });
     }
     None
@@ -397,7 +396,8 @@ mod tests {
         );
         assert_eq!(
             signed.expires_at_ms,
-            SIGNING_EPOCH_SECS * 1_000 + TTL.as_millis() as u64
+            SIGNING_EPOCH_SECS * 1_000
+                + u64::try_from(TTL.as_millis()).expect("the test value should fit u64")
         );
     }
 
@@ -628,12 +628,12 @@ mod tests {
     #[test]
     fn stored_crc32c_selects_its_algorithm_out_of_the_hash_header() {
         assert_eq!(
-            stored_crc32c("crc32c=mnG7TA==").map(|checksum| checksum.value),
+            stored_crc32c("crc32c=mnG7TA==").map(|checksum| checksum.value.to_string()),
             Some(HELLO_CRC32C_HEX.to_owned())
         );
         assert_eq!(
             stored_crc32c("md5=XUFAKrxLKna5cZ2REBfFkg==,crc32c=mnG7TA==")
-                .map(|checksum| checksum.value),
+                .map(|checksum| checksum.value.to_string()),
             Some(HELLO_CRC32C_HEX.to_owned())
         );
         assert_eq!(

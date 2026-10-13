@@ -83,7 +83,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_state_bytes(0)
@@ -152,7 +152,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_state_bytes(0)
@@ -266,7 +266,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .build()
         .await
         .expect("writer");
@@ -313,7 +313,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         ));
         let store: SharedObjectStore = recording.clone();
         let writer = LoonFs::builder_with_store(store.clone())
-            .writer_id("runtime-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
             .build()
             .await
             .expect("writer");
@@ -378,7 +378,7 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_owns() {
     let directory = tempfile::tempdir().expect("directory");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store)
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .build()
         .await
         .expect("writer");

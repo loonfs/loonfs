@@ -179,7 +179,10 @@ pub fn byte_pattern(length: usize, modulus: u8) -> Result<Vec<u8>, PatternError>
         return Err(PatternError::ZeroModulus);
     }
     Ok((0..length)
-        .map(|offset| (offset % usize::from(modulus)) as u8)
+        .map(|offset| {
+            u8::try_from(offset % usize::from(modulus))
+                .expect("a remainder below a u8 modulus should fit u8")
+        })
         .collect())
 }
 

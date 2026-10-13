@@ -195,13 +195,17 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("planless-boundary-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "planless-boundary-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("planless-boundary-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "planless-boundary-maintenance",
+        ))
         .build()
         .await
         .expect("build maintenance")
@@ -380,7 +384,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-service-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grep-service-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await

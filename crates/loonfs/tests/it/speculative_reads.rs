@@ -20,7 +20,7 @@ async fn writer_with_file(
     namespace_id: &NamespaceId,
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("speculative-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("speculative-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -66,7 +66,9 @@ async fn an_unchanged_view_resolves_the_path_once() {
     let namespace_id = NamespaceId::parse("speculative").expect("valid namespace id");
     let _writer = writer_with_file(&store, &namespace_id).await;
     LoonFs::builder_with_store(store.clone())
-        .writer_id("speculative-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "speculative-maintenance",
+        ))
         .build()
         .await
         .expect("build maintenance")

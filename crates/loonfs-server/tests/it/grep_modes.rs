@@ -388,7 +388,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let temp_dir = tempdir().expect("store tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("restart-seed")
+        .writer_id(loonfs_test_support::ids::writer_id("restart-seed"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -738,7 +738,9 @@ async fn seed_namespace(
 ) -> (SharedObjectStore, LoonFs<Writable>, NamespaceId) {
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(format!("grep-mode-seed-{name}"))
+        .writer_id(loonfs_test_support::ids::writer_id(&format!(
+            "grep-mode-seed-{name}"
+        )))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -757,10 +759,10 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
-        writer_id: format!("grep-mode-{mode:?}"),
-        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
-        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
-        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        writer_id: loonfs_test_support::ids::writer_id(&format!("grep-mode-{mode:?}")),
+        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS as u64,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS as u64,
+        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u64,
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
@@ -997,7 +999,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .await
         .expect("build reader");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(actor)
+        .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
         .expect("build maintenance")

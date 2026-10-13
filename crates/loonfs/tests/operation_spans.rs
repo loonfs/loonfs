@@ -62,7 +62,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
 
     block_on(async {
         let writer = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id("operation-span-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("operation-span-writer"))
             .build()
             .await
             .expect("build writer");
@@ -77,7 +77,9 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
         namespace.metadata().await.expect("read namespace state");
 
         LoonFs::builder_with_store(writer.object_store())
-            .writer_id("operation-span-maintenance")
+            .writer_id(loonfs_test_support::ids::writer_id(
+                "operation-span-maintenance",
+            ))
             .build()
             .await
             .expect("build maintenance")
@@ -123,7 +125,9 @@ fn delegated_writer_calls_close_one_operation_span() {
 
     let (create_log, put_log) = block_on(async {
         let writer = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id("operation-span-count-writer")
+            .writer_id(loonfs_test_support::ids::writer_id(
+                "operation-span-count-writer",
+            ))
             .build()
             .await
             .expect("build writer");

@@ -14,15 +14,16 @@ use tokio::sync::OwnedSemaphorePermit;
 pub(super) fn streamed_download_response(
     stream: FileContentStream<SharedObjectStore>,
     permit: OwnedSemaphorePermit,
-    max_content_bytes: u64,
+    max_content_bytes: Option<u64>,
     namespace_id: &NamespaceId,
 ) -> Result<Response, ApiResponseError> {
-    if stream.size_bytes() > max_content_bytes {
+    if let Some(max_bytes) = max_content_bytes.filter(|max_bytes| stream.size_bytes() > *max_bytes)
+    {
         return Err(ApiResponseError::runtime_for_namespace(
             namespace_id,
             loonfs::Error::Core(loonfs::CoreError::ContentTooLarge {
                 size_bytes: stream.size_bytes(),
-                max_bytes: max_content_bytes,
+                max_bytes,
             }),
         ));
     }

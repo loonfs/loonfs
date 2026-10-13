@@ -84,7 +84,7 @@ pub enum CoreError {
         max_bytes: usize,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
-    AppendTooLarge { size_bytes: usize, max_bytes: usize },
+    AppendTooLarge { size_bytes: u64, max_bytes: u64 },
     /// The request contains more items than one batch may read. No items were
     /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]

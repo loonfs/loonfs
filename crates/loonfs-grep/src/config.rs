@@ -14,13 +14,13 @@ use thiserror::Error;
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
     /// Revisions examined per build step.
-    pub max_files_per_step: usize,
+    pub max_files_per_step: u64,
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
     /// Build and reorganize steps that hold file content or index segments
     /// at once. A host builds one `GrepStepBudget` from it and passes that
     /// budget to every worker it runs.
-    pub max_concurrent_steps: usize,
+    pub max_concurrent_steps: u64,
 }
 
 impl GrepWorkerConfig {
@@ -48,14 +48,18 @@ impl Default for GrepWorkerConfig {
     fn default() -> Self {
         let policy = GramIndexBuildPolicy::default();
         Self {
-            max_files_per_step: policy.max_files_per_step.get(),
+            max_files_per_step: policy.max_files_per_step.get() as u64,
             max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
-            max_concurrent_steps: DEFAULT_MAX_CONCURRENT_GREP_STEPS.get(),
+            max_concurrent_steps: DEFAULT_MAX_CONCURRENT_GREP_STEPS.get() as u64,
         }
     }
 }
 
-fn nonzero_usize(field: &'static str, value: usize) -> Result<NonZeroUsize, GrepWorkerConfigError> {
+fn nonzero_usize(field: &'static str, value: u64) -> Result<NonZeroUsize, GrepWorkerConfigError> {
+    let value = usize::try_from(value).map_err(|_| GrepWorkerConfigError::InvalidField {
+        field,
+        reason: format!("must not exceed {}", usize::MAX),
+    })?;
     NonZeroUsize::new(value).ok_or_else(|| GrepWorkerConfigError::InvalidField {
         field,
         reason: "must be greater than zero".to_owned(),

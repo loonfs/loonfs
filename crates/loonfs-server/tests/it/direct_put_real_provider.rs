@@ -912,8 +912,8 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     harness: &crate::common::TestServer,
     namespace: &str,
 ) {
-    let payload: Vec<u8> = (0..4 * PROXY_CAP_BYTES as usize)
-        .map(|offset| (offset % 251) as u8)
+    let payload: Vec<u8> = (0..4 * PROXY_CAP_BYTES)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
         .collect();
     let target = NamespacePath::parse(namespace, "/cap-bound.bin").expect("cap-bound target");
 
@@ -1003,7 +1003,7 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
 /// wrong place or twice cannot go unnoticed.
 fn multipart_payload(part_size: usize, parts: usize) -> Vec<u8> {
     (0..part_size * parts + 4_096)
-        .map(|offset| (offset % 251) as u8)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
         .collect()
 }
 
@@ -1051,7 +1051,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     let upload_id = begin.upload_id.clone();
     let (part_size_bytes, checksum_algorithm) = direct_multipart_of(&begin);
     assert_eq!(
-        part_size_bytes as usize, part_size,
+        part_size_bytes, part_size as u64,
         "the deployment's part geometry is the one this payload was cut to"
     );
     assert_eq!(checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
@@ -1061,7 +1061,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .iter()
         .enumerate()
         .map(|(index, chunk)| UploadPartChecksumClaim {
-            part_number: index as u32 + 1,
+            part_number: u32::try_from(index).expect("the test value should fit u32") + 1,
             checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect();
@@ -1270,7 +1270,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     // Three parts and a bit at the deployment's geometry, so the pass
     // crosses a wave boundary and ends on a short part.
     let payload: Vec<u8> = (0..3 * MULTIPART_PART_SIZE + 4_096)
-        .map(|offset| (offset % 251) as u8)
+        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
         .collect();
 
     let file = tempfile::NamedTempFile::new().expect("temp file for the one-pass put");

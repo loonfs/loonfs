@@ -67,7 +67,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     ));
     store.fail_all();
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
@@ -286,7 +286,7 @@ async fn writer_with_policy_and_byte_limit(
         KeyPredicate::any(),
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(policy)
         .publication_policy(crate::PublicationPolicy {
             max_estimated_bytes_per_namespace: NonZeroUsize::new(max_estimated_bytes_per_namespace)
@@ -758,7 +758,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         ));
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
         let writer = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("inline-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: Some(8),
                 inline_content_wal_object_budget_bytes: 4,
@@ -1075,7 +1075,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         metadata_manifest_prefix(&namespace),
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
@@ -1228,7 +1228,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             ..Default::default()
         };
         let independent = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("independent")
+            .writer_id(loonfs_test_support::ids::writer_id("independent"))
             .build()
             .await
             .expect("independent maintenance")
@@ -1320,7 +1320,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         },
     ] {
         let error = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("writer")
+            .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .inline_content(options)
             .build()
             .await
@@ -1330,7 +1330,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         assert!(store.snapshot().is_empty());
     }
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(0),
             ..policy()
@@ -1369,7 +1369,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     // The session folds only a full tail, so nothing but the explicit fold
     // runs until the last commit fills it.
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .metadata_cache(cache)
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),

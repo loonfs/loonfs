@@ -1498,8 +1498,10 @@ async fn install_synthetic_bindings_base(
         count.is_power_of_two(),
         "the scrambling multiplier is only a permutation over a power of two"
     );
-    let mut binds = Vec::with_capacity(count as usize);
-    let mut unbinds = Vec::with_capacity(count as usize);
+    let mut binds =
+        Vec::with_capacity(usize::try_from(count).expect("the test value should fit usize"));
+    let mut unbinds =
+        Vec::with_capacity(usize::try_from(count).expect("the test value should fit usize"));
     for index in 0..count {
         let parent = InodeId(1_000);
         // Odd multiplier, power-of-two modulus: a bijection, so every name is
@@ -1678,7 +1680,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         profile.index_reads
     );
     assert!(
-        profile.requests() < merged.rows_read as usize / 8,
+        (profile.requests() as u64) < merged.rows_read / 8,
         "total work must follow the window's segments, not its rows: {} requests for {} rows",
         profile.requests(),
         merged.rows_read
@@ -1698,7 +1700,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         panic!("nothing cancelled this job");
     };
     let profile = classify_reads(&store.take_reads(), &descriptors);
-    assert!(profile.requests() < job.rows_read as usize / 8);
+    assert!((profile.requests() as u64) < job.rows_read / 8);
     assert!(job.peak_operator_rows <= 1);
 }
 

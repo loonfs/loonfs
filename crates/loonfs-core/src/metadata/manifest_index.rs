@@ -79,7 +79,7 @@ pub(super) struct ManifestDirentryBindCandidate {
 pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
-    start_after_name_key: Option<&str>,
+    start_after_name_key: Option<&NameKey>,
     start_after_row_key: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ManifestDirentryBindCandidate>> {
@@ -117,8 +117,8 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     name_key: &NameKey,
 ) -> Result<Vec<DirentryBindingRecord>> {
-    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key.as_str());
-    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key.as_str());
+    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key);
+    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
     segments
         .scan_prefix_for_lookup(
             MetadataRowFamily::DirentryBinds,
@@ -327,8 +327,8 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,
 ) -> Result<Option<CommitReceiptRecord>> {
-    let filter_probe = lookup_keys::commit_receipt_probe(commit_id.as_str());
-    let prefix = lookup_keys::commit_receipt_prefix(commit_id.as_str());
+    let filter_probe = lookup_keys::commit_receipt_probe(commit_id);
+    let prefix = lookup_keys::commit_receipt_prefix(commit_id);
     let receipts: Vec<CommitReceiptRecord> = segments
         .scan_prefix_for_lookup(
             MetadataRowFamily::CommitReceipts,

@@ -38,8 +38,8 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
-use loonfs_types::{format::hex::hex_encode_bytes, SecretString};
-use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
+use loonfs_types::SecretString;
+use loonfs_types::{Checksum, ChecksumAlgorithm, HexDigest, OperationDeadline, StreamingChecksum};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
@@ -400,7 +400,10 @@ impl MultipartController for S3RequestSigner {
                 }
                 crc.update(&payload);
                 size_bytes += payload.len() as u64;
-                Ok(self.upload_part(key, &upload_id, index as u32 + 1, payload))
+                let part_number = u32::try_from(index)
+                    .expect("a part index below the provider part limit should fit u32")
+                    + 1;
+                Ok(self.upload_part(key, &upload_id, part_number, payload))
             })
             .try_buffer_unordered(part_window)
             .try_collect()
@@ -725,7 +728,7 @@ fn base64_checksum(algorithm: ChecksumAlgorithm, value: &str) -> Option<Checksum
         .ok()?;
     (raw.len() == algorithm.value_bytes()).then(|| Checksum {
         algorithm,
-        value: hex_encode_bytes(&raw),
+        value: HexDigest::encode(&raw),
     })
 }
 
@@ -893,7 +896,7 @@ mod tests {
                         .split_once('-').expect("bounds");
                     let first: usize = first.parse().expect("first");
                     let end = last.parse::<usize>().expect("last") + 1;
-                    assert!(end - first <= crate::assembly::READ_BYTES as usize);
+                    assert!(end - first <= usize::try_from(crate::assembly::READ_BYTES).expect("the test value should fit usize"));
                     assert_eq!(request.headers()[http::header::IF_MATCH], "\"base\"");
                     ("get", response.body(Bytes::copy_from_slice(&self.base[first..end])))
                 }
@@ -1171,7 +1174,8 @@ mod tests {
             let length = if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                 64 * 1024 * 1024
             } else {
-                crate::assembly::READ_BYTES as usize
+                usize::try_from(crate::assembly::READ_BYTES)
+                    .expect("the test value should fit usize")
             };
             let base = vec![b'a'; length];
             let tail = Bytes::from_static(b"tail");

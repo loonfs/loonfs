@@ -58,17 +58,27 @@ const _: () = assert!(0 < FOLD_AT_WAL_OBJECTS && FOLD_AT_WAL_OBJECTS < MAX_UNFOL
 
 /// Provider retry-admission deadline, in milliseconds. This alone does not
 /// bound a final retry's backoff and request phase.
-pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;
+pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = duration_ms(PROVIDER_OPERATION_DEADLINE);
 
 /// One control-plane provider HTTP attempt's request timeout, in
 /// milliseconds. Payload-sized conditional writes use a longer timeout.
-pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis() as u64;
+pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = duration_ms(PROVIDER_ATTEMPT_TIMEOUT);
 
 /// Allowance for publication request phases, including retry admission,
 /// final backoff and a payload-sized final attempt. Conditional publications
 /// always use a single request, even when their bodies are large.
 pub const PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS: u64 =
-    PROVIDER_PUBLICATION_REQUEST_DEADLINE.as_millis() as u64;
+    duration_ms(PROVIDER_PUBLICATION_REQUEST_DEADLINE);
+
+/// Converts a duration to whole milliseconds at compile time. A value past
+/// `u64::MAX` milliseconds fails the build instead of truncating.
+const fn duration_ms(duration: std::time::Duration) -> u64 {
+    let seconds_ms = duration
+        .as_secs()
+        .checked_mul(1_000)
+        .expect("the duration should fit u64 milliseconds");
+    seconds_ms + duration.subsec_millis() as u64
+}
 
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;

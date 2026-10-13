@@ -41,7 +41,7 @@ async fn check_buffered_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("access-reads")
+        .writer_id(loonfs_test_support::ids::writer_id("access-reads"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -201,7 +201,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let old_writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("old-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("old-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -267,7 +267,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         );
     }
     let peer = LoonFs::builder_with_store(store)
-        .writer_id("peer")
+        .writer_id(loonfs_test_support::ids::writer_id("peer"))
         .min_publish_interval_ms(0)
         .build()
         .await

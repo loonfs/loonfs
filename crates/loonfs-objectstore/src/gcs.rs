@@ -304,7 +304,8 @@ fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError
 }
 
 fn crc32c_header(checksum: &Checksum) -> String {
-    let value = u32::from_str_radix(&checksum.value, 16).expect("computed CRC-32C should be valid");
+    let value =
+        u32::from_str_radix(checksum.value.as_str(), 16).expect("computed CRC-32C should be valid");
     format!(
         "crc32c={}",
         base64::engine::general_purpose::STANDARD.encode(value.to_be_bytes())
@@ -666,7 +667,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                stored_crc32c_from_headers(&headers).map(|checksum| checksum.value),
+                stored_crc32c_from_headers(&headers).map(|checksum| checksum.value.to_string()),
                 Some(crc32c_of_hello.to_owned()),
                 "crc32c not found in {values:?}"
             );

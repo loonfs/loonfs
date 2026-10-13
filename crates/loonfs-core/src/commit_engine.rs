@@ -281,8 +281,8 @@ impl CommitCandidate {
                 }
             } else if bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
                 CoreError::AppendTooLarge {
-                    size_bytes: bytes.len(),
-                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
+                    size_bytes: bytes.len() as u64,
+                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES as u64,
                 }
             } else {
                 continue;

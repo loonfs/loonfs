@@ -45,7 +45,7 @@ impl GrepHost {
             .await
             .expect("build reader");
         let maintenance = LoonFs::builder_with_store(store.clone())
-            .writer_id(actor)
+            .writer_id(loonfs_test_support::ids::writer_id(actor))
             .build()
             .await
             .expect("build maintenance")

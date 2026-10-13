@@ -348,10 +348,10 @@ pub(crate) struct FoyerCacheStats {
 struct DiskGeometry {
     /// Bytes in one disk block, which is [`DISK_BLOCK_BYTES`] for a
     /// directory this build wrote.
-    block_bytes: usize,
+    block_bytes: u64,
     /// Blocks the directory was built to hold, which is an upper bound on
     /// the block files it holds.
-    blocks: usize,
+    blocks: u64,
 }
 
 /// Prepares the versioned cache directory for the configured capacity.
@@ -365,8 +365,8 @@ struct DiskGeometry {
 /// already holds the directory lock.
 fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConfigError> {
     let wanted = DiskGeometry {
-        block_bytes: DISK_BLOCK_BYTES,
-        blocks: capacity / DISK_BLOCK_BYTES,
+        block_bytes: DISK_BLOCK_BYTES as u64,
+        blocks: (capacity / DISK_BLOCK_BYTES) as u64,
     };
     let found = read_geometry(directory)?;
     let keep = found.is_some_and(|found| {

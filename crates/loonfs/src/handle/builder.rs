@@ -15,6 +15,7 @@ use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
+use loonfs_types::WriterId;
 use std::sync::Arc;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
@@ -56,7 +57,7 @@ struct CoreConfig {
 
 /// What only a writable runtime reads.
 pub(crate) struct WriterConfig {
-    writer_id: Option<String>,
+    writer_id: Option<WriterId>,
     min_publish_interval_ms: u64,
     publication_policy: PublicationPolicy,
     inline_content: InlineContentPolicy,
@@ -248,7 +249,7 @@ impl LoonFsBuilder<ReadOnly> {
 
 impl LoonFsBuilder<Writable> {
     /// Sets the writer id used by namespace mutations. Required.
-    pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
+    pub fn writer_id(mut self, writer_id: impl Into<WriterId>) -> Self {
         self.writer.writer_id = Some(writer_id.into());
         self
     }
@@ -306,7 +307,7 @@ impl LoonFsBuilder<Writable> {
         let writer_id = writer
             .writer_id
             .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
-        let identity = WriterIdentity::new(writer_id)?;
+        let identity = WriterIdentity { writer_id };
         let runtime = owning_runtime()?;
         let core = self.core.open()?;
         let execution_budget = core.inner.config.execution_budget.clone();

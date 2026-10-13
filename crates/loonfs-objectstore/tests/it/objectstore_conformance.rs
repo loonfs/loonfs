@@ -615,7 +615,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
     let _ = store.delete(&key).await;
 
     let payload: Vec<u8> = (0..1_000_003usize)
-        .map(|index| (index % 241) as u8)
+        .map(|index| u8::try_from(index % 241).expect("a remainder below 241 should fit u8"))
         .collect();
     store
         .put(
@@ -674,8 +674,10 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     let key = streamed_write_key();
     let _ = store.delete(&key).await;
 
-    let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize;
-    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
+    let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
+    let payload: Vec<u8> = (0..payload_len)
+        .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+        .collect();
     let expected = Checksum::crc64nvme(&payload);
 
     let size_bytes = store
@@ -686,14 +688,14 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
         )
         .await
         .expect("streamed write of a multi-part payload");
-    assert_eq!(size_bytes, payload_len as u64);
+    assert_eq!(size_bytes, payload_len);
 
     let read_back = store
         .get(&key, None)
         .await
         .expect("read the streamed object back")
         .expect("streamed object exists");
-    assert_eq!(read_back.len(), payload_len);
+    assert_eq!(read_back.len() as u64, payload_len);
     assert_eq!(
         Checksum::crc64nvme(&read_back),
         expected,

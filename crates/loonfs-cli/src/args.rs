@@ -3,12 +3,40 @@
 use crate::progress::ProgressMode;
 use crate::render::OutputFormat;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
-use loonfs_types::InodeId;
+use loonfs_types::{
+    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, CommitId, InodeId, NamespaceId, PinId,
+    PrincipalId, PublicOrdinalRangeError, RevisionNo,
+};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
     loonfs_types::public_inode_id::decode(value).map_err(|error| error.to_string())
+}
+
+/// Parses a decimal ordinal and checks that it is a public integer.
+fn parse_public_ordinal<T>(
+    value: &str,
+    constructor: fn(u64) -> Result<T, PublicOrdinalRangeError>,
+) -> Result<T, String> {
+    let value: u64 = value.parse().map_err(|error| format!("{error}"))?;
+    constructor(value).map_err(|error| error.to_string())
+}
+
+fn parse_change_seq(value: &str) -> Result<ChangeSeq, String> {
+    parse_public_ordinal(value, ChangeSeq::parse)
+}
+
+fn parse_revision_no(value: &str) -> Result<RevisionNo, String> {
+    parse_public_ordinal(value, RevisionNo::parse)
+}
+
+fn parse_attributes_revision_no(value: &str) -> Result<AttributesRevisionNo, String> {
+    parse_public_ordinal(value, AttributesRevisionNo::parse)
+}
+
+fn parse_access_revision_no(value: &str) -> Result<AccessRevisionNo, String> {
+    parse_public_ordinal(value, AccessRevisionNo::parse)
 }
 
 const TOP_LEVEL_HELP_TEMPLATE: &str = "\
@@ -706,7 +734,7 @@ pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Args)]
@@ -754,7 +782,7 @@ pub(crate) struct NamespaceShowArgs {
     pub target: TargetSelectorArgs,
     /// Namespace to show. When omitted, the usual namespace selection applies.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
-    pub namespace_id: Option<String>,
+    pub namespace_id: Option<NamespaceId>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -779,7 +807,7 @@ pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
     /// Access mode. It can't be changed after the namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
@@ -789,7 +817,7 @@ pub(crate) struct NamespaceCreateArgs {
     /// A principal to grant `admin` on the root at creation. Repeat the flag
     /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
-    pub administrators: Vec<String>,
+    pub administrators: Vec<PrincipalId>,
     /// How sibling names are compared. It can't be changed after the
     /// namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
@@ -805,10 +833,10 @@ pub(crate) struct NamespaceDeleteArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
     /// Delete only if the namespace head is still at this sequence.
-    #[arg(long)]
-    pub expected_head_seq: Option<u64>,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub expected_head_seq: Option<ChangeSeq>,
     /// Skip the interactive confirmation.
     #[arg(long)]
     pub yes: bool,
@@ -825,12 +853,12 @@ pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub source_namespace_id: String,
+    pub source_namespace_id: NamespaceId,
     #[arg(value_hint = ValueHint::Other)]
-    pub new_namespace_id: String,
+    pub new_namespace_id: NamespaceId,
     /// Fork from a live snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -871,7 +899,7 @@ pub(crate) struct CommitArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit. One is generated when omitted.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Args)]
@@ -884,7 +912,7 @@ pub(crate) struct FilesystemLsArgs {
     pub pagination: PaginationArgs,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -908,7 +936,7 @@ pub(crate) struct FilesystemStatArgs {
     pub inode: Option<InodeId>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -940,8 +968,8 @@ pub(crate) struct AccessSetArgs {
     pub expected_inode_id: Option<InodeId>,
     /// Replace only while the row is still at this access revision. Needs
     /// --expected-inode-id, which identifies the row.
-    #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id", value_parser = parse_access_revision_no)]
+    pub expected_revision: Option<AccessRevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -975,8 +1003,8 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub expected_inode_id: Option<InodeId>,
     /// Update only while the inode's attribute revision is still this one.
     /// Requires --expected-inode-id.
-    #[arg(long, requires = "expected_inode_id")]
-    pub expected_attributes_revision: Option<u64>,
+    #[arg(long, requires = "expected_inode_id", value_parser = parse_attributes_revision_no)]
+    pub expected_attributes_revision: Option<AttributesRevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1029,11 +1057,11 @@ pub(crate) struct FilesystemCatArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Print this revision instead of the current content.
-    #[arg(long)]
-    pub revision: Option<u64>,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -1079,11 +1107,11 @@ pub(crate) struct FilesystemGetArgs {
     #[arg(short, long)]
     pub recursive: bool,
     /// Download this revision instead of the current content.
-    #[arg(long)]
-    pub revision: Option<u64>,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
     /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
@@ -1116,8 +1144,8 @@ pub(crate) struct FilesystemPutArgs {
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
     pub expected_inode_id: Option<InodeId>,
     /// Replacement requires that the file still has this revision and inode. This precondition implies --force.
-    #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id", value_parser = parse_revision_no)]
+    pub expected_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1139,8 +1167,8 @@ pub(crate) struct FilesystemAppendArgs {
     #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_inode_id: Option<InodeId>,
     /// The append requires that the file still has this revision and inode.
-    #[arg(long, requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, requires = "expected_inode_id", value_parser = parse_revision_no)]
+    pub expected_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1169,9 +1197,10 @@ pub(crate) struct FilesystemTransferArgs {
     #[arg(
         long,
         conflicts_with = "recursive",
-        requires = "expected_destination_inode_id"
+        requires = "expected_destination_inode_id",
+        value_parser = parse_revision_no
     )]
-    pub expected_destination_revision: Option<u64>,
+    pub expected_destination_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1184,8 +1213,8 @@ pub(crate) struct FilesystemRestoreArgs {
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
-    #[arg(long)]
-    pub revision: u64,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: RevisionNo,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1209,8 +1238,8 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// Committed sequence of the delete being recovered, as reported by
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
     /// so a stale command can't cancel a later delete.
-    #[arg(long)]
-    pub deletion_seq: u64,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub deletion_seq: ChangeSeq,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1229,13 +1258,13 @@ pub(crate) struct ChangesArgs {
     pub target: TargetSelectorArgs,
     /// Return committed changes after this sequence (defaults to 0, the
     /// start of retained history).
-    #[arg(long)]
-    pub after: Option<u64>,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub after: Option<ChangeSeq>,
     #[command(flatten)]
     pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1260,7 +1289,7 @@ pub(crate) struct SnapshotTargetArgs {
     pub request: RequestBehaviorArgs,
     /// Namespace whose snapshots to manage.
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Args)]
@@ -1289,7 +1318,7 @@ pub(crate) struct SnapshotExtendArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: String,
+    pub snapshot_id: PinId,
     /// New lifetime from now, in milliseconds.
     #[arg(long)]
     pub ttl_ms: u64,
@@ -1301,7 +1330,7 @@ pub(crate) struct SnapshotDeleteArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to delete.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: String,
+    pub snapshot_id: PinId,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1351,7 +1380,7 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub principal_id: String,
+    pub principal_id: PrincipalId,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1426,8 +1455,8 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     pub target: TargetSelectorArgs,
     /// Advance the floor to this sequence, or to the folded manifest head
     /// when that's lower.
-    #[arg(long, conflicts_with = "before")]
-    pub to_seq: Option<u64>,
+    #[arg(long, conflicts_with = "before", value_parser = parse_change_seq)]
+    pub to_seq: Option<ChangeSeq>,
     /// Advance the floor to the last commit made at or before this Unix
     /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]
@@ -1461,7 +1490,7 @@ pub(crate) struct MaintenanceCheckpointDeleteArgs {
     pub target: TargetSelectorArgs,
     /// Checkpoint ID to delete.
     #[arg(value_hint = ValueHint::Other)]
-    pub checkpoint_id: String,
+    pub checkpoint_id: PinId,
 }
 
 #[derive(Debug, Args)]

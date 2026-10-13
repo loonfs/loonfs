@@ -97,7 +97,10 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
         (4, 2, vec![100, 15]),
     ] {
         let start = bytes.len();
-        bytes.resize(start + added, b'b' + revision as u8);
+        bytes.resize(
+            start + added,
+            b'b' + u8::try_from(revision).expect("the test value should fit u8"),
+        );
         let reference = commit_piece(
             &store,
             &namespace_id,
@@ -520,7 +523,10 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     for (revision, added) in [(2, 10), (3, 3)] {
         let offset = bytes.len();
-        bytes.resize(offset + added, b'b' + revision as u8);
+        bytes.resize(
+            offset + added,
+            b'b' + u8::try_from(revision).expect("the test value should fit u8"),
+        );
         commit_piece(
             &store,
             &namespace_id,

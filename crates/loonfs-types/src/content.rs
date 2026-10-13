@@ -1,7 +1,7 @@
 //! Immutable content references and their checksums.
 
-use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
-use crate::ids::{ContentId, NamespaceId};
+use crate::hex::{hex_decode_bytes, hex_encode_bytes};
+use crate::ids::{string_id, validation_error, ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -65,6 +65,31 @@ impl fmt::Display for ChecksumAlgorithm {
     }
 }
 
+validation_error!(
+    HexDigestValidationError,
+    "invalid hex digest {value:?}: {reason}"
+);
+
+string_id! {
+    /// Digest bytes spelled in lowercase hexadecimal, two characters per byte.
+    HexDigest,
+    error = HexDigestValidationError,
+    validate = validate_hex_digest,
+}
+
+impl HexDigest {
+    /// Spells digest bytes in lowercase hexadecimal.
+    pub fn encode(bytes: &[u8]) -> Self {
+        Self(hex_encode_bytes(bytes))
+    }
+}
+
+fn validate_hex_digest(value: &str) -> Result<(), HexDigestValidationError> {
+    hex_decode_bytes(value)
+        .map(|_| ())
+        .map_err(|error| HexDigestValidationError::new(value, error.to_string()))
+}
+
 /// A checksum algorithm and its canonical lowercase hexadecimal value.
 // This type also appears in request bodies, so it rejects unknown fields in
 // every context. Add new algorithms instead of new fields. This is not
@@ -76,7 +101,8 @@ pub struct Checksum {
     /// Algorithm that produced `value`.
     pub algorithm: ChecksumAlgorithm,
     /// The canonical lowercase hexadecimal checksum without a prefix.
-    pub value: String,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub value: HexDigest,
 }
 
 impl Checksum {
@@ -118,30 +144,26 @@ impl Checksum {
         };
         let combined = crc_fast::checksum_combine(
             algorithm,
-            u64::from_str_radix(&self.value, 16).ok()?,
-            u64::from_str_radix(&next.value, 16).ok()?,
+            u64::from_str_radix(self.value.as_str(), 16).ok()?,
+            u64::from_str_radix(next.value.as_str(), 16).ok()?,
             next_len,
         );
         let bytes = combined.to_be_bytes();
         Some(Checksum {
             algorithm: self.algorithm,
-            value: hex_encode_bytes(&bytes[8 - self.algorithm.value_bytes()..]),
+            value: HexDigest::encode(&bytes[8 - self.algorithm.value_bytes()..]),
         })
     }
 
-    /// Validates the exact width and lowercase-hex alphabet for `algorithm`.
+    /// Validates the exact width for `algorithm`.
     pub fn validate(&self) -> Result<(), ChecksumValidationError> {
         let expected_len = self.algorithm.value_bytes() * 2;
-        if self.value.len() != expected_len {
+        let actual_len = self.value.as_str().len();
+        if actual_len != expected_len {
             return Err(ChecksumValidationError::InvalidWidth {
                 algorithm: self.algorithm,
                 expected_len,
-                actual_len: self.value.len(),
-            });
-        }
-        if !self.value.bytes().all(is_lower_hex_byte) {
-            return Err(ChecksumValidationError::InvalidAlphabet {
-                algorithm: self.algorithm,
+                actual_len,
             });
         }
         Ok(())
@@ -163,12 +185,6 @@ pub enum ChecksumValidationError {
         expected_len: usize,
         /// Number of characters supplied.
         actual_len: usize,
-    },
-    /// The checksum value contains a character outside lowercase hexadecimal.
-    #[error("checksum for algorithm `{algorithm}` must be lowercase hex")]
-    InvalidAlphabet {
-        /// Algorithm whose checksum value was rejected.
-        algorithm: ChecksumAlgorithm,
     },
 }
 
@@ -398,7 +414,7 @@ impl Crc64Nvme {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: hex_encode_bytes(&self.digest.sum64().to_be_bytes()),
+            value: HexDigest::encode(&self.digest.sum64().to_be_bytes()),
         }
     }
 }
@@ -434,7 +450,7 @@ impl Crc32c {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
-            value: hex_encode_bytes(&self.crc.to_be_bytes()),
+            value: HexDigest::encode(&self.crc.to_be_bytes()),
         }
     }
 }
@@ -507,7 +523,7 @@ impl ContentRef {
 mod tests {
     use super::{
         Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-        ContentRefValidationError, StreamingChecksum,
+        ContentRefValidationError, HexDigest, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -618,7 +634,7 @@ mod tests {
         );
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "0".repeat(64),
+            value: HexDigest::parse("0".repeat(64)).expect("hex digest"),
         };
         assert!(matches!(
             content_ref.validate(),
@@ -629,50 +645,44 @@ mod tests {
     }
 
     #[test]
-    fn checksum_validation_enforces_exact_widths_and_lowercase_hex() {
+    fn checksum_validation_enforces_exact_widths() {
         for (algorithm, width) in [
             (ChecksumAlgorithm::Crc64nvme, 16),
             (ChecksumAlgorithm::Crc32c, 8),
         ] {
-            Checksum {
+            let checksum = |len: usize| Checksum {
                 algorithm,
-                value: "a".repeat(width),
-            }
-            .validate()
-            .expect("exact lowercase width");
-
+                value: HexDigest::parse("a".repeat(len)).expect("hex digest"),
+            };
+            checksum(width).validate().expect("exact width");
             assert!(matches!(
-                Checksum {
-                    algorithm,
-                    value: "a".repeat(width - 1),
-                }
-                .validate(),
+                checksum(width - 2).validate(),
                 Err(ChecksumValidationError::InvalidWidth { .. })
             ));
             assert!(matches!(
-                Checksum {
-                    algorithm,
-                    value: "a".repeat(width + 1),
-                }
-                .validate(),
+                checksum(width + 2).validate(),
                 Err(ChecksumValidationError::InvalidWidth { .. })
-            ));
-            assert!(matches!(
-                Checksum {
-                    algorithm,
-                    value: "A".repeat(width),
-                }
-                .validate(),
-                Err(ChecksumValidationError::InvalidAlphabet { .. })
             ));
         }
     }
 
     #[test]
+    fn a_checksum_value_outside_lowercase_hex_pairs_fails_to_decode() {
+        for value in ["A".repeat(16), "a".repeat(15), "g".repeat(16)] {
+            let document = serde_json::json!({ "algorithm": "crc64nvme", "value": value });
+            let error = serde_json::from_value::<Checksum>(document).expect_err("not hex pairs");
+            assert!(error.to_string().contains("invalid hex digest"), "{error}");
+        }
+    }
+
+    #[test]
     fn crc64nvme_matches_its_catalog_check_value() {
-        assert_eq!(Checksum::crc64nvme(b"123456789").value, "ae8b14860a799888");
         assert_eq!(
-            Checksum::crc64nvme(b"").value,
+            Checksum::crc64nvme(b"123456789").value.as_str(),
+            "ae8b14860a799888"
+        );
+        assert_eq!(
+            Checksum::crc64nvme(b"").value.as_str(),
             "0000000000000000",
             "the empty payload is the identity"
         );
@@ -680,9 +690,9 @@ mod tests {
 
     #[test]
     fn crc32c_matches_its_catalog_check_value() {
-        assert_eq!(Checksum::crc32c(b"123456789").value, "e3069283");
+        assert_eq!(Checksum::crc32c(b"123456789").value.as_str(), "e3069283");
         assert_eq!(
-            Checksum::crc32c(b"").value,
+            Checksum::crc32c(b"").value.as_str(),
             "00000000",
             "the empty payload is the identity"
         );
@@ -690,7 +700,9 @@ mod tests {
 
     #[test]
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
-        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+        let payload: Vec<u8> = (0..4096u32)
+            .map(|byte| u8::try_from(byte % 256).expect("a remainder below 256 should fit u8"))
+            .collect();
         for expected in [Checksum::crc64nvme(&payload), Checksum::crc32c(&payload)] {
             let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
             for chunk in payload.chunks(97) {

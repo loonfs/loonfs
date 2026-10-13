@@ -116,8 +116,9 @@ pub use commit_identity::{
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentMismatchError, ContentRef,
-    ContentRefKind, ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme,
-    ResumedPrefixIncompleteError, ResumedPrefixOverrunError, StreamingChecksum,
+    ContentRefKind, ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme, HexDigest,
+    HexDigestValidationError, ResumedPrefixIncompleteError, ResumedPrefixOverrunError,
+    StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

@@ -282,13 +282,13 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
         .expect("maintenance")

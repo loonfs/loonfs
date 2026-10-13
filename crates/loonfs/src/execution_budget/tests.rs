@@ -52,10 +52,13 @@ async fn gated_runtime(
         }),
         OperationSelector::Put,
     ));
-    let runtime = configure(LoonFs::builder_with_store(store.clone()).writer_id("budget-writer"))
-        .build()
-        .await
-        .expect("build writer");
+    let runtime = configure(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id("budget-writer")),
+    )
+    .build()
+    .await
+    .expect("build writer");
     GatedRuntime {
         _root: root,
         store,
@@ -683,7 +686,7 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         KeyPredicate::content_blob(),
     ));
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id("staging-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("staging-writer"))
         .execution_budget(budget.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_threshold_bytes: None,

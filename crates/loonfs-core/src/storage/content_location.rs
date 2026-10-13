@@ -61,9 +61,10 @@ impl ContentLocation {
                         content_ref.content_id
                     )));
                 }
-                let bytes = piece
-                    .bytes
-                    .slice(..(end - offset).min(piece.bytes.len() as u64) as usize);
+                let bytes = piece.bytes.slice(
+                    ..usize::try_from((end - offset).min(piece.bytes.len() as u64))
+                        .expect("a range inside the piece should fit usize"),
+                );
                 offset += bytes.len() as u64;
                 pieces.push(bytes);
             }
@@ -190,9 +191,11 @@ impl ContentLocation {
         for piece in &self.pieces {
             let piece_end = offset + piece.len() as u64;
             if offset < end && piece_end > start {
-                parts.push(piece.slice(
-                    (start.max(offset) - offset) as usize..(end.min(piece_end) - offset) as usize,
-                ));
+                let first = usize::try_from(start.max(offset) - offset)
+                    .expect("a range inside the piece should fit usize");
+                let last = usize::try_from(end.min(piece_end) - offset)
+                    .expect("a range inside the piece should fit usize");
+                parts.push(piece.slice(first..last));
             }
             offset = piece_end;
         }

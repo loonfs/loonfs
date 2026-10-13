@@ -30,7 +30,7 @@ async fn writer_over(
     namespaces: &[&NamespaceId],
 ) -> crate::LoonFs<crate::Writable> {
     let writer = crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(execution_budget)
         .build()
         .await

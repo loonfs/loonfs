@@ -437,6 +437,10 @@ impl HistogramHandle for HistogramValue {
         self.bucket_counts[bucket].fetch_add(1, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
         if value > 0.0 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a float-to-integer `as` saturates, and no `try_from` exists for it"
+            )]
             let millionths = (value * 1_000_000.0).round().min(u64::MAX as f64) as u64;
             self.sum_millionths.fetch_add(millionths, Ordering::Relaxed);
         }

@@ -222,7 +222,9 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentPolicy::default(),
-        identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
+        identity: WriterIdentity {
+            writer_id: loonfs_test_support::ids::writer_id("writer-a"),
+        },
         execution_budget: ExecutionBudget::default(),
         compactor_epochs: tokio::sync::Mutex::default(),
     })
@@ -251,7 +253,7 @@ async fn test_writer_with_interval(
     min_publish_interval_ms: u64,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(min_publish_interval_ms)
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
@@ -266,7 +268,7 @@ async fn test_writer_with_cache(
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
@@ -2273,7 +2275,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
@@ -2335,7 +2337,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     ));
     let namespace_id = NamespaceId::parse("inline-fold").expect("namespace");
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -2451,7 +2453,7 @@ async fn a_failed_fold_reloads_the_tail() {
     ));
     let namespace_id = NamespaceId::parse("failed-fold").expect("valid namespace id");
     let writer = crate::LoonFs::builder_with_store(failing.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .build()
         .await
         .expect("build writer");
@@ -2544,7 +2546,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         metadata_manifest_prefix(&namespaces[0]),
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(one_fold_at_a_time())
         .build()
         .await
@@ -2631,7 +2633,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_b)),
     ));
     let writer = crate::LoonFs::builder_with_store(recording.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(one_fold_at_a_time())
         .build()
         .await
@@ -2813,7 +2815,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
         metadata_manifest_prefix(&folding),
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(
             ExecutionBudget::builder()
                 .max_concurrent_folds(NonZeroUsize::MIN)
@@ -3312,7 +3314,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     let b = NamespaceId::parse("b").expect("namespace");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &a));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("bounded-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("bounded-writer"))
         .execution_budget(
             ExecutionBudget::builder()
                 .max_admitted_requests(NonZeroUsize::new(2).expect("two requests"))

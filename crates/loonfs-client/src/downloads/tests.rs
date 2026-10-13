@@ -340,8 +340,12 @@ async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
     );
     let grant = grant_of_ranges(content_ref, "http://example.invalid/object", &[10; 5]);
     let transport = scripted_transport::script(grant.ranges.iter().map(|range| {
-        let start = range.start_offset as usize;
-        Outcome::Success(payload[start..start + range.length as usize].to_vec())
+        let start = usize::try_from(range.start_offset).expect("the offset should fit usize");
+        Outcome::Success(
+            payload[start
+                ..start + usize::try_from(range.length).expect("the length should fit usize")]
+                .to_vec(),
+        )
     }));
     let client = client_for(&transport);
 
@@ -444,7 +448,9 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
 
     let transport = scripted_transport::script([
         Outcome::Success(serde_json::to_vec(&issued).expect("encode grant")),
-        Outcome::Success(payload[held as usize..].to_vec()),
+        Outcome::Success(
+            payload[usize::try_from(held).expect("the held prefix should fit usize")..].to_vec(),
+        ),
     ]);
     let client = client_for(&transport);
     let spec = NamespacePath::parse("demo", "/big.bin").expect("namespace path");
@@ -463,7 +469,9 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
         .await
         .expect("open the new grant");
     download
-        .fold_resumed_prefix(&payload[..held as usize])
+        .fold_resumed_prefix(
+            &payload[..usize::try_from(held).expect("the held prefix should fit usize")],
+        )
         .expect("fold the held prefix");
     let mut received = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("chunk") {
@@ -472,7 +480,7 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
 
     assert_eq!(
         received,
-        payload[held as usize..],
+        payload[usize::try_from(held).expect("the held prefix should fit usize")..],
         "only the bytes past the resume point arrive"
     );
     let sent = transport.sent();
@@ -509,7 +517,9 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
 
     let transport = scripted_transport::script([
         Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
-        Outcome::Success(payload[held as usize..].to_vec()),
+        Outcome::Success(
+            payload[usize::try_from(held).expect("the held prefix should fit usize")..].to_vec(),
+        ),
     ]);
     let client = client_for(&transport);
     let resumed = client
@@ -529,7 +539,9 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
         .await
         .expect("open the new grant");
     download
-        .fold_resumed_prefix(&payload[..held as usize])
+        .fold_resumed_prefix(
+            &payload[..usize::try_from(held).expect("the held prefix should fit usize")],
+        )
         .expect("fold the held prefix");
     let mut received = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("chunk") {
@@ -538,7 +550,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
 
     assert_eq!(
         received,
-        payload[held as usize..],
+        payload[usize::try_from(held).expect("the held prefix should fit usize")..],
         "only the bytes past the resume point arrive"
     );
     let sent = transport.sent();

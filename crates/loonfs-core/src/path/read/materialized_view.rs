@@ -998,10 +998,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         attributes: AttributeInclusion,
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        let start_after = request
-            .cursor
-            .as_ref()
-            .map(|cursor| cursor.last_name_key.as_str());
+        let start_after = request.cursor.as_ref().map(|cursor| &cursor.last_name_key);
         let select_span = tracing::debug_span!(
             target: "loonfs::page",
             "loonfs.phase",

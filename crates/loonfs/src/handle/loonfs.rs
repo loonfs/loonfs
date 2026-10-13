@@ -325,7 +325,9 @@ mod tests {
         let runtime = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("no-stored-block-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "no-stored-block-cache-writer",
+        ))
         .build()
         .await
         .expect("build runtime");
@@ -343,7 +345,9 @@ mod tests {
         let runtime = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("stored-block-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "stored-block-cache-writer",
+        ))
         .stored_metadata_block_cache(stored_blocks.clone())
         .build()
         .await
@@ -366,7 +370,9 @@ mod tests {
         let writer = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("converted-builder-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "converted-builder-writer",
+        ))
         .build()
         .await
         .expect("build writer");
@@ -422,7 +428,7 @@ mod tests {
             OperationSelector::PutCreateIfAbsent,
         ));
         let runtime = LoonFs::builder_with_store(blocking.clone())
-            .writer_id(writer_id)
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id))
             .build()
             .await
             .expect("build runtime");

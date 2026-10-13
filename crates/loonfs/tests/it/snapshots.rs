@@ -415,7 +415,9 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
 
     let deleter = block_on(
         LoonFs::builder_with_store(store.clone())
-            .writer_id("checkpoint-tombstone-deleter")
+            .writer_id(loonfs_test_support::ids::writer_id(
+                "checkpoint-tombstone-deleter",
+            ))
             .build(),
     )
     .expect("build deleting writer");
@@ -424,7 +426,9 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
 
     let maintenance = block_on(
         LoonFs::builder_with_store(store)
-            .writer_id("checkpoint-tombstone-observer")
+            .writer_id(loonfs_test_support::ids::writer_id(
+                "checkpoint-tombstone-observer",
+            ))
             .build(),
     )
     .expect("build post-delete maintenance")
@@ -466,7 +470,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     let writer = LoonFs::builder_with_store(Arc::new(
         LocalFsStore::new(directory.path()).expect("store"),
     ))
-    .writer_id("snapshot-options")
+    .writer_id(loonfs_test_support::ids::writer_id("snapshot-options"))
     .build()
     .await
     .expect("writer");

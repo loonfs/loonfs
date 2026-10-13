@@ -128,7 +128,9 @@ pub(crate) fn presign_v4(
         scheme.query_prefix,
         signature
     );
-    let expires_at_ms = unix_ms(request_parts.object_key, now)? + ttl.as_millis() as u64;
+    let ttl_ms = u64::try_from(ttl.as_millis())
+        .expect("a presign TTL of at most seven days should fit u64 milliseconds");
+    let expires_at_ms = unix_ms(request_parts.object_key, now)? + ttl_ms;
 
     Ok(PresignedUrl {
         method: method.to_owned(),
@@ -163,7 +165,7 @@ pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
     let duration = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| before_unix_epoch(object_key, err))?;
-    Ok(duration.as_millis() as u64)
+    Ok(u64::try_from(duration.as_millis()).expect("unix milliseconds should fit u64"))
 }
 
 fn before_unix_epoch(object_key: &str, error: SystemTimeError) -> ObjectStoreError {

@@ -62,7 +62,11 @@ async fn fixture<S: ObjectStore>(
     let mut offset = 0;
     let mut crc = Checksum::crc64nvme(&[]);
     for (index, &length) in lengths.iter().enumerate() {
-        let bytes = Bytes::from(vec![b'a' + index as u8; length]);
+        let bytes = Bytes::from(vec![
+            b'a' + u8::try_from(index)
+                .expect("the test value should fit u8");
+            length
+        ]);
         let extent = ContentExtent {
             owner_namespace_id: owner.clone(),
             content_id: if shared && index == 0 {
@@ -295,7 +299,13 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         };
         extent.length = layout_size;
         let key = extent_object_key(extent);
-        let bytes = Bytes::from([b"aaaaaa".as_slice(), &b"zzzz"[..size as usize - 6]].concat());
+        let bytes = Bytes::from(
+            [
+                b"aaaaaa".as_slice(),
+                &b"zzzz"[..usize::try_from(size).expect("the test value should fit usize") - 6],
+            ]
+            .concat(),
+        );
         store
             .put_immutable_verified(&key, bytes)
             .await
@@ -317,7 +327,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let operations = store.snapshot();
         assert!(
             matches!(operations.last(), Some(RecordedOperation::Assemble { sources, bytes, .. })
-            if *bytes == 10 - size as usize && sources.len() == usize::from(size == 10))
+            if *bytes == 10 - usize::try_from(size).expect("the test value should fit usize") && sources.len() == usize::from(size == 10))
         );
     }
 }

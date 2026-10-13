@@ -139,7 +139,7 @@ async fn build_initialized_writer(
     writer_id: &str,
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
@@ -466,7 +466,12 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let bytes = vec![b'x'; CONTENT_READ_CHUNK_BYTES as usize + 17];
+    let bytes = vec![
+        b'x';
+        usize::try_from(CONTENT_READ_CHUNK_BYTES)
+            .expect("the test value should fit usize")
+            + 17
+    ];
     let content_ref = harness.stage_content(&bytes).await;
     harness.recording.reset();
 

@@ -17,13 +17,13 @@
 //!
 //! ```no_run
 //! # async fn run(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
-//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions};
+//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, WriterId};
 //!
 //! let actor_id = ActorId::parse("usr_8f3c").expect("valid actor id");
 //! let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 //!
 //! let runtime = LoonFs::builder(store_config)
-//!     .writer_id("server-a")
+//!     .writer_id(WriterId::parse("server-a").expect("valid writer id"))
 //!     .build()
 //!     .await?;
 //! runtime

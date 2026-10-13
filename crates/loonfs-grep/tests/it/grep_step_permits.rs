@@ -125,7 +125,9 @@ impl ObjectStore for ContentWatch {
 /// reads reach the store.
 async fn content_object_writer(store: &SharedObjectStore) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-step-permits-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "grep-step-permits-writer",
+        ))
         .min_publish_interval_ms(0)
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: None,

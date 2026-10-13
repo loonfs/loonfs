@@ -133,6 +133,9 @@ pub struct CreateCheckpointOptions {
 }
 
 /// Options for a direct download.
+///
+/// The client's `DownloadOptions` also has `snapshot_id`, which this one does
+/// not need because a snapshot is read through its own read view.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// The first byte the download reads, for a caller that already holds

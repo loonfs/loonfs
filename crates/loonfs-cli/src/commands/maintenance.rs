@@ -1,10 +1,7 @@
 //! `loonfs maintenance` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
-use super::context::{
-    parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_command_context,
-    resolve_mutation_context, resolve_profile_context,
-};
+use super::context::{resolve_command_context, resolve_mutation_context, resolve_profile_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
@@ -16,12 +13,11 @@ use crate::args::{
     MaintenanceStoreProbeArgs,
 };
 use crate::backend::StepBudget;
-use crate::error::CliError;
 use loonfs_types::api::v0::GrepIndexLifecycle;
 use loonfs_types::{
-    AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, ErrorCode, GcRequest,
-    MetadataCompactionRequest, MetadataMaintenanceRequest, PinId, PrincipalId,
-    RecoverAdministratorRequest, RunMaintenanceRequest,
+    AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, GcRequest,
+    MetadataCompactionRequest, MetadataMaintenanceRequest, RecoverAdministratorRequest,
+    RunMaintenanceRequest,
 };
 use std::path::Path;
 
@@ -84,12 +80,7 @@ async fn run_maintenance_recover_administrator(
     args: MaintenanceRecoverAdministratorArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let principal_id = PrincipalId::parse(&args.principal_id).map_err(|error| {
-        context.fail(
-            kind,
-            CliError::invalid_request(error.to_string()).with_param("principal_id"),
-        )
-    })?;
+    let principal_id = args.principal_id.clone();
     let request =
         RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest { principal_id });
     let response = context
@@ -206,13 +197,7 @@ async fn run_maintenance_checkpoint_delete(
     args: MaintenanceCheckpointDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let checkpoint_id = PinId::parse(&args.checkpoint_id).map_err(|error| {
-        context.fail(
-            kind,
-            crate::error::CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                .with_param("checkpoint_id"),
-        )
-    })?;
+    let checkpoint_id = args.checkpoint_id.clone();
     let response = context
         .target
         .client
@@ -295,7 +280,7 @@ async fn run_maintenance_retention_advance(
         .run_maintenance(
             context.namespace(),
             &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
-                to_seq: args.to_seq.map(ChangeSeq),
+                to_seq: args.to_seq,
                 cutoff_at_ms: args.before,
             }),
             context.actor_id.as_ref(),
@@ -344,14 +329,8 @@ pub(crate) async fn run_changes(
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let after_seq = parse_public_ordinal_arg("--after", args.after.unwrap_or(0), ChangeSeq::parse)
-        .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let after_seq = args.after.unwrap_or(ChangeSeq(0));
+    let snapshot_id = args.snapshot_id.clone();
     let listing = collect_or_stream_pages(
         PagePlan::new(&args.pagination.page_limits),
         Some(after_seq),

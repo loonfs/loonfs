@@ -759,7 +759,7 @@ mod completion_body_tests {
         let store =
             loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
         let writer = LoonFs::builder_with_store(std::sync::Arc::new(store))
-            .writer_id("writer")
+            .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .build()
             .await
             .expect("writer");
@@ -858,7 +858,7 @@ mod completion_body_tests {
     fn maximum_multipart_completion_fits_the_completion_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "f".repeat(64),
+            value: loonfs_types::HexDigest::parse("f".repeat(64)).expect("hex digest"),
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
@@ -892,12 +892,12 @@ mod completion_body_tests {
     fn maximum_part_signing_request_fits_the_control_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "f".repeat(64),
+            value: loonfs_types::HexDigest::parse("f".repeat(64)).expect("hex digest"),
         };
         let request = SignUploadPartsRequest {
             parts: (1..=loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
                 .map(|part_number| UploadPartChecksumClaim {
-                    part_number: part_number as u32,
+                    part_number: u32::try_from(part_number).expect("the test value should fit u32"),
                     checksum: checksum.clone(),
                 })
                 .collect(),

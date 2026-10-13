@@ -7,11 +7,12 @@ use loonfs::{ExecutionBudget, MetadataCache};
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
 use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
-use loonfs_types::SecretString;
+use loonfs_types::{SecretString, WriterId};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -27,17 +28,18 @@ pub struct InlineContentConfig {
         serialize_with = "serialize_inline_content_threshold",
         deserialize_with = "deserialize_inline_content_threshold"
     )]
-    pub inline_content_threshold_bytes: Option<usize>,
-    pub inline_content_wal_object_budget_bytes: Option<usize>,
-    pub inline_content_fold_at_bytes: Option<usize>,
-    pub inline_content_tail_limit_bytes: Option<usize>,
+    pub inline_content_threshold_bytes: Option<u64>,
+    pub inline_content_wal_object_budget_bytes: Option<u64>,
+    pub inline_content_fold_at_bytes: Option<u64>,
+    pub inline_content_tail_limit_bytes: Option<u64>,
 }
 
 impl Default for InlineContentConfig {
     fn default() -> Self {
         Self {
             inline_content_threshold_bytes: loonfs::InlineContentPolicy::default()
-                .inline_content_threshold_bytes,
+                .inline_content_threshold_bytes
+                .map(|bytes| bytes as u64),
             inline_content_wal_object_budget_bytes: None,
             inline_content_fold_at_bytes: None,
             inline_content_tail_limit_bytes: None,
@@ -46,7 +48,7 @@ impl Default for InlineContentConfig {
 }
 
 fn serialize_inline_content_threshold<S>(
-    threshold: &Option<usize>,
+    threshold: &Option<u64>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -58,14 +60,14 @@ where
     }
 }
 
-fn deserialize_inline_content_threshold<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+fn deserialize_inline_content_threshold<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Threshold {
-        Bytes(usize),
+        Bytes(u64),
         Enabled(bool),
     }
 
@@ -82,16 +84,21 @@ impl InlineContentConfig {
     pub(crate) fn effective_policy(&self) -> loonfs::InlineContentPolicy {
         let defaults = loonfs::InlineContentPolicy::default();
         loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: self.inline_content_threshold_bytes,
+            inline_content_threshold_bytes: self
+                .inline_content_threshold_bytes
+                .map(validated_usize),
             inline_content_wal_object_budget_bytes: self
                 .inline_content_wal_object_budget_bytes
-                .unwrap_or(defaults.inline_content_wal_object_budget_bytes),
+                .map_or(
+                    defaults.inline_content_wal_object_budget_bytes,
+                    validated_usize,
+                ),
             inline_content_fold_at_bytes: self
                 .inline_content_fold_at_bytes
-                .unwrap_or(defaults.inline_content_fold_at_bytes),
+                .map_or(defaults.inline_content_fold_at_bytes, validated_usize),
             inline_content_tail_limit_bytes: self
                 .inline_content_tail_limit_bytes
-                .unwrap_or(defaults.inline_content_tail_limit_bytes),
+                .map_or(defaults.inline_content_tail_limit_bytes, validated_usize),
         }
     }
 }
@@ -104,11 +111,11 @@ impl InlineContentConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationLimitsConfig {
-    pub max_requests: Option<std::num::NonZeroUsize>,
-    pub max_requests_per_namespace: Option<std::num::NonZeroUsize>,
-    pub max_estimated_bytes: Option<std::num::NonZeroUsize>,
-    pub max_estimated_bytes_per_namespace: Option<std::num::NonZeroUsize>,
-    pub max_concurrent_publications: Option<std::num::NonZeroUsize>,
+    pub max_requests: Option<NonZeroU64>,
+    pub max_requests_per_namespace: Option<NonZeroU64>,
+    pub max_estimated_bytes: Option<NonZeroU64>,
+    pub max_estimated_bytes_per_namespace: Option<NonZeroU64>,
+    pub max_concurrent_publications: Option<NonZeroU64>,
 }
 
 impl PublicationLimitsConfig {
@@ -118,10 +125,11 @@ impl PublicationLimitsConfig {
         loonfs::PublicationPolicy {
             max_requests_per_namespace: self
                 .max_requests_per_namespace
-                .unwrap_or(defaults.max_requests_per_namespace),
-            max_estimated_bytes_per_namespace: self
-                .max_estimated_bytes_per_namespace
-                .unwrap_or(defaults.max_estimated_bytes_per_namespace),
+                .map_or(defaults.max_requests_per_namespace, validated_nonzero_usize),
+            max_estimated_bytes_per_namespace: self.max_estimated_bytes_per_namespace.map_or(
+                defaults.max_estimated_bytes_per_namespace,
+                validated_nonzero_usize,
+            ),
         }
     }
 }
@@ -139,31 +147,31 @@ impl PublicationLimitsConfig {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
-    pub memory_limit_bytes: Option<usize>,
+    pub memory_limit_bytes: Option<u64>,
     pub auth_token: Option<SecretString>,
     /// Signs content tokens; unset or empty here falls back to
     /// `LOONFS_CONTENT_TOKEN_SECRET`.
     #[serde(default)]
     pub content_token_secret: SecretString,
-    pub writer_id: String,
+    pub writer_id: WriterId,
     /// Maximum public reads running at once. Reads past this limit wait.
     #[serde(default = "default_max_concurrent_reads")]
-    pub max_concurrent_reads: usize,
+    pub max_concurrent_reads: u64,
     #[serde(default = "default_max_in_flight_requests")]
-    pub max_in_flight_requests: usize,
+    pub max_in_flight_requests: u64,
     #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
+    pub max_connections: u64,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
     /// low.
     #[serde(default = "default_max_concurrent_folds")]
-    pub max_concurrent_folds: usize,
+    pub max_concurrent_folds: u64,
     /// Maximum metadata merges this server runs at once, bounded compaction
     /// steps and streaming compactions alike, whether writer sessions, the
     /// maintenance sweep, or maintenance requests start them. A merge never
     /// holds a fold permit.
     #[serde(default = "default_max_concurrent_compactions")]
-    pub max_concurrent_compactions: usize,
+    pub max_concurrent_compactions: u64,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsConfig,
@@ -234,24 +242,24 @@ pub struct ServerConfig {
     /// Maximum live snapshots per namespace. Advertised as
     /// the `snapshot.max_live_per_namespace` capability limit.
     #[serde(default = "default_snapshot_max_live_per_namespace")]
-    pub snapshot_max_live_per_namespace: usize,
+    pub snapshot_max_live_per_namespace: u64,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap answer `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
     /// bodies forward to the store incrementally instead of buffering.
     #[serde(default = "default_max_concurrent_uploads")]
-    pub max_concurrent_uploads: usize,
+    pub max_concurrent_uploads: u64,
     /// How many proxied content streams the server will serve at once;
     /// requests past the cap answer `server_busy` before any fetch.
     /// Content memory follows this count times the internal read chunk size,
     /// independent of `max_download_bytes`. Admission lasts until the body
     /// finishes or is dropped.
     #[serde(default = "default_max_concurrent_downloads")]
-    pub max_concurrent_downloads: usize,
+    pub max_concurrent_downloads: u64,
     /// How many namespaces the maintenance sweep visits at once. Folds and
     /// merges also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
-    pub max_concurrent_maintenance: usize,
+    pub max_concurrent_maintenance: u64,
     /// Milliseconds between ticks of held sessions. Defaults to 5000.
     #[serde(default = "default_tick_interval_ms")]
     pub tick_interval_ms: u64,
@@ -272,14 +280,14 @@ pub struct ServerConfig {
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
     /// compaction that holds at most this much at once. Derived when sized.
-    pub max_merge_input_bytes: Option<usize>,
+    pub max_merge_input_bytes: Option<u64>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
     /// default of 1000.
     pub manifest_revalidation_interval_ms: Option<u64>,
     /// Bytes retained by all read, publication, and fold memos. Zero keeps
     /// none. Derived when sized; otherwise defaults to 256 MiB.
-    pub max_read_working_bytes: Option<usize>,
+    pub max_read_working_bytes: Option<u64>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance sweep and explicit `metadata` requests use the same
@@ -357,39 +365,39 @@ fn default_snapshot_max_lifetime_ms() -> u64 {
     loonfs::SnapshotPolicy::default().max_lifetime_ms
 }
 
-fn default_snapshot_max_live_per_namespace() -> usize {
-    loonfs::SnapshotPolicy::default().max_live_per_namespace
+fn default_snapshot_max_live_per_namespace() -> u64 {
+    loonfs::SnapshotPolicy::default().max_live_per_namespace as u64
 }
 
-fn default_max_in_flight_requests() -> usize {
+fn default_max_in_flight_requests() -> u64 {
     256
 }
 
-fn default_max_connections() -> usize {
+fn default_max_connections() -> u64 {
     1024
 }
 
-fn default_max_concurrent_uploads() -> usize {
-    loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
+fn default_max_concurrent_uploads() -> u64 {
+    loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS as u64
 }
 
-fn default_max_concurrent_reads() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_READS
+fn default_max_concurrent_reads() -> u64 {
+    loonfs::DEFAULT_MAX_CONCURRENT_READS as u64
 }
 
-fn default_max_concurrent_folds() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+fn default_max_concurrent_folds() -> u64 {
+    loonfs::DEFAULT_MAX_CONCURRENT_FOLDS as u64
 }
 
-fn default_max_concurrent_compactions() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
+fn default_max_concurrent_compactions() -> u64 {
+    loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u64
 }
 
-fn default_max_concurrent_downloads() -> usize {
-    loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS
+fn default_max_concurrent_downloads() -> u64 {
+    loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS as u64
 }
 
-fn default_max_concurrent_maintenance() -> usize {
+fn default_max_concurrent_maintenance() -> u64 {
     8
 }
 
@@ -413,8 +421,8 @@ fn default_idle_session_timeout_ms() -> u64 {
     1_800_000
 }
 
-fn default_max_merge_input_bytes() -> usize {
-    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
+fn default_max_merge_input_bytes() -> u64 {
+    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES as u64
 }
 
 fn default_idle_fold_timeout_ms() -> u64 {
@@ -457,8 +465,8 @@ pub struct LocalCacheConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCacheConfig {
-    pub max_segment_bytes: Option<usize>,
-    pub max_head_state_bytes: Option<usize>,
+    pub max_segment_bytes: Option<u64>,
+    pub max_head_state_bytes: Option<u64>,
 }
 
 /// The server's `[grep]` table.
@@ -469,7 +477,7 @@ pub struct GrepConfig {
     /// index-maintenance endpoints and its sweep builds and collects the
     /// index.
     pub mode: JobMode,
-    pub max_cache_bytes: Option<usize>,
+    pub max_cache_bytes: Option<u64>,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
     #[serde(flatten)]
@@ -566,7 +574,6 @@ impl ServerConfig {
 
     pub(crate) fn validate(&self) -> Result<MemorySizing, ServerConfigError> {
         let bind = self.bind_addr()?;
-        validate_non_empty("writer_id", &self.writer_id)?;
 
         if let Some(token) = &self.auth_token {
             if token.expose().trim().is_empty() {
@@ -610,23 +617,20 @@ impl ServerConfig {
             ("snapshot_max_lifetime_ms", self.snapshot_max_lifetime_ms),
             (
                 "snapshot_max_live_per_namespace",
-                self.snapshot_max_live_per_namespace as u64,
+                self.snapshot_max_live_per_namespace,
             ),
-            ("max_concurrent_reads", self.max_concurrent_reads as u64),
-            ("max_concurrent_folds", self.max_concurrent_folds as u64),
+            ("max_concurrent_reads", self.max_concurrent_reads),
+            ("max_concurrent_folds", self.max_concurrent_folds),
             (
                 "max_concurrent_compactions",
-                self.max_concurrent_compactions as u64,
+                self.max_concurrent_compactions,
             ),
-            ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
-            (
-                "max_concurrent_downloads",
-                self.max_concurrent_downloads as u64,
-            ),
+            ("max_concurrent_uploads", self.max_concurrent_uploads),
+            ("max_concurrent_downloads", self.max_concurrent_downloads),
             (
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes
-                    .unwrap_or(default_max_merge_input_bytes()) as u64,
+                    .unwrap_or(default_max_merge_input_bytes()),
             ),
         ] {
             validate_positive(field, value, None)?;
@@ -635,12 +639,93 @@ impl ServerConfig {
             ("max_in_flight_requests", self.max_in_flight_requests),
             ("max_connections", self.max_connections),
         ] {
-            validate_positive(field, value as u64, None)?;
-            if value > tokio::sync::Semaphore::MAX_PERMITS {
+            validate_positive(field, value, None)?;
+            if value > tokio::sync::Semaphore::MAX_PERMITS as u64 {
                 return Err(ServerConfigError::InvalidField {
                     field,
                     reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
                 });
+            }
+        }
+        for (field, value) in [
+            ("memory_limit_bytes", self.memory_limit_bytes),
+            ("max_concurrent_reads", Some(self.max_concurrent_reads)),
+            ("max_in_flight_requests", Some(self.max_in_flight_requests)),
+            ("max_connections", Some(self.max_connections)),
+            ("max_concurrent_folds", Some(self.max_concurrent_folds)),
+            (
+                "max_concurrent_compactions",
+                Some(self.max_concurrent_compactions),
+            ),
+            (
+                "snapshot_max_live_per_namespace",
+                Some(self.snapshot_max_live_per_namespace),
+            ),
+            ("max_concurrent_uploads", Some(self.max_concurrent_uploads)),
+            (
+                "max_concurrent_downloads",
+                Some(self.max_concurrent_downloads),
+            ),
+            (
+                "max_concurrent_maintenance",
+                Some(self.max_concurrent_maintenance),
+            ),
+            ("max_merge_input_bytes", self.max_merge_input_bytes),
+            ("max_read_working_bytes", self.max_read_working_bytes),
+            (
+                "inline_content.inline_content_threshold_bytes",
+                self.inline_content.inline_content_threshold_bytes,
+            ),
+            (
+                "inline_content.inline_content_wal_object_budget_bytes",
+                self.inline_content.inline_content_wal_object_budget_bytes,
+            ),
+            (
+                "inline_content.inline_content_fold_at_bytes",
+                self.inline_content.inline_content_fold_at_bytes,
+            ),
+            (
+                "inline_content.inline_content_tail_limit_bytes",
+                self.inline_content.inline_content_tail_limit_bytes,
+            ),
+            (
+                "publication.max_requests",
+                self.publication.max_requests.map(NonZeroU64::get),
+            ),
+            (
+                "publication.max_requests_per_namespace",
+                self.publication
+                    .max_requests_per_namespace
+                    .map(NonZeroU64::get),
+            ),
+            (
+                "publication.max_estimated_bytes",
+                self.publication.max_estimated_bytes.map(NonZeroU64::get),
+            ),
+            (
+                "publication.max_estimated_bytes_per_namespace",
+                self.publication
+                    .max_estimated_bytes_per_namespace
+                    .map(NonZeroU64::get),
+            ),
+            (
+                "publication.max_concurrent_publications",
+                self.publication
+                    .max_concurrent_publications
+                    .map(NonZeroU64::get),
+            ),
+            (
+                "metadata_cache.max_segment_bytes",
+                self.metadata_cache.max_segment_bytes,
+            ),
+            (
+                "metadata_cache.max_head_state_bytes",
+                self.metadata_cache.max_head_state_bytes,
+            ),
+            ("grep.max_cache_bytes", self.grep.max_cache_bytes),
+        ] {
+            if let Some(value) = value {
+                validate_fits_usize(field, value)?;
             }
         }
         if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
@@ -652,7 +737,7 @@ impl ServerConfig {
         for (field, value) in [
             (
                 "max_concurrent_maintenance",
-                self.max_concurrent_maintenance as u64,
+                self.max_concurrent_maintenance,
             ),
             ("tick_interval_ms", self.tick_interval_ms),
             ("maintenance_interval_ms", self.maintenance_interval_ms),
@@ -721,18 +806,18 @@ impl ServerConfig {
             std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
         let mut builder = ExecutionBudget::builder()
-            .max_concurrent_reads(positive(self.max_concurrent_reads))
-            .max_concurrent_folds(positive(self.max_concurrent_folds))
-            .max_concurrent_compactions(positive(self.max_concurrent_compactions))
+            .max_concurrent_reads(positive(validated_usize(self.max_concurrent_reads)))
+            .max_concurrent_folds(positive(validated_usize(self.max_concurrent_folds)))
+            .max_concurrent_compactions(positive(validated_usize(self.max_concurrent_compactions)))
             .max_merge_input_bytes(positive(memory.merge_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.publication.bytes))
             .metrics_recorder(recorder);
         if let Some(limit) = self.publication.max_requests {
-            builder = builder.max_admitted_requests(limit);
+            builder = builder.max_admitted_requests(validated_nonzero_usize(limit));
         }
         if let Some(limit) = self.publication.max_concurrent_publications {
-            builder = builder.max_concurrent_publications(limit);
+            builder = builder.max_concurrent_publications(validated_nonzero_usize(limit));
         }
         builder.build()
     }
@@ -869,16 +954,20 @@ impl ServerConfig {
         &self,
         cgroup_limit: Option<usize>,
     ) -> Result<MemorySizing, ServerConfigError> {
-        let limit = self.memory_limit_bytes.or(cgroup_limit);
+        let limit = self
+            .memory_limit_bytes
+            .map(validated_usize)
+            .or(cgroup_limit);
         let fixed = [
             ("process", (128 * MIB) as u128),
             (
                 "connections (`max_connections` x 472 KiB)",
-                self.max_connections as u128 * 472 * 1024,
+                u128::from(self.max_connections) * 472 * 1024,
             ),
             (
                 "transfers ((`max_concurrent_uploads` + `max_concurrent_downloads`) x 8 MiB)",
-                (self.max_concurrent_uploads as u128 + self.max_concurrent_downloads as u128)
+                (u128::from(self.max_concurrent_uploads)
+                    + u128::from(self.max_concurrent_downloads))
                     * (8 * MIB) as u128,
             ),
         ];
@@ -891,14 +980,19 @@ impl ServerConfig {
         let serves_grep = self.grep.mode.serves();
         validate_positive(
             "max_concurrent_compactions",
-            self.max_concurrent_compactions as u64,
+            self.max_concurrent_compactions,
             None,
         )?;
+        validate_fits_usize(
+            "max_concurrent_compactions",
+            self.max_concurrent_compactions,
+        )?;
+        let compactions = validated_usize(self.max_concurrent_compactions);
         let memory = MemorySizing {
             limit: limit.map(|bytes| {
                 MemoryTerm::new(
                     "memory_limit_bytes",
-                    self.memory_limit_bytes,
+                    self.memory_limit_bytes.map(validated_usize),
                     Some(bytes),
                     0,
                 )
@@ -908,25 +1002,27 @@ impl ServerConfig {
             managed,
             segment: MemoryTerm::new(
                 "metadata_cache.max_segment_bytes",
-                self.metadata_cache.max_segment_bytes,
+                self.metadata_cache.max_segment_bytes.map(validated_usize),
                 share(if serves_grep { 40 } else { 50 }),
                 loonfs::DEFAULT_MAX_SEGMENT_BYTES,
             ),
             head_state: MemoryTerm::new(
                 "metadata_cache.max_head_state_bytes",
-                self.metadata_cache.max_head_state_bytes,
+                self.metadata_cache
+                    .max_head_state_bytes
+                    .map(validated_usize),
                 share(10),
                 loonfs::DEFAULT_MAX_HEAD_STATE_BYTES,
             ),
             grep: MemoryTerm::new(
                 "grep.max_cache_bytes",
-                self.grep.max_cache_bytes,
+                self.grep.max_cache_bytes.map(validated_usize),
                 share(if serves_grep { 10 } else { 0 }),
                 loonfs_grep::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             ),
             read_working: MemoryTerm::new(
                 "max_read_working_bytes",
-                self.max_read_working_bytes,
+                self.max_read_working_bytes.map(validated_usize),
                 share(20),
                 loonfs::DEFAULT_MAX_READ_WORKING_BYTES,
             ),
@@ -934,17 +1030,17 @@ impl ServerConfig {
                 "publication.max_estimated_bytes",
                 self.publication
                     .max_estimated_bytes
-                    .map(std::num::NonZeroUsize::get),
+                    .map(|bytes| validated_usize(bytes.get())),
                 share(10),
                 64 * MIB,
             ),
             merge_input: MemoryTerm::new(
                 "max_merge_input_bytes",
-                self.max_merge_input_bytes,
-                share(10).map(|bytes| bytes / self.max_concurrent_compactions),
-                default_max_merge_input_bytes(),
+                self.max_merge_input_bytes.map(validated_usize),
+                share(10).map(|bytes| bytes / compactions),
+                validated_usize(default_max_merge_input_bytes()),
             ),
-            compactions: self.max_concurrent_compactions,
+            compactions,
             serves_grep,
         };
         memory.validate()?;
@@ -1016,6 +1112,27 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ServerConf
     } else {
         Ok(())
     }
+}
+
+/// Refuses a count or byte budget that this platform's `usize` can't hold.
+fn validate_fits_usize(field: &'static str, value: u64) -> Result<(), ServerConfigError> {
+    if usize::try_from(value).is_ok() {
+        return Ok(());
+    }
+    Err(ServerConfigError::InvalidField {
+        field,
+        reason: format!("must not exceed {}", usize::MAX),
+    })
+}
+
+/// Converts a count or byte budget that [`ServerConfig::validate`] has
+/// checked fits `usize`.
+pub(crate) fn validated_usize(value: u64) -> usize {
+    usize::try_from(value).expect("a validated config value should fit usize")
+}
+
+fn validated_nonzero_usize(value: NonZeroU64) -> NonZeroUsize {
+    NonZeroUsize::try_from(value).expect("a validated config value should fit usize")
 }
 
 fn validate_positive(
@@ -1144,7 +1261,7 @@ max_segment_bytes = 67108864
         assert_eq!(memory.segment.bytes, 67_108_864);
         assert_eq!(memory.segment.source, "set");
         assert_eq!(memory.head_state.bytes, 303_499_837);
-        config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
+        config.metadata_cache.max_segment_bytes = Some((4 * 1024 * super::MIB) as u64);
         let error = config.validate().expect_err("overrides must fit");
         assert!(error
             .to_string()
@@ -1187,7 +1304,7 @@ max_cache_bytes = 0
             ]
         );
         assert!(memory.terms().iter().all(|(term, _)| term.source == "set"));
-        config.max_merge_input_bytes = Some(1024 * super::MIB);
+        config.max_merge_input_bytes = Some((1024 * super::MIB) as u64);
         assert_invalid_field(
             config.validate().expect_err("all four merges must fit"),
             "memory_limit_bytes",
@@ -1434,7 +1551,10 @@ root = "/tmp/loonfs-server"
 
         let error = load_server_config(&path).expect_err("blank writer fields");
 
-        assert_missing_field(error, "writer_id");
+        let ServerConfigError::Decode(message) = &error else {
+            panic!("expected a decode error for the blank writer id, got {error:?}");
+        };
+        assert!(message.contains("must not be blank"), "{message}");
     }
 
     #[test]
@@ -1879,7 +1999,7 @@ root = "/tmp/loonfs-server"
         assert!(toml::from_str::<PublicationLimitsConfig>("max_requsets = 10").is_err());
         let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
-        assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
+        assert_eq!(overrides.max_requests, std::num::NonZeroU64::new(12));
         assert_eq!(
             overrides
                 .effective_policy()
@@ -1912,19 +2032,19 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
         assert_eq!(
             config.max_concurrent_reads,
-            loonfs::DEFAULT_MAX_CONCURRENT_READS
+            loonfs::DEFAULT_MAX_CONCURRENT_READS as u64
         );
         assert_eq!(
             config.max_concurrent_folds,
-            loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+            loonfs::DEFAULT_MAX_CONCURRENT_FOLDS as u64
         );
         assert_eq!(
             config.max_concurrent_compactions,
-            loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
+            loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u64
         );
         for field in ["max_in_flight_requests", "max_connections"] {
             let mut oversized = config.clone();
-            let value = tokio::sync::Semaphore::MAX_PERMITS + 1;
+            let value = tokio::sync::Semaphore::MAX_PERMITS as u64 + 1;
             match field {
                 "max_in_flight_requests" => oversized.max_in_flight_requests = value,
                 _ => oversized.max_connections = value,

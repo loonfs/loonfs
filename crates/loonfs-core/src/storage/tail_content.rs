@@ -148,7 +148,8 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         candidate = candidate
             .into_iter()
             .filter_map(|piece| {
-                let skipped = skip.min(piece.len() as u64) as usize;
+                let skipped = usize::try_from(skip.min(piece.len() as u64))
+                    .expect("a range inside the piece should fit usize");
                 skip -= skipped as u64;
                 (skipped < piece.len()).then(|| piece.slice(skipped..))
             })

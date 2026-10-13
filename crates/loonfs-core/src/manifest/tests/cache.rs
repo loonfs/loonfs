@@ -656,10 +656,8 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .find(|binding| binding.name_key.as_str() == "x.txt")
         .expect("binding for x.txt")
         .clone();
-    let prefix =
-        lookup_keys::direntry_bind_prefix(binding.parent_inode_id, binding.name_key.as_str());
-    let probe =
-        lookup_keys::direntry_bind_probe(binding.parent_inode_id, binding.name_key.as_str());
+    let prefix = lookup_keys::direntry_bind_prefix(binding.parent_inode_id, &binding.name_key);
+    let probe = lookup_keys::direntry_bind_probe(binding.parent_inode_id, &binding.name_key);
 
     store.reset();
     let rows = segments
@@ -1205,7 +1203,7 @@ async fn segment_object_bytes(
 }
 
 fn stored_block_bytes(object: &Bytes, handle: &BlockHandle) -> Bytes {
-    let start = handle.offset as usize;
+    let start = usize::try_from(handle.offset).expect("the test value should fit usize");
     object.slice(start..start + handle.stored_bytes as usize)
 }
 

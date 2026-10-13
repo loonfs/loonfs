@@ -815,7 +815,9 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     assert_success(&harness.run(&["use", "demo"]));
 
     // Above the inline threshold, so the bytes live in a content object.
-    let payload: Vec<u8> = (0..=64 * 1024).map(|index| index as u8).collect();
+    let payload: Vec<u8> = (0..=64 * 1024)
+        .map(|index| u8::try_from(index % 256).expect("a remainder below 256 should fit u8"))
+        .collect();
     let local = harness.temp_dir.path().join("source.bin");
     fs::write(&local, &payload).expect("write payload");
     assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/doc.bin"]));
@@ -1334,7 +1336,7 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
 
     let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
     assert_failure(&create);
-    assert_eq!(json_error(&create)["code"], "invalid_request");
+    assert_eq!(json_error(&create)["code"], "invalid_usage");
     assert!(json_error(&create)["message"]
         .as_str()
         .expect("json string")
@@ -1343,11 +1345,11 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
     assert_failure(&fork);
-    assert_eq!(json_error(&fork)["code"], "invalid_request");
+    assert_eq!(json_error(&fork)["code"], "invalid_usage");
 
     let use_namespace = harness.run(&["--json", "use", "bad/name"]);
     assert_failure(&use_namespace);
-    assert_eq!(json_error(&use_namespace)["code"], "invalid_request");
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_usage");
 }
 
 #[test]
@@ -1366,7 +1368,7 @@ fn embedded_commands_reject_out_of_range_ordinal_arguments() {
         "9007199254740992",
     ]);
     assert_failure(&changes);
-    assert_eq!(json_error(&changes)["code"], "invalid_request");
+    assert_eq!(json_error(&changes)["code"], "invalid_usage");
     assert!(json_error(&changes)["message"]
         .as_str()
         .expect("json string")
@@ -1389,15 +1391,15 @@ fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
 
     let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
     assert_failure(&create);
-    assert_eq!(json_error(&create)["code"], "invalid_request");
+    assert_eq!(json_error(&create)["code"], "invalid_usage");
 
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
     assert_failure(&fork);
-    assert_eq!(json_error(&fork)["code"], "invalid_request");
+    assert_eq!(json_error(&fork)["code"], "invalid_usage");
 
     let use_namespace = harness.run(&["--json", "use", "bad/name"]);
     assert_failure(&use_namespace);
-    assert_eq!(json_error(&use_namespace)["code"], "invalid_request");
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_usage");
 }
 
 #[test]

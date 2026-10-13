@@ -104,6 +104,9 @@ pub struct PreparedContent {
     pub(crate) kind: PreparedContentKind,
 }
 
+/// The core's `PreparedContentKind` holds a content reference for inline bytes
+/// and a staged expiry, while this one holds raw inline bytes and the content
+/// token, because the server assigns the reference and checks the expiry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedContentKind {
     Inline(Vec<u8>),

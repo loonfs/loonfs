@@ -1007,7 +1007,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(SettableWallClock(AtomicU64::new(1_750_000_000_000)));
     let writer = LoonFs::builder_with_store(store(temp_dir.path()))
-        .writer_id("snapshot-clock-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("snapshot-clock-writer"))
         .wall_clock(clock.clone())
         .build()
         .await

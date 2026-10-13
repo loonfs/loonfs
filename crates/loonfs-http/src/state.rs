@@ -67,8 +67,10 @@ pub struct BindingConfig {
     /// any background maintenance itself.
     pub maintenance: JobMode,
     pub snapshot_policy: SnapshotPolicy,
-    pub max_download_bytes: u64,
-    pub max_upload_bytes: u64,
+    /// Largest content a service-proxied read returns, or `None` for no limit.
+    pub max_download_bytes: Option<u64>,
+    /// Largest body a service-proxied upload accepts, or `None` for no limit.
+    pub max_upload_bytes: Option<u64>,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
     pub inline_content: InlineContentPolicy,

@@ -145,7 +145,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("index-ahead-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("index-ahead-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -209,7 +209,7 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let base_store: SharedObjectStore = base.clone();
     let namespace_id = NamespaceId::parse("query-pin").expect("namespace id");
     let writer = LoonFs::builder_with_store(base_store.clone())
-        .writer_id("query-pin-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("query-pin-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -270,7 +270,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-lifecycle").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("lifecycle-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("lifecycle-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -408,7 +408,9 @@ async fn exhausted_run_numbers_panic_without_writing_the_manifest() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("run-number-limit").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("run-number-limit-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "run-number-limit-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -549,7 +551,9 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-manifest-failure").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("enable-manifest-failure-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "enable-manifest-failure-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -606,7 +610,9 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-enable").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("ambiguous-enable-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "ambiguous-enable-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -663,7 +669,9 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-restart").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("ambiguous-restart-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "ambiguous-restart-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -731,13 +739,13 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("gap-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("gap-maintenance"))
         .build()
         .await
         .expect("maintenance")
@@ -812,13 +820,15 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("handoff-gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("handoff-gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("handoff-gap-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "handoff-gap-maintenance",
+        ))
         .build()
         .await
         .expect("maintenance")
@@ -940,7 +950,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("expiry-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("expiry-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1086,7 +1096,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("overlap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("overlap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1195,7 +1205,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("move-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("move-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1255,7 +1265,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("delete-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1359,7 +1369,9 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("undelete-backfill-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "undelete-backfill-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1465,7 +1477,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("isolation-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("isolation-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1514,7 +1526,7 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("error-surface").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("error-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("error-writer"))
         .build()
         .await
         .expect("writer");
@@ -1584,7 +1596,9 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("checkpoint-mismatch-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "checkpoint-mismatch-writer",
+        ))
         .build()
         .await
         .expect("writer");
@@ -1640,7 +1654,9 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("missing-checkpoint-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "missing-checkpoint-writer",
+        ))
         .build()
         .await
         .expect("writer");
@@ -1731,7 +1747,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("scan-gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("scan-gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1808,7 +1824,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("deep-scan-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("deep-scan-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1949,7 +1965,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("worker-results-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("worker-results-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2115,7 +2131,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let source = NamespaceId::parse("grep-fork-source").expect("source namespace");
     let target = NamespaceId::parse("grep-fork-target").expect("target namespace");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("fork-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("fork-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2203,7 +2219,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
     let backfill_namespace = NamespaceId::parse("equiv-backfill").expect("namespace id");
     let incremental_namespace = NamespaceId::parse("equiv-incremental").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("equiv-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("equiv-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2279,7 +2295,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("enable-honesty-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("enable-honesty-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2376,7 +2392,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("numbered-grep-tests")
+        .writer_id(loonfs_test_support::ids::writer_id("numbered-grep-tests"))
         .build()
         .await
         .expect("writer");
@@ -2480,7 +2496,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let recording = Arc::new(RecordingStore::new(young_successor, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("numbered-grep-tests")
+        .writer_id(loonfs_test_support::ids::writer_id("numbered-grep-tests"))
         .build()
         .await
         .expect("writer");
@@ -2666,7 +2682,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         },
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("superseded-grep-gc")
+        .writer_id(loonfs_test_support::ids::writer_id("superseded-grep-gc"))
         .build()
         .await
         .expect("writer");
@@ -2769,7 +2785,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-access")
+        .writer_id(loonfs_test_support::ids::writer_id("grep-access"))
         .min_publish_interval_ms(0)
         .build()
         .await

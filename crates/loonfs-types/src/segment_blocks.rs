@@ -101,7 +101,8 @@ impl BuiltSegmentBlocks {
     /// Encodes a small stored filter for an inline segment descriptor.
     pub fn inline_filter_hex(&self) -> Option<String> {
         (self.filter.stored_bytes <= DEFAULT_MAX_INLINE_FILTER_BYTES).then(|| {
-            let start = self.filter.offset as usize;
+            let start = usize::try_from(self.filter.offset)
+                .expect("a built segment's offsets should index its in-memory bytes");
             crate::format::hex::hex_encode_bytes(
                 &self.bytes[start..start + self.filter.stored_bytes as usize],
             )
@@ -269,7 +270,10 @@ impl SegmentBlocksBuilder {
 
         let restart = self.entry_count.is_multiple_of(RESTART_INTERVAL);
         if restart {
-            self.restarts.push(self.entries.len() as u32);
+            self.restarts.push(
+                u32::try_from(self.entries.len())
+                    .expect("an unfinished data block should be below its target size"),
+            );
         }
         let shared_len = if restart {
             0
@@ -306,7 +310,9 @@ impl SegmentBlocksBuilder {
         for restart in &self.restarts {
             payload.extend_from_slice(&restart.to_le_bytes());
         }
-        payload.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
+        let restart_count =
+            u32::try_from(self.restarts.len()).expect("a block's restart count should fit u32");
+        payload.extend_from_slice(&restart_count.to_le_bytes());
         self.decoded_data_bytes += (self.restarts.len() + 1) * 4;
         self.restarts.clear();
         self.entry_count = 0;
@@ -617,10 +623,15 @@ fn append_section(
     } else {
         payload.to_vec()
     };
+    let handle_bytes = |len: usize| {
+        u32::try_from(len).map_err(|_| {
+            SegmentBlockCodecError::Malformed(format!("a {len}-byte block does not fit a handle"))
+        })
+    };
     let handle = BlockHandle {
         offset: bytes.len() as u64,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: handle_bytes(stored.len())?,
+        decoded_bytes: handle_bytes(payload.len())?,
         crc32c: crc32c::crc32c(&stored),
     };
     bytes.extend_from_slice(&stored);
@@ -675,8 +686,9 @@ fn decode_section(
 }
 
 fn build_filter_payload(hashes: &[(u64, u64)]) -> Vec<u8> {
-    let bit_len = (hashes.len() * FILTER_BITS_PER_KEY).max(64) as u64;
-    let mut bits = vec![0u8; bit_len.div_ceil(8) as usize];
+    let bits_len = (hashes.len() * FILTER_BITS_PER_KEY).max(64);
+    let mut bits = vec![0u8; bits_len.div_ceil(8)];
+    let bit_len = bits_len as u64;
     for (h1, h2) in hashes {
         for probe in 0..u64::from(FILTER_HASH_COUNT) {
             let bit = h1.wrapping_add(probe.wrapping_mul(*h2)) % bit_len;
@@ -791,7 +803,7 @@ mod tests {
             "completed blocks are already compressed"
         );
         let built = builder.build().expect("finish segment");
-        let start = built.index.offset as usize;
+        let start = usize::try_from(built.index.offset).expect("the offset should fit usize");
         let end = start + built.index.stored_bytes as usize;
         let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
         assert_eq!(
@@ -834,7 +846,8 @@ mod tests {
     }
 
     fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-        &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+        let start = usize::try_from(handle.offset).expect("the offset should fit usize");
+        &bytes[start..start + handle.stored_bytes as usize]
     }
 
     fn encode_index(entries: &[SegmentIndexEntry]) -> (Vec<u8>, BlockHandle) {
@@ -1063,7 +1076,8 @@ mod tests {
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
 
         let mut corrupted = built.bytes.clone();
-        let target = index[0].block.offset as usize + 3;
+        let target =
+            usize::try_from(index[0].block.offset).expect("the offset should fit usize") + 3;
         corrupted[target] ^= 0xff;
         let error = decode_data_block(section(&corrupted, &index[0].block), &index[0].block)
             .expect_err("corrupted data block should fail");
@@ -1073,7 +1087,7 @@ mod tests {
         ));
 
         let mut corrupted = built.bytes.clone();
-        let target = built.index.offset as usize + 3;
+        let target = usize::try_from(built.index.offset).expect("the offset should fit usize") + 3;
         corrupted[target] ^= 0xff;
         let error = decode_index_block(section(&corrupted, &built.index), &built.index)
             .expect_err("corrupted index should fail");
@@ -1083,7 +1097,8 @@ mod tests {
         ));
 
         let mut corrupted = built.bytes.clone();
-        let target = built.filter.offset as usize + 12;
+        let target =
+            usize::try_from(built.filter.offset).expect("the offset should fit usize") + 12;
         corrupted[target] ^= 0xff;
         let error = decode_filter_block(section(&corrupted, &built.filter), &built.filter)
             .expect_err("corrupted filter should fail");
@@ -1154,7 +1169,10 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&n_hashes.to_le_bytes());
             payload.extend_from_slice(&bit_len.to_le_bytes());
-            payload.resize(12 + bit_len.div_ceil(8) as usize, 0xff);
+            payload.resize(
+                12 + usize::try_from(bit_len.div_ceil(8)).expect("the filter should fit usize"),
+                0xff,
+            );
             let mut bytes = Vec::new();
             let handle = append_section(&mut bytes, &payload, false).expect("filter section");
             assert!(matches!(
@@ -1170,7 +1188,8 @@ mod tests {
         let mut restart_offsets = Vec::new();
         for index in 0..=RESTART_INTERVAL {
             if index.is_multiple_of(RESTART_INTERVAL) {
-                restart_offsets.push(payload.len() as u32);
+                restart_offsets
+                    .push(u32::try_from(payload.len()).expect("the offset should fit u32"));
             }
             write_varint(&mut payload, u64::from(index != 0));
             write_varint(&mut payload, u64::from(index == 0));

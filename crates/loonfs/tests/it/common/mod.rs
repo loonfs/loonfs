@@ -106,7 +106,7 @@ pub(crate) fn store(root: &Path) -> SharedObjectStore {
 
 pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -232,13 +232,16 @@ pub(crate) async fn open_runtime_with_async(
     writer_id: &str,
     configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
-    let writer = configure(LoonFs::builder_with_store(store.clone()).writer_id(writer_id))
-        .build()
-        .await
-        .expect("build writer");
+    let writer = configure(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
+    )
+    .build()
+    .await
+    .expect("build writer");
     let reader = writer.read_only();
     let maintenance = LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .build()
         .await
         .expect("build maintenance")

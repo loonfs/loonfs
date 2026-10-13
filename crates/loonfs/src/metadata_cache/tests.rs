@@ -43,7 +43,7 @@ async fn pin_fold_reads(
         .metrics_recorder(recorder.clone())
         .build();
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id("pin-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("pin-writer"))
         .execution_budget(budget.clone())
         .metadata_cache(
             MetadataCache::builder()
@@ -197,7 +197,7 @@ async fn same_shape_store(
     bytes: &'static [u8],
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(local_store(root))
-        .writer_id("same-shape-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("same-shape-writer"))
         .metadata_cache(cache.clone())
         .build()
         .await
@@ -328,7 +328,7 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
     );
 
     let reopened = LoonFs::builder_with_store(local_store(first_root.path()))
-        .writer_id("reopened-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("reopened-writer"))
         .metadata_cache(cache.clone())
         .build()
         .await

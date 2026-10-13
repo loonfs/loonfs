@@ -815,10 +815,10 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
-        writer_id: writer_id.to_owned(),
-        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
-        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
-        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        writer_id: loonfs_test_support::ids::writer_id(writer_id),
+        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS as u64,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS as u64,
+        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u64,
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
@@ -862,7 +862,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()

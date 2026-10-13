@@ -384,7 +384,9 @@ async fn store_fault_has_one_error_from_the_boundary() {
     ));
     let store: SharedObjectStore = failing.clone();
     let bootstrap = LoonFs::builder_with_store(store.clone())
-        .writer_id("logging-store-fault-bootstrap")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "logging-store-fault-bootstrap",
+        ))
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()

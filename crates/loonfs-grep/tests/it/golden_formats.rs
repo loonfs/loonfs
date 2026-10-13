@@ -254,7 +254,8 @@ fn sample_gram_postings_segment() -> BuiltSegmentBlocks {
 }
 
 fn segment_section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+    let start = usize::try_from(handle.offset).expect("the offset should fit usize");
+    &bytes[start..start + handle.stored_bytes as usize]
 }
 
 /// Reads back the block a fixture pins. The fixture stores the decompressed
@@ -265,8 +266,8 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
     let stored = zstd::stream::encode_all(payload.as_slice(), 0).expect("compress the block");
     let handle = BlockHandle {
         offset: 0,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
+        decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block_rows::<IndexRow>(&stored, &handle).expect("decode golden data block")

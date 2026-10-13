@@ -6,7 +6,7 @@ use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{AccessSetArgs, CommandKind};
 use crate::error::CliError;
 use loonfs_client::{AccessState, UpdateAccessOptions};
-use loonfs_types::{AccessGrants, AccessRevisionNo, AccessRight, AccessRights, PrincipalId};
+use loonfs_types::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -23,9 +23,9 @@ pub(crate) async fn run_access_set(
         grants: parse_grants(&args.grants).map_err(|error| context.fail(kind, error))?,
     };
     let options = UpdateAccessOptions {
-        commit: commit_options(&args.commit).map_err(|error| context.fail(kind, error))?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_access_revision_no: args.expected_revision.map(AccessRevisionNo),
+        expected_access_revision_no: args.expected_revision,
     };
     let result = context
         .target

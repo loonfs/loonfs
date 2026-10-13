@@ -63,7 +63,7 @@ impl SweepServer {
         let clock = Arc::new(SettableWallClock(AtomicU64::new(now_ms)));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let runtime = LoonFs::builder_with_store(store)
-            .writer_id("sweep-server")
+            .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))
             .min_publish_interval_ms(0)
             .wall_clock(clock.clone())
             .monotonic_timer(clock.clone())
@@ -202,7 +202,7 @@ root = "unused"
 /// A writer that ran before the server started, on the real clock.
 async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("before-the-server")
+        .writer_id(loonfs_test_support::ids::writer_id("before-the-server"))
         .min_publish_interval_ms(0)
         .build()
         .await

@@ -3,6 +3,9 @@
 use loonfs_types::ChangeSeq;
 
 /// Options for creating a namespace.
+///
+/// The client's `CreateNamespaceOptions` has no `allow_existing`, because the
+/// create request on the wire has no field for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateNamespaceOptions {
     /// Access mode the namespace is created with.

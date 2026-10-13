@@ -85,13 +85,15 @@ async fn create_compacted_directory(
     )
     .expect("grants");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("compacted-page-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("compacted-page-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("compacted-page-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "compacted-page-maintenance",
+        ))
         .build()
         .await
         .expect("maintenance")

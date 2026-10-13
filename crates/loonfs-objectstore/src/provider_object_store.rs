@@ -674,7 +674,8 @@ impl MultipartWrite<'_> {
         upload_id: &provider_store::MultipartId,
         bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
-        let part_size = self.store.multipart_geometry.part_bytes as usize;
+        let part_size = usize::try_from(self.store.multipart_geometry.part_bytes)
+            .expect("a multipart part should fit usize");
         let part_count = bytes.len().div_ceil(part_size);
         let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
         let mut in_flight = FuturesUnordered::new();
@@ -944,7 +945,8 @@ impl ObjectStore for ProviderObjectStore {
             async move {
                 let mut parts = PartReader::new(
                     stream::once(async { Ok(bytes) }).boxed(),
-                    self.multipart_geometry.part_bytes as usize,
+                    usize::try_from(self.multipart_geometry.part_bytes)
+                        .expect("a multipart part should fit usize"),
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
@@ -972,7 +974,11 @@ impl ObjectStore for ProviderObjectStore {
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
-        let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+        let mut reader = PartReader::new(
+            body,
+            usize::try_from(self.multipart_geometry.part_bytes)
+                .expect("a multipart part should fit usize"),
+        );
         let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
         if reader.exhausted() {
             let size_bytes = head.len() as u64;
@@ -1006,7 +1012,11 @@ impl ObjectStore for ProviderObjectStore {
                     .put(key, collect_stream(body).await?, PutMode::CreateIfAbsent)
                     .await;
             }
-            let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+            let mut reader = PartReader::new(
+                body,
+                usize::try_from(self.multipart_geometry.part_bytes)
+                    .expect("a multipart part should fit usize"),
+            );
             let head = reader.next_part().await?.unwrap_or_default();
             self.put_parts(
                 key,
@@ -2423,7 +2433,7 @@ mod tests {
             ("namespaces/demo/uploads/upl_2.json", multipart_payload(15)),
             (
                 MULTIPART_KEY,
-                multipart_payload(MULTIPART_TEST_THRESHOLD as usize + 1),
+                multipart_payload(MULTIPART_TEST_THRESHOLD + 1),
             ),
         ] {
             let written = store
@@ -2752,18 +2762,21 @@ mod tests {
         );
     }
 
-    const MULTIPART_TEST_THRESHOLD: u64 = 1024;
-    const MULTIPART_TEST_PART: u64 = 512;
+    const MULTIPART_TEST_THRESHOLD: usize = 1024;
+    const MULTIPART_TEST_PART: usize = 512;
     const MULTIPART_KEY: &str = "namespaces/demo/content/con_abcdef0123456789abcdef0123456789";
 
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.
     fn multipart_test_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
-        retrying_store(flaky).multipart_geometry(MULTIPART_TEST_THRESHOLD, MULTIPART_TEST_PART)
+        retrying_store(flaky)
+            .multipart_geometry(MULTIPART_TEST_THRESHOLD as u64, MULTIPART_TEST_PART as u64)
     }
 
     fn multipart_payload(len: usize) -> Vec<u8> {
-        (0..len).map(|index| (index % 251) as u8).collect()
+        (0..len)
+            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+            .collect()
     }
 
     fn script_part(
@@ -2879,7 +2892,7 @@ mod tests {
         store
             .put_overwrite(
                 "namespaces/demo/uploads/upl_small.bin",
-                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize - 1)),
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD - 1)),
             )
             .await
             .expect("below-threshold put");
@@ -2889,7 +2902,7 @@ mod tests {
         store
             .put_overwrite(
                 MULTIPART_KEY,
-                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize)),
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD)),
             )
             .await
             .expect("at-threshold put");
@@ -3102,7 +3115,7 @@ mod tests {
     async fn a_short_streamed_put_is_one_request_that_keeps_its_precondition() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        let payload = multipart_payload(MULTIPART_TEST_PART as usize - 1);
+        let payload = multipart_payload(MULTIPART_TEST_PART - 1);
 
         store
             .put_streamed(
@@ -3211,7 +3224,7 @@ mod tests {
     async fn a_streamed_put_that_fails_mid_stream_abandons_its_upload() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        let head = multipart_payload(MULTIPART_TEST_PART as usize);
+        let head = multipart_payload(MULTIPART_TEST_PART);
         let body = stream::iter([
             Ok(Bytes::from(head)),
             Ok(Bytes::from(multipart_payload(64))),

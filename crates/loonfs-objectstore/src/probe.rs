@@ -667,9 +667,10 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
 
     // The smallest payload with a middle part, which is where a provider's
     // own rules about non-final part sizes bite.
-    let payload_len =
-        PROVIDER_MULTIPART_THRESHOLD_BYTES as usize + PROVIDER_MULTIPART_PART_BYTES as usize + 4096;
-    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
+    let payload_len = PROVIDER_MULTIPART_THRESHOLD_BYTES + PROVIDER_MULTIPART_PART_BYTES + 4096;
+    let payload: Vec<u8> = (0..payload_len)
+        .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+        .collect();
 
     let metadata = ok_optional(
         "multipart overwrite",
@@ -677,7 +678,7 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
             .put_overwrite(&key, Bytes::from(payload.clone()))
             .await,
     )?;
-    if metadata.size_bytes != payload_len as u64 {
+    if metadata.size_bytes != payload_len {
         return Err(wrong(format!(
             "a multipart write of {payload_len} bytes reports {} stored",
             metadata.size_bytes

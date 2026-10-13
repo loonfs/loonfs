@@ -64,11 +64,11 @@ impl BloomFilter {
 impl BloomLevel {
     fn new(expected_entries: u64, seed: u64, max_bytes: usize) -> Option<Self> {
         let bytes = expected_entries.checked_mul(10)?.div_ceil(8).max(1);
-        if bytes > max_bytes as u64 {
-            return None;
-        }
+        let bytes = usize::try_from(bytes)
+            .ok()
+            .filter(|bytes| *bytes <= max_bytes)?;
         Some(Self {
-            bits: vec![0; bytes as usize],
+            bits: vec![0; bytes],
             seed,
         })
     }
@@ -77,8 +77,9 @@ impl BloomLevel {
         let first = xxh64(bytes, self.seed);
         let step = xxh64(bytes, self.seed.wrapping_add(1));
         std::array::from_fn(|index| {
-            (first.wrapping_add((index as u64).wrapping_mul(step)) % (self.bits.len() as u64 * 8))
-                as usize
+            let position = first.wrapping_add((index as u64).wrapping_mul(step))
+                % (self.bits.len() as u64 * 8);
+            usize::try_from(position).expect("a bit position inside the filter should fit usize")
         })
     }
 
