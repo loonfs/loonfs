@@ -1431,9 +1431,9 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "GrepIndex",
             &[
-                "GrepIndexLifecycleDisabled",
-                "GrepIndexLifecycleBackfilling",
-                "GrepIndexLifecycleActive",
+                "GrepIndexStatusDisabled",
+                "GrepIndexStatusBackfilling",
+                "GrepIndexStatusActive",
             ][..],
         ),
         (

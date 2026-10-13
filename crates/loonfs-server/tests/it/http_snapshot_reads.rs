@@ -11,8 +11,7 @@ use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::api::v0::ListChangesResponse;
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
-    SnapshotSummary,
+    ChangeSeq, CreateCheckpointRequest, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -20,7 +19,7 @@ use std::io::Read as _;
 use std::path::Path;
 use tempfile::tempdir;
 
-type ApiResult<T> = Result<T, (u16, Box<ApiError>)>;
+type ApiResult<T> = Result<T, (u16, Box<ErrorResponse>)>;
 
 async fn start_snapshot_server(root: &Path, writer_id: &str) -> TestServer {
     start_server(test_config(root.join("store"), writer_id, writer_id)).await
@@ -116,7 +115,7 @@ fn decode_json_response<T: DeserializeOwned>(
     }
 }
 
-fn create_snapshot(server_url: &str, namespace: &str, name: &str, ttl_ms: u64) -> SnapshotSummary {
+fn create_snapshot(server_url: &str, namespace: &str, name: &str, ttl_ms: u64) -> Snapshot {
     post_json(
         &format!("{server_url}/v0/namespaces/{namespace}/snapshots"),
         serde_json::json!({"name": name, "ttl_ms": ttl_ms}),

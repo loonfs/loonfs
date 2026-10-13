@@ -14,16 +14,15 @@ use loonfs_types::{
         CreateDownloadRequest, CreateDownloadResponse, CreateUploadBody, DirectoryBinding,
         ListChangesResponse, ObjectTransferAccess, UploadMode, UploadSession, UploadSessionStatus,
     },
-    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
-    CheckpointOwnerSummary, CommitRequest, CompactionStepOutcome, ContentRef,
-    CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
-    DeleteCheckpointResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
-    DeletedObjectCounts, ExtendSnapshotRequest, FilesystemOperation, ForkNamespaceRequest,
-    GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome, MetadataCompactionRequest,
-    MetadataCompactionResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse, PinId,
-    RetainedCandidates, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary,
-    TrashEntry, WalFoldStepOutcome,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, CheckpointOwner, CommitRequest,
+    CompactionStepOutcome, ContentRef, CreateCheckpointRequest, CreateNamespaceRequest,
+    CreateSnapshotRequest, DeleteCheckpointResponse, DeleteSnapshotResponse,
+    DeletedCheckpointsByOwner, DeletedObjectCounts, ErrorResponse, ExtendSnapshotRequest,
+    FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
+    MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, PinId, RetainedCandidates, RevisionNo, RunMaintenanceRequest,
+    RunMaintenanceResponse, Snapshot, TrashEntry, WalFoldStepOutcome,
 };
 
 /// Builds the static OpenAPI document for the v0 HTTP API.
@@ -94,7 +93,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     components(
         schemas(
         loonfs_types::CapabilityDocument,
-        ApiError,
+        ErrorResponse,
         loonfs_types::ErrorDetails,
         loonfs_types::WriterEpoch,
         CreateNamespaceRequest,
@@ -113,12 +112,12 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         CreateCheckpointRequest,
         Checkpoint,
         PinId,
-        CheckpointOwnerSummary,
+        CheckpointOwner,
         ListCheckpointsResponse,
         DeleteCheckpointResponse,
         CreateSnapshotRequest,
         ExtendSnapshotRequest,
-        SnapshotSummary,
+        Snapshot,
         ListSnapshotsResponse,
         DeleteSnapshotResponse,
         RunMaintenanceRequest,
@@ -178,7 +177,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         ListChangesResponse,
         loonfs_types::api::v0::GrepMatch,
         loonfs_types::api::v0::GrepResponse,
-        loonfs_types::api::v0::GrepIndexLifecycle,
+        loonfs_types::api::v0::GrepIndexStatus,
         loonfs_types::api::v0::GrepIndex,
         loonfs_types::api::v0::StoreProbeRequest,
         loonfs_types::api::v0::StoreProbeCheckOutcome,
@@ -213,7 +212,7 @@ struct LoonfsOpenApi;
     dead_code,
     reason = "used only to generate the reusable OpenAPI response schema"
 )]
-pub(super) struct UnavailableResponse(#[to_schema] ApiError);
+pub(super) struct UnavailableResponse(#[to_schema] ErrorResponse);
 
 /// Adds the shared 503 response to an OpenAPI operation.
 pub(super) struct UnavailableResponses;

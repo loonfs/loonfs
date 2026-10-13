@@ -102,15 +102,17 @@ pub struct GrepResponse {
 ///
 /// A namespace is searchable only when the lifecycle is `Active`.
 ///
-/// The durable twin is `GrepIndexStatus` in `loonfs-grep`, and the fields
-/// differ because this response tags variants with `status`, writes inode IDs
-/// in their public `ino_` form, and omits a zero `next_event_index`, while the
-/// durable record tags variants with `kind` and always writes
-/// `next_event_index`.
+/// The durable twin is `GrepIndexStatus` in `loonfs-grep`. The two types share
+/// a name because they describe the same status, and their fields differ
+/// because each follows the conventions of its own surface: this response tags
+/// variants with `status` and writes inode IDs in their public `ino_` form, and
+/// the durable record tags variants with `kind` and writes inode IDs as
+/// numbers. This response also omits a zero `next_event_index`, which the
+/// durable record always writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum GrepIndexLifecycle {
+pub enum GrepIndexStatus {
     /// No index is maintained for this namespace.
     Disabled,
     /// An initial scan of a pinned checkpoint that is not yet searchable.
@@ -139,7 +141,7 @@ pub enum GrepIndexLifecycle {
     },
 }
 
-impl GrepIndexLifecycle {
+impl GrepIndexStatus {
     /// Whether every commit at or below `target_seq` is represented.
     ///
     /// A watermark inside a commit (`next_event_index` above zero) has that
@@ -171,7 +173,7 @@ pub struct GrepIndex {
     pub namespace_id: NamespaceId,
     /// Where the index is in its lifecycle.
     #[serde(flatten)]
-    pub lifecycle: GrepIndexLifecycle,
+    pub status: GrepIndexStatus,
     /// Run number the index allocates next.
     pub next_run_no: RunNo,
     /// True while a partitioned segment reorganization is in progress.
@@ -209,7 +211,7 @@ mod tests {
 
     #[test]
     fn lifecycle_statuses_never_share_a_sequence_field() {
-        let backfilling = GrepIndexLifecycle::Backfilling {
+        let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(9),
             cursor_inode_id: Some(InodeId(4)),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
@@ -227,7 +229,7 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(GrepIndexLifecycle::Active {
+            serde_json::to_value(GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(9),
                 next_event_index: 0,
             })
@@ -237,14 +239,14 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(GrepIndexLifecycle::Disabled).expect("serialize disabled"),
+            serde_json::to_value(GrepIndexStatus::Disabled).expect("serialize disabled"),
             serde_json::json!({"status": "disabled"})
         );
     }
 
     #[test]
     fn only_an_active_index_has_built_through_a_sequence() {
-        let backfilling = GrepIndexLifecycle::Backfilling {
+        let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(9),
             cursor_inode_id: None,
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
@@ -254,9 +256,9 @@ mod tests {
             !backfilling.is_built_through(ChangeSeq(0)),
             "a backfill has indexed nothing until it turns active"
         );
-        assert!(!GrepIndexLifecycle::Disabled.is_built_through(ChangeSeq(0)));
+        assert!(!GrepIndexStatus::Disabled.is_built_through(ChangeSeq(0)));
 
-        let active = |built_through_seq, next_event_index| GrepIndexLifecycle::Active {
+        let active = |built_through_seq, next_event_index| GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         };
@@ -274,7 +276,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(GrepIndex {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                lifecycle: GrepIndexLifecycle::Active {
+                status: GrepIndexStatus::Active {
                     built_through_seq: ChangeSeq(12),
                     next_event_index: 0,
                 },
@@ -294,7 +296,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(GrepIndex {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                lifecycle: GrepIndexLifecycle::Backfilling {
+                status: GrepIndexStatus::Backfilling {
                     captured_seq: ChangeSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
                     checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")

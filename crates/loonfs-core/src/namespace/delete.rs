@@ -4,10 +4,11 @@ use crate::error::{CoreError, Result};
 use crate::manifest::publish::{update_manifest, ManifestChange};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{AcquiredWriter, NamespaceStatus};
+use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 #[allow(

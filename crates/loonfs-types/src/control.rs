@@ -3,11 +3,11 @@
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
+use crate::WriterId;
 use crate::{
     ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId, PinId,
     SubjectId, UploadId,
 };
-use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::num::NonZeroU64;
@@ -167,17 +167,6 @@ pub struct WriterBlock {
     pub writer_id: WriterId,
     /// Unix-millisecond stamp of the epoch acquisition.
     pub acquired_at_ms: u64,
-}
-
-/// Captures the writer identity and fencing epoch a session must retain while publishing.
-///
-/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcquiredWriter {
-    /// Stable writer label copied into the manifest's writer block.
-    pub writer_id: WriterId,
-    /// Fencing epoch every commit publication from this session must match.
-    pub writer_epoch: WriterEpoch,
 }
 
 /// Namespace lifecycle status.

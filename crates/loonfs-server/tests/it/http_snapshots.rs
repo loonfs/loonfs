@@ -9,20 +9,20 @@ use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior,
-    ListSnapshotsResponse, NamespaceId, SnapshotSummary,
+    ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior, ErrorResponse,
+    ListSnapshotsResponse, NamespaceId, Snapshot,
 };
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
 
-type ApiResult<T> = Result<T, (u16, Box<ApiError>)>;
+type ApiResult<T> = Result<T, (u16, Box<ErrorResponse>)>;
 
 fn create_snapshot(
     server_url: &str,
     namespace: &str,
     name: &str,
     ttl_ms: u64,
-) -> ApiResult<SnapshotSummary> {
+) -> ApiResult<Snapshot> {
     post_json_body(
         &format!("{server_url}/v0/namespaces/{namespace}/snapshots"),
         serde_json::json!({"name": name, "ttl_ms": ttl_ms}),
@@ -45,7 +45,7 @@ fn extend_snapshot(
     namespace: &str,
     snapshot_id: &str,
     ttl_ms: u64,
-) -> ApiResult<SnapshotSummary> {
+) -> ApiResult<Snapshot> {
     post_json_body(
         &format!("{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}/extend"),
         serde_json::json!({"ttl_ms": ttl_ms}),
@@ -519,5 +519,90 @@ async fn snapshot_file_read_returns_the_captured_state() {
             .expect("current content"),
         b"current"
     );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
+    use loonfs_client::ClientError;
+    use loonfs_test_support::ids::page_limit;
+    use loonfs_types::PageRequest;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let config = test_config(
+        temp_dir.path().join("store"),
+        "snapshot-cursor-kind",
+        "snapshot-cursor-kind",
+    );
+    let harness = start_server(config).await;
+    let namespace = NamespaceId::parse("demo").expect("namespace id");
+    harness
+        .client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    for name in ["first", "second"] {
+        harness
+            .client
+            .create_snapshot(&namespace, name, 5_000)
+            .await
+            .expect("create snapshot");
+    }
+    let first_of = |cursor| PageRequest {
+        limit: page_limit(1),
+        cursor,
+    };
+    let snapshot_cursor = harness
+        .client
+        .list_snapshots(&namespace)
+        .page(first_of(None))
+        .await
+        .expect("first snapshot page")
+        .next_cursor
+        .expect("snapshot cursor");
+    let resumed = harness
+        .client
+        .list_snapshots(&namespace)
+        .page(first_of(Some(snapshot_cursor.clone())))
+        .await
+        .expect("a snapshot cursor resumes the snapshot listing");
+    assert_eq!(resumed.snapshots.len(), 1);
+    let checkpoint_cursor = harness
+        .client
+        .list_checkpoints(&namespace)
+        .page(first_of(None))
+        .await
+        .expect("first checkpoint page")
+        .next_cursor
+        .expect("checkpoint cursor");
+
+    let rejections = [
+        harness
+            .client
+            .list_snapshots(&namespace)
+            .page(first_of(Some(checkpoint_cursor)))
+            .await
+            .map(drop),
+        harness
+            .client
+            .list_checkpoints(&namespace)
+            .page(first_of(Some(snapshot_cursor)))
+            .await
+            .map(drop),
+    ];
+    for rejection in rejections {
+        match rejection {
+            Err(ClientError::Api {
+                status,
+                code,
+                param,
+                ..
+            }) => {
+                assert_eq!((status, code.as_str()), (400, "invalid_request"));
+                assert_eq!(param.as_deref(), Some("cursor"));
+            }
+            other => panic!("expected an invalid cursor, got {other:?}"),
+        }
+    }
     harness.server.abort();
 }

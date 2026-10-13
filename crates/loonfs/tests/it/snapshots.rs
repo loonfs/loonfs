@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use loonfs::{
-    CheckpointOwnerSummary, ErrorCode, ListSnapshotsResponse, LoonFs, NamespaceId, PageRequest,
+    CheckpointOwner, ErrorCode, ListSnapshotsResponse, LoonFs, NamespaceId, PageRequest,
     PaginationPolicy, ReadOnly, SharedObjectStore, SnapshotPolicy,
 };
 use loonfs_objectstore::keys::pin_prefix;
@@ -404,7 +404,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
         .find(|checkpoint| {
             matches!(
                 &checkpoint.owner,
-                CheckpointOwnerSummary::Fork {
+                CheckpointOwner::Fork {
                     target_namespace_id
                 } if target_namespace_id == &target
             )

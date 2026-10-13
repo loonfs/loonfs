@@ -3,7 +3,7 @@
 use super::summaries::*;
 use crate::commands::MaintenanceRan;
 use loonfs_types::api::v0::{
-    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
+    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
     StoreProbeResponse,
 };
 use loonfs_types::{
@@ -47,7 +47,7 @@ pub(super) fn human_namespace_deleted(response: &DeleteNamespaceResponse) -> Str
     )
 }
 
-pub(super) fn human_snapshot_created(snapshot: &SnapshotSummary) -> String {
+pub(super) fn human_snapshot_created(snapshot: &Snapshot) -> String {
     format!(
         "snapshot {} created for {} at sequence {} (name: {}, expires: {})",
         snapshot.snapshot_id,
@@ -82,7 +82,7 @@ pub(super) fn human_snapshots_listed(response: &ListSnapshotsResponse) -> String
     lines.join("\n")
 }
 
-pub(super) fn human_snapshot_extended(snapshot: &SnapshotSummary) -> String {
+pub(super) fn human_snapshot_extended(snapshot: &Snapshot) -> String {
     format!(
         "snapshot {} in {} extended to {}",
         snapshot.snapshot_id,
@@ -262,13 +262,10 @@ pub(super) fn human_grep_index_enabled(
             waited_for_seq.map_or_else(|| "its target".to_owned(), |seq| format!("seq {}", seq.0));
         format!(
             "{opening}; gave up waiting for {target} after {steps} steps — {}",
-            grep_index_state_summary(&response.lifecycle)
+            grep_index_state_summary(&response.status)
         )
     } else {
-        format!(
-            "{opening}; {}",
-            grep_index_state_summary(&response.lifecycle)
-        )
+        format!("{opening}; {}", grep_index_state_summary(&response.status))
     }
 }
 
@@ -284,7 +281,7 @@ pub(super) fn human_grep_index_status(response: &GrepIndex) -> String {
     let mut summary = format!(
         "grep index on {}: {}",
         response.namespace_id,
-        grep_index_state_summary(&response.lifecycle)
+        grep_index_state_summary(&response.status)
     );
     if response.reorganize_pending {
         summary.push_str("; a reorganization is in progress");

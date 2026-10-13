@@ -61,7 +61,7 @@ impl Client {
         namespace_id: &NamespaceId,
         name: &str,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
         self.request_json(
             self.post(&url),
@@ -106,7 +106,7 @@ impl Client {
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
             self.base_url

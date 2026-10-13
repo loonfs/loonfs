@@ -12,7 +12,7 @@ use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::{DeleteSnapshotResponse, NamespaceId, PinId, SnapshotSummary};
+use loonfs_types::{DeleteSnapshotResponse, NamespaceId, PinId, Snapshot};
 use std::sync::Arc;
 
 /// Resolves the read basis a live snapshot lease pins.
@@ -42,7 +42,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     max_lifetime_ms: u64,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<SnapshotSummary> {
+) -> Result<Snapshot> {
     let deadline = Deadline::start(timer);
     let object_key = pin(namespace_id, snapshot_id);
     retry_while_contended(|| async {

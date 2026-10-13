@@ -8,14 +8,14 @@ use super::handlers_filesystem::{
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
-use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{DownloadOptions, ErrorCode};
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     api::v0::{
         CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
@@ -70,12 +70,12 @@ impl InodeDownloadQuery {
         request_body = CreateDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadResponse),
-            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
-            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -130,12 +130,12 @@ pub(super) async fn create_download(
         ),
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, snapshot id, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            (status = 400, description = "Invalid inode ID, snapshot id, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -146,6 +146,7 @@ pub(super) async fn create_download_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<InodeDownloadQuery>,
+    NoBody: NoBody,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -180,12 +181,12 @@ pub(super) async fn create_download_by_inode(
         ),
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which cannot be combined with a revision", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -196,6 +197,7 @@ pub(super) async fn create_revision_download_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(query): AppQuery<InodeDownloadQuery>,
+    NoBody: NoBody,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);

@@ -2736,25 +2736,25 @@
         "description": "The maintenance status of a namespace's grep index.",
         "discriminator": {
           "mapping": {
-            "active": "#/components/schemas/GrepIndexLifecycleActive",
-            "backfilling": "#/components/schemas/GrepIndexLifecycleBackfilling",
-            "disabled": "#/components/schemas/GrepIndexLifecycleDisabled"
+            "active": "#/components/schemas/GrepIndexStatusActive",
+            "backfilling": "#/components/schemas/GrepIndexStatusBackfilling",
+            "disabled": "#/components/schemas/GrepIndexStatusDisabled"
           },
           "propertyName": "status"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/GrepIndexLifecycleDisabled"
+            "$ref": "#/components/schemas/GrepIndexStatusDisabled"
           },
           {
-            "$ref": "#/components/schemas/GrepIndexLifecycleBackfilling"
+            "$ref": "#/components/schemas/GrepIndexStatusBackfilling"
           },
           {
-            "$ref": "#/components/schemas/GrepIndexLifecycleActive"
+            "$ref": "#/components/schemas/GrepIndexStatusActive"
           }
         ]
       },
-      "GrepIndexLifecycleActive": {
+      "GrepIndexStatusActive": {
         "description": "An index following the change feed through its searchable watermark.",
         "properties": {
           "built_through_seq": {
@@ -2795,7 +2795,7 @@
         ],
         "type": "object"
       },
-      "GrepIndexLifecycleBackfilling": {
+      "GrepIndexStatusBackfilling": {
         "description": "An initial scan of a pinned checkpoint that is not yet searchable.",
         "properties": {
           "captured_seq": {
@@ -2839,7 +2839,7 @@
         ],
         "type": "object"
       },
-      "GrepIndexLifecycleDisabled": {
+      "GrepIndexStatusDisabled": {
         "description": "No index is maintained for this namespace.",
         "properties": {
           "namespace_id": {
@@ -3899,6 +3899,12 @@
         "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
         "type": "string"
       },
+      "ProbeRunId": {
+        "description": "Identifies one store probe run and the objects it writes.",
+        "example": "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b",
+        "pattern": "^probe_[0-9a-f]{32}$",
+        "type": "string"
+      },
       "RetainedCandidates": {
         "description": "The candidates inspected but not deleted by one garbage-collection pass.",
         "properties": {
@@ -4515,8 +4521,8 @@
             "type": "array"
           },
           "run_id": {
-            "description": "The server-generated label for this probe run and its objects.",
-            "type": "string"
+            "$ref": "#/components/schemas/ProbeRunId",
+            "description": "The server-generated label for this probe run and its objects."
           }
         },
         "required": [

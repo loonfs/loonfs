@@ -591,7 +591,7 @@ An idle namespace costs no requests between full passes. A full pass costs one l
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
-| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 38 GET or HEAD and 12 LIST |
+| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 37 GET or HEAD and 12 LIST |
 
 On a collection pass, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every full pass. Core metadata still costs 6 requests per visit, and garbage collection adds 16, for a total of 22. For example, a server with 1,000 caught-up idle namespaces and no grep sends no requests for them between full passes, and about 22,000 on each daily full pass, plus the namespace listing.
 

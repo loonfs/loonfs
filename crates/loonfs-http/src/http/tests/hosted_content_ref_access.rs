@@ -8,8 +8,8 @@ use axum::http::{Request, StatusCode};
 use loonfs::{CreateNamespaceOptions, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, ApiError, ErrorCode, NamespaceAccess, PrincipalId,
-    PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, AccessRights, ErrorCode, ErrorResponse, NamespaceAccess,
+    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,7 +125,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
-    let error: ApiError = serde_json::from_slice(&bytes).expect("api error");
+    let error: ErrorResponse = serde_json::from_slice(&bytes).expect("api error");
     assert_eq!(error.code, ErrorCode::PathNotFound.as_str());
 
     let body = json!({
@@ -149,7 +149,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
-    let error: ApiError = serde_json::from_slice(&bytes).expect("api error");
+    let error: ErrorResponse = serde_json::from_slice(&bytes).expect("api error");
     assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
     assert_eq!(
         destination_namespace

@@ -249,16 +249,6 @@ pub struct ListInodeChildrenResponse {
     pub next_cursor: Option<String>,
 }
 
-/// File bytes plus the metadata entry they came from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct FileBytes {
-    /// Authoritative metadata for the file that was read.
-    pub entry: PathEntry,
-    /// Validated file bytes.
-    pub bytes: Vec<u8>,
-}
-
 /// One recoverable deletion and its removed directory binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -7,7 +7,7 @@ use crate::common::start_server;
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{ApiError, Commit};
+use loonfs_types::{Commit, ErrorResponse};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -15,7 +15,7 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
     match result {
         Err(ureq::Error::Status(status, response)) => {
             assert_eq!(status, 400);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
             assert!(error.message.contains("invalid namespace_id"));
@@ -107,7 +107,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     {
         Err(ureq::Error::Status(status, response)) => {
             assert_eq!(status, 400);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
         }
@@ -138,7 +138,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     {
         Err(ureq::Error::Status(status, response)) => {
             assert_eq!(status, 400);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
         }
@@ -152,11 +152,11 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
 fn assert_unknown_query_parameter(
     result: Result<ureq::Response, ureq::Error>,
     expected_param: &str,
-) -> ApiError {
+) -> ErrorResponse {
     match result {
         Err(ureq::Error::Status(status, response)) => {
             assert_eq!(status, 400);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
             assert_eq!(error.param.as_deref(), Some(expected_param));
@@ -273,7 +273,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
     {
         Err(ureq::Error::Status(status, response)) => {
             assert_eq!(status, 400);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
             assert_eq!(error.param, None);
@@ -338,7 +338,7 @@ async fn an_unknown_query_parameter_without_credentials_answers_unauthorized() {
     ] {
         match raw_agent().get(&url).call() {
             Err(ureq::Error::Status(401, response)) => {
-                let error: ApiError =
+                let error: ErrorResponse =
                     serde_json::from_reader(response.into_reader()).expect("decode api error");
                 assert_eq!(error.code, "unauthorized");
                 assert_eq!(error.param, None);
@@ -356,7 +356,7 @@ async fn an_unknown_query_parameter_without_credentials_answers_unauthorized() {
         .send_json(serde_json::json!({}))
     {
         Err(ureq::Error::Status(401, response)) => {
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "unauthorized");
         }

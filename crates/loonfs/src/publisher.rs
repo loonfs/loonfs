@@ -1844,7 +1844,7 @@ where
                     return Err(CoreError::CommitIdReuseConflict {
                         commit_id: commit_id.to_string(),
                         committed_seq: Some(response.committed_seq),
-                        committed_fingerprint: Some(primary_identity.as_str().to_owned()),
+                        committed_fingerprint: Some(primary_identity),
                     }
                     .into())
                 }

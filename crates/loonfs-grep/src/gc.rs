@@ -1,8 +1,7 @@
 //! Complete collection passes over one namespace's grep objects.
 
 use crate::keyspace::{
-    grep_prefix, manifest_key, manifests_prefix, parse_key, segment_key, segments_prefix,
-    GrepKeyKind,
+    grep_prefix, manifests_prefix, parse_key, segment_key, segments_prefix, GrepKeyKind,
 };
 use crate::manifest::{
     load_current_grep_manifest, load_grep_manifest, GrepManifestEnvelope, GrepManifestState,
@@ -10,13 +9,12 @@ use crate::manifest::{
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::engine::{
-    grace_age, GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS,
-    UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
+    GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
 };
 use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId, RunMaintenanceResponse};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
 const _: () = assert!(GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
@@ -90,6 +88,21 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let observed_hint = current
             .as_ref()
             .map_or(ManifestNo(1), |current| current.hint.state.manifest_no);
+        let prefix = manifests_prefix(namespace_id);
+        let mut manifest_entries = Vec::new();
+        let mut keys = self.store().list_entries_from_stream(&prefix, None);
+        while let Some(entry) = keys.next().await {
+            manifest_entries.push(entry.map_err(|error| GrepError::store(&prefix, &error))?);
+        }
+        let listed_manifests: BTreeMap<ManifestNo, Option<u64>> = manifest_entries
+            .iter()
+            .filter_map(|entry| match parse_key(&entry.key)?.kind {
+                GrepKeyKind::Manifest { manifest_no } => {
+                    Some((manifest_no, entry.last_modified_at_ms))
+                }
+                _ => None,
+            })
+            .collect();
         let mut live_segments = BTreeSet::new();
         let mut kept_manifests = BTreeSet::new();
         let mut root = current.map(|current| current.manifest_state().clone());
@@ -103,10 +116,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             if state.manifest_no() <= ManifestNo(1) {
                 break;
             }
-            let successor = manifest_key(namespace_id, &state.manifest_no());
-            let age = grace_age(self.store(), &successor, GREP_GC_GRACE_WINDOW_MS, now_ms)
-                .await
-                .map_err(|error| GrepError::store(&successor, &error))?;
+            let age = listed_manifests.get(&state.manifest_no()).map_or(
+                GraceAge::Gone,
+                |&last_modified_at_ms| {
+                    GraceAge::of(last_modified_at_ms, GREP_GC_GRACE_WINDOW_MS, now_ms)
+                },
+            );
             if matches!(age, GraceAge::Young | GraceAge::Unknown) {
                 let predecessor = ManifestNo(state.manifest_no().0 - 1);
                 root = load_grep_manifest(self.store(), namespace_id, predecessor)
@@ -115,12 +130,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 kept_manifests.extend(root.as_ref().map(GrepManifestState::manifest_no));
             }
         }
-        let prefix = manifests_prefix(namespace_id);
-        let mut keys = self.store().list_entries_from_stream(&prefix, None);
-        while let Some(entry) = keys.next().await {
-            let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
-            let key = &entry.key;
-            let Some(parsed) = parse_key(key) else {
+        for entry in &manifest_entries {
+            let Some(parsed) = parse_key(&entry.key) else {
                 report.retained_candidates += 1;
                 continue;
             };
@@ -133,7 +144,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             collect_candidate(
                 self.store(),
-                &entry,
+                entry,
                 GREP_GC_GRACE_WINDOW_MS,
                 now_ms,
                 &mut report,

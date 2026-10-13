@@ -19,7 +19,7 @@ use utoipa::ToSchema;
 pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     let mut named = NamedSchemas::default();
     named.tagged::<CreateUploadBody>("mode", None);
-    named.tagged::<CheckpointOwnerSummary>("kind", None);
+    named.tagged::<CheckpointOwner>("kind", None);
     named.tagged::<CommitPrecondition>("kind", None);
     named.tagged::<FilesystemChange>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);
@@ -34,7 +34,7 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<WalFoldStepOutcome>("outcome", None);
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
     named.composite::<UploadSession, UploadSessionStatus>("status", None);
-    named.composite::<GrepIndex, GrepIndexLifecycle>("status", None);
+    named.composite::<GrepIndex, GrepIndexStatus>("status", None);
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.

@@ -77,10 +77,10 @@ pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
     classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
-    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileContentStream, GcOptions,
-    ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataViewError, RetentionTarget, WriterFence, CONTENT_READ_CHUNK_BYTES,
-    MAX_CURRENT_FILES_PER_STAT,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
+    FoldWalResponse, GcOptions, ListCheckpointFilesOptions, MetadataCompactionJobOutcome,
+    MetadataCompactionPolicy, MetadataViewError, RetentionTarget, SnapshotPageCursor, WriterFence,
+    CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
@@ -89,22 +89,21 @@ pub use loonfs_types::api::v0::{
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
-    Checkpoint, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition,
+    Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition,
     CompactionStepOutcome, ContentId, ContentRef, ContentRefKind, DeleteCheckpointResponse,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DeleteSnapshotResponse,
     DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor,
-    DisplayName, EffectiveLimit, EntryInodeKind, FileBytes, FileRevision, FileRevisionsPageCursor,
-    FoldWalOutcome, FoldWalResponse, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
-    ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest,
-    MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics,
-    NamespaceId, NamespaceMetadata, Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind,
-    PinId, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId, WalFoldStepOutcome, WriterId,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    PROTOCOL_VERSION,
+    DisplayName, EffectiveLimit, EntryInodeKind, FileRevision, FileRevisionsPageCursor, GcResponse,
+    InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo,
+    MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
+    MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata,
+    Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId, RetainedCandidates,
+    RetainedReason, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, Snapshot,
+    TrashEntry, UploadId, WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -121,8 +120,8 @@ pub mod engine {
     };
     pub use loonfs_core::time::{Deadline, Observation};
     pub use loonfs_core::{
-        grace_age, next_run_no_after, refill_iterators, select_next_iterator, GraceAge,
-        SegmentBlockLoader, SegmentRowIterator,
+        next_run_no_after, refill_iterators, select_next_iterator, GraceAge, SegmentBlockLoader,
+        SegmentRowIterator,
     };
 }
 
@@ -270,8 +269,8 @@ pub enum Error {
 
 impl Error {
     /// Returns this error as the public API error body.
-    pub fn to_api_error(&self) -> loonfs_types::ApiError {
-        loonfs_types::ApiError {
+    pub fn to_error_response(&self) -> loonfs_types::ErrorResponse {
+        loonfs_types::ErrorResponse {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: self.invalid_request_param(),

@@ -628,6 +628,16 @@ string_id! {
 }
 
 string_id! {
+    /// Identifies one store probe run and the objects it writes.
+    ProbeRunId,
+    prefix = "probe",
+    schema(
+        pattern = r"^probe_[0-9a-f]{32}$",
+        example = "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b"
+    )
+}
+
+string_id! {
     /// Name-policy-derived directory entry key.
     ///
     /// Use this for exact name preconditions. Keep user-facing spelling in

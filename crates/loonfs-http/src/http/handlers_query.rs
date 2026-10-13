@@ -4,7 +4,7 @@ use super::extractors::SubjectHeaders;
 use super::query_params::{effective_page_limit, parse_boolean_query_param, required_query_param};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
-use super::{AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::{Extension, Json};
@@ -14,7 +14,7 @@ use loonfs_grep::{
 };
 use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     GrepRequest, GrepResponse, NamespaceId, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
@@ -63,12 +63,12 @@ pub(super) struct GrepQuery {
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
-            (status = 400, description = "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, scope path, or scope inode not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
-            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
+            (status = 400, description = "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, scope path, or scope inode not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ErrorResponse),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -168,12 +168,12 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Lost a grep manifest publication race; retry", body = ApiError),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
-            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Lost a grep manifest publication race; retry", body = ErrorResponse),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -183,6 +183,7 @@ pub(super) async fn enable_grep_index(
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
+    NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
     let _handle = state
         .namespaces
@@ -219,10 +220,10 @@ pub(super) async fn enable_grep_index(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
-            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -258,12 +259,12 @@ async fn read_grep_index_status(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Lost a grep manifest publication race; retry", body = ApiError),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
-            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Lost a grep manifest publication race; retry", body = ErrorResponse),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -273,6 +274,7 @@ pub(super) async fn disable_grep_index(
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
+    NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
     let _handle = state
         .namespaces
@@ -300,7 +302,7 @@ pub(super) fn map_grep_error(
     if let GrepError::Runtime(error) = error {
         return ApiResponseError::runtime_for_namespace(namespace_id, error);
     }
-    ApiResponseError::from_api_error(error.code(), error.to_api_error())
+    ApiResponseError::from_error_response(error.code(), error.to_error_response())
 }
 
 fn grep_publication_conflict() -> ApiResponseError {

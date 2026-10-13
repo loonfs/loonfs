@@ -181,7 +181,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
                     .get_grep_index(&namespace_id)
                     .await
                     .expect("index");
-                assert!(index.lifecycle.is_built_through(ChangeSeq(1)));
+                assert!(index.status.is_built_through(ChangeSeq(1)));
             }
         };
         let build = async {
@@ -2314,10 +2314,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     else {
         panic!("a fresh enable publishes a backfill");
     };
-    let backfilling = loonfs_types::api::v0::GrepIndexLifecycle::from(&state);
+    let backfilling = loonfs_types::api::v0::GrepIndexStatus::from(&state);
     assert_eq!(
         backfilling,
-        loonfs_types::api::v0::GrepIndexLifecycle::Backfilling {
+        loonfs_types::api::v0::GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
@@ -2354,7 +2354,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     // Once the walk finishes, the API reports the manifest as active with the
     // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let active = loonfs_types::api::v0::GrepIndexLifecycle::from(
+    let active = loonfs_types::api::v0::GrepIndexStatus::from(
         &worker
             .lifecycle(&namespace_id)
             .await
@@ -2362,7 +2362,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     );
     assert_eq!(
         active,
-        loonfs_types::api::v0::GrepIndexLifecycle::Active {
+        loonfs_types::api::v0::GrepIndexStatus::Active {
             built_through_seq: ChangeSeq(1),
             next_event_index: 0,
         }
@@ -2748,6 +2748,90 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         .await
         .expect("head")
         .is_some());
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_grep_gc_pass_reads_grep_manifest_ages_from_one_listing_without_a_head_request() {
+    use loonfs_grep::manifest::encode_grep_manifest;
+    use loonfs_types::ManifestNo;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("listed-gc").expect("namespace");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let recording = Arc::new(RecordingStore::new(
+        base,
+        KeyPredicate::prefix(grep_prefix(&namespace_id)),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("listed-grep-gc"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("namespace");
+    for number in 1..=3_u8 {
+        let segment = crate::golden_formats::segment_ref(number, number.into(), 0);
+        store
+            .put_if_absent(
+                &segment_key(&namespace_id, &segment.segment_id),
+                Bytes::from_static(b"segment"),
+            )
+            .await
+            .expect("segment");
+        let state = GrepManifestState::new(
+            namespace_id.clone(),
+            ManifestNo(number.into()),
+            GrepIndexStatus::Active {
+                built_through_seq: ChangeSeq(0),
+                next_event_index: 0,
+            },
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: RunNo(4),
+            },
+            vec![segment],
+        )
+        .expect("manifest state");
+        store
+            .put_if_absent(
+                &manifest_key(&namespace_id, &ManifestNo(number.into())),
+                Bytes::from(
+                    encode_grep_manifest(state)
+                        .expect("encode manifest")
+                        .into_bytes(),
+                ),
+            )
+            .await
+            .expect("manifest");
+    }
+    write_hint(&*store, &namespace_id, ManifestNo(3)).await;
+    let collector = worker(&store).await;
+    recording.reset();
+
+    let report = collector
+        .gc_namespace(&namespace_id, 0)
+        .await
+        .expect("a pass over young manifests");
+
+    assert_eq!(
+        (report.deleted_segments, report.deleted_other_objects),
+        (0, 0)
+    );
+    assert_eq!(recording.count(OperationSelector::Head), 0);
+    assert_eq!(
+        recording
+            .snapshot()
+            .iter()
+            .filter(|operation| matches!(
+                operation,
+                RecordedOperation::List { prefix } if *prefix == manifests_prefix(&namespace_id)
+            ))
+            .count(),
+        1
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

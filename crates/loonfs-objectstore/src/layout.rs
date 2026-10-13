@@ -31,7 +31,7 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
-    /// Classifies a temporary object that an extension writes and deletes.
+    /// Classifies a temporary object that an assembly writes and deletes.
     TemporaryObject,
 }
 

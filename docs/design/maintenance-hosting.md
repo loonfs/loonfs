@@ -83,7 +83,7 @@ A daily pass costs one namespace listing per page, plus these requests for each 
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
-| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 38 GET or HEAD and 12 LIST |
+| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 37 GET or HEAD and 12 LIST |
 
 Objects that are still inside their grace windows, and work that's due, add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored.
 

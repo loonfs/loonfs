@@ -172,7 +172,7 @@ string_cursor_response!(
 );
 string_cursor_response!(
     crate::api::v0::ListSnapshotsResponse,
-    crate::api::v0::SnapshotSummary,
+    crate::api::v0::Snapshot,
     snapshots
 );
 

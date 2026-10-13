@@ -568,7 +568,7 @@ Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries a
 
 ### 5.2 Commit responses and safe retry
 
-Every successful commit returns a `Commit` with its `namespace_id`, `commit_id`, and `committed_seq`. The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These values match the change feed, including values such as newly created inode IDs. If the caller omits an optional `commit_id`, the response includes a generated ID.
+Every successful commit returns a `Commit` with its `namespace_id`, `commit_id`, and `committed_seq`. The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These values match the change feed, including values such as newly created inode IDs.
 
 To retry a commit, a client resubmits the same request with the same `commit_id`:
 
@@ -696,7 +696,7 @@ The server rejects a request body that contains an unknown field, at any level o
 
 Response bodies follow the opposite rule. A client MUST keep working against a server newer than itself, so it MUST tolerate response fields it doesn't recognize (see [Writer and client requirements](#72-writer-and-client-requirements)).
 
-The exception is `ContentRef` and `Checksum`, which are closed shapes in both requests and responses. A response never adds a field to either shape. A new content strategy is added as a new `kind` value, and a new checksum algorithm as a new `algorithm` value, so both schemas are `additionalProperties: false` in responses too. An unknown content kind fails to decode, and so does an unknown checksum algorithm. [Strict decoding and evolution](format.md#123-strict-decoding-and-evolution) states the same rules and extends them to durable shapes.
+The exceptions are `ContentRef`, `Checksum`, and `ContentToken`, which are closed shapes in both requests and responses. A response never adds a field to any of them. A new content strategy is added as a new `kind` value, and a new checksum algorithm as a new `algorithm` value, so the `ContentRef` and `Checksum` schemas are `additionalProperties: false` in responses too. `ContentToken` is closed because the server mints it and the client sends it back unchanged, so new information goes inside its opaque `token` string. An unknown content kind fails to decode, and so does an unknown checksum algorithm. [Strict decoding and evolution](format.md#123-strict-decoding-and-evolution) states the same rules and extends them to durable shapes.
 
 The server also rejects unknown query parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` (a misspelling of `expected_head_seq`) returns 400 `invalid_request`, instead of deleting the namespace without the intended precondition. A route that declares no query parameters rejects every query parameter. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions, because probes and scrapers might append their own parameters.
 

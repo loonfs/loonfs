@@ -93,11 +93,11 @@ impl GrepError {
     }
 
     /// Preserves public error fields for embedded and HTTP callers.
-    pub fn to_api_error(&self) -> loonfs_types::ApiError {
+    pub fn to_error_response(&self) -> loonfs_types::ErrorResponse {
         if let Self::Runtime(error) = self {
-            return error.to_api_error();
+            return error.to_error_response();
         }
-        loonfs_types::ApiError {
+        loonfs_types::ErrorResponse {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: None,

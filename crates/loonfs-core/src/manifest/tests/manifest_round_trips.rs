@@ -70,7 +70,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
         .await
         .expect("load head");
-    let acquired_writer = loonfs_types::format::control::AcquiredWriter {
+    let acquired_writer = crate::namespace::writer_epoch::AcquiredWriter {
         writer_id: context.writer_id.clone(),
         writer_epoch: head.writer_epoch,
     };
@@ -105,7 +105,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("fold publish projection")
     .response;
-    assert_eq!(response.outcome, loonfs_types::FoldWalOutcome::Published);
+    assert_eq!(response.outcome, crate::FoldWalOutcome::Published);
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)
             .await

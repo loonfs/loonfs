@@ -13,7 +13,7 @@ use crate::args::{
     MaintenanceStoreProbeArgs,
 };
 use crate::backend::StepBudget;
-use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, GcRequest,
     MetadataCompactionRequest, MetadataMaintenanceRequest, RecoverAdministratorRequest,
@@ -371,17 +371,17 @@ async fn run_maintenance_index_enable(
         .enable_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
-    let target_seq = match (args.no_wait, &response.lifecycle) {
+    let target_seq = match (args.no_wait, &response.status) {
         // Nothing to wait for: the caller opted out, or the index is
         // disabled, which enable would have changed if it could.
-        (true, _) | (_, GrepIndexLifecycle::Disabled) => None,
+        (true, _) | (_, GrepIndexStatus::Disabled) => None,
         // A backfill already names the namespace sequence its checkpoint
         // captured, and reaching it is what completes the backfill.
-        (_, GrepIndexLifecycle::Backfilling { captured_seq, .. }) => Some(*captured_seq),
+        (_, GrepIndexStatus::Backfilling { captured_seq, .. }) => Some(*captured_seq),
         // An active index is asked to catch up to where the namespace is
         // now: one read, before any stepping, so an index that is already
         // there returns without doing anything.
-        (_, GrepIndexLifecycle::Active { .. }) => Some(
+        (_, GrepIndexStatus::Active { .. }) => Some(
             context
                 .target
                 .client

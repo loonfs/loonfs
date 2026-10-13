@@ -39,7 +39,7 @@ use loonfs_types::{
         CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
         CreateSnapshotRequest, CreateUploadBody, DeleteSnapshotResponse, ExtendSnapshotRequest,
         GrepIndex, ListChangesResponse, ListSnapshotsResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, SnapshotSummary,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, Snapshot,
         StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadPartChecksumClaim,
         UploadSession, UploadSessionStatus,
     },

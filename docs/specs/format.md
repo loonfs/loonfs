@@ -274,6 +274,8 @@ Content objects are stored under their owner's prefix (see [File contents and ow
 
 On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
+The store probe writes its scratch objects under `probe-runs/{run_id}/`, which is outside every namespace and isn't an object family (the [API specification][api-spec] describes the probe).
+
 The key layout is part of the format. Other objects MUST NOT use keys in these families. Core readers and garbage collection don't interpret keys under an extension's prefix.
 
 ### 2.2 Object roles and mutability
@@ -1923,7 +1925,7 @@ A range lookup uses the last keys to find candidate blocks. Readers verify each 
 
 ### A.8 Object keys
 
-These patterns define the core object families. A segment's owner can be different from the namespace that reads it.
+These patterns define the core object families and the store probe's scratch prefix, which isn't a family. A segment's owner can be different from the namespace that reads it.
 
 | Family | Object key pattern |
 | --- | --- |
@@ -1936,6 +1938,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Content objects | `namespaces/{owner_namespace_id}/content/{content_id}` |
 | Content span objects | `namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}` |
 | Temporary objects | `namespaces/{namespace_id}/temporary/{temporary_id}` |
+| Store probe scratch prefix | `probe-runs/{run_id}/` |
 
 ## Appendix B. Semantic commit fingerprints
 

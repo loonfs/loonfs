@@ -1981,7 +1981,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let advanced = super::fold::fold_wal(&store, &namespace_id)
         .await
         .expect("in-budget retry succeeds");
-    assert_eq!(advanced.outcome, loonfs_types::FoldWalOutcome::Published);
+    assert_eq!(advanced.outcome, crate::FoldWalOutcome::Published);
     assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
 }
 

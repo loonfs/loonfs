@@ -17,7 +17,7 @@ mod tests;
 pub use self::files::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, ListCheckpointFilesOptions,
 };
-pub use self::list::CheckpointPageCursor;
+pub use self::list::{CheckpointPageCursor, SnapshotPageCursor};
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::snapshot::load_snapshot_read_basis;
 

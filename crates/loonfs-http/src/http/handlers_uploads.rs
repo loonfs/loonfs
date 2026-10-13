@@ -5,8 +5,8 @@ use super::error::ApiResponseError;
 use super::extractors::{decode_json, SubjectHeaders};
 use super::query_params::parse_path_id;
 use super::{
-    AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
-    UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery, UploadBodyBytes,
+    UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use crate::Namespaces;
 use axum::extract::State;
@@ -20,9 +20,9 @@ use loonfs_objectstore::{
     presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
     ObjectStoreError,
 };
-#[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
 use loonfs_types::ErrorCode;
+#[cfg(feature = "openapi")]
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     api::v0::{
         CompleteUploadBody, CreateUploadBody, ObjectTransferAccess, SignUploadPartsRequest,
@@ -115,12 +115,12 @@ pub(super) struct UploadPathParams {
         request_body = CreateUploadBody,
         responses(
             (status = 200, description = "Upload session started", body = UploadSession),
-            (status = 400, description = "Invalid upload request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
-            (status = 501, description = "Requested upload mode is unsupported", body = ApiError),
+            (status = 400, description = "Invalid upload request", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ErrorResponse),
+            (status = 501, description = "Requested upload mode is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -278,13 +278,13 @@ async fn begin_direct_multipart_upload(
         request_body = SignUploadPartsRequest,
         responses(
             (status = 200, description = "Part capabilities issued", body = SignUploadPartsResponse),
-            (status = 400, description = "Invalid part request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 409, description = "Upload already completed", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
-            (status = 501, description = "Direct multipart upload is unsupported", body = ApiError),
+            (status = 400, description = "Invalid part request", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
+            (status = 409, description = "Upload already completed", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ErrorResponse),
+            (status = 501, description = "Direct multipart upload is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -500,12 +500,12 @@ fn with_content_token(
         request_body(content = Vec<u8>, content_type = "application/octet-stream"),
         responses(
             (status = 200, description = "Open session with the staged content reference", body = UploadSession),
-            (status = 400, description = "Invalid upload content", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 409, description = "Upload content conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid upload content", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
+            (status = 409, description = "Upload content conflict", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -558,12 +558,12 @@ pub(super) async fn put_upload_content(
         ),
         responses(
             (status = 200, description = "Upload completed", body = UploadSession),
-            (status = 400, description = "Invalid completion request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 409, description = "Upload completion conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid completion request", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
+            (status = 409, description = "Upload completion conflict", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -616,10 +616,10 @@ pub(super) async fn complete_upload(
         ),
         responses(
             (status = 200, description = "Upload session state", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid upload id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -684,11 +684,11 @@ pub(super) async fn get_upload(
         ),
         responses(
             (status = 200, description = "Upload aborted", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 409, description = "Upload already completed", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid upload id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
+            (status = 409, description = "Upload already completed", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -699,6 +699,7 @@ pub(super) async fn abort_upload(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
+    NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let namespace = state

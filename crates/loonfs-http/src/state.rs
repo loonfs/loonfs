@@ -351,7 +351,7 @@ impl Namespaces {
         self.fenced_sessions_dropped.fetch_add(1, Ordering::Relaxed);
         drop(handles);
         let active_writer_id = error
-            .to_api_error()
+            .to_error_response()
             .details
             .and_then(|details| details.active_writer_id);
         tracing::warn!(

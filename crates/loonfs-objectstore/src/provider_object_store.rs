@@ -244,6 +244,7 @@ pub struct ProviderObjectStore {
     multipart_controller: Arc<dyn MultipartController>,
     compare_token: CompareToken,
     kind: ConfiguredObjectStoreKind,
+    checksum_algorithm: ChecksumAlgorithm,
     io_runtime: StoreIoRuntime,
     multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
@@ -277,6 +278,7 @@ impl ProviderObjectStore {
         paginated: Arc<dyn PaginatedListStore>,
         config: ProviderObjectStoreConfig,
         kind: ConfiguredObjectStoreKind,
+        checksum_algorithm: ChecksumAlgorithm,
         io_runtime: StoreIoRuntime,
         checksum_reader: Arc<dyn StoredChecksumReader>,
         multipart_controller: Arc<dyn MultipartController>,
@@ -290,6 +292,7 @@ impl ProviderObjectStore {
             multipart_controller,
             compare_token: CompareToken::Etag,
             kind,
+            checksum_algorithm,
             io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
@@ -720,10 +723,7 @@ impl MultipartWrite<'_> {
 #[async_trait]
 impl ObjectStore for ProviderObjectStore {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        match self.kind {
-            ConfiguredObjectStoreKind::GcpGcs => ChecksumAlgorithm::Crc32c,
-            _ => ChecksumAlgorithm::Crc64nvme,
-        }
+        self.checksum_algorithm
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
@@ -1413,6 +1413,7 @@ mod tests {
                 key_prefix: Some("tenant-a".to_owned()),
             },
             ConfiguredObjectStoreKind::LocalFs,
+            ChecksumAlgorithm::Crc64nvme,
             StoreIoRuntime::new().expect("store io runtime"),
             Arc::clone(&inner) as Arc<dyn StoredChecksumReader>,
             Arc::new(ConditionalPutController::over(inner, Some("tenant-a"))),
@@ -2298,6 +2299,7 @@ mod tests {
                 key_prefix: Some("tenant-a".to_owned()),
             },
             ConfiguredObjectStoreKind::LocalFs,
+            ChecksumAlgorithm::Crc64nvme,
             StoreIoRuntime::new().expect("store io runtime"),
             Arc::clone(&flaky) as Arc<dyn StoredChecksumReader>,
             Arc::new(ConditionalPutController::over(flaky, Some("tenant-a"))),
@@ -2547,6 +2549,7 @@ mod tests {
             Arc::clone(&resending) as Arc<dyn PaginatedListStore>,
             ProviderObjectStoreConfig { key_prefix: None },
             ConfiguredObjectStoreKind::LocalFs,
+            ChecksumAlgorithm::Crc64nvme,
             StoreIoRuntime::new().expect("store io runtime"),
             resending.clone(),
             Arc::new(ConditionalPutController::over(resending.clone(), None)),

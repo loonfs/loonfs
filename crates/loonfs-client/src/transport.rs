@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use loonfs_types::{ApiError, ErrorCode, OperationDeadline, TransportRetryOutcome};
+use loonfs_types::{ErrorCode, ErrorResponse, OperationDeadline, TransportRetryOutcome};
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
 use std::time::Duration;
@@ -387,8 +387,8 @@ pub(crate) struct FailedAttempt {
 }
 
 pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
-    match serde_json::from_slice::<ApiError>(body) {
-        Ok(body) => ClientError::from_api_error(status, body),
+    match serde_json::from_slice::<ErrorResponse>(body) {
+        Ok(body) => ClientError::from_error_response(status, body),
         // A status with a non-envelope body is most commonly an intermediary
         // answering for the server (a load balancer's HTML 502): keep the
         // status — it is the only signal the response carried.

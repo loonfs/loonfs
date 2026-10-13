@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::{ListOptions, StatOptions};
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     public_inode_id, DirectoryPageCursor, FileRevisionsPageCursor, InodeId,
     ListFileRevisionsResponse, PageRequest,
@@ -72,10 +72,10 @@ pub(super) struct StatInodeQuery {
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -139,11 +139,11 @@ pub(super) struct ListInodeChildrenQuery {
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 409, description = "Inode is not a directory", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a directory", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -200,11 +200,11 @@ pub(super) async fn list_inode_children(
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid inode ID, limit, or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or inode not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid inode ID, limit, or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or inode not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -248,12 +248,12 @@ pub(super) async fn list_file_revisions_by_inode(
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -300,12 +300,12 @@ pub(super) async fn get_file_bytes_by_inode(
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )

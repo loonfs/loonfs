@@ -1,10 +1,9 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, SnapshotSummary,
-    Writable,
+    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, Snapshot, Writable,
 };
-use loonfs_core::CheckpointPageCursor;
+use loonfs_core::{CheckpointPageCursor, SnapshotPageCursor};
 use loonfs_types::PageRequest;
 use loonfs_types::PinId;
 use std::num::NonZeroU32;
@@ -85,7 +84,7 @@ impl<M: crate::Mode> Namespace<M> {
     )]
     async fn snapshots_page(
         &self,
-        request: PageRequest<CheckpointPageCursor>,
+        request: PageRequest<SnapshotPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         if self.core.subject.is_some() {
@@ -98,7 +97,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = self.core.now_ms();
         let requested = request.limit.as_usize();
-        let mut cursor = request.cursor;
+        let mut cursor = request.cursor.map(CheckpointPageCursor::from);
         let mut snapshots = Vec::with_capacity(requested);
         let engine = self.core.reader_engine(&self.namespace_id);
         loop {
@@ -116,17 +115,17 @@ impl<M: crate::Mode> Namespace<M> {
                 .await
                 .map_err(Error::from)?;
             snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint)
-                    .filter(|snapshot| snapshot.is_live(now_ms))
+                Snapshot::from_checkpoint(checkpoint).filter(|snapshot| snapshot.is_live(now_ms))
             }));
             match page.next_cursor {
                 Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
                 next_cursor => {
+                    let next_cursor = next_cursor.map(SnapshotPageCursor::from);
                     return Ok(ListSnapshotsResponse {
                         namespace_id: self.namespace_id.clone(),
                         snapshots,
                         next_cursor: super::core::encode_next_cursor(next_cursor.as_ref())?,
-                    })
+                    });
                 }
             }
         }
@@ -164,7 +163,7 @@ impl Namespace<Writable> {
         name: &str,
         expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         self.ensure_administrator().await?;
         self.ensure_live_snapshot_limit(policy.max_live_per_namespace, 1)
@@ -219,7 +218,7 @@ impl Namespace<Writable> {
             live += page
                 .items
                 .into_iter()
-                .filter_map(SnapshotSummary::from_checkpoint)
+                .filter_map(Snapshot::from_checkpoint)
                 .filter(|snapshot| snapshot.is_live(now_ms))
                 .count();
             if live > max_live {
@@ -255,7 +254,7 @@ impl Namespace<Writable> {
         snapshot_id: &PinId,
         requested_expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self

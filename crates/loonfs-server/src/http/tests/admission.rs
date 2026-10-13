@@ -48,7 +48,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     let body = axum::body::to_bytes(refused.into_body(), 4096)
         .await
         .expect("error body");
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error envelope");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error envelope");
     assert_eq!(error.code, "server_busy");
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert_eq!(refused_polls.load(Ordering::SeqCst), 0);

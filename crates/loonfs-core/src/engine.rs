@@ -6,6 +6,7 @@ use crate::cache::{HeadStateCache, MetadataSegmentCache};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
+use crate::manifest::FoldWalResponse;
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -14,7 +15,8 @@ use crate::namespace::{bootstrap, fork};
 use crate::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
-    DirectDownloadByInodeTarget, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
+    DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, LoadedMetadataView,
+    ReadLoadContext,
 };
 use crate::pin::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
@@ -40,9 +42,9 @@ use loonfs_types::EffectiveLimit;
 use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
-    FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
-    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo,
-    SnapshotSummary, Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    FileRevision, FileRevisionsPageCursor, InodeId, NamespaceAccess, NamespaceId,
+    NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Snapshot, Subject,
+    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1335,11 +1337,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Creates a snapshot of the current namespace state.
-    pub async fn create_snapshot(
-        &self,
-        name: String,
-        expires_at_ms: u64,
-    ) -> Result<SnapshotSummary> {
+    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Snapshot> {
         let context = self.mutation_context();
         crate::pin::create_pin(
             &self.store,
@@ -1388,7 +1386,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         checkpoint_id: &PinId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,

@@ -21,6 +21,38 @@ impl PageCursor for CheckpointPageCursor {
     const KIND: &'static str = "checkpoint_inventory";
 }
 
+/// Resume position for a snapshot listing.
+///
+/// It records the same position as a [`CheckpointPageCursor`] under its own
+/// kind, so a cursor from one listing can't resume the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotPageCursor {
+    namespace_id: NamespaceId,
+    last_key: String,
+}
+
+impl PageCursor for SnapshotPageCursor {
+    const KIND: &'static str = "snapshot_inventory";
+}
+
+impl From<CheckpointPageCursor> for SnapshotPageCursor {
+    fn from(cursor: CheckpointPageCursor) -> Self {
+        Self {
+            namespace_id: cursor.namespace_id,
+            last_key: cursor.last_key,
+        }
+    }
+}
+
+impl From<SnapshotPageCursor> for CheckpointPageCursor {
+    fn from(cursor: SnapshotPageCursor) -> Self {
+        Self {
+            namespace_id: cursor.namespace_id,
+            last_key: cursor.last_key,
+        }
+    }
+}
+
 impl CheckpointPageCursor {
     fn after(namespace_id: &NamespaceId, last_key: String) -> Self {
         Self {

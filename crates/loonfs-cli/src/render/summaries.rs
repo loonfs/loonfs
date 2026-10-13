@@ -126,10 +126,10 @@ pub(super) fn wal_fold_summary(outcome: &WalFoldStepOutcome) -> String {
 }
 
 /// Formats the current grep index state.
-pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
+pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
     match state {
-        GrepIndexLifecycle::Disabled => "disabled".to_owned(),
-        GrepIndexLifecycle::Backfilling {
+        GrepIndexStatus::Disabled => "disabled".to_owned(),
+        GrepIndexStatus::Backfilling {
             captured_seq,
             cursor_inode_id,
             ..
@@ -141,7 +141,7 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
             ),
             None => format!("backfilling toward seq {}, not yet started", captured_seq.0),
         },
-        GrepIndexLifecycle::Active {
+        GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         } => {
@@ -162,13 +162,13 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
 /// User checkpoints show their label. Fork checkpoints show their target
 /// namespace because users cannot delete them, and snapshots say what they
 /// are for the same reason.
-pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
+pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
     match owner {
-        CheckpointOwnerSummary::User { name } => name.clone(),
-        CheckpointOwnerSummary::Fork {
+        CheckpointOwner::User { name } => name.clone(),
+        CheckpointOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
-        CheckpointOwnerSummary::Snapshot { name } => format!("snapshot {name}"),
+        CheckpointOwner::Snapshot { name } => format!("snapshot {name}"),
     }
 }
 

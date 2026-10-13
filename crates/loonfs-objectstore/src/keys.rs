@@ -2,8 +2,11 @@
 //!
 //! [durable object family]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys
 
+use crate::probe::PROBE_RUN_PREFIX;
 use loonfs_types::format::manifest::MetadataSegmentRef;
-use loonfs_types::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};
+use loonfs_types::{
+    ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, ProbeRunId, UploadId, WalNo,
+};
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
@@ -120,6 +123,17 @@ pub fn temporary_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/temporary/")
 }
 
+/// Builds the listing prefix containing the objects of every store probe run.
+pub fn probe_runs_prefix() -> String {
+    format!("{PROBE_RUN_PREFIX}/")
+}
+
+/// Builds the listing prefix containing the objects one store probe run writes
+/// and deletes.
+pub fn probe_run_prefix(run_id: &ProbeRunId) -> String {
+    format!("{PROBE_RUN_PREFIX}/{run_id}/")
+}
+
 #[cfg(test)]
 mod tests {
     // The key builder is tested where it is defined.
@@ -127,17 +141,19 @@ mod tests {
 
     use super::{
         content_blob, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pin, temporary_object, upload_session, wal_object, wal_prefix,
+        metadata_segment_object_key, pin, probe_run_prefix, probe_runs_prefix, temporary_object,
+        upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
     };
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, ProbeRunId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
+    const PROBE_RUN_ID: &str = "probe_00000000000000000000000000000001";
 
     fn content_id() -> ContentId {
         ContentId::parse(CONTENT_ID).expect("valid content id")
@@ -216,6 +232,7 @@ mod tests {
                 .replace("{end:020}", "00000000000000000019")
                 .replace("{content_id}", CONTENT_ID)
                 .replace("{temporary_id}", &temporary_id)
+                .replace("{run_id}", PROBE_RUN_ID)
         };
 
         let built = [
@@ -243,6 +260,10 @@ mod tests {
                 super::content_span(&namespace_id(), &content_id(), 2, 19),
             ),
             ("Temporary objects", temporary),
+            (
+                "Store probe scratch prefix",
+                probe_run_prefix(&ProbeRunId::parse(PROBE_RUN_ID).expect("valid probe run id")),
+            ),
         ];
 
         let expected: std::collections::BTreeMap<String, String> = built
@@ -264,6 +285,9 @@ mod tests {
     fn listing_prefixes_match_their_keys() {
         assert_eq!(wal_prefix(&namespace_id()), "namespaces/ns-1/wal/");
         assert!(wal_object(&namespace_id(), &WalNo(42)).starts_with(&wal_prefix(&namespace_id())));
+        assert_eq!(probe_runs_prefix(), "probe-runs/");
+        let run_id = ProbeRunId::parse(PROBE_RUN_ID).expect("valid probe run id");
+        assert!(probe_run_prefix(&run_id).starts_with(&probe_runs_prefix()));
     }
 
     fn segment_descriptor() -> MetadataSegmentRef {

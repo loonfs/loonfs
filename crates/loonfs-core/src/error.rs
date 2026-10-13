@@ -15,8 +15,8 @@ use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
-    PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
+    BindingVersion, ChangeSeq, CommitFingerprint, CommitId, ErrorDetails, InodeId, InodeKind,
+    NamespaceId, PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
 };
 use thiserror::Error;
 
@@ -140,7 +140,7 @@ pub enum CoreError {
         /// Fingerprint of the committed mutation. It is present whenever
         /// `committed_seq` is present and lets a retry verify that it represents the
         /// same request.
-        committed_fingerprint: Option<String>,
+        committed_fingerprint: Option<CommitFingerprint>,
     },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
@@ -847,7 +847,9 @@ mod tests {
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: Some(ChangeSeq(9)),
-            committed_fingerprint: Some("v1:sha256:abc".to_owned()),
+            committed_fingerprint: Some(
+                serde_json::from_str(r#""v1:sha256:abc""#).expect("fingerprint"),
+            ),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
@@ -856,7 +858,10 @@ mod tests {
         );
         assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
         assert_eq!(
-            details.committed_fingerprint.as_deref(),
+            details
+                .committed_fingerprint
+                .as_ref()
+                .map(loonfs_types::CommitFingerprint::as_str),
             Some("v1:sha256:abc")
         );
 

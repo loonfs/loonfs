@@ -10,7 +10,7 @@ use crate::pin::list::list_checkpoints_page;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::{CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, PageRequest};
+use loonfs_types::{CheckpointOwner, ErrorCode, ListCheckpointsResponse, PageRequest};
 
 async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
     store: &S,
@@ -88,7 +88,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
     for checkpoint in &listed.checkpoints {
         assert_eq!(
             checkpoint.owner,
-            CheckpointOwnerSummary::User {
+            CheckpointOwner::User {
                 name: "nightly".to_owned()
             }
         );
@@ -507,7 +507,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
     assert_eq!(listed.checkpoints[0].checkpoint_id, snapshot.checkpoint_id);
     assert_eq!(
         listed.checkpoints[0].owner,
-        CheckpointOwnerSummary::Snapshot {
+        CheckpointOwner::Snapshot {
             name: "report-run".to_owned(),
         }
     );

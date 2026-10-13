@@ -249,7 +249,7 @@ fn failed_query_parameter(path: &serde_path_to_error::Path) -> Option<String> {
 }
 
 /// A `Json` extractor whose rejections stay inside the error contract:
-/// malformed bodies answer 400 with an `invalid_request` `ApiError` body
+/// malformed bodies answer 400 with an `invalid_request` `ErrorResponse` body
 /// instead of the raw framework rejection, and authorization runs before
 /// the body is read so a malformed body never turns an unauthorized
 /// request's 401 into a 400.
@@ -637,8 +637,6 @@ fn body_too_large_error(limit: usize) -> ApiResponseError {
 /// error, while a present-but-malformed body still answers 400 in-envelope.
 pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
 
-const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
-
 impl<T> FromRequest<BindingState> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,
@@ -652,8 +650,8 @@ where
         let body = extract_body_bytes(
             req,
             state,
-            MAX_OPTIONAL_JSON_BODY_BYTES,
-            body_too_large_error(MAX_OPTIONAL_JSON_BODY_BYTES),
+            MAX_JSON_BODY_BYTES,
+            body_too_large_error(MAX_JSON_BODY_BYTES),
         )
         .await?;
         if body.is_empty() {
@@ -661,6 +659,26 @@ where
         }
         let value = decode_json(&body)?;
         Ok(OptionalAppJson(Some(value)))
+    }
+}
+
+/// Rejects a request body for operations that declare none. An empty body
+/// passes.
+pub(super) struct NoBody;
+
+impl FromRequest<BindingState> for NoBody {
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &BindingState,
+    ) -> Result<Self, Self::Rejection> {
+        let unexpected_body = ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            "this operation does not take a request body",
+        );
+        extract_body_bytes(req, state, 0, unexpected_body).await?;
+        Ok(NoBody)
     }
 }
 
@@ -710,7 +728,7 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("error body");
-            let error: loonfs_types::ApiError =
+            let error: loonfs_types::ErrorResponse =
                 serde_json::from_slice(&body).expect("error envelope");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         }

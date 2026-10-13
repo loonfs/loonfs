@@ -17,8 +17,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use loonfs_http::{api_error_response, authenticate_routes, observe_routes};
-use loonfs_types::{ApiError, ErrorCode};
+use loonfs_http::{authenticate_routes, error_response, observe_routes};
+use loonfs_types::{ErrorCode, ErrorResponse};
 
 fn router(state: AppState) -> Router {
     let binding = loonfs_http::router(state.binding.clone());
@@ -41,9 +41,9 @@ async fn get_health() -> &'static str {
 
 async fn get_readiness(State(state): State<AppState>) -> Response {
     if state.runtime.is_shutting_down() {
-        return api_error_response(
+        return error_response(
             ErrorCode::ShuttingDown,
-            ApiError {
+            ErrorResponse {
                 code: ErrorCode::ShuttingDown.as_str().to_owned(),
                 message: "the server is shutting down and no longer admits new work".to_owned(),
                 feature: None,

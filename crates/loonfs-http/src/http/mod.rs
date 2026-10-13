@@ -21,7 +21,7 @@ mod response_frames;
 #[cfg(test)]
 mod tests;
 
-pub use self::error::api_error_response;
+pub use self::error::error_response;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
@@ -29,8 +29,8 @@ use crate::BindingState;
 
 use self::error::{ApiResponseError, ServedErrorCode};
 use self::extractors::{
-    acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
-    OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
+    acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoBody,
+    NoQuery, OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
     MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{
@@ -109,7 +109,7 @@ const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
 
 /// Assigns each request a correlation id: every response carries it as the
 /// `x-request-id` header, and error bodies repeat it as
-/// `ApiError.request_id` so a caller's log line and the server's trace can
+/// `ErrorResponse.request_id` so a caller's log line and the server's trace can
 /// be joined without header plumbing.
 async fn with_request_id(request: Request, next: Next) -> Response {
     let request_id = loonfs_types::generated_id("req");

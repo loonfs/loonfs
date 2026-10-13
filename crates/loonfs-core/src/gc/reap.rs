@@ -6,7 +6,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::pin::record::load_pin_at_key;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::RetainedReason;
 
@@ -109,21 +109,4 @@ impl GraceAge {
             Self::Unknown => Some(RetainedReason::NoProviderTimestamp),
         }
     }
-}
-
-/// Reads where one object stands against the grace window by its provider timestamp.
-pub async fn grace_age<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    grace_window_ms: u64,
-    now_ms: u64,
-) -> std::result::Result<GraceAge, ObjectStoreError> {
-    let Some(metadata) = store.head(key).await? else {
-        return Ok(GraceAge::Gone);
-    };
-    Ok(GraceAge::of(
-        metadata.last_modified_at_ms,
-        grace_window_ms,
-        now_ms,
-    ))
 }

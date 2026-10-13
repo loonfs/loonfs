@@ -17,4 +17,4 @@ mod uploads;
 
 pub use collect::gc_namespace;
 pub use options::GcOptions;
-pub use reap::{grace_age, GraceAge};
+pub use reap::GraceAge;

@@ -16,27 +16,26 @@ pub use downloads::{
 };
 pub use operations::{
     validate_access_precondition, validate_attributes_precondition, AdvanceRetentionRequest,
-    AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitPrecondition,
-    CommitRequest, CompactionStepOutcome, CreateCheckpointRequest, CreateNamespaceRequest,
-    CreateSnapshotRequest, DeleteCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
-    DeletedObjectCounts, DestinationBehavior, DestinationPrecondition,
-    DestinationPreconditionError, ErrorDetails, ExpectedFileState, ExtendSnapshotRequest,
-    FileRevision, FilesystemOperation, FoldWalOutcome, FoldWalResponse, ForkNamespaceRequest,
-    GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListSnapshotsResponse, MetadataCompactionOutcome, MetadataCompactionRequest,
-    MetadataCompactionResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceAccessMode, NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata,
-    PreconditionFields, RecoverAdministratorRequest, RecoverAdministratorResponse,
-    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse,
-    SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
-    StoreProbeResponse, WalFoldStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointOwner, CommitPrecondition, CommitRequest,
+    CompactionStepOutcome, CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
+    DeleteCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
+    DestinationPrecondition, DestinationPreconditionError, ErrorDetails, ErrorResponse,
+    ExpectedFileState, ExtendSnapshotRequest, FileRevision, FilesystemOperation,
+    ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListSnapshotsResponse, MetadataCompactionOutcome,
+    MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, NamespaceAccessMode, NamespaceDiagnostics, NamespaceForkBasis,
+    NamespaceMetadata, PreconditionFields, RecoverAdministratorRequest,
+    RecoverAdministratorResponse, RetainedCandidates, RetainedReason, RunMaintenanceRequest,
+    RunMaintenanceResponse, Snapshot, StoreProbeCheckOutcome, StoreProbeCheckResult,
+    StoreProbeRequest, StoreProbeResponse, WalFoldStepOutcome,
 };
 pub use reads::{
-    AttributesProjection, EntryInodeKind, FileBytes, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, PathEntry, PathEntryKind, TrashEntry,
+    AttributesProjection, EntryInodeKind, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListTrashResponse, PathEntry, PathEntryKind, TrashEntry,
 };
-pub use search::{GrepIndex, GrepIndexLifecycle, GrepMatch, GrepRequest, GrepResponse};
+pub use search::{GrepIndex, GrepIndexStatus, GrepMatch, GrepRequest, GrepResponse};
 pub use uploads::{
     CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,
     SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentClaim,

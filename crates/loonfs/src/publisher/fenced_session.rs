@@ -99,7 +99,7 @@ async fn assert_old_handle_refuses_submission(delete: bool) {
         std::task::Poll::Ready(Err(error)) => error,
         other => panic!("expected an immediate fencing error, got {other:?}"),
     };
-    assert_eq!(error.to_api_error(), first_error.to_api_error());
+    assert_eq!(error.to_error_response(), first_error.to_error_response());
     assert_eq!(publisher.admission.namespace_usage(old.id()), usage);
     assert_eq!(writer.execution_budget().stats(), before);
     assert_eq!(store.counts(), requests);
@@ -272,15 +272,15 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         queued_commit
             .await
             .expect_err("queued commit is fenced")
-            .to_api_error(),
-        first_error.to_api_error()
+            .to_error_response(),
+        first_error.to_error_response()
     );
     assert_eq!(
         queued_delete
             .await
             .expect_err("queued delete is fenced")
-            .to_api_error(),
-        first_error.to_api_error()
+            .to_error_response(),
+        first_error.to_error_response()
     );
     bounded(Duration::from_secs(10), shutdown)
         .await

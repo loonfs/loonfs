@@ -288,8 +288,8 @@ impl From<ClientError> for CliError {
     }
 }
 
-impl From<loonfs_types::ApiError> for CliError {
-    fn from(error: loonfs_types::ApiError) -> Self {
+impl From<loonfs_types::ErrorResponse> for CliError {
+    fn from(error: loonfs_types::ErrorResponse) -> Self {
         Self {
             code: error.code,
             message: error.message,
@@ -303,13 +303,13 @@ impl From<loonfs_types::ApiError> for CliError {
 
 impl From<loonfs::Error> for CliError {
     fn from(error: loonfs::Error) -> Self {
-        error.to_api_error().into()
+        error.to_error_response().into()
     }
 }
 
 impl From<loonfs_grep::GrepError> for CliError {
     fn from(error: loonfs_grep::GrepError) -> Self {
-        error.to_api_error().into()
+        error.to_error_response().into()
     }
 }
 

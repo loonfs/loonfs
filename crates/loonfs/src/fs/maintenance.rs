@@ -13,7 +13,7 @@ use crate::{
     CreateCheckpointOptions, DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse,
     ListCheckpointsResponse, MaintainMetadataOptions, MaintenanceCancellation,
     MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceResponse,
-    NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
+    NamespaceId, PinId, SharedObjectStore, Snapshot, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -180,9 +180,9 @@ impl Maintenance {
                 .await
                 .map_err(Error::from)?;
             for checkpoint in page.items {
-                if let loonfs_types::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
+                if let loonfs_types::CheckpointOwner::User { .. } = checkpoint.owner {
                     live_checkpoints = live_checkpoints.saturating_add(1);
-                } else if SnapshotSummary::from_checkpoint(checkpoint)
+                } else if Snapshot::from_checkpoint(checkpoint)
                     .is_some_and(|snapshot| snapshot.is_live(now_ms))
                 {
                     live_snapshots = live_snapshots.saturating_add(1);

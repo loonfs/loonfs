@@ -167,6 +167,7 @@ pub mod publish {
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
         TailSource, WalFoldInput, WalTailReport, WriterSessionStatus,
     };
+    pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
@@ -184,23 +185,23 @@ pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
     MetadataViewError, Result, WriterFence,
 };
-pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
+pub use gc::{gc_namespace, GcOptions, GraceAge};
 pub use manifest::ManifestLoadError;
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
-    CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
-    MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget, SegmentBlockLoader,
-    SegmentRowIterator,
+    CompactionStepOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
+    MetadataCompactionSpec, MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget,
+    SegmentBlockLoader, SegmentRowIterator,
 };
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
-    CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
-    MAX_CURRENT_FILES_PER_STAT,
+    CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
+    GrantedRange, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    ListCheckpointFilesOptions,
+    ListCheckpointFilesOptions, SnapshotPageCursor,
 };
 pub use protocol::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,

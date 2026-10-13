@@ -4,8 +4,9 @@ use super::ContentToken;
 use crate::options::UndeleteDestination;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    ManifestNo, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
+    AttributesRevisionNo, BindingVersion, ChangeSeq, CommitFingerprint, CommitId, ContentRef,
+    DisplayName, InodeId, ManifestNo, NamespaceId, PinId, ProbeRunId, RevisionNo, WriterEpoch,
+    WriterId,
 };
 use crate::{NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,7 @@ use std::collections::BTreeMap;
 /// HTTP error body used by LoonFS APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(as = ErrorResponse))]
-pub struct ApiError {
+pub struct ErrorResponse {
     /// The stable machine-readable error code as a string.
     pub code: String,
     /// The capability feature key for a `not_supported` error.
@@ -56,8 +56,8 @@ pub struct ErrorDetails {
     pub committed_seq: Option<ChangeSeq>,
     /// The fingerprint of the mutation that landed under `commit_id`, present with `committed_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub committed_fingerprint: Option<String>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, nullable = false))]
+    pub committed_fingerprint: Option<CommitFingerprint>,
     /// The index of the failed operation in the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -223,7 +223,7 @@ pub struct NamespaceMetadata {
 /// A namespace's access mode as reported, without its genesis grants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NamespaceAccessMode {
     /// Every caller holding the deployment credential may do everything.
     Unrestricted {},
@@ -1158,9 +1158,8 @@ pub struct DeleteCheckpointResponse {
 /// The owner of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(as = CheckpointOwner))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CheckpointOwnerSummary {
+pub enum CheckpointOwner {
     /// An operator-created pin, deleted by id or by its own expiry.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
     User {
@@ -1190,7 +1189,7 @@ pub struct Checkpoint {
     /// Durable checkpoint id used to address the checkpoint for deletion.
     pub checkpoint_id: PinId,
     /// Who owns the checkpoint, including the label carried by a user pin.
-    pub owner: CheckpointOwnerSummary,
+    pub owner: CheckpointOwner,
     /// Time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// Expiry in Unix milliseconds; collection waits one further grace window.
@@ -1206,8 +1205,7 @@ pub struct Checkpoint {
 /// A live snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(as = Snapshot))]
-pub struct SnapshotSummary {
+pub struct Snapshot {
     /// Snapshot id.
     pub snapshot_id: PinId,
     /// Namespace whose state the snapshot captured.
@@ -1222,13 +1220,13 @@ pub struct SnapshotSummary {
     pub expires_at_ms: u64,
 }
 
-impl SnapshotSummary {
+impl Snapshot {
     /// Converts a snapshot-owned checkpoint to a snapshot summary.
     ///
     /// Returns `None` for another owner. A snapshot owner always carries the
     /// checkpoint's top-level `expires_at_ms`.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Option<Self> {
-        let CheckpointOwnerSummary::Snapshot { name } = checkpoint.owner else {
+        let CheckpointOwner::Snapshot { name } = checkpoint.owner else {
             return None;
         };
         Some(Self {
@@ -1269,7 +1267,7 @@ pub struct ListSnapshotsResponse {
     /// Namespace the snapshots belong to.
     pub namespace_id: NamespaceId,
     /// Live snapshot records in ascending snapshot-id order.
-    pub snapshots: Vec<SnapshotSummary>,
+    pub snapshots: Vec<Snapshot>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1284,35 +1282,6 @@ pub struct DeleteSnapshotResponse {
     pub namespace_id: NamespaceId,
     /// Deleted snapshot record.
     pub snapshot_id: PinId,
-}
-
-/// How one WAL fold satisfied its goal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum FoldWalOutcome {
-    /// The current manifest already covered the WAL tail; nothing was published.
-    AlreadyCurrent,
-    /// This call published the next current manifest.
-    Published,
-    /// Another publisher changed the current manifest before this call could publish.
-    ManifestAdvanced,
-}
-
-/// The current manifest state after one WAL fold.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct FoldWalResponse {
-    /// Namespace whose WAL tail was folded.
-    pub namespace_id: NamespaceId,
-    /// Head sequence the fold attempted to cover.
-    pub target_head_seq: ChangeSeq,
-    /// Current manifest number after the operation.
-    pub manifest_no: ManifestNo,
-    /// Sequence covered by that manifest.
-    pub manifest_head_seq: ChangeSeq,
-    /// Whether this call published the current manifest.
-    pub outcome: FoldWalOutcome,
 }
 
 /// Optional overrides for one garbage-collection pass.
@@ -1800,7 +1769,7 @@ pub struct StoreProbeRequest {}
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StoreProbeResponse {
     /// The server-generated label for this probe run and its objects.
-    pub run_id: String,
+    pub run_id: ProbeRunId,
     /// The check results in execution order.
     pub checks: Vec<StoreProbeCheckResult>,
 }
@@ -1934,6 +1903,22 @@ mod tests {
                 "head_seq": 11,
                 "retention_floor_seq": 4
             })
+        );
+    }
+
+    #[test]
+    fn a_namespace_access_mode_from_a_newer_server_decodes_with_an_unknown_field() {
+        let mode: NamespaceAccessMode = serde_json::from_value(serde_json::json!({
+            "kind": "acl",
+            "principal_scope": "corp",
+            "added_by_a_newer_server": true
+        }))
+        .expect("a response accepts unknown fields");
+        assert_eq!(
+            mode,
+            NamespaceAccessMode::Acl {
+                principal_scope: PrincipalScope::parse("corp").expect("principal scope"),
+            }
         );
     }
 
@@ -2623,7 +2608,7 @@ mod tests {
             namespace_id: namespace_id.clone(),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
-            owner: CheckpointOwnerSummary::User {
+            owner: CheckpointOwner::User {
                 name: "release".to_owned(),
             },
             created_at_ms: 1_752_623_000_000,
@@ -2675,7 +2660,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
-            owner: CheckpointOwnerSummary::User {
+            owner: CheckpointOwner::User {
                 name: "release".to_owned(),
             },
             created_at_ms: 1_752_623_000_000,

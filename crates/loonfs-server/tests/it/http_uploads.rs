@@ -14,8 +14,8 @@ use loonfs_types::{
         CompleteUploadBody, CreateUploadBody, FilesystemChange, UploadMode, UploadSession,
         UploadSessionStatus,
     },
-    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
+    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DestinationBehavior,
+    ErrorCode, ErrorResponse, FilesystemOperation, InodeId, RevisionNo,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
 use tempfile::tempdir;
@@ -50,7 +50,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         panic!("invalid upload id should return an HTTP status");
     };
     assert_eq!(status, 400);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, "invalid_request");
 
@@ -95,7 +95,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
             panic!("a rejected begin body returns an HTTP status");
         };
         assert_eq!(status, 400, "body: {body}");
-        let error: ApiError =
+        let error: ErrorResponse =
             serde_json::from_reader(response.into_reader()).expect("API error envelope");
         assert_eq!(error.code, "invalid_request", "body: {body}");
     }
@@ -143,7 +143,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         panic!("a rejected completion body returns an HTTP status");
     };
     assert_eq!(status, 400);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, "invalid_request");
     assert!(
@@ -239,7 +239,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         panic!("an unstaged completion returns an HTTP status");
     };
     assert_eq!(status, 400);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
     assert!(
@@ -261,7 +261,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         panic!("an oversized completion returns an HTTP status");
     };
     assert_eq!(status, 413);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
     assert!(
@@ -508,7 +508,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         panic!("aborting a completed session should return an HTTP status");
     };
     assert_eq!(status_code, 409);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, "upload_already_completed");
 
@@ -574,8 +574,7 @@ fn abort_upload(
                 "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"
             ))
             .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string("{}")
+            .call()
             .map_err(Box::new)?;
         Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))
     })

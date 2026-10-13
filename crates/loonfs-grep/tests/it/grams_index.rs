@@ -17,7 +17,7 @@ use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -135,7 +135,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .enable_grep_index(&namespace_id)
         .await
         .expect("re-enable");
-    assert_eq!(again.lifecycle, enabled.lifecycle);
+    assert_eq!(again.status, enabled.status);
 
     // Explicit worker steps run the backfill and keep the watermark current.
     for _ in 0..2 {
@@ -176,7 +176,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .disable_grep_index(&namespace_id)
         .await
         .expect("disable");
-    assert_eq!(disabled.lifecycle, GrepIndexLifecycle::Disabled);
+    assert_eq!(disabled.status, GrepIndexStatus::Disabled);
     let error = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
