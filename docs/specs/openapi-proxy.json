@@ -4701,6 +4701,95 @@
         ],
         "x-fern-sdk-method-name": "delete",
         "x-loonfs-retry": "not_idempotent"
+      },
+      "get": {
+        "description": "Returns one live snapshot, as the snapshot listing returns it. A missing id, or the id of a pin that isn't a snapshot, returns snapshot_not_found, and an expired snapshot returns snapshot_gone.",
+        "operationId": "get_snapshot",
+        "parameters": [
+          {
+            "description": "Application namespace alias",
+            "in": "path",
+            "name": "namespace_alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot id",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            },
+            "description": "Live snapshot"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace or snapshot id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or snapshot not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot expired"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Retrieve snapshot",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-request-name": "GetSnapshotRequest",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {

@@ -24,6 +24,7 @@ pub(crate) const PROXY_OPERATIONS: &[&str] = &[
     "get_capabilities",
     "get_file_content",
     "get_path_entry",
+    "get_snapshot",
     "get_upload",
     "grep",
     "list_changes",
