@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-/// Canonical absolute path plus its parsed components.
+/// An absolute path in canonical form, with its parsed components.
 ///
-/// Richer than the string-id newtypes (it carries segments), so it exposes
-/// only `Display`/`AsRef<str>` on top of its structural accessors instead of
+/// The path stores its components, so it has more structure than the string ID types. Because of
+/// that, it exposes only `Display` and `AsRef<str>` on top of its structural accessors instead of
 /// the full `string_id!` suite.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AbsolutePath {
@@ -24,7 +24,7 @@ pub struct AbsolutePath {
 pub struct PathComponent(String);
 
 string_id! {
-    /// User-facing spelling of one path component.
+    /// One path component, spelled as users see it.
     DisplayName,
     error = PathError,
     validate = validate_display_name,
@@ -292,7 +292,7 @@ impl utoipa::PartialSchema for AbsolutePath {
         utoipa::openapi::schema::Object::builder()
             .schema_type(utoipa::openapi::schema::Type::String)
             .description(Some(
-                "Validated complete absolute namespace path, serialized as a plain string.",
+                "A complete absolute path in the namespace, validated and serialized as a plain string.",
             ))
             .example(Some(serde_json::json!("/docs/report.txt")))
             .into()

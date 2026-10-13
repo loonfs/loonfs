@@ -4,53 +4,53 @@ use super::ObjectTransferAccess;
 use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, PinId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
-/// The path to download and, optionally, the revision to download.
+/// A request to download a file by path, and optionally a revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateDownloadRequest {
-    /// Absolute path of the file to read.
+    /// The absolute path of the file to read.
     pub path: AbsolutePath,
-    /// Revision to read. Omit it for the path's current revision.
-    /// Cannot be combined with `snapshot_id`.
+    /// The revision to read. Omit it to read the path's current revision. It can't be combined with
+    /// `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub revision_no: Option<RevisionNo>,
-    /// Read the file revision captured by this snapshot.
-    /// Cannot be combined with `revision_no`.
+    /// A snapshot whose captured file revision the download reads. It can't be combined with
+    /// `revision_no`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
-    /// The first byte the grant reads. It names `[start_offset, size_bytes)`
-    /// of the revision; a client that resumes asks for a new grant from the
-    /// bytes it holds. Must be below the revision's size, except 0 for a
-    /// revision of zero bytes.
+    /// The first byte that the grant reads. The grant covers the revision's bytes from
+    /// `start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant
+    /// that starts after the bytes it already has. The offset must be less than the revision's
+    /// size. For a revision of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: u64,
 }
 
-/// The options for a download of a file inode's current revision.
+/// The options for downloading a file inode's current revision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateDownloadByInodeRequest {
-    /// Read the file revision captured by this snapshot.
+    /// A snapshot whose captured file revision the download reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
-    /// The first byte the grant reads. Defaults to 0 and must be below the
-    /// file's size, except 0 for a file of zero bytes.
+    /// The first byte that the grant reads. It defaults to 0 and must be less than the file's size.
+    /// For a file of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: u64,
 }
 
-/// The options for a download of one retained inode revision.
+/// The options for downloading one retained revision of an inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateRevisionDownloadByInodeRequest {
-    /// The first byte the grant reads. Defaults to 0 and must be below the
-    /// revision's size, except 0 for a revision of zero bytes.
+    /// The first byte that the grant reads. It defaults to 0 and must be less than the revision's
+    /// size. For a revision of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: u64,
 }
@@ -59,49 +59,49 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// Signed object ranges for one revision.
+/// The signed object ranges for one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDownloadResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Absolute path as rendered from stored display names.
+    /// The absolute path, built from the stored display names.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
-    /// Revision the capability reads, resolved from the request.
+    /// The revision that the capability reads, as resolved from the request.
     pub revision_no: RevisionNo,
     /// The identity, byte length, and checksum of the revision's bytes.
     pub content_ref: ContentRef,
-    /// The revision's bytes from the requested offset, in order.
+    /// The ranges that cover the revision's bytes from the requested offset, in order.
     pub ranges: Vec<DownloadRange>,
 }
 
-/// A short-lived capability to read one inode revision.
+/// A short-lived capability to read one revision of an inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDownloadByInodeResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// File inode being read.
+    /// The file inode being read.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Revision being read.
+    /// The revision being read.
     pub revision_no: RevisionNo,
-    /// Content identity, size, and checksum.
+    /// The content's identity, size, and checksum.
     pub content_ref: ContentRef,
-    /// The revision's bytes from the requested offset, in order.
+    /// The ranges that cover the revision's bytes from the requested offset, in order.
     pub ranges: Vec<DownloadRange>,
 }
 
-/// One contiguous run of a revision's bytes, read from one object.
+/// One contiguous run of a revision's bytes, which the client reads from one object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DownloadRange {
-    /// Offset of the run's first byte in the revision.
+    /// The offset of the run's first byte in the revision.
     pub start_offset: u64,
-    /// Bytes in the run.
+    /// The number of bytes in the run.
     pub length: u64,
-    /// Short-lived read capability for exactly those bytes.
+    /// A short-lived read capability for exactly those bytes.
     pub access: ObjectTransferAccess,
 }
 

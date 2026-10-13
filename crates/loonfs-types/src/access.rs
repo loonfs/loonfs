@@ -185,40 +185,41 @@ validation_error!(
 );
 
 string_id! {
-    /// A validated principal identifier supplied by the application.
+    /// A validated principal identifier that the application supplies.
     ///
-    /// Principal IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E)
-    /// other than the comma, which separates ids on the wire.
+    /// Principal IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E) other than the
+    /// comma, which separates IDs on the wire.
     PrincipalId,
     error = PrincipalIdValidationError,
     validate = validate_principal_id,
     schema(
-        description = "Stable opaque principal id containing 1 to 256 visible ASCII characters other than the comma.",
+        description = "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
         pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "prn_8f3c"
     )
 }
 
 string_id! {
-    /// The identity domain a namespace's principal ids belong to.
+    /// The identity domain that a namespace's principal IDs belong to.
     ///
-    /// A deployment that did not issue a namespace's grants refuses to
-    /// interpret them by comparing this value. Same grammar as a principal id.
+    /// A deployment compares this value to check whether it issued a namespace's grants, and it
+    /// refuses to interpret grants that it didn't issue. A principal scope follows the same rules
+    /// as a principal ID.
     PrincipalScope,
     error = PrincipalScopeValidationError,
     validate = validate_principal_scope,
     schema(
-        description = "Opaque identity-domain id containing 1 to 256 visible ASCII characters other than the comma.",
+        description = "An opaque identity domain ID of 1 to 256 visible ASCII characters other than the comma.",
         pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "org_acme"
     )
 }
 
 numeric_id! {
-    /// Monotonic per-inode access revision.
+    /// The number of one revision of an inode's access row.
     AccessRevisionNo,
     public_ordinal,
-    schema_description = "Monotonic per-inode access revision. It increases with every accepted access update."
+    schema_description = "The number of one revision of an inode's access row. It increases with every accepted access update."
 }
 
 fn visible_ascii_reason(value: &str) -> Option<&'static str> {
@@ -255,26 +256,26 @@ fn validate_principal_scope(value: &str) -> Result<(), PrincipalScopeValidationE
     })
 }
 
-/// One right a grant can carry.
+/// One right that a grant can include.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRight {
-    /// Read the item: names and kinds of a directory's entries, or a file's current bytes.
+    /// The right to read a directory's entry names and kinds, or a file's current bytes.
     Read,
-    /// Read older revisions and snapshots.
+    /// The right to read older revisions and snapshots.
     History,
-    /// Change the item: new revisions and attributes.
+    /// The right to change the item by writing new revisions and attributes.
     Write,
-    /// Add an entry to a directory.
+    /// The right to add an entry to a directory.
     Create,
-    /// Remove an entry from a directory.
+    /// The right to remove an entry from a directory.
     Remove,
-    /// Grant a subset of one's own rights to others.
+    /// The right to grant a subset of the subject's own rights to others.
     Share,
-    /// Change any grant or the boundary.
+    /// The right to change any grant or the boundary.
     Manage,
-    /// Every right on every inode. Valid only on the root inode's row.
+    /// Every right on every inode. It's valid only on the root inode's row.
     Admin,
 }
 
@@ -342,9 +343,10 @@ pub enum AccessRightsError {
     },
 }
 
-/// A set of rights. Encoded as distinct names in `read`, `history`, `write`,
-/// `create`, `remove`, `share`, `manage`, `admin` order. Decoding accepts any
-/// order and rejects repeated names.
+/// A set of rights.
+///
+/// The set is encoded as distinct right names in `read`, `history`, `write`, `create`, `remove`,
+/// `share`, `manage`, `admin` order. Decoding accepts any order and rejects a repeated name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(value_type = Vec<AccessRight>))]
@@ -438,9 +440,10 @@ impl<'de> Deserialize<'de> for AccessRights {
     }
 }
 
-/// A validated map from principal to rights, limited to 1,000 entries and
-/// 65,536 bytes of principal ids. No entry has an empty set of rights. Decoding
-/// rejects repeated principals.
+/// A map from each principal to its rights.
+///
+/// The map can have at most 1,000 entries and 65,536 bytes of principal IDs, and no entry has an
+/// empty set of rights. Decoding rejects a repeated principal.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(value_type = std::collections::BTreeMap<String, AccessRights>))]

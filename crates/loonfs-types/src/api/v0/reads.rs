@@ -8,32 +8,33 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Metadata for one path returned by stat and directory listings.
+/// The metadata for one path, as stat and directory listings return it.
 ///
-/// Attribute fields are included only when requested.
+/// The response includes attribute fields only when the request asks for them.
 ///
-/// Newer servers may report other inode kinds; clients read only the fields every entry carries.
+/// A newer server can return an inode kind that isn't listed here. Clients should read only the
+/// fields that every entry includes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PathEntry {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Absolute path as rendered from stored display names.
+    /// The absolute path, built from the stored display names.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
-    /// Stable inode identity for this item.
+    /// The entry's stable inode ID.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Actor that created this inode, as supplied by the application.
+    /// The actor that created this inode, as the application supplied it.
     pub created_by: ActorId,
-    /// The inode creation time in Unix milliseconds.
+    /// The time the inode was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// Inode kind and its kind-specific payload.
+    /// The inode's kind and the fields that are specific to that kind.
     #[serde(flatten)]
     pub kind: PathEntryKind,
-    /// Namespace head sequence this answer was read from.
+    /// The namespace head sequence that this response was read at.
     pub head_seq: ChangeSeq,
-    /// Parent directory inode, absent for the root.
+    /// The parent directory's inode. It's absent for the root.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -41,15 +42,16 @@ pub struct PathEntry {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub parent_inode_id: Option<InodeId>,
-    /// Stored display name for this path component, absent for the nameless root.
+    /// The stored display name of this path component. It's absent for the root, which has no name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
-    /// The opaque ID for the current parent and name binding, absent for the namespace root.
+    /// The opaque ID of the current binding of the entry's parent and name. It's absent for the
+    /// namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub binding_version: Option<BindingVersion>,
-    /// The inode's attribute projection, when requested.
+    /// The inode's attributes, when the request asks for them.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes: Option<AttributesProjection>,
@@ -97,32 +99,32 @@ impl PathEntry {
     }
 }
 
-/// Kind-specific metadata for a path entry.
+/// The metadata that is specific to a path entry's kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
 pub enum PathEntryKind {
-    /// A directory without a revision payload.
+    /// A directory, which has no revision fields.
     #[serde(rename = "dir")]
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryDirectory"))]
     Directory {},
-    /// A file and its current revision summary.
+    /// A file, with a summary of its current revision.
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryFile"))]
     File {
-        /// Current file revision number.
+        /// The file's current revision number.
         revision_no: RevisionNo,
-        /// The current file size in bytes.
+        /// The file's current size in bytes.
         size_bytes: u64,
-        /// Current content reference.
+        /// The file's current content.
         content_ref: ContentRef,
-        /// Actor responsible for the current revision.
+        /// The actor responsible for the current revision.
         revision_committed_by: ActorId,
-        /// The current revision time in Unix milliseconds.
+        /// The time the current revision was committed, in Unix milliseconds.
         revision_committed_at_ms: u64,
     },
-    /// A kind added by a newer server, without its kind-specific fields.
+    /// An inode kind from a newer server. This variant doesn't include the kind's own fields.
     ///
-    /// It serializes as `unknown` because the reported kind is not kept.
+    /// It serializes as `unknown` because the reported kind isn't kept.
     #[serde(other)]
     Unknown,
 }
@@ -151,22 +153,21 @@ impl PathEntryKind {
     }
 }
 
-/// The inode kind a response reports.
+/// The inode kind that a response reports.
 ///
-/// The stored [`InodeKind`] is closed. A response can come from a newer
-/// server that stores more kinds, so this enum ends in `Unknown`.
+/// The stored [`InodeKind`] has a closed set of values. A response can come from a newer server
+/// that stores more kinds, so this enum ends in `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryInodeKind {
-    /// File with revision history.
+    /// A file, which has a revision history.
     File,
-    /// Directory with child bindings.
+    /// A directory, which has child bindings.
     ///
-    /// The wire value is pinned to `"dir"`; only the Rust name spells the
-    /// word out.
+    /// The wire value is always `"dir"`, and only the Rust variant name spells out the whole word.
     #[serde(rename = "dir")]
     Directory,
-    /// A kind added by a newer server. It serializes as `unknown`.
+    /// An inode kind from a newer server. It serializes as `unknown`.
     #[serde(other)]
     Unknown,
 }
@@ -190,97 +191,97 @@ impl fmt::Display for EntryInodeKind {
     }
 }
 
-/// The optional attributes returned for one inode.
+/// The optional attributes that a read returns for one inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AttributesProjection {
-    /// The attribute revision this projection represents.
+    /// The attribute revision that these attributes come from.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub attributes_revision_no: AttributesRevisionNo,
-    /// The actor responsible for the latest attribute update, absent for the
-    /// initial empty state.
+    /// The actor responsible for the latest attribute update. It's absent before the first update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_by: Option<ActorId>,
-    /// The latest attribute update time in Unix milliseconds, absent for the
-    /// initial empty state.
+    /// The time of the latest attribute update, in Unix milliseconds. It's absent before the first
+    /// update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_at_ms: Option<u64>,
-    /// The complete attribute map at `attributes_revision_no`, including an empty map
-    /// for the initial state.
+    /// The complete attribute map at `attributes_revision_no`. The map is empty before the first
+    /// update.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub attributes: Attributes,
 }
 
-/// One directory listing and the namespace head used to read it.
+/// One page of a directory's entries, with the namespace head that the read used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListPathEntriesResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Absolute path of the listed directory.
+    /// The absolute path of the listed directory.
     pub path: AbsolutePath,
-    /// Namespace head sequence this listing was read from.
+    /// The namespace head sequence that this listing was read at.
     pub head_seq: ChangeSeq,
-    /// The directory entries in canonical name-key order.
+    /// The directory entries, in canonical name key order.
     pub entries: Vec<PathEntry>,
-    /// Cursor for the next page, if more entries remain.
+    /// The cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// One directory listing addressed by parent inode and the namespace head used to read it.
+/// One page of a directory's children, addressed by the parent inode, with the namespace head that
+/// the read used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListInodeChildrenResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Directory inode whose children were returned.
+    /// The directory inode whose children were returned.
     #[serde(with = "crate::public_inode_id")]
     pub parent_inode_id: InodeId,
-    /// Namespace head sequence this listing was read from.
+    /// The namespace head sequence that this listing was read at.
     pub head_seq: ChangeSeq,
-    /// The directory entries in canonical name-key order.
+    /// The directory entries, in canonical name key order.
     pub entries: Vec<PathEntry>,
-    /// Cursor for the next page, if more entries remain.
+    /// The cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// One recoverable deletion and its removed directory binding.
+/// One recoverable deletion and the directory binding that it removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
-    /// Inode hidden by the deletion.
+    /// The inode that the deletion hides.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Whether the deleted root is a file or a directory; a newer server may report another kind.
+    /// Whether the deleted root is a file or a directory. A newer server can return another kind.
     #[cfg_attr(feature = "openapi", schema(value_type = InodeKind))]
     pub inode_kind: EntryInodeKind,
-    /// Commit sequence that identifies this deletion.
+    /// The commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,
-    /// Time of the deletion, in Unix milliseconds.
+    /// The time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
-    /// Actor responsible for the deletion.
+    /// The actor responsible for the deletion.
     pub deleted_by: ActorId,
-    /// Directory binding removed by the deletion.
+    /// The directory binding that the deletion removed.
     pub deleted_binding: DirectoryBinding,
 }
 
-/// One trash listing page: the namespace's recoverable deletions.
+/// One page of the namespace's recoverable deletions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListTrashResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Head sequence this page was evaluated at.
+    /// The head sequence that this page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// Recoverable deletions, oldest deletion first.
+    /// The recoverable deletions, oldest first.
     pub entries: Vec<TrashEntry>,
-    /// Present when another page follows.
+    /// The cursor for the next page. It's present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,

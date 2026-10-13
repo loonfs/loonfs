@@ -63,16 +63,16 @@ pub(super) struct StatInodeQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
-        description = "Returns the path entry for a visible inode from the current state or a live snapshot. Unknown or hidden inodes answer `inode_not_found`.",
+        description = "Returns the path entry for a visible inode, from the current state or a live snapshot. An unknown or hidden inode returns `inode_not_found`.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "Inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the path state captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read.")
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -128,21 +128,21 @@ pub(super) struct ListInodeChildrenQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
-        description = "Lists one page of a directory's children from the current state or a live snapshot, addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
+        description = "Lists one page of a directory's children, in canonical name key order, from the current state or a live snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "Directory inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
-            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the directory state captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The directory's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
+            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read.")
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a directory", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a directory", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -191,19 +191,19 @@ pub(super) async fn list_inode_children(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
-        description = "Returns retained revisions for a file inode without requiring a current path.",
+        description = "Returns the retained revisions of a file inode. The file doesn't need a current path.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
             (status = 400, description = "Invalid inode ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or inode not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -240,18 +240,18 @@ pub(super) async fn list_file_revisions_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
         summary = "Read file by inode",
-        description = "Reads and verifies the current revision of a visible file inode, wherever it is bound, or the revision a live snapshot captured. Unknown or hidden inodes answer `inode_not_found`.",
+        description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that a live snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read.")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -294,16 +294,16 @@ pub(super) async fn get_file_content_by_inode(
         summary = "Read file revision by inode",
         description = "Reads and verifies one retained file revision by inode ID and revision number.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number.")
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

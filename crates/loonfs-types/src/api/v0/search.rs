@@ -4,29 +4,28 @@ use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, PinId, RevisionNo, Ru
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
-/// One content-search request.
+/// One content search request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepRequest {
-    /// The Rust `regex` pattern, without backreferences or lookaround, limited to
-    /// 1,024 UTF-8 bytes and requiring `allow_scan` when it has no required literal
-    /// bytes.
+    /// The search pattern, in Rust `regex` syntax without backreferences or lookaround. The pattern
+    /// can be at most 1,024 UTF-8 bytes, and a pattern with no required literal bytes needs
+    /// `allow_scan`.
     pub pattern: String,
     /// Whether matching ignores case.
     pub case_insensitive: bool,
-    /// The absolute directory path that limits matching to its descendants.
-    /// Cannot be combined with `inode_id`.
+    /// The absolute directory path that limits matching to its descendants. It can't be combined
+    /// with `inode_id`.
     pub path_prefix: Option<AbsolutePath>,
-    /// The inode that limits matching to its descendants. Cannot be combined
-    /// with `path_prefix`.
+    /// The inode that limits matching to its descendants. It can't be combined with `path_prefix`.
     pub inode_id: Option<InodeId>,
-    /// The cursor from the previous page, bound to that request and evaluated against
-    /// the current namespace head.
+    /// The cursor from the previous page. The cursor is tied to the request that returned it, and
+    /// the server evaluates it against the current namespace head.
     pub cursor: Option<String>,
-    /// Whether index lag returns indexed-only results with `tail_scanned: false`
-    /// instead of `index_lagging`.
+    /// Whether a lagging index returns results from the index alone, with `tail_scanned: false`,
+    /// instead of returning `index_lagging`.
     pub allow_stale: bool,
-    /// Whether patterns without required literal bytes may use a scan capped by the
-    /// server's budget.
+    /// Whether a pattern without required literal bytes can use a scan, which the server's budget
+    /// limits.
     pub allow_scan: bool,
 }
 
@@ -58,69 +57,69 @@ impl GrepRequest {
     }
 }
 
-/// One line-oriented match.
+/// One match and the line that contains it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepMatch {
-    /// The file's absolute path, derived at the snapshot.
+    /// The file's absolute path at the search's snapshot.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
-    /// Durable identity of the matched file.
+    /// The matched file's durable inode ID.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// The matched revision (the newest visible one at the snapshot).
+    /// The matched revision, which is the newest visible revision at the snapshot.
     pub revision_no: RevisionNo,
-    /// One-based line number of the match.
+    /// The match's line number, counting from 1.
     pub line_number: u64,
-    /// Byte offset of the match within the file.
+    /// The match's byte offset within the file.
     pub byte_offset: u64,
-    /// The matching line, truncated to the server's line cap.
+    /// The matching line, truncated to the server's maximum line length.
     pub line: String,
-    /// True when `line` was truncated.
+    /// Whether the server truncated `line`.
     pub line_truncated: bool,
 }
 
-/// One content-search page.
+/// One page of content search results.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepResponse {
-    /// Namespace searched.
+    /// The namespace that was searched.
     pub namespace_id: NamespaceId,
-    /// The namespace head sequence used to evaluate this page.
+    /// The namespace head sequence that the server used to evaluate this page.
     pub head_seq: ChangeSeq,
-    /// Commits at or below this sequence were answered from the index.
+    /// The last sequence that the index covers. The server searched the commits at or below this
+    /// sequence through the index.
     pub built_through_seq: ChangeSeq,
-    /// Whether revisions after `built_through_seq` were scanned exhaustively.
+    /// Whether the server scanned every revision after `built_through_seq`.
     pub tail_scanned: bool,
-    /// The matches in ascending `(inode_id, byte_offset)` order.
+    /// The matches, in ascending `(inode_id, byte_offset)` order.
     pub matches: Vec<GrepMatch>,
-    /// Present when another page follows.
+    /// The cursor for the next page. It's present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// The grep index status for a namespace.
+/// The status of a namespace's grep index.
 ///
-/// A namespace is searchable only when the status is `Active`.
+/// A namespace can be searched only when the status is `Active`.
 ///
-/// The durable twin is `GrepIndexStatus` in `loonfs-grep`. The two types share
-/// a name because they describe the same status, and their fields differ
-/// because each follows the conventions of its own surface: this response tags
-/// variants with `status` and writes inode IDs in their public `ino_` form, and
-/// the durable record tags variants with `kind` and writes inode IDs as
-/// numbers.
+/// The durable record of this status is `GrepIndexStatus` in `loonfs-grep`. The two types share a
+/// name because they describe the same status. Their fields differ because each type follows the
+/// conventions of its own surface. This response tags variants with `status` and writes inode IDs
+/// in their public `ino_` form, and the durable record tags variants with `kind` and writes inode
+/// IDs as numbers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GrepIndexStatus {
     /// No index is maintained for this namespace.
     Disabled,
-    /// An initial scan of a pinned checkpoint that is not yet searchable.
+    /// An index that is running its initial scan of a pinned checkpoint and can't be searched yet.
     Backfilling {
-        /// The namespace sequence that completes the backfill when reached.
+        /// The namespace sequence that completes the backfill when the index reaches it.
         captured_seq: ChangeSeq,
-        /// The inode after which the scan resumes, absent before the first page.
+        /// The inode that the scan resumes after. It's absent before the first page.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -128,18 +127,18 @@ pub enum GrepIndexStatus {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,
-        /// Checkpoint pinning the state being walked.
+        /// The checkpoint that pins the state being scanned.
         checkpoint_id: PinId,
     },
-    /// An index following the change feed through its searchable watermark.
+    /// An index that follows the change feed and can be searched through its watermark.
     Active {
-        /// Sequence of the commit at the index cursor.
+        /// The sequence of the commit at the index cursor.
         built_through_seq: ChangeSeq,
-        /// The next change-event offset within `built_through_seq`, or zero when the
-        /// whole commit is indexed.
+        /// The offset of the next change event within `built_through_seq`. It's zero when the whole
+        /// commit is indexed.
         next_event_index: u32,
     },
-    /// A status added by a newer server, without its status-specific fields.
+    /// A status from a newer server. This variant doesn't include the status's own fields.
     #[serde(other)]
     Unknown,
 }
@@ -168,14 +167,14 @@ impl GrepIndexStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepIndex {
-    /// Namespace the status describes.
+    /// The namespace that the status describes.
     pub namespace_id: NamespaceId,
-    /// The index's status, with the fields that status records.
+    /// The index's status, with the fields that the status records.
     #[serde(flatten)]
     pub status: GrepIndexStatus,
-    /// Run number the index allocates next.
+    /// The next run number that the index allocates.
     pub next_run_no: RunNo,
-    /// True while a partitioned segment reorganization is in progress.
+    /// Whether a partitioned segment reorganization is in progress.
     pub reorganize_pending: bool,
 }
 

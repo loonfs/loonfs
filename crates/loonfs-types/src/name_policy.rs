@@ -7,7 +7,10 @@ use icu_casemap::CaseMapper;
 use icu_normalizer::ComposingNormalizer;
 use serde::{Deserialize, Serialize};
 
-/// How a namespace compares sibling names, fixed at creation.
+/// How a namespace compares sibling names, for example whether Report.txt and report.txt are the
+/// same name.
+///
+/// The mode is set when the namespace is created and can't be changed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]

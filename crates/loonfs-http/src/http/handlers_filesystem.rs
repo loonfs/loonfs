@@ -229,16 +229,16 @@ impl ReadTarget {
         summary = "List directory",
         description = "Lists a directory from the current state or a live snapshot.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute filesystem path"),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
-            ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the directory state captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("path" = String, Query, description = "The absolute path of the directory to list."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
+            ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read.")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -289,14 +289,14 @@ pub(super) async fn list_path_entries(
         summary = "Stat path",
         description = "Returns path metadata from the current state or a live snapshot.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute filesystem path"),
-            ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the path state captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("path" = String, Query, description = "The absolute path to read."),
+            ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read.")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -340,14 +340,14 @@ pub(super) async fn get_path_entry(
         summary = "Read file",
         description = "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute file path"),
-            ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number; cannot be combined with snapshot_id"),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("path" = String, Query, description = "The absolute path of the file to read."),
+            ("revision_no" = Option<RevisionNo>, Query, description = "An earlier revision to read. It can't be combined with `snapshot_id`."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read.")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
+            (status = 400, description = "Invalid path, revision, snapshot ID, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -405,11 +405,11 @@ pub(super) async fn get_file_content(
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest deletion first. Entries never age out at the retention floor; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
+        description = "Returns the namespace's recoverable deletions, oldest first. Advancing the retention floor doesn't remove entries. Each entry includes the inode ID and deletion sequence that an undelete needs, and the deleted name when the delete recorded one.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque trash page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
@@ -457,12 +457,12 @@ pub(super) async fn list_trash(
         path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
-        description = "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
+        description = "Resolves the current path to a file inode and returns that file's revisions. If the file might be renamed, use the inode revisions route, which identifies the file by a stable ID.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute file path"),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("path" = String, Query, description = "The absolute path of the file."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -508,8 +508,8 @@ pub(super) async fn list_file_revisions(
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
-        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request preconditions check the pre-state after receipt resolution and before operations; a failed precondition names its position in `details.precondition_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Applies one commit, which is an ordered, non-empty list of path operations that are committed together. The commit ID makes retries idempotent. The server checks the request's preconditions against the state before the commit, after it resolves any commit receipt and before it runs the operations. A failed precondition's position is reported in `details.precondition_index`. A request can contain a single operation. If an operation fails, the whole request fails, and for a request with more than one operation, `details.operation_index` reports the failed operation's position.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CommitRequest,
         responses(
             (status = 200, description = "Commit applied", body = Commit),
@@ -518,7 +518,7 @@ pub(super) async fn list_file_revisions(
             (status = 404, description = "Namespace or path not found", body = ErrorResponse),
             (status = 409, description = "Operation conflict", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit, or an append carries more than 256 KiB", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit, or an append contains more than 256 KiB", body = ErrorResponse),
             (status = 501, description = "Inline content is disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -622,17 +622,17 @@ pub(super) async fn create_commit(
         summary = "List changes after a sequence",
         description = "Returns committed changes after a sequence. A snapshot limits the feed to its captured sequence.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("after_seq" = loonfs_types::ChangeSeq, Query, description = "Return committed changes after this sequence"),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "End the feed at this snapshot's captured sequence")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("after_seq" = loonfs_types::ChangeSeq, Query, description = "The sequence after which to return committed changes."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot whose captured sequence ends the feed.")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
-            (status = 400, description = "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ErrorResponse),
+            (status = 400, description = "Invalid change cursor, limit, snapshot ID, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
-            (status = 409, description = "The cursor is older than the retained change history; restart from a fresh listing or checkpoint", body = ErrorResponse),
+            (status = 409, description = "The cursor is older than the retained change history. Restart from a fresh listing or checkpoint.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )

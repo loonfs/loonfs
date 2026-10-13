@@ -18,7 +18,8 @@ pub const PATTERN: &str = r"^ino_[1-9][0-9]*$";
 pub const EXAMPLE: &str = "ino_123";
 
 /// OpenAPI description for public inode IDs.
-pub const DESCRIPTION: &str = "Stable inode ID within a namespace";
+pub const DESCRIPTION: &str =
+    "The stable ID of one inode within a namespace. An inode's ID doesn't change.";
 
 const INVALID_REASON: &str = "must use `ino_` followed by a nonzero u64 without leading zeroes";
 

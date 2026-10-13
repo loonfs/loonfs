@@ -37,14 +37,14 @@ use std::time::Duration;
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
-        description = "Returns ordered signed object ranges covering exactly `[start_offset, size_bytes)` of the selected revision. Each range carries its signed headers in `access.headers`, which the client sends unchanged. The client checks each range's length and the complete revision's checksum. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
+        description = "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `access.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new grant from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id")
+            ("namespace_id" = String, Path, description = "The namespace ID.")
         ),
         request_body = CreateDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadResponse),
-            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 400, description = "Invalid path, revision, snapshot ID, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -107,18 +107,18 @@ pub(super) async fn create_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
         ),
         request_body = CreateDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, snapshot id, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, snapshot ID, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
@@ -168,19 +168,19 @@ pub(super) async fn create_download_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin revision download by inode",
-        description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
+        description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number.")
         ),
         request_body = CreateRevisionDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
-            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),

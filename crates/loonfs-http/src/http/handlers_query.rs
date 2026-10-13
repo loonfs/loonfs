@@ -49,17 +49,17 @@ pub(super) struct GrepQuery {
         path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
-        description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep index.",
+        description = "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches in ascending `(inode_id, byte_offset)` order. It scans every revision committed after the index watermark, unless `allow_stale` skips them. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("pattern" = String, Query, description = "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes."),
-            ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Match case-insensitively (`true` or `false`). Defaults to `false`."),
-            ("path_prefix" = Option<String>, Query, description = "Complete absolute path used to restrict matches. Cannot be combined with `inode_id`."),
-            ("inode_id" = Option<String>, Query, description = "Inode whose descendants restrict matches. Cannot be combined with `path_prefix`.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`."),
-            ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`."),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum matches per page"),
-            ("cursor" = Option<String>, Query, description = "Opaque grep page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("pattern" = String, Query, description = "The search pattern, in the Rust `regex` crate's syntax. Its UTF-8 encoding must be at most 1024 bytes."),
+            ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether matching ignores case. The default is `false`."),
+            ("path_prefix" = Option<String>, Query, description = "A complete absolute path that limits matches to its descendants. It can't be combined with `inode_id`."),
+            ("inode_id" = Option<String>, Query, description = "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether a pattern with no required grams can use a capped exhaustive scan. The default is `false`."),
+            ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the server returns results from the index alone when the unindexed tail exceeds the scan budget. The default is `false`."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum number of matches per page."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
@@ -67,7 +67,7 @@ pub(super) struct GrepQuery {
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, scope path, or scope inode not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
-            (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ErrorResponse),
+            (status = 501, description = "This deployment doesn't serve grep queries, the grep index isn't enabled, or its backfill hasn't completed on this namespace", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -164,15 +164,15 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until it is active. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. The deployment must maintain the grep index.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Lost a grep manifest publication race; retry", body = ErrorResponse),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 409, description = "Another publisher changed the grep manifest first. Retry the request.", body = ErrorResponse),
+            (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -216,13 +216,13 @@ pub(super) async fn enable_grep_index(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index",
         tag = "maintenance",
         summary = "Get grep index status",
-        description = "Returns whether the namespace's grep index is `disabled`, `backfilling`, or `active`, including build progress when available. A namespace that has never enabled the index is `disabled`. This operation requires a deployment that maintains grep indexes and does not change the index.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. The deployment must maintain grep indexes, and this operation doesn't change the index.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -255,15 +255,15 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep index by publishing the next manifest number with no segment references. Index maintenance stops when a step reads the disabled manifest. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. The deployment must maintain the grep index.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Lost a grep manifest publication race; retry", body = ErrorResponse),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 409, description = "Another publisher changed the grep manifest first. Retry the request.", body = ErrorResponse),
+            (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )

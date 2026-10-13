@@ -28,9 +28,10 @@ validation_error!(
 );
 
 string_id! {
-    /// A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.
+    /// The validated name of an inode attribute, from 1 to 128 UTF-8 bytes without control
+    /// characters.
     ///
-    /// Names are byte-exact; writes reject the reserved `loonfs.` prefix even though
+    /// Keys are compared byte for byte. Writes reject the reserved `loonfs.` prefix, even though
     /// the type accepts it.
     AttributeKey,
     error = AttributeKeyValidationError,
@@ -74,10 +75,10 @@ validation_error!(
 );
 
 string_id! {
-    /// A validated inode attribute value of at most 4,096 UTF-8 bytes.
+    /// One validated inode attribute value of at most 4,096 UTF-8 bytes.
     ///
-    /// Empty strings and control characters are valid, and only an explicit remove
-    /// operation deletes an attribute.
+    /// Empty strings and control characters are valid, and an attribute is deleted only by an
+    /// explicit remove operation.
     AttributeValue,
     error = AttributeValueValidationError,
     validate = validate_attribute_value,
@@ -105,11 +106,11 @@ impl AttributeValue {
     }
 }
 
-/// A validated attribute map limited to 100 entries and 65,536 total key and
-/// value UTF-8 bytes.
+/// A map from attribute keys to values, with at most 100 entries and 65,536 UTF-8 bytes of keys and
+/// values in total.
 ///
-/// Construction and decoding reject values over these limits; an empty map
-/// represents cleared attributes.
+/// Construction and decoding reject a map over these limits. An empty map means that the inode has
+/// no attributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(
@@ -215,13 +216,13 @@ pub enum AttributesError {
 }
 
 numeric_id! {
-    /// The revision number for an inode's attribute map.
+    /// The number of one revision of an inode's attribute map.
     ///
-    /// It starts at zero and increases when the map changes; clients can guard
-    /// updates but cannot query earlier maps.
+    /// It starts at zero and increases when the map changes. Clients can use it as an update
+    /// precondition, but they can't read earlier maps.
     AttributesRevisionNo,
     public_ordinal,
-    schema_description = "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
+    schema_description = "The number of one revision of an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
 }
 
 #[cfg(test)]

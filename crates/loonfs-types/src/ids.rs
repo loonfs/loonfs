@@ -465,12 +465,11 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 string_id! {
-    /// Durable id for one namespace.
+    /// The durable ID of one namespace.
     ///
-    /// A namespace id names one lifetime. This id is not a display name.
-    /// Its serialized form is 1 to 128
-    /// lowercase ASCII letters, digits, dots, underscores, or hyphens, starting
-    /// with a letter or digit; the `loonfs-` prefix is reserved for system use.
+    /// Each namespace ID refers to one namespace lifetime, and it isn't a display name. Its
+    /// serialized form is 1 to 128 lowercase ASCII letters, digits, dots, underscores, or hyphens,
+    /// and it starts with a letter or digit. The `loonfs-` prefix is reserved for system use.
     NamespaceId,
     error = NamespaceIdValidationError,
     validate = validate_namespace_id,
@@ -484,7 +483,7 @@ string_id! {
 }
 
 string_id! {
-    /// Stable writer label supplied by the embedding process.
+    /// A stable writer label that the embedding process supplies.
     WriterId,
     error = WriterIdValidationError,
     validate = |value: &str| {
@@ -496,7 +495,7 @@ string_id! {
 }
 
 string_id! {
-    /// Opaque token identifying one parent and name binding version.
+    /// An opaque token for one version of a parent and name binding.
     BindingVersion,
     error = BindingVersionValidationError,
     validate = |value: &str| {
@@ -518,12 +517,12 @@ string_id! {
 }
 
 string_id! {
-    /// Client-supplied idempotency key for one logical commit.
+    /// The client's idempotency key for one logical commit.
     ///
-    /// Reuse the same `CommitId` when retrying the same request. The accepted
-    /// grammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,
-    /// or hyphens, starting with a letter or digit. Generated commit ids have the
-    /// form `c_<32 lowercase hex>`, but callers may supply any value in that grammar.
+    /// Reuse the same `CommitId` when you retry the same request. A commit ID is 1 to 128 lowercase
+    /// ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.
+    /// Generated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value
+    /// that follows these rules.
     CommitId,
     error = CommitIdValidationError,
     validate = validate_commit_id,
@@ -541,7 +540,9 @@ impl CommitId {
 }
 
 string_id! {
-    /// Durable pin identifier. The manifest number determines which namespace manifest it pins.
+    /// The durable ID of one pin.
+    ///
+    /// The manifest number in the ID determines which namespace manifest the pin protects.
     PinId,
     error = GeneratedIdValidationError,
     validate = validate_pin_id,
@@ -591,7 +592,7 @@ fn validate_pin_id(value: &str) -> Result<(), GeneratedIdValidationError> {
 }
 
 string_id! {
-    /// Durable id for one upload session.
+    /// The durable ID of one upload session.
     UploadId,
     prefix = "upl",
     schema(
@@ -601,7 +602,7 @@ string_id! {
 }
 
 string_id! {
-    /// Random identity of one immutable content object.
+    /// The random identity of one immutable content object.
     ContentId,
     prefix = "con",
     schema(
@@ -629,7 +630,9 @@ string_id! {
 }
 
 string_id! {
-    /// Identifies one store probe run and the objects it writes.
+    /// The ID of one run of the store contract probe.
+    ///
+    /// The probe stores its temporary objects under a key prefix that includes this ID.
     ProbeRunId,
     prefix = "probe",
     schema(
@@ -639,10 +642,10 @@ string_id! {
 }
 
 string_id! {
-    /// Name-policy-derived directory entry key.
+    /// The directory entry key that the namespace's naming mode derives from a display name.
     ///
-    /// Use this for exact name preconditions. Keep user-facing spelling in
-    /// `DisplayName`.
+    /// Use the name key for exact name preconditions, and use `DisplayName` for the spelling that
+    /// users see.
     NameKey,
     error = NameKeyValidationError,
     validate = validate_name_key,
@@ -697,9 +700,9 @@ pub fn next_public_ordinal(current: u64) -> Option<u64> {
 }
 
 numeric_id! {
-    /// Numeric identity of a file or directory within a namespace.
+    /// The numeric identity of a file or directory within a namespace.
     ///
-    /// Inodes are stable across renames.
+    /// An inode keeps its ID when it's renamed.
     InodeId
 }
 
@@ -729,19 +732,19 @@ pub const ROOT_INODE_ID: InodeId = InodeId(1);
 pub const FIRST_ALLOCATABLE_INODE_ID: InodeId = InodeId(ROOT_INODE_ID.0 + 1);
 
 numeric_id! {
-    /// Revision number for a file's content.
+    /// The number of one revision of a file's content.
     RevisionNo,
     public_ordinal,
-    schema_description = "Revision number for a file's content. It increases whenever the content is replaced or restored."
+    schema_description = "The number of one revision of a file's content. It increases whenever the content is replaced or restored."
 }
 
 numeric_id! {
-    /// Sequence number assigned to a namespace commit.
+    /// The sequence number of one namespace commit.
     ///
-    /// This number determines the order in which commits become visible.
+    /// Commits become visible in the order of these numbers.
     ChangeSeq,
     public_ordinal,
-    schema_description = "Sequence number assigned to a namespace commit. It determines the order in which commits become visible."
+    schema_description = "The sequence number of one namespace commit. Commits become visible in the order of these numbers."
 }
 
 numeric_id! {
@@ -752,31 +755,31 @@ numeric_id! {
 }
 
 numeric_id! {
-    /// Monotonic manifest counter for one namespace.
+    /// The number of one of a namespace's manifests. Later manifests have higher numbers.
     ///
-    /// The manifest number can increase when metadata changes, even if no
-    /// namespace commit is written.
+    /// The manifest number can increase when metadata changes, even if no namespace commit is
+    /// written.
     ManifestNo,
     public_ordinal,
-    schema_description = "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written."
+    schema_description = "The number of one of a namespace's manifests. Later manifests have higher numbers, and the number can increase when metadata changes, even if no namespace commit is written."
 }
 
 numeric_id! {
-    /// Monotonic run counter allocated by the manifest that names the run.
+    /// The number of one run among the runs that a manifest lists.
     ///
-    /// A run is the set of segments one producer wrote together. The
-    /// namespace manifest and the grep manifest each keep their own counter,
-    /// so a run number means nothing outside the manifest that allocated it.
+    /// A run is the set of segments that one producer wrote together. The namespace manifest and
+    /// the grep manifest each keep their own increasing counter, so a run number means nothing
+    /// outside the manifest that assigned it.
     RunNo,
     public_ordinal,
-    schema_description = "Monotonic run counter allocated by the manifest that names the run. A run is the set of segments one producer wrote together."
+    schema_description = "The number of one run among the runs that a manifest lists. A run is the set of segments that one producer wrote together."
 }
 
 numeric_id! {
-    /// Counter used to reject writes from an older writer.
+    /// The counter that LoonFS uses to reject writes from an older writer.
     WriterEpoch,
     public_ordinal,
-    schema_description = "Counter used to reject writes from an older writer."
+    schema_description = "The counter that LoonFS uses to reject writes from an older writer."
 }
 
 numeric_id! {
@@ -788,17 +791,16 @@ numeric_id! {
 // Filesystem item kind
 // ---------------------------------------------------------------------------
 
-/// Filesystem item kind.
+/// The kind of a filesystem item, which is a file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InodeKind {
-    /// File with revision history.
+    /// A file, which has a revision history.
     File,
-    /// Directory with child bindings.
+    /// A directory, which has child bindings.
     ///
-    /// The wire value is pinned to `"dir"`; only the Rust name spells the
-    /// word out.
+    /// The wire value is always `"dir"`, and only the Rust variant name spells out the whole word.
     #[serde(rename = "dir")]
     Directory,
 }

@@ -1266,9 +1266,9 @@ The `NamespaceMetadata` object has exactly these fields:
 | `naming` | The naming mode, either `"case_insensitive"` or `"case_sensitive"`. It controls how sibling names are compared (see [Names and paths](format.md#14-names-and-paths)). |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. It contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The oldest position a change feed can resume after. The feed returns changes above it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 
 The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes.
 
@@ -1285,9 +1285,9 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. It contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The oldest position a change feed can resume after. The feed returns changes above it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
 | `wal_tail_objects` | The WAL tip minus the current manifest's folded WAL number, including fences. |
 | `live_snapshots` | The number of snapshots that hadn't expired when the diagnostics read began. |
