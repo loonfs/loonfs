@@ -178,10 +178,10 @@ pub enum CoreError {
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error(
-        "the content ids namespace `{namespace_id}` roots need {bytes} bytes of read working \
-         memory, above its {limit}-byte limit"
+        "the garbage collection live set of namespace `{namespace_id}` needs {bytes} bytes of \
+         read working memory, above its {limit}-byte limit"
     )]
-    ContentRootsExceedReadMemory {
+    LiveSetExceedsReadMemory {
         namespace_id: NamespaceId,
         bytes: usize,
         limit: usize,
@@ -460,9 +460,9 @@ impl CoreError {
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
                 ErrorCode::CheckpointUnavailable
             }
-            // The deployment's read memory cannot hold this namespace's live
-            // content ids; an operator raises the limit.
-            CoreError::ContentRootsExceedReadMemory { .. } => ErrorCode::ServerError,
+            // The deployment's read memory cannot hold this namespace's
+            // collection live set; an operator raises the limit.
+            CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -569,7 +569,7 @@ impl CoreError {
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
-            | CoreError::ContentRootsExceedReadMemory { .. }
+            | CoreError::LiveSetExceedsReadMemory { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
         }
     }

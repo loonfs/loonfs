@@ -203,7 +203,7 @@ pub use loonfs_objectstore::{
     SharedObjectStore, StoreConfig,
 };
 
-pub use config::{InlineContentPolicy, PublicationPolicy};
+pub use config::{InlineContentPolicy, PublicationPolicy, DEFAULT_MAX_READ_CONTENT_BYTES};
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,

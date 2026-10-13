@@ -571,6 +571,48 @@ async fn a_manifest_update_returns_the_hint_it_raised() {
 }
 
 #[tokio::test]
+async fn a_manifest_update_stops_after_the_contention_limit() {
+    use crate::manifest::publish::{update_manifest, ManifestChange};
+
+    for rival_publishes in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        create(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let mut attempts = 0;
+        let result = update_manifest(&store, &namespace_id, &deadline, |payload| {
+            attempts += 1;
+            let store = &store;
+            async move {
+                if !rival_publishes {
+                    return Ok(ManifestChange::Again);
+                }
+                let mut rival = payload.clone();
+                rival.manifest_no = rival.manifest_no.successor().expect("next number");
+                let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
+                store
+                    .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
+                    .await
+                    .expect("rival manifest");
+                Ok(ManifestChange::Next(Box::new(payload), ()))
+            }
+        })
+        .await;
+        let Err(CoreError::StoreContention { object_key }) = result else {
+            panic!("expected StoreContention, got {:?}", result.map(|_| ()));
+        };
+        assert_eq!(attempts, crate::limits::MAX_CONTENTION_ATTEMPTS);
+        assert!(
+            object_key.starts_with(&metadata_manifest_prefix(&namespace_id)),
+            "{object_key}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");

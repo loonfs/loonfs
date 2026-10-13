@@ -3267,26 +3267,43 @@ async fn a_pass_reads_its_roots_through_the_given_cache_and_releases_their_memor
 }
 
 #[tokio::test]
-async fn a_pass_fails_when_its_content_roots_do_not_fit_the_read_memory() {
+async fn a_pass_fails_when_its_pinned_manifests_do_not_fit_the_read_memory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     folded_namespace_with_two_files(&store, &namespace_id).await;
-
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(1, None));
+    let head_bytes = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .manifest_bytes;
+    let budget = 8 * loonfs_types::usize_from_u64(head_bytes);
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(budget, None));
     let cache = root_scan_cache(Arc::clone(&memory));
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    gc_namespace(&store, Some(&cache), &namespace_id, &options(), &aged)
+        .await
+        .expect("one pinned manifest fits the budget");
+
+    let setup = context(1_000);
+    for index in 0..9 {
+        let (path, commit_id) = (
+            format!("/docs/pinned-{index}.txt"),
+            format!("gc-pin-{index}"),
+        );
+        write_test_file(&store, &namespace_id, &path, &commit_id, &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("checkpoint");
+    }
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let error = gc_namespace(&store, Some(&cache), &namespace_id, &options(), &aged)
         .await
-        .expect_err("the content ids do not fit the budget");
+        .expect_err("ten pinned manifests do not fit the budget");
 
-    assert!(
-        matches!(
-            error,
-            CoreError::ContentRootsExceedReadMemory { limit: 1, .. }
-        ),
-        "{error:?}"
-    );
+    let CoreError::LiveSetExceedsReadMemory { limit, .. } = error else {
+        panic!("expected LiveSetExceedsReadMemory, got {error:?}");
+    };
+    assert_eq!(limit, budget);
     assert_eq!(memory.in_use(), 0, "the failed pass released what it held");
     let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
     let mut listing = store.list_prefix_stream(&content_prefix);
@@ -3295,7 +3312,7 @@ async fn a_pass_fails_when_its_content_roots_do_not_fit_the_read_memory() {
         key.expect("listed key");
         content_objects += 1;
     }
-    assert_eq!(content_objects, 2, "the failed pass deleted nothing");
+    assert_eq!(content_objects, 11, "the failed pass deleted nothing");
 }
 
 #[tokio::test]
@@ -3322,10 +3339,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
         .expect_err("the first session's content id does not fit the budget");
 
     assert!(
-        matches!(
-            error,
-            CoreError::ContentRootsExceedReadMemory { limit: 1, .. }
-        ),
+        matches!(error, CoreError::LiveSetExceedsReadMemory { limit: 1, .. }),
         "{error:?}"
     );
     let prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);

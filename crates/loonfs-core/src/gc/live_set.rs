@@ -3,7 +3,7 @@
 //! while their successor is younger than the pass's grace window or has no
 //! provider timestamp.
 
-use super::charged_set::ChargedSet;
+use super::charged_set::{Charge, ChargedSet};
 use super::reap::GraceAge;
 use super::uploads::protect_session_content;
 use crate::context::MutationContext;
@@ -37,9 +37,10 @@ pub(super) enum RetirementStatus {
 pub(super) struct LiveSet {
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
-    pub(super) objects: BTreeSet<String>,
+    pub(super) objects: ChargedSet<String>,
     pub(super) content_ids: ChargedSet<ContentId>,
     pub(super) manifests: Vec<LoadedManifest>,
+    manifest_charge: Charge,
     pub(super) content_layout_rows: u64,
     has_pins: bool,
     grace_window_ms: u64,
@@ -51,7 +52,8 @@ impl LiveSet {
     /// Loads roots, their segments, and in an active namespace the content they
     /// name, including superseded manifests with a young or undated successor
     /// regardless of the discovery hint. Reads go through `segment_cache`, and
-    /// the content ids are charged to its read working memory.
+    /// the object keys, content ids, and held manifests are charged to its read
+    /// working memory.
     pub(super) async fn load<S: ObjectStore + ?Sized>(
         store: &S,
         segment_cache: Option<&MetadataSegmentCache>,
@@ -64,7 +66,8 @@ impl LiveSet {
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content.
-        let mut content_ids = ChargedSet::new(namespace_id, read_working_memory(segment_cache));
+        let memory = read_working_memory(segment_cache);
+        let mut content_ids = ChargedSet::new(namespace_id, Arc::clone(&memory));
         if !manifest.state.envelope.payload().status.is_deleted() {
             protect_session_content(store, namespace_id, |content_id| {
                 content_ids.insert(content_id)
@@ -77,7 +80,7 @@ impl LiveSet {
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
-            objects: BTreeSet::new(),
+            objects: ChargedSet::new(namespace_id, Arc::clone(&memory)),
             content_ids,
             content_layout_rows: head
                 .runs
@@ -87,6 +90,7 @@ impl LiveSet {
                 .map(|segment| segment.row_count)
                 .sum(),
             manifests: Vec::new(),
+            manifest_charge: Charge::new(namespace_id, memory),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: context.now_ms,
@@ -94,7 +98,7 @@ impl LiveSet {
         };
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
-        live.protect_manifest(&anchor.manifest);
+        live.protect_manifest(&anchor.manifest)?;
         if live.current_tombstone.is_none() {
             let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
             for revision in tail.revisions() {
@@ -201,26 +205,29 @@ impl LiveSet {
                 envelope: Arc::new(envelope),
             },
         };
-        self.protect_manifest(&manifest);
+        self.protect_manifest(&manifest)?;
         manifests.insert(manifest_no);
         Ok(true)
     }
 
-    fn protect_manifest(&mut self, manifest: &LoadedManifest) {
-        self.objects.insert(manifest.object_key.clone());
-        self.objects.extend(
-            manifest
-                .state
-                .envelope
-                .payload()
-                .runs
-                .iter()
-                .flat_map(|run| &run.segments)
-                .map(metadata_segment_object_key),
-        );
+    fn protect_manifest(&mut self, manifest: &LoadedManifest) -> Result<()> {
+        self.objects.insert(manifest.object_key.clone())?;
+        for segment in manifest
+            .state
+            .envelope
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+        {
+            self.objects.insert(metadata_segment_object_key(segment))?;
+        }
         if self.current_tombstone.is_none() {
+            self.manifest_charge
+                .add(loonfs_types::usize_from_u64(manifest.manifest_bytes))?;
             self.manifests.push(manifest.clone());
         }
+        Ok(())
     }
 
     pub(super) fn protects_wal(&self, key: &str) -> bool {

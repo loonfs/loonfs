@@ -205,7 +205,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
         store,
         ReadConfig {
             execution_budget: ExecutionBudget::default(),
-            max_read_content_bytes: None,
+            max_read_content_bytes: crate::DEFAULT_MAX_READ_CONTENT_BYTES,
             manifest_revalidation_interval_ms: 1000,
             metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
             trace_mode: TraceMode::Remote,

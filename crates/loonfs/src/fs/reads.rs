@@ -442,7 +442,7 @@ impl ReadView {
                 .read_file(
                     absolute_path,
                     &self.context,
-                    self.core.inner.config.max_read_content_bytes,
+                    Some(self.core.inner.config.max_read_content_bytes),
                 )
                 .await?)
         })
@@ -515,7 +515,7 @@ impl ReadView {
                 .read_file_by_inode(
                     inode_id,
                     &self.context,
-                    self.core.inner.config.max_read_content_bytes,
+                    Some(self.core.inner.config.max_read_content_bytes),
                 )
                 .await?)
         })
@@ -1570,7 +1570,7 @@ impl<M: crate::Mode> Namespace<M> {
                         absolute_path,
                         revision_no,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(read)
@@ -1643,7 +1643,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .read_file_by_inode(
                         inode_id,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(read)
@@ -1776,7 +1776,7 @@ impl<M: crate::Mode> Namespace<M> {
                         inode_id,
                         revision_no,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(bytes)

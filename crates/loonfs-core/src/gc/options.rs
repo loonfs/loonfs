@@ -1,9 +1,14 @@
 //! Options for one namespace collection.
 
 use crate::error::{CoreError, Result};
-use crate::limits::{GC_CONTENT_SHARD_ROWS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
+use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_types::GcRequest;
 use serde::{Deserialize, Serialize};
+
+/// Default layout rows one content shard covers. A pass picks the shard width
+/// that splits its layout rows into shards of about this many, so it holds the
+/// extent keys of about 65,536 rows at once.
+const GC_CONTENT_SHARD_ROWS: usize = 65_536;
 
 /// Limits for one namespace collection pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

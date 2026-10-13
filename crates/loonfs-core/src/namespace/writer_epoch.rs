@@ -56,6 +56,9 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     let mut anchor =
         load_read_anchor_from_manifest(store, namespace_id, manifest, hint, deadline.origin())
             .await?;
+    // Only the deadline bounds this loop, because a lost fence race means the
+    // old writer wrote a WAL object, and stopping after a count would make the
+    // caller publish another epoch.
     loop {
         let head = &anchor.read_state;
         ensure_writer_not_fenced(head, &acquired)?;

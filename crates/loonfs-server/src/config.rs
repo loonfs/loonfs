@@ -333,21 +333,31 @@ fn default_request_deadline_ms() -> u64 {
     loonfs_http::DEFAULT_REQUEST_DEADLINE_MS
 }
 
+/// Default for `shutdown_deadline_ms`, so a graceful shutdown waits at most
+/// 10 minutes for accepted requests and the maintenance sweep. That is long
+/// enough for an accepted request to finish the provider operation it already
+/// started. The assertion below checks this default only, because an operator
+/// can configure any positive value.
+const DEFAULT_SHUTDOWN_DEADLINE_MS: u64 = 600_000;
+
+const _: () = assert!(
+    DEFAULT_SHUTDOWN_DEADLINE_MS as u128
+        > loonfs_objectstore::PROVIDER_OPERATION_DEADLINE.as_millis()
+);
+
 fn default_shutdown_deadline_ms() -> u64 {
-    // Clears loonfs_objectstore::PROVIDER_OPERATION_DEADLINE so an accepted
-    // request can finish the provider operation it already started.
-    600_000
+    DEFAULT_SHUTDOWN_DEADLINE_MS
 }
 
 fn default_max_upload_bytes() -> u64 {
-    256 * 1024 * 1024
+    // Mirrors the download default so anything the proxy accepted, the proxy
+    // will serve back. Content ingested past this through `direct_put`
+    // needs a raised limit to be read through the server.
+    default_max_download_bytes()
 }
 
 fn default_max_download_bytes() -> u64 {
-    // Mirrors the upload default so anything the proxy accepted, the proxy
-    // will serve back. Content ingested past this through `direct_put`
-    // needs a raised limit to be read through the server.
-    default_max_upload_bytes()
+    loonfs::DEFAULT_MAX_READ_CONTENT_BYTES
 }
 
 fn default_snapshot_max_ttl_ms() -> u64 {

@@ -6,6 +6,11 @@ use loonfs_objectstore::ConfiguredObjectStoreKind;
 /// Default minimum interval, in milliseconds, between checks for a successor
 /// to a cached manifest.
 pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
+/// Default largest file content that one buffered read materializes. With the
+/// default of [`DEFAULT_MAX_CONCURRENT_READS`](crate::DEFAULT_MAX_CONCURRENT_READS)
+/// reads at once, the buffered reads under one budget hold at most 16 GiB (64
+/// reads of 256 MiB).
+pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// Default minimum interval, in milliseconds, between publication starts
 /// for one namespace (see [`crate::publisher`]). A request to an idle
 /// namespace publishes immediately; the interval only paces requests that
@@ -120,9 +125,8 @@ pub(crate) struct ReadConfig {
     pub(crate) execution_budget: crate::ExecutionBudget,
     /// Largest file content the buffered read APIs will materialize for one
     /// call, checked against resolved metadata before any content fetch.
-    /// `None` (the embedded default) reads files of any size; servers set
-    /// this so one proxied read cannot buffer arbitrarily large content.
-    pub max_read_content_bytes: Option<u64>,
+    /// Defaults to [`DEFAULT_MAX_READ_CONTENT_BYTES`].
+    pub max_read_content_bytes: u64,
     /// Minimum monotonic interval between checks for a successor to a cached
     /// manifest. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
