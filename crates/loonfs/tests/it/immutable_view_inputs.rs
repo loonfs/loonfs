@@ -1,6 +1,6 @@
 //! Cached reads and current retention-floor reads use different manifest requests.
 
-use loonfs::{LoonFs, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore};
+use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::sync::Arc;
@@ -15,13 +15,13 @@ fn manifest_gets(gets: &[String]) -> Vec<String> {
 
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
         .expect("build maintenance")
@@ -44,7 +44,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
     maintenance
         .maintain_metadata_with_options(
             namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -89,7 +89,7 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     );
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("warm-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("warm-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await

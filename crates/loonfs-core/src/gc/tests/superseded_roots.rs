@@ -83,7 +83,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                     KeyPredicate::any(),
                 ),
                 KeyPredicate::hint(&namespace_id),
-                OperationClass::CompareAndSwap,
+                OperationSelector::CompareAndSwap,
                 InjectedError::Transport("hint unavailable".into()),
             );
             if lagging_hint {
@@ -117,12 +117,12 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 assert!(previous.state.manifest().manifest_no > anchor.hint.state.manifest_no);
             }
 
-            let published_at_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1;
+            let published_at_ms = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1;
             let recent = MetadataMapStore::new(
                 &store,
                 KeyPredicate::exact(&current.object_key),
                 move |mut metadata| {
-                    metadata.last_modified_ms = Some(published_at_ms);
+                    metadata.last_modified_at_ms = Some(published_at_ms);
                     metadata
                 },
             );
@@ -224,12 +224,12 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .await
         .expect("current manifest");
     assert!(current.state.manifest().manifest_no > successor.state.manifest().manifest_no);
-    let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1;
+    let now_ms = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1;
     let recent = Arc::new(MetadataMapStore::new(
         Arc::clone(&store),
         KeyPredicate::exact(&successor.object_key),
         move |mut metadata| {
-            metadata.last_modified_ms = Some(now_ms);
+            metadata.last_modified_at_ms = Some(now_ms);
             metadata
         },
     ));
@@ -293,7 +293,7 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     assert!(!dropped.is_empty());
     let undated =
         MetadataMapStore::without_last_modified(&store, KeyPredicate::exact(&current.object_key));
-    let aged = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1);
+    let aged = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1);
     let retained = gc_namespace(&undated, None, &namespace_id, &options(), &aged)
         .await
         .expect("collect with undated successor");

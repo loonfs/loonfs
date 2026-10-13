@@ -26,10 +26,10 @@ const PATH: &str = "/big.bin";
 /// that a read holding the file whole could not hide inside one.
 const CHUNK_BYTES: u64 = 64 * 1024;
 const CHUNKS: u64 = 10;
-const PAYLOAD_BYTES: usize = (CHUNK_BYTES * CHUNKS) as usize + 17;
+const PAYLOAD_BYTES: usize = loonfs_types::usize_from_u64(CHUNK_BYTES * CHUNKS) + 17;
 
 fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+    (0..251_u8).cycle().take(len).collect()
 }
 
 fn chunked() -> ReadFileStreamOptions {
@@ -224,7 +224,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .await
         .expect("historical stream");
     let view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("view snapshot");
     let snapshot_stream = view

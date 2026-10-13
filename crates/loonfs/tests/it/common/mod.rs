@@ -4,20 +4,20 @@
 #![allow(clippy::panic)]
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
-use loonfs::publish::{CommitCandidate, CommitRequest};
+use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, ContentRef, DeleteOptions,
     DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager, FoldWalResponse,
-    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
-    NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore,
-    UploadId, UploadSession, Writable,
+    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, MaintainMetadataOptions,
+    Maintenance, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceId,
+    PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore, UploadId,
+    UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct SettableWallClock(pub(crate) AtomicU64);
 
 impl loonfs::WallClock for SettableWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0.load(Ordering::SeqCst))
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -106,7 +106,7 @@ pub(crate) fn store(root: &Path) -> SharedObjectStore {
 
 pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -158,20 +158,20 @@ pub(crate) async fn collect_checkpoints(
 }
 
 /// Metadata maintenance options with an explicit fold threshold.
-pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MetadataMaintenanceOptions {
-    MetadataMaintenanceOptions {
+pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MaintainMetadataOptions {
+    MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::new(max_wal_tail_objects)
             .expect("a fold threshold should be nonzero"),
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     }
 }
 
 /// Runs explicit compaction until no family group is due, so every group
 /// ends in one base run and the retention floor's rules have been applied.
 pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
-    let options = MetadataMaintenanceOptions {
+    let options = MaintainMetadataOptions {
         compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     };
     for _ in 0..32 {
         let step = maintenance
@@ -232,13 +232,16 @@ pub(crate) async fn open_runtime_with_async(
     writer_id: &str,
     configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
-    let writer = configure(LoonFs::builder_with_store(store.clone()).writer_id(writer_id))
-        .build()
-        .await
-        .expect("build writer");
+    let writer = configure(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
+    )
+    .build()
+    .await
+    .expect("build writer");
     let reader = writer.read_only();
     let maintenance = LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .build()
         .await
         .expect("build maintenance")
@@ -429,7 +432,7 @@ pub(crate) trait RuntimeTestExt {
     fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: MaintainMetadataOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse>;
     fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse>;
     fn stat_path_blocking(
@@ -510,12 +513,12 @@ pub(crate) trait RuntimeTestExt {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
     ) -> loonfs::Result<Commit>;
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
+        requests: Vec<CommitIntent>,
     ) -> Vec<loonfs::Result<Commit>>;
     fn list_changes_blocking(
         &self,
@@ -559,7 +562,7 @@ impl RuntimeTestExt for TestRuntime {
     fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: MaintainMetadataOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse> {
         block_on(
             self.maintenance
@@ -706,7 +709,7 @@ impl RuntimeTestExt for TestRuntime {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
         block_on(namespace.commit(request))
@@ -715,7 +718,7 @@ impl RuntimeTestExt for TestRuntime {
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
+        requests: Vec<CommitIntent>,
     ) -> Vec<loonfs::Result<Commit>> {
         let namespace = match self.namespace_writer(namespace_id) {
             Ok(namespace) => namespace,
@@ -788,7 +791,7 @@ impl RuntimeStoreProbe {
         let fail_wal_publish = Arc::new(FailStore::new(
             hint_gets.clone() as SharedObjectStore,
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         ));
         Self {
@@ -823,15 +826,15 @@ impl RuntimeStoreProbe {
     }
 
     pub(crate) fn wal_get_count(&self) -> usize {
-        self.wal_gets.count(OperationClass::Read)
+        self.wal_gets.count(OperationSelector::Read)
     }
 
     pub(crate) fn manifest_get_count(&self) -> usize {
-        self.manifest_gets.count(OperationClass::Read)
+        self.manifest_gets.count(OperationSelector::Read)
     }
 
     pub(crate) fn hint_get_count(&self) -> usize {
-        self.hint_gets.count(OperationClass::Read)
+        self.hint_gets.count(OperationSelector::Read)
     }
 }
 

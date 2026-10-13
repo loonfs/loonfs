@@ -4,12 +4,12 @@
 
 use crate::common::{collect_path_entries, expect_code, writer};
 use loonfs::{
-    ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace, NamespaceId,
-    NamespaceSessionState, ReadOnly, SharedObjectStore, Writable,
+    ErrorCode, LoonFs, MaintainMetadataOptions, ManifestNo, Namespace, NamespaceId,
+    NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     let failing = Arc::new(FailStore::new(
         blocking,
         KeyPredicate::any(),
-        OperationClass::Any,
+        OperationSelector::Any,
         InjectedError::PermissionDenied("store access after fencing".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();
@@ -107,8 +107,8 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     );
     assert_eq!(failing.attempts(), 0);
     assert_eq!(
-        namespace_writer_a.session_state(),
-        NamespaceSessionState::Fenced
+        namespace_writer_a.session_status(),
+        NamespaceSessionStatus::Fenced
     );
     failing.clear();
 
@@ -188,7 +188,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let fold_threshold = usize::try_from(
-        MetadataMaintenanceOptions::default()
+        MaintainMetadataOptions::default()
             .max_wal_tail_objects
             .get(),
     )
@@ -210,7 +210,9 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .await
         .expect("first fold completes");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("cold-handoff-inspection")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "cold-handoff-inspection",
+        ))
         .build()
         .await
         .expect("build maintenance handle")

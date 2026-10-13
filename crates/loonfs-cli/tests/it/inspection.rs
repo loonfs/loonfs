@@ -2,7 +2,7 @@
 
 use super::common::*;
 #[cfg(unix)]
-use loonfs_objectstore::{probe::PROBE_RUN_PREFIX, ObjectStoreErrorClass};
+use loonfs_objectstore::{probe::PROBE_RUN_PREFIX, ObjectStoreErrorKind};
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 
@@ -131,7 +131,7 @@ fn doctor_fails_when_the_embedded_store_cannot_be_read() {
             .iter()
             .find(|check| check["name"] == "health")
             .expect("health check")["message"],
-        ObjectStoreErrorClass::PermissionDenied
+        ObjectStoreErrorKind::PermissionDenied
             .public_message()
             .as_ref()
     );

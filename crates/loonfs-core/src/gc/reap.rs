@@ -65,7 +65,8 @@ pub(super) async fn sweep_pin<S: ObjectStore + ?Sized>(
         .expires_at_ms()
         .map(|expiry| expiry.saturating_add(grace_window_ms));
     let ages_out_at_ms = live
-        .namespace_deleted
+        .current_tombstone
+        .is_some()
         .then(|| record.created_at_ms.saturating_add(grace_window_ms));
     let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
     Ok(match reclaimable_at_ms {
@@ -90,8 +91,8 @@ pub enum GraceAge {
 
 impl GraceAge {
     /// Compares a listed modification time with the pass's grace window.
-    pub fn of(last_modified_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
-        match last_modified_ms {
+    pub fn of(last_modified_at_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
+        match last_modified_at_ms {
             None => Self::Unknown,
             Some(modified) if now_ms.saturating_sub(modified) < grace_window_ms => Self::Young,
             Some(_) => Self::Aged,
@@ -121,7 +122,7 @@ pub async fn grace_age<S: ObjectStore + ?Sized>(
         return Ok(GraceAge::Gone);
     };
     Ok(GraceAge::of(
-        metadata.last_modified_ms,
+        metadata.last_modified_at_ms,
         grace_window_ms,
         now_ms,
     ))

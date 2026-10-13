@@ -4,7 +4,7 @@ use super::*;
 use crate::http::error::ApiResponseError;
 use axum::http::Method;
 use axum::response::IntoResponse;
-use loonfs::NamespaceSessionState;
+use loonfs::NamespaceSessionStatus;
 use loonfs_test_support::stores::BlockingStore;
 use tower::ServiceExt;
 
@@ -181,7 +181,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::hint(&namespace_id),
-        OperationClass::Read,
+        OperationSelector::Read,
     ));
     let (router, state) = test_app(
         test_options(directory.path(), "close-during-open-host"),
@@ -212,7 +212,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
         .expect("the paused open");
 
     let held = state.namespaces.open(&namespace_id).await.expect("open");
-    assert_eq!(held.session_state(), NamespaceSessionState::Open);
+    assert_eq!(held.session_status(), NamespaceSessionStatus::Open);
     create_directory(&router, &namespace_id, "/after-close").await;
 }
 
@@ -274,8 +274,8 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
 
     create_directory(&router, &fenced, "/replacement").await;
     let replacement = state.namespaces.open(&fenced).await.expect("replacement");
-    assert_eq!(replacement.session_state(), NamespaceSessionState::Open);
-    assert_eq!(old.session_state(), NamespaceSessionState::Fenced);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
+    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
     let response = ApiResponseError::runtime_for_namespace_writer(
         &state.namespaces,
         &fenced,
@@ -323,7 +323,7 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     ));
     let mut options = test_options(directory.path(), "ending-host");
     options.binding.inline_content.inline_content_fold_at_bytes = 1;
@@ -385,8 +385,8 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
         .open(&namespace_id)
         .await
         .expect("new handle");
-    assert_eq!(replacement.session_state(), NamespaceSessionState::Open);
-    assert_eq!(old.session_state(), NamespaceSessionState::Fenced);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
+    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
     old.close().await.expect("close old clone");
     create_directory(&router, &namespace_id, "/replacement-still-held").await;
     assert_eq!(
@@ -454,8 +454,7 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
         .await
         .expect("close idle session")
         .expect("session closed");
-    assert!(closed.was_open);
-    assert_eq!(closed.drained_commits, 0);
+    assert_eq!(closed.drained_commits, Some(0));
     assert!(namespaces.held_ids().is_empty());
 }
 
@@ -468,7 +467,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         let store = Arc::new(BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         ));
         let mut options = test_options(directory.path(), "closing-host");
         options.binding.inline_content.inline_content_fold_at_bytes = 1;
@@ -541,8 +540,8 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         };
         assert_eq!(fresh.last_published_seq(), None);
         assert_eq!(
-            old_entry.lock().expect("entry").handle.session_state(),
-            NamespaceSessionState::Closed
+            old_entry.lock().expect("entry").handle.session_status(),
+            NamespaceSessionStatus::Closed
         );
         fresh
             .create_directory("/fresh", &loonfs_test_support::test_actor())

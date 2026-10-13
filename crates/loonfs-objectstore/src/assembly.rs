@@ -30,7 +30,7 @@ pub(crate) fn missing_source(key: &str) -> ObjectStoreError {
     }
 }
 
-pub(crate) fn check_algorithms(
+pub(crate) fn validate_algorithms(
     algorithm: ChecksumAlgorithm,
     key: &str,
     sources: &[AssemblySource],
@@ -48,7 +48,7 @@ pub(crate) fn check_algorithms(
     Ok(())
 }
 
-pub(crate) fn check_expected(key: &str, expected: &Checksum, actual: &Checksum) -> Result<()> {
+pub(crate) fn verify_expected(key: &str, expected: &Checksum, actual: &Checksum) -> Result<()> {
     if expected == actual {
         Ok(())
     } else {
@@ -83,12 +83,11 @@ pub(crate) fn stream_sources<'a, S: ObjectStore + ?Sized>(
         .then(move |source| async move { source_stream(store, source).await })
         .try_flatten()
         .chain(stream::iter(tail).flat_map(|piece| {
+            let read_bytes = loonfs_types::usize_from_u64(READ_BYTES);
             stream::iter(
-                (0..piece.len())
-                    .step_by(READ_BYTES as usize)
-                    .map(move |start| {
-                        Ok(piece.slice(start..(start + READ_BYTES as usize).min(piece.len())))
-                    }),
+                (0..piece.len()).step_by(read_bytes).map(move |start| {
+                    Ok(piece.slice(start..(start + read_bytes).min(piece.len())))
+                }),
             )
         }))
         .boxed()
@@ -111,7 +110,7 @@ async fn source_stream<'a, S: ObjectStore + ?Sized>(
                 return Ok(None);
             };
             if offset == range.end_exclusive {
-                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
                 return Ok(None);
             }
             let end = (offset + READ_BYTES).min(range.end_exclusive);
@@ -130,7 +129,7 @@ async fn source_stream<'a, S: ObjectStore + ?Sized>(
             }
             checksum.update(&chunk);
             let checksum = if end == range.end_exclusive {
-                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
                 None
             } else {
                 Some(checksum)
@@ -148,13 +147,13 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
     expected: &Checksum,
     key: &str,
 ) -> Result<Bytes> {
-    check_algorithms(store.checksum_algorithm(), key, sources, expected)?;
+    validate_algorithms(store.checksum_algorithm(), key, sources, expected)?;
     let mut bytes = Vec::new();
     let mut body = stream_sources(store, sources, tail);
     while let Some(chunk) = body.next().await {
         bytes.extend_from_slice(&chunk?);
     }
-    check_expected(
+    verify_expected(
         key,
         expected,
         &Checksum::compute(expected.algorithm, &bytes),
@@ -184,10 +183,19 @@ pub(crate) struct AssemblyPart {
     pub source: Option<usize>,
 }
 
+/// How a provider sizes the parts of one multipart upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartSizing {
+    /// Every part but the last is the same size, as Cloudflare R2 requires.
+    Equal,
+    /// Parts can differ in size within the provider's minimum and maximum.
+    Varied,
+}
+
 pub(crate) fn plan_parts(
     lengths: &[u64],
     tail_length: u64,
-    equal_parts: bool,
+    sizing: PartSizing,
 ) -> Vec<AssemblyPart> {
     let mut parts = Vec::new();
     let source_length: u64 = lengths.iter().sum();
@@ -201,7 +209,7 @@ pub(crate) fn plan_parts(
         let remaining = lengths
             .get(source)
             .map_or(0, |length| source_start + length - offset);
-        let (length, copied) = if equal_parts {
+        let (length, copied) = if sizing == PartSizing::Equal {
             let length = R2_PART_BYTES.min(total - offset);
             (length, remaining >= length)
         } else if remaining >= MIN_PART_BYTES {
@@ -237,7 +245,7 @@ mod tests {
 
         let directory = tempfile::tempdir().expect("directory");
         let local = LocalFsStore::new(directory.path()).expect("store");
-        let first = Bytes::from(vec![b'a'; READ_BYTES as usize + 7]);
+        let first = Bytes::from(vec![b'a'; loonfs_types::usize_from_u64(READ_BYTES) + 7]);
         let second = Bytes::from_static(b"second");
         local
             .put_immutable_verified("source/first", first.clone())
@@ -348,7 +356,7 @@ mod tests {
     #[test]
     fn multipart_plans_pad_small_runs_and_copy_only_contained_r2_chunks() {
         let mib = 1024 * 1024;
-        let aws = plan_parts(&[mib, 10 * mib], 1, false);
+        let aws = plan_parts(&[mib, 10 * mib], 1, PartSizing::Varied);
         assert_eq!(
             aws,
             vec![
@@ -375,7 +383,7 @@ mod tests {
                 },
             ]
         );
-        let r2 = plan_parts(&[40 * mib, 90 * mib], 1, true);
+        let r2 = plan_parts(&[40 * mib, 90 * mib], 1, PartSizing::Equal);
         assert_eq!(
             r2,
             vec![
@@ -402,7 +410,7 @@ mod tests {
                 },
             ]
         );
-        let large = plan_parts(&[12 * 1024 * mib], 0, false);
+        let large = plan_parts(&[12 * 1024 * mib], 0, PartSizing::Varied);
         assert_eq!(large.len(), 3);
         assert!(large.iter().all(|part| part.source == Some(0)
             && part.range.end_exclusive - part.range.start_inclusive == 4 * 1024 * mib));

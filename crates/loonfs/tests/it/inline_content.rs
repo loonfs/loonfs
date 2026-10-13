@@ -5,7 +5,7 @@ use loonfs::{
     AppendFileOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore,
 };
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -14,7 +14,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
@@ -35,7 +35,7 @@ async fn publish_inline(
         Bytes::from_static(b"inline content"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let mut request = CommitRequest::single(
+    let mut request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,
@@ -83,7 +83,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_state_bytes(0)
@@ -125,7 +125,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
                 .remove(0)
                 .object_key
         };
-        assert_eq!(recording.count(OperationClass::Put), 1);
+        assert_eq!(recording.count(OperationSelector::Put), 1);
 
         assert_eq!(
             object_key,
@@ -152,7 +152,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_state_bytes(0)
@@ -266,7 +266,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .build()
         .await
         .expect("writer");
@@ -293,8 +293,8 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         )
         .await
         .expect("import before folding");
-    assert_eq!(recording.count(OperationClass::Head), 0);
-    assert_eq!(recording.count(OperationClass::Read), 0);
+    assert_eq!(recording.count(OperationSelector::Head), 0);
+    assert_eq!(recording.count(OperationSelector::Read), 0);
     let file = namespace.read_file("/file").await.expect("imported bytes");
     assert_eq!(file.bytes, b"inline content");
     assert_eq!(file.entry.revision_no(), Some(RevisionNo(2)));
@@ -313,7 +313,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         ));
         let store: SharedObjectStore = recording.clone();
         let writer = LoonFs::builder_with_store(store.clone())
-            .writer_id("runtime-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
             .build()
             .await
             .expect("writer");
@@ -378,7 +378,7 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_owns() {
     let directory = tempfile::tempdir().expect("directory");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store)
-        .writer_id("runtime-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .build()
         .await
         .expect("writer");

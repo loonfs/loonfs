@@ -11,12 +11,12 @@ use crate::{ErrorCode, LoonFs, Namespace, Writable};
 impl LoonFs<Writable> {
     /// Fork, delete, and snapshot management belong to the token holder and
     /// to administrators of an ACL namespace.
-    pub(super) async fn require_administrator(&self, namespace_id: &NamespaceId) -> Result<()> {
+    pub(super) async fn ensure_administrator(&self, namespace_id: &NamespaceId) -> Result<()> {
         if self.core.subject.is_none() {
             return Ok(());
         }
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        Ok(engine.require_administrator(&context).await?)
+        Ok(engine.ensure_administrator(&context).await?)
     }
 
     /// Creates an unrestricted, case-insensitive namespace, bootstrapping its
@@ -102,7 +102,7 @@ impl LoonFs<Writable> {
         actor: &ActorId,
         options: &ForkNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
-        self.require_administrator(source_namespace_id).await?;
+        self.ensure_administrator(source_namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = {
             let _permit = match options.snapshot_id {
@@ -127,12 +127,12 @@ impl LoonFs<Writable> {
 impl Namespace<Writable> {
     /// Delete and snapshot management belong to the token holder and to
     /// administrators of an ACL namespace.
-    pub(super) async fn require_administrator(&self) -> Result<()> {
+    pub(super) async fn ensure_administrator(&self) -> Result<()> {
         if self.core.subject.is_none() {
             return Ok(());
         }
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
-        Ok(engine.require_administrator(&context).await?)
+        Ok(engine.ensure_administrator(&context).await?)
     }
 
     /// Ends the namespace after folding its final WAL tail, whatever its
@@ -164,7 +164,7 @@ impl Namespace<Writable> {
         &self,
         options: &DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         self.session().submit_delete(*options).await
     }
@@ -182,7 +182,7 @@ pub(crate) async fn delete_namespace_with_engine(
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     options: DeleteNamespaceOptions,
 ) -> Result<DeleteNamespaceResponse> {
-    let context = core.mutation_context(&writer.identity)?;
+    let context = core.mutation_context(&writer.identity);
     let result = engine
         .delete_namespace(core.store(), options, &context)
         .await

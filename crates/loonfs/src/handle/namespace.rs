@@ -1,9 +1,9 @@
 //! The handle for one namespace, in a read-only or a writable mode.
 
-use super::{LoonFs, ReadOnly, Writable};
+use super::{LoonFs, Mode, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
-use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
-use crate::{ChangeSeq, NamespaceId, Result};
+use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionStatus};
+use crate::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, Result};
 use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
@@ -38,16 +38,16 @@ use std::sync::Arc;
 /// `writer_session_closed` while its work ends, then starts a new session
 /// even if clones of the dead session are still held.
 #[derive(Clone)]
-pub struct Namespace<M> {
+pub struct Namespace<M: Mode> {
     pub(crate) core: RuntimeCore,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) mode: M,
-    /// Held exactly when the mode is [`Writable`]. The mode type is shared
-    /// with [`LoonFs`], which has no session, so the session lives here.
-    session: Option<Arc<NamespaceSession>>,
+    /// The writer session in the writable mode. The mode type is shared with
+    /// [`LoonFs`], which has no session, so the session lives here.
+    session: M::Session,
 }
 
-impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
+impl<M: Mode + fmt::Debug> fmt::Debug for Namespace<M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Namespace")
@@ -57,7 +57,7 @@ impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
     }
 }
 
-impl<M> Namespace<M> {
+impl<M: Mode> Namespace<M> {
     /// Returns the id of the namespace this handle acts on.
     pub fn id(&self) -> &NamespaceId {
         &self.namespace_id
@@ -97,7 +97,7 @@ impl Namespace<ReadOnly> {
             core,
             namespace_id,
             mode: ReadOnly,
-            session: None,
+            session: (),
         }
     }
 }
@@ -108,18 +108,16 @@ impl Namespace<Writable> {
             core: runtime.core.clone(),
             namespace_id: session.namespace_id().clone(),
             mode: runtime.mode.clone(),
-            session: Some(session),
+            session,
         }
     }
 
     pub(crate) fn session(&self) -> &NamespaceSession {
-        self.session
-            .as_deref()
-            .expect("a writable namespace handle should hold its writer session")
+        &self.session
     }
 
     /// Returns the state of this handle's writer session.
-    pub fn session_state(&self) -> NamespaceSessionState {
+    pub fn session_status(&self) -> NamespaceSessionStatus {
         self.session().state()
     }
 
@@ -131,8 +129,8 @@ impl Namespace<Writable> {
     }
 
     /// Reads the last publication time on the runtime's monotonic clock.
-    pub fn last_published_ms(&self) -> Option<u64> {
-        self.session().last_published_ms()
+    pub fn last_published_at_ms(&self) -> Option<u64> {
+        self.session().last_published_at_ms()
     }
 
     /// Reads whether metadata maintenance found nothing left due for this session.
@@ -141,19 +139,22 @@ impl Namespace<Writable> {
     }
 
     /// Records a host's metadata result only if no newer commit has published.
-    pub fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
+    ///
+    /// This is a hook for a host that runs its own maintenance sweep, such as
+    /// the `loonfs-server` sweep. Embedded applications don't call it.
+    pub fn record_metadata_maintenance(
+        &self,
+        expected_seq: Option<ChangeSeq>,
+        outcome: MetadataMaintenanceOutcome,
+    ) {
         self.session()
-            .record_metadata_maintenance(expected_seq, caught_up);
+            .record_metadata_maintenance(expected_seq, outcome);
     }
 
     /// Returns whether this is the only handle holding its writer session.
     /// Hosts must prevent concurrent opens while using this check to close it.
     pub fn is_exclusively_held(&self) -> bool {
-        Arc::strong_count(
-            self.session
-                .as_ref()
-                .expect("a writable namespace handle should hold its writer session"),
-        ) == 1
+        Arc::strong_count(&self.session) == 1
     }
 
     /// Refuses new work, cancels the session's metadata compaction, drains

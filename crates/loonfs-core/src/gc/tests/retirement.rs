@@ -169,7 +169,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
 
 #[tokio::test]
 async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup() {
-    use crate::limits::{DIRECT_TRANSFER_URL_TTL_MS, NAMESPACE_RETIREMENT_GRACE_MS};
+    use crate::limits::{DIRECT_TRANSFER_URL_TTL_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::{clock::ManualClock, stores::FakeMultipartStore};
 
     let directory = tempdir().expect("directory");
@@ -235,7 +235,10 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     .await
     .expect("retire");
     let deadline = report.reclaimable_at_ms.expect("deadline");
-    assert_eq!(deadline, clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_MS);
+    assert_eq!(
+        deadline,
+        clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
+    );
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
     let before = gc_namespace(
@@ -335,7 +338,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = format!("sha256:{}", "0".repeat(64));
     let pin_id = basis.source_pin_id.clone();
-    let bytes = crate::manifest::publish::encode_manifest(payload).expect("manifest");
+    let bytes = crate::manifest::publish::encode_manifest(payload);
     store
         .put_overwrite(&current.object_key, bytes.into_bytes().into())
         .await

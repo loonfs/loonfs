@@ -4,8 +4,8 @@ use crate::common::{
     assert_core_error_kind, metadata_options, open_runtime_async, store, SettableWallClock,
 };
 use loonfs::{
-    DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest, PaginationPolicy,
-    PutFileOptions, SnapshotPolicy,
+    CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest,
+    PaginationPolicy, PutFileOptions, SnapshotPolicy,
 };
 use tempfile::tempdir;
 
@@ -17,7 +17,7 @@ async fn read_during_compaction_and_collection(
 ) -> (loonfs::Result<loonfs::PathEntry>, LoonFs<loonfs::ReadOnly>) {
     use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, MetadataMapStore, OperationClass,
+        BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
     };
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ async fn read_during_compaction_and_collection(
             }),
         ),
         KeyPredicate::metadata_segment(),
-        OperationClass::Get,
+        OperationSelector::Get,
     ));
     let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
     let runtime_namespace = runtime.reader.namespace(&namespace);
@@ -65,7 +65,7 @@ async fn read_during_compaction_and_collection(
             .maintenance
             .maintain_metadata_with_options(
                 &namespace,
-                &loonfs::MetadataMaintenanceOptions {
+                &loonfs::MaintainMetadataOptions {
                     compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
                     ..metadata_options(1)
                 },
@@ -93,7 +93,7 @@ async fn read_during_compaction_and_collection(
             namespace_writer
                 .create_snapshot(
                     "durable",
-                    loonfs::current_time_ms().expect("time") + 60_000,
+                    loonfs::current_time_ms() + 60_000,
                     &SnapshotPolicy::default(),
                 )
                 .await
@@ -111,7 +111,7 @@ async fn read_during_compaction_and_collection(
     let view = if let Some(snapshot) = &snapshot {
         Some(
             cold_namespace
-                .read_view_at_snapshot(&snapshot.checkpoint_id)
+                .read_view_at_snapshot(&snapshot.snapshot_id)
                 .await
                 .expect("snapshot view"),
         )
@@ -158,7 +158,7 @@ async fn read_during_compaction_and_collection(
         for _ in 0..16 {
             let outcome = runtime
                 .maintenance
-                .compact_metadata(&namespace)
+                .compact_metadata(&namespace, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("compact");
             if matches!(
@@ -249,7 +249,7 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manifest_advance() {
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
-    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
     use std::sync::Arc;
 
@@ -280,7 +280,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
     let snapshot = namespace_writer
         .create_snapshot(
             "durable",
-            loonfs::current_time_ms().expect("time") + 60_000,
+            loonfs::current_time_ms() + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -296,7 +296,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
         .expect("cold reader");
     let namespace = reader.namespace(&namespace_id);
     let snapshot_view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("snapshot view");
     let checkpoint_view = namespace
@@ -336,8 +336,8 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
     for view in [snapshot_view, checkpoint_view] {
         store.reset();
         assert_core_error_kind(view.stat("/file").await, ErrorCode::NamespaceCorrupt);
-        assert_eq!(store.count(OperationClass::Put), 0);
-        assert_eq!(store.count(OperationClass::Delete), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
+        assert_eq!(store.count(OperationSelector::Delete), 0);
     }
     runtime.writer.shutdown().await.expect("shutdown");
 }
@@ -372,7 +372,7 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
     let snapshot = namespace_writer
         .create_snapshot(
             "deleted",
-            loonfs::current_time_ms().expect("time") + 60_000,
+            loonfs::current_time_ms() + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -388,7 +388,7 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .expect("cold reader");
     let namespace = reader.namespace(&namespace_id);
     let snapshot_view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("snapshot view");
     let checkpoint_view = namespace
@@ -396,7 +396,7 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .await
         .expect("checkpoint view");
     namespace_writer
-        .delete_snapshot(&snapshot.checkpoint_id)
+        .delete_snapshot(&snapshot.snapshot_id)
         .await
         .expect("delete snapshot");
     runtime
@@ -458,17 +458,17 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
             .expect("seed file");
     }
 
-    let now_ms = loonfs::current_time_ms().expect("current time");
+    let now_ms = loonfs::current_time_ms();
     let first_snapshot = namespace_writer
         .create_snapshot("first", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create first snapshot");
     let first_view = namespace
-        .read_view_at_snapshot(&first_snapshot.checkpoint_id)
+        .read_view_at_snapshot(&first_snapshot.snapshot_id)
         .await
         .expect("view first snapshot");
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(2))
+        .effective_limit(Some(2))
         .expect("page limit");
     let first_page = first_view
         .list("/")
@@ -482,7 +482,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         first_page.next_cursor.as_deref().expect("next cursor"),
     )
     .expect("decode cursor");
-    assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.checkpoint_id));
+    assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.snapshot_id));
     let mut unbound_cursor = cursor.clone();
     unbound_cursor.pin_id = None;
     let unbound_cursor = loonfs_types::encode_cursor(&unbound_cursor).expect("encode cursor");
@@ -502,7 +502,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("create second snapshot");
     let second_view = namespace
-        .read_view_at_snapshot(&second_snapshot.checkpoint_id)
+        .read_view_at_snapshot(&second_snapshot.snapshot_id)
         .await
         .expect("view second snapshot");
 
@@ -616,7 +616,7 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
         );
     }
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(2))
+        .effective_limit(Some(2))
         .expect("page limit");
     let first_page = views[0]
         .list("/")
@@ -729,7 +729,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .list("/")
         .page(PageRequest {
             limit: PaginationPolicy::default()
-                .resolve_limit(None)
+                .effective_limit(None)
                 .expect("default page limit"),
             cursor: None,
         })
@@ -744,10 +744,16 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         ["/before.txt"]
     );
     let states = view
-        .resolve_current_files(&[before.inode_id])
+        .stat_current_files_by_inode(&[before.inode_id])
         .await
         .expect("resolve inode through the view");
-    assert_eq!(states[0].current_revision_no, before.revision_no());
+    assert_eq!(
+        states[0].file,
+        CurrentFile::Visible {
+            path: before.path.clone(),
+            revision_no: before.revision_no(),
+        }
+    );
 
     let latest = namespace
         .read_file("/before.txt")
@@ -899,13 +905,13 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .stat("/pinned.txt")
         .await
         .expect("resolve captured file");
-    let now_ms = loonfs::current_time_ms().expect("current time");
+    let now_ms = loonfs::current_time_ms();
     let snapshot = namespace_writer
         .create_snapshot("reader", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
     let snapshot_options = loonfs::StatOptions {
-        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     assert_eq!(
@@ -930,7 +936,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("replace captured file");
     let view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("view live snapshot");
     assert_eq!(
@@ -983,13 +989,11 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
     assert_eq!(inode_download.content_ref, download.content_ref);
 
     namespace_writer
-        .delete_snapshot(&snapshot.checkpoint_id)
+        .delete_snapshot(&snapshot.snapshot_id)
         .await
         .expect("release snapshot");
     assert_core_error_kind(
-        namespace
-            .read_view_at_snapshot(&snapshot.checkpoint_id)
-            .await,
+        namespace.read_view_at_snapshot(&snapshot.snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
 }
@@ -1003,7 +1007,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(SettableWallClock(AtomicU64::new(1_750_000_000_000)));
     let writer = LoonFs::builder_with_store(store(temp_dir.path()))
-        .writer_id("snapshot-clock-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("snapshot-clock-writer"))
         .wall_clock(clock.clone())
         .build()
         .await
@@ -1031,7 +1035,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         let view = namespace
-            .read_view_at_snapshot(&snapshot.checkpoint_id)
+            .read_view_at_snapshot(&snapshot.snapshot_id)
             .await
             .expect("the snapshot is live one millisecond before its expiry");
         assert_eq!(view.head_seq(), snapshot.captured_seq);
@@ -1040,9 +1044,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         assert_core_error_kind(
-            namespace
-                .read_view_at_snapshot(&snapshot.checkpoint_id)
-                .await,
+            namespace.read_view_at_snapshot(&snapshot.snapshot_id).await,
             ErrorCode::SnapshotGone,
         );
     }
@@ -1071,7 +1073,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         )
         .await
         .expect("create captured file");
-    let now_ms = loonfs::current_time_ms().expect("current time");
+    let now_ms = loonfs::current_time_ms();
     let mut snapshots = Vec::new();
     for name in ["first", "second"] {
         snapshots.push(
@@ -1082,12 +1084,12 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         );
     }
     let view = namespace
-        .read_view_at_snapshot(&snapshots[0].checkpoint_id)
+        .read_view_at_snapshot(&snapshots[0].snapshot_id)
         .await
         .expect("view the first snapshot");
-    let other = snapshots[1].checkpoint_id.clone();
+    let other = snapshots[1].snapshot_id.clone();
     let limit = PaginationPolicy::default()
-        .resolve_limit(None)
+        .effective_limit(None)
         .expect("limit");
     let root = view.stat("/").await.expect("root entry").inode_id;
 
@@ -1156,7 +1158,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
 async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_propagate() {
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
     };
     use std::sync::Arc;
 
@@ -1165,7 +1167,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     let failures = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Get,
+        OperationSelector::Get,
         InjectedError::Transport("manifest read failed".to_owned()),
     ));
     let store = Arc::new(RecordingStore::new(failures.clone(), KeyPredicate::any()));
@@ -1212,14 +1214,14 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
             .count(),
         2
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
-    assert_eq!(store.count(OperationClass::Delete), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
+    assert_eq!(store.count(OperationSelector::Delete), 0);
 
     failures.fail_all();
     store.reset();
     assert_core_error_kind(view.stat("/file").await, ErrorCode::ServerError);
     assert_eq!(failures.attempts(), 1);
-    assert_eq!(store.count(OperationClass::Put), 0);
-    assert_eq!(store.count(OperationClass::Delete), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
+    assert_eq!(store.count(OperationSelector::Delete), 0);
     runtime.writer.shutdown().await.expect("shutdown");
 }

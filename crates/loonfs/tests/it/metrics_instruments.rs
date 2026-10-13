@@ -6,7 +6,7 @@
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-use loonfs::{LoonFs, MetadataMaintenanceOptions, SnapshotPolicy};
+use loonfs::{LoonFs, MaintainMetadataOptions, SnapshotPolicy};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ fn a_writer_with_a_recorder_reports_stores_and_publications() {
     let namespace_id = namespace_id("demo");
     // Enough writes to push the WAL tail past its threshold, so the writer
     // folds it.
-    let writes = MetadataMaintenanceOptions::default()
+    let writes = MaintainMetadataOptions::default()
         .max_wal_tail_objects
         .get()
         + 1;
@@ -218,7 +218,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
             .await
             .expect("create snapshot");
         let _snapshot_view = namespace
-            .read_view_at_snapshot(&reader_snapshot.checkpoint_id)
+            .read_view_at_snapshot(&reader_snapshot.snapshot_id)
             .await
             .expect("view snapshot");
         recorder.snapshot()

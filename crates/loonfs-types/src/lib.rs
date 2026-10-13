@@ -30,8 +30,9 @@ mod path;
 pub mod public_inode_id;
 mod retry;
 mod secret;
-mod sst_blocks;
+mod segment_blocks;
 mod wal;
+mod widths;
 
 pub mod api {
     //! HTTP API request and response shapes, one module per protocol version.
@@ -66,10 +67,10 @@ pub mod format {
         pub use crate::envelope::*;
     }
 
-    pub mod sst_blocks {
+    pub mod segment_blocks {
         //! Block handles, builders, and codecs for metadata and index segments.
 
-        pub use crate::sst_blocks::*;
+        pub use crate::segment_blocks::*;
     }
 
     pub mod wal {
@@ -115,8 +116,10 @@ pub use commit_identity::{
     semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
-    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-    ContentRefValidationError, Crc32c, Crc64Nvme, StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumHex, ChecksumHexValidationError, ChecksumValidationError,
+    ChunkAfterEndError, ContentMismatchError, ContentRef, ContentRefKind,
+    ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme, ResumedPrefixError,
+    ResumedPrefixIncompleteError, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
@@ -148,6 +151,7 @@ pub use retry::{
     TransportRetryPolicy,
 };
 pub use secret::SecretString;
+pub use widths::usize_from_u64;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `api::v0`; add here only what most consumers touch.

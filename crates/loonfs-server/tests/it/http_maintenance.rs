@@ -492,14 +492,14 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 struct FixedWallClock(u64);
 
 impl loonfs::WallClock for FixedWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 
 #[tokio::test]
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
-    let default_idle_ms = loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let default_idle_ms = loonfs::MaintainMetadataOptions::default().idle_fold_after_ms;
     for (idle_fold_after_ms, expected) in [
         (0, loonfs_types::WalFoldStepOutcome::NotNeeded),
         (
@@ -518,7 +518,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         // The server reads commit age on its own clock, so a commit stamped
         // by a writer whose clock is long past is idle on arrival.
         let writer = loonfs::LoonFs::builder_with_store(store)
-            .writer_id("departed-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
             .wall_clock(std::sync::Arc::new(FixedWallClock(1_750_000_000_000)))
             .build()
             .await
@@ -537,7 +537,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
 
         let harness = start_server(loonfs_server::ServerConfig {
             idle_fold_after_ms,
-            maintenance: loonfs_server::MaintenanceMode::ServeOnly,
+            maintenance: loonfs_server::JobMode::ServeOnly,
             ..test_config(store_root, "loonfs-server-idle", key_prefix)
         })
         .await;
@@ -596,7 +596,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-maintenance-corrupt",
         "http-maintenance-corrupt",
     );
-    warm_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
+    warm_config.maintenance = loonfs_server::JobMode::ServeOnly;
     let harness = start_server(warm_config).await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let mut cold_config = test_config(
@@ -604,7 +604,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-cold-reader",
         "http-maintenance-corrupt",
     );
-    cold_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
+    cold_config.maintenance = loonfs_server::JobMode::ServeOnly;
     let cold = start_server(cold_config).await;
     let client = harness.client.clone();
     let cold_client = cold.client.clone();

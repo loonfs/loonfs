@@ -215,7 +215,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             Arc::clone(&store),
             KeyPredicate::exact(&current.object_key),
             move |mut meta| {
-                meta.last_modified_ms = Some(now_ms);
+                meta.last_modified_at_ms = Some(now_ms);
                 meta
             },
         );

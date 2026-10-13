@@ -16,8 +16,8 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::{
-    add_profile, delete_profile, delete_profile_in_table, list_profiles, make_default_profile,
-    make_default_profile_in_table, show_profile, update_profile,
+    add_profile, delete_profile, delete_profile_in_table, list_profiles, set_default_profile,
+    set_default_profile_in_table, show_profile, update_profile,
 };
 use crate::prompt;
 use std::path::Path;
@@ -124,7 +124,7 @@ fn run_profile_update(
             apply_update_interactive(&name, existing)?
         } else {
             return Err(CliError::non_interactive_input_required(
-                "update flags (e.g. --root, --bucket)",
+                "update flags (e.g. `--root`, `--bucket`)",
             ));
         };
 
@@ -210,11 +210,11 @@ fn run_profile_use(
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     match loaded {
         ConfigLoad::Valid(_) => {
-            mutate_config(config_path, |config| make_default_profile(config, name))
+            mutate_config(config_path, |config| set_default_profile(config, name))
                 .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?
         }
         ConfigLoad::Degraded { mut table, .. } => {
-            make_default_profile_in_table(&mut table, name)
+            set_default_profile_in_table(&mut table, name)
                 .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
             save_config_table(config_path, &table)
                 .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;

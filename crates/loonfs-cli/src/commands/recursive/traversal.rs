@@ -66,7 +66,7 @@ impl Iterator for LocalTree {
                     ));
                 }
                 None => {
-                    let frame = self.stack.pop().expect("a frame is open");
+                    let frame = self.stack.pop().expect("a directory frame should be open");
                     if !frame.has_children {
                         return Some(TreeEntry::Directory(frame.relative_remote));
                     }
@@ -79,7 +79,7 @@ impl Iterator for LocalTree {
             // directory. This also bounds handles by the API's path depth.
             let relative = path
                 .strip_prefix(&self.root)
-                .expect("a descendant of the root");
+                .expect("a walked path should be a descendant of the root");
             let relative_remote = match relative_remote(relative).and_then(|relative| {
                 loonfs_types::AbsolutePath::parse(joined_remote(&self.remote_root, &relative))
                     .map_err(|error| {
@@ -128,8 +128,17 @@ impl Iterator for LocalTree {
 struct RemoteFrame {
     relative: String,
     entries: std::vec::IntoIter<PathEntry>,
-    cursor: Option<String>,
-    needs_page: bool,
+    next_page: NextPage,
+}
+
+/// Which page of a directory listing a frame reads next.
+enum NextPage {
+    /// The first page.
+    Start,
+    /// The page after this cursor.
+    After(String),
+    /// None: the listing is complete.
+    Exhausted,
 }
 
 impl RemoteFrame {
@@ -137,15 +146,15 @@ impl RemoteFrame {
         Self {
             relative,
             entries: Vec::new().into_iter(),
-            cursor: None,
-            needs_page: true,
+            next_page: NextPage::Start,
         }
     }
 
     fn set_page(&mut self, page: ListPathEntriesResponse) -> ChangeSeq {
         self.entries = page.entries.into_iter();
-        self.cursor = page.next_cursor;
-        self.needs_page = self.cursor.is_some();
+        self.next_page = page
+            .next_cursor
+            .map_or(NextPage::Exhausted, NextPage::After);
         page.head_seq
     }
 }
@@ -224,32 +233,34 @@ impl RemoteTree<'_> {
                     }
                 }
             }
-            if frame.needs_page {
-                let remote = joined_remote(self.root, &frame.relative);
-                let page = async {
-                    let spec = parse_remote(self.context, &remote, self.param)?;
-                    Ok(self
-                        .context
-                        .target
-                        .list_at_snapshot(&spec, self.snapshot_id)
-                        .page(page_request(
-                            frame.cursor.clone(),
-                            Some(TREE_LIST_PAGE_SIZE),
-                        )?)
-                        .await?)
+            let cursor = match &frame.next_page {
+                NextPage::Start => None,
+                NextPage::After(cursor) => Some(cursor.clone()),
+                NextPage::Exhausted => {
+                    self.stack.pop();
+                    continue;
                 }
-                .await;
-                match page {
-                    Ok(page) => return Some(TreeEntry::Head(frame.set_page(page))),
-                    Err(error) => {
-                        // Earlier files may have committed already. Keep their
-                        // results and continue siblings after a listing failure.
-                        self.stack.pop();
-                        return Some(TreeEntry::Failure(remote, error));
-                    }
+            };
+            let remote = joined_remote(self.root, &frame.relative);
+            let page = async {
+                let spec = parse_remote(self.context, &remote, self.param)?;
+                Ok(self
+                    .context
+                    .target
+                    .list_at_snapshot(&spec, self.snapshot_id)
+                    .page(page_request(cursor, Some(TREE_LIST_PAGE_SIZE))?)
+                    .await?)
+            }
+            .await;
+            match page {
+                Ok(page) => return Some(TreeEntry::Head(frame.set_page(page))),
+                Err(error) => {
+                    // Earlier files may have committed already. Keep their
+                    // results and continue siblings after a listing failure.
+                    self.stack.pop();
+                    return Some(TreeEntry::Failure(remote, error));
                 }
             }
-            self.stack.pop();
         }
     }
 }

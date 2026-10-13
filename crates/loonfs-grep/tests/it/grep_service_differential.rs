@@ -4,9 +4,9 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
-use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions, NamespaceId,
+    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
     PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::manifest::load_current_grep_manifest;
@@ -111,7 +111,7 @@ async fn publish_same_content_files(
     let candidates = (0..count)
         .map(|index| {
             CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -195,13 +195,17 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("planless-boundary-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "planless-boundary-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("planless-boundary-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "planless-boundary-maintenance",
+        ))
         .build()
         .await
         .expect("build maintenance")
@@ -259,7 +263,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .maintenance
         .maintain_metadata_with_options(
             &fixture.namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -339,7 +343,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .maintenance
         .maintain_metadata_with_options(
             &fixture.namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -380,7 +384,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-service-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("grep-service-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -509,7 +513,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             &scan_off,
             &GrepError::QueryUnindexable(
                 "the pattern has no run of at least 3 literal bytes for the trigram index; set \
-                 allow_scan to search without it"
+                 `allow_scan` to search without it"
                     .to_owned(),
             ),
         )

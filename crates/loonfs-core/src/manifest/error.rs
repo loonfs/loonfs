@@ -1,21 +1,11 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_types::format::manifest::MetadataRowFamily;
-use loonfs_types::{ManifestNo, NamespaceId};
-use serde::{Deserialize, Serialize};
+use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
 use thiserror::Error;
 
-/// Coarse failure class of a manifest load: corruption versus store trouble.
-///
-/// Deliberately not named `*ErrorKind` to avoid colliding with the wire-level
-/// caller-action concept in [`loonfs_types::ErrorKind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ManifestLoadFailureClass {
-    Corrupt,
-    Store,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ManifestLoadError {
     #[error("missing namespace manifest `{object_key}`")]
     MissingManifest { object_key: String },
@@ -23,7 +13,7 @@ pub enum ManifestLoadError {
     ReadManifest {
         object_key: String,
         message: String,
-        class: crate::error::StoreFailureClass,
+        kind: loonfs_objectstore::ObjectStoreErrorKind,
     },
     #[error("namespace manifest codec error for `{object_key}`: {message}")]
     ManifestCodec { object_key: String, message: String },
@@ -58,7 +48,11 @@ pub enum ManifestLoadError {
     #[error("missing metadata segment `{object_key}`")]
     MissingSegment { object_key: String },
     #[error("failed to read metadata segment `{object_key}`: {message}")]
-    ReadSegment { object_key: String, message: String },
+    ReadSegment {
+        object_key: String,
+        message: String,
+        kind: loonfs_objectstore::ObjectStoreErrorKind,
+    },
     #[error("metadata segment codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
     #[error("metadata segment descriptor mismatch for `{object_key}`: {message}")]
@@ -82,9 +76,11 @@ pub enum ManifestLoadError {
 }
 
 impl ManifestLoadError {
-    pub fn failure_class(&self) -> ManifestLoadFailureClass {
+    pub fn code(&self) -> ErrorCode {
         match self {
-            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureClass::Store,
+            Self::ReadManifest { kind, .. } | Self::ReadSegment { kind, .. } => {
+                crate::error::classify_store_failure(*kind)
+            }
             Self::MissingManifest { .. }
             | Self::ManifestCodec { .. }
             | Self::ManifestNamespaceMismatch { .. }
@@ -96,7 +92,7 @@ impl ManifestLoadError {
             | Self::SegmentCodec { .. }
             | Self::SegmentDescriptorMismatch { .. }
             | Self::SegmentRowKindMismatch { .. }
-            | Self::DuplicateRevisionRow { .. } => ManifestLoadFailureClass::Corrupt,
+            | Self::DuplicateRevisionRow { .. } => ErrorCode::NamespaceCorrupt,
         }
     }
 }

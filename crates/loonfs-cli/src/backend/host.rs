@@ -7,7 +7,7 @@ use loonfs::{InlineContentPolicy, LoonFs, Maintenance, SharedObjectStore, Writab
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces,
+    AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -33,13 +33,12 @@ pub(crate) fn client(
     inline_content: InlineContentPolicy,
     no_retry: bool,
 ) -> Result<Client, CliError> {
-    let options = Arc::new(BindingOptions {
-        serves_grep: true,
-        maintains_grep_index: true,
+    let options = Arc::new(BindingConfig {
+        grep: JobMode::ServeAndMaintain,
         serves_maintenance: true,
         snapshot_policy: loonfs::SnapshotPolicy::default(),
-        max_download_bytes: u64::MAX,
-        max_upload_bytes: u64::MAX,
+        max_download_bytes: None,
+        max_upload_bytes: None,
         max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
         max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
         inline_content,
@@ -47,7 +46,7 @@ pub(crate) fn client(
             .get_or_init(|| loonfs_types::generated_id("content-token").into())
             .clone(),
         request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         store_kind,
         auth_policy: AuthPolicy::Unauthenticated,
     });

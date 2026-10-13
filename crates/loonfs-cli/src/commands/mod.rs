@@ -24,9 +24,12 @@ pub(crate) use self::output::{
     MaintenanceRan, TrashListing,
 };
 
-use crate::args::{AccessCommand, Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};
+use crate::args::{
+    AccessCommand, Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior, TopLevelCommand,
+};
 use crate::config::resolve_config_location;
 use crate::error::CliError;
+use crate::render::OutputFormat;
 use clap::CommandFactory;
 use clap_complete::Shell;
 use std::path::Path;
@@ -39,7 +42,7 @@ pub(crate) async fn run(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let kind = cli.kind();
-    if runtime.json && !kind.supports_json() {
+    if runtime.output == OutputFormat::Json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
             profile: None,
@@ -49,9 +52,11 @@ pub(crate) async fn run(
     }
 
     match cli.command {
-        Command::Completion(args) => run_completion(kind, &args),
-        Command::Doctor(args) => inspection::run_doctor(kind, cli.config.as_deref(), &args).await,
-        command => {
+        TopLevelCommand::Completion(args) => run_completion(kind, &args),
+        TopLevelCommand::Doctor(args) => {
+            inspection::run_doctor(kind, cli.config.as_deref(), &args).await
+        }
+        TopLevelCommand::Configured(command) => {
             let location = resolve_config_location(cli.config.as_deref())
                 .map_err(|error| context::fail(kind, None, None, error))?;
             let config_path = location.path.as_path();
@@ -117,15 +122,9 @@ pub(crate) async fn run(
                 Command::Maintenance { command } => {
                     maintenance::run_maintenance_command(kind, config_path, command).await
                 }
-                Command::Completion(_) | Command::Doctor(_) => pre_config_command_in_nested_match(),
             }
         }
     }
-}
-
-#[allow(clippy::unreachable)]
-fn pre_config_command_in_nested_match() -> ! {
-    unreachable!("pre-config commands return in the outer match")
 }
 
 fn run_completion(

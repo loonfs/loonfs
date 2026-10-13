@@ -31,9 +31,10 @@ pub struct ClientConfig {
     pub request_timeout_ms: Option<u64>,
     /// Disables the bounded automatic retry of quick-clearing transient
     /// failures: the retryable-unavailability codes (`server_busy`,
-    /// `commit_queue_full`, `shutting_down` — a draining process telling the
-    /// caller to retry against the next one) and network-level transport
-    /// errors (connect failures, timeouts, resets). Off by default. The retry
+    /// `commit_queue_full`, `store_contention`, `shutting_down` — a draining
+    /// process telling the caller to retry against the next one) and
+    /// network-level transport errors (connect failures, timeouts, resets).
+    /// Off by default. The retry
     /// applies only to reads, commits (which carry a durable replay
     /// identity), and operations whose repeat semantics are idempotent;
     /// lifecycle mutations

@@ -248,7 +248,7 @@ func TestStreamingDownloadsStartBeforeEOFAndCancelPendingReads(t *testing.T) {
 }
 
 func TestStreamingDownloadsRequestAWindowOfRangesWhileOneIsRead(t *testing.T) {
-	const rangeWindow = 4
+	const rangeResponsesInFlight = 4
 	var fixture streamCase
 	if err := json.Unmarshal([]byte(`{"name": "five_ranges", "content": "123456789", "algorithm": "crc64nvme",
 		"checksum": "ae8b14860a799888", "size_bytes": 9, "ranges": [
@@ -307,7 +307,7 @@ func TestStreamingDownloadsRequestAWindowOfRangesWhileOneIsRead(t *testing.T) {
 	if _, err := io.ReadFull(opened.Content, first); err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < rangeWindow; index++ {
+	for index := 0; index < rangeResponsesInFlight; index++ {
 		select {
 		case <-reached[index]:
 		case <-time.After(5 * time.Second):
@@ -315,7 +315,7 @@ func TestStreamingDownloadsRequestAWindowOfRangesWhileOneIsRead(t *testing.T) {
 		}
 	}
 	select {
-	case <-reached[rangeWindow]:
+	case <-reached[rangeResponsesInFlight]:
 		t.Fatal("a range past the window was requested before range 0 ended")
 	default:
 	}
@@ -325,7 +325,7 @@ func TestStreamingDownloadsRequestAWindowOfRangesWhileOneIsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-reached[rangeWindow]:
+	case <-reached[rangeResponsesInFlight]:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the range past the window was not requested once range 0 ended")
 	}

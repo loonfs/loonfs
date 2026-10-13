@@ -9,12 +9,12 @@
 
 use bytes::Bytes;
 use loonfs::publish::{
-    parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation, InlineContent,
+    parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation, InlineContent,
 };
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
-    MetadataCache, MetadataMaintenanceOptions, NamespaceId, PageRequest, ReadOnly,
-    SharedObjectStore, StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
+    MaintainMetadataOptions, MetadataCache, NamespaceId, PageRequest, ReadOnly, SharedObjectStore,
+    StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{
@@ -222,7 +222,7 @@ impl Shape {
             );
         }
         CommitCandidate::with_inline_content(
-            CommitRequest {
+            CommitIntent {
                 commit_id: self.commit_id(label),
                 actor_id: self.actor(),
                 subject: (self.rows == Rows::Dense).then(|| subject(0)),
@@ -282,18 +282,18 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("seed-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
-    let fold = MetadataMaintenanceOptions {
+    let fold = MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::MIN,
         ..Default::default()
     };

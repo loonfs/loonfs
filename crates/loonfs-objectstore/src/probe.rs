@@ -461,7 +461,7 @@ async fn head_reports_last_modified(store: &dyn ObjectStore, run: &ProbeRun) -> 
         "the written object's metadata",
         ok("head", store.head(&key).await)?,
     )?;
-    match head.last_modified_ms {
+    match head.last_modified_at_ms {
         None => Err(wrong(
             "the store reports no last-modified time, so nothing can age out of the grace window",
         )),
@@ -667,9 +667,11 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
 
     // The smallest payload with a middle part, which is where a provider's
     // own rules about non-final part sizes bite.
-    let payload_len =
-        PROVIDER_MULTIPART_THRESHOLD_BYTES as usize + PROVIDER_MULTIPART_PART_BYTES as usize + 4096;
-    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
+    let payload_len = PROVIDER_MULTIPART_THRESHOLD_BYTES + PROVIDER_MULTIPART_PART_BYTES + 4096;
+    let payload: Vec<u8> = (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(payload_len))
+        .collect();
 
     let metadata = ok_optional(
         "multipart overwrite",
@@ -677,7 +679,7 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
             .put_overwrite(&key, Bytes::from(payload.clone()))
             .await,
     )?;
-    if metadata.size_bytes != payload_len as u64 {
+    if metadata.size_bytes != payload_len {
         return Err(wrong(format!(
             "a multipart write of {payload_len} bytes reports {} stored",
             metadata.size_bytes
@@ -1122,7 +1124,7 @@ mod tests {
 
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Ok(self.inner.head(key).await?.map(|mut metadata| {
-                metadata.last_modified_ms = Some(0);
+                metadata.last_modified_at_ms = Some(0);
                 metadata
             }))
         }

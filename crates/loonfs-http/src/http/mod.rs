@@ -61,7 +61,8 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put, MethodRouter};
-use axum::Router;
+use axum::{Extension, Router};
+use futures::FutureExt as _;
 use loonfs::ErrorCode;
 use loonfs_types::ErrorKind;
 
@@ -146,6 +147,60 @@ async fn with_request_deadline(request_deadline_ms: u64, request: Request, next:
         )
         .into_response(),
     }
+}
+
+/// Turns a panic in a handler into a `server_error` response.
+///
+/// Tokio contains a panic to its task, so without this layer a panicking
+/// handler drops the connection with no body, no request ID, and no log, and
+/// a client treats that as a transport failure it may retry. With it, the
+/// caller gets the error envelope and the request ID, and the server logs the
+/// panic at error level. The rest of the process keeps serving; a panic is a
+/// bug, so the work the handler had started may be half done.
+async fn catch_handler_panic(request: Request, next: Next) -> Response {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned());
+    let namespace_id = route
+        .as_deref()
+        .and_then(|route| namespace_id_in_path(route, request.uri().path()))
+        .map(str::to_owned);
+    match std::panic::AssertUnwindSafe(next.run(request))
+        .catch_unwind()
+        .await
+    {
+        Ok(response) => response,
+        Err(panic) => {
+            let panic = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("a panic payload that isn't a string");
+            REQUEST_ID.with(|request_id| {
+                tracing::error!(
+                    request_id = request_id.as_str(),
+                    route = route.as_deref(),
+                    namespace_id = namespace_id.as_deref(),
+                    panic,
+                    "request handler panicked"
+                );
+            });
+            ApiResponseError::new(
+                ErrorCode::ServerError,
+                "the server hit a bug while handling the request",
+            )
+            .into_response()
+        }
+    }
+}
+
+/// The path segment that a route's `{namespace_id}` parameter matched.
+fn namespace_id_in_path<'a>(route: &str, path: &'a str) -> Option<&'a str> {
+    route
+        .split('/')
+        .zip(path.split('/'))
+        .find_map(|(template, segment)| (template == "{namespace_id}").then_some(segment))
 }
 
 /// Counts, times, and logs every request once it reaches its HTTP outcome.
@@ -235,15 +290,16 @@ async fn require_bearer_token(
     Ok(next.run(request).await)
 }
 
-fn gated(
-    enabled: bool,
+/// Serves `served` with `handle` as a request extension where the binding
+/// holds the handle, and `denied` where it doesn't.
+fn gated<T: Clone + Send + Sync + 'static>(
+    handle: Option<T>,
     served: MethodRouter<BindingState>,
     denied: MethodRouter<BindingState>,
 ) -> MethodRouter<BindingState> {
-    if enabled {
-        served
-    } else {
-        denied
+    match handle {
+        Some(handle) => served.layer(Extension(handle)),
+        None => denied,
     }
 }
 
@@ -253,8 +309,8 @@ pub fn router(state: BindingState) -> Router {
     // are separately deployable: the query route exists where this server
     // serves grep, and the three routes that mutate a grep manifest exist where
     // it maintains one.
-    let serves_grep = state.options.serves_grep;
-    let maintains_index = state.options.maintains_grep_index;
+    let grep_service = state.grep_service.clone();
+    let index_worker = state.grep_index_worker().cloned();
     let mut authenticated = Router::new()
         .route(
             "/v0/capabilities",
@@ -301,7 +357,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/grep",
-            gated(serves_grep, get(grep), get(grep_queries_not_served)),
+            gated(grep_service, get(grep), get(grep_queries_not_served)),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/revisions",
@@ -378,7 +434,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index",
                 gated(
-                    maintains_index,
+                    index_worker.clone(),
                     get(get_grep_index),
                     get(grep_index_not_maintained),
                 ),
@@ -386,7 +442,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
                 gated(
-                    maintains_index,
+                    index_worker.clone(),
                     post(enable_grep_index),
                     post(grep_index_not_maintained),
                 ),
@@ -394,7 +450,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
                 gated(
-                    maintains_index,
+                    index_worker,
                     post(disable_grep_index),
                     post(grep_index_not_maintained),
                 ),
@@ -441,6 +497,7 @@ pub fn authenticate_routes(router: Router, state: &BindingState) -> Router {
 pub fn observe_routes(router: Router, state: &BindingState) -> Router {
     router
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(catch_handler_panic))
         .layer(tower::util::MapResponseLayer::new(
             response_frames::split_response,
         ))

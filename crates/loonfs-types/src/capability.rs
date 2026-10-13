@@ -158,6 +158,7 @@ pub struct CapabilityDocument {
 
 /// Violation of the capability document rules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum CapabilityDocumentError {
     /// Reports a malformed feature key.
     #[error(

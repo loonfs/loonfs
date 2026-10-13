@@ -36,7 +36,7 @@ pub(crate) use self::rows::{
 pub(crate) use self::view::InMemoryMetadataView;
 pub(crate) use self::view::{AttributesProjection, MetadataView};
 pub(crate) use self::view_session::{
-    LeafRevisionPrefetch, MetadataViewSession, VisibleChildEntry,
+    LeafRevisionPreload, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;

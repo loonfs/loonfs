@@ -165,7 +165,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             "append" => MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES,
             _ => MAX_COMMIT_OPERATIONS,
         };
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
             actor_id: actor.clone(),
             subject: None,
@@ -255,12 +255,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .await
             .expect("plan");
         let estimate = super::planned_wal_record_bytes(
-            candidate.request(),
+            candidate.intent(),
             candidate.inline_content(),
             &plan.deltas,
             &plan.appended,
         ) + WAL_OBJECT_OVERHEAD_BYTES;
-        let next_inode_id = session.commit_candidate(allocation).expect("allocation");
+        let next_inode_id = session.commit_candidate(allocation);
         let prepared = PreparedCommit {
             commit: plan.finish(next_inode_id),
             committed_at_ms: u64::MAX,
@@ -270,9 +270,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
                 .expect("encode");
         assert!(
-            encoded.document_len() <= estimate,
+            encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",
-            encoded.document_len()
+            encoded.document_bytes()
         );
     }
 }

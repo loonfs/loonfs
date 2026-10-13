@@ -2,6 +2,7 @@
 //! WAL probes observe commits; interval checks observe manifest changes.
 
 use crate::fs::RuntimeCore;
+use crate::metadata_cache::CacheLookup;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
@@ -27,11 +28,15 @@ impl RuntimeCore {
 
     /// Looks up the head for a load and counts the hit or miss. A
     /// speculative read peeks first and then loads, so only the load counts.
-    fn lookup_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+    fn find_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
         let head = self.inner.head_state.get_anchor(namespace_id);
         self.inner
             .metadata_cache
-            .record_head_anchor_lookup(head.is_some());
+            .record_head_anchor_lookup(if head.is_some() {
+                CacheLookup::Hit
+            } else {
+                CacheLookup::Miss
+            });
         head
     }
 
@@ -67,7 +72,9 @@ impl RuntimeCore {
             // this shortcut: it may have observed before an intervening
             // write completed. Local publication is not a remote proof.
             let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
-            self.inner.metadata_cache.record_head_anchor_lookup(true);
+            self.inner
+                .metadata_cache
+                .record_head_anchor_lookup(CacheLookup::Hit);
             return Ok(head);
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
@@ -102,7 +109,7 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<CachedReadAnchor, CoreError> {
-        if let Some(cached) = self.lookup_namespace_head(namespace_id) {
+        if let Some(cached) = self.find_namespace_head(namespace_id) {
             let mut head = CachedReadAnchor::clone(&cached);
             // Measure every answer against the previous check, not against the probe
             // it answers. A successor published after that check cannot be collected
@@ -231,7 +238,7 @@ impl RuntimeCore {
             Some(self.inner.metadata_segment_cache.as_ref()),
             &live.head,
             snapshot_id,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
         .map_err(Error::from)?;

@@ -64,15 +64,6 @@ pub(crate) struct WriterBits {
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
-impl WriterIdentity {
-    /// Mints an identity, rejecting a blank writer id.
-    pub(crate) fn new(writer_id: String) -> Result<Self> {
-        let writer_id =
-            WriterId::parse(writer_id).map_err(|error| Error::Config(error.to_string()))?;
-        Ok(Self { writer_id })
-    }
-}
-
 impl RuntimeCore {
     pub(crate) fn with_subject(&self, subject: Subject) -> Self {
         Self {
@@ -113,16 +104,16 @@ impl RuntimeCore {
     }
 
     /// Reads the handle's wall clock as unix milliseconds.
-    pub(crate) fn now_ms(&self) -> Result<u64> {
-        Ok(self.inner.wall_clock.now_ms()?)
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.inner.wall_clock.now_ms()
     }
 
     /// Stamps a mutation by `actor` with the handle's wall clock.
-    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> Result<MutationContext> {
-        Ok(MutationContext {
+    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> MutationContext {
+        MutationContext {
             writer_id: actor.writer_id.clone(),
-            now_ms: self.now_ms()?,
-        })
+            now_ms: self.now_ms(),
+        }
     }
 
     /// This runtime's instrument set, for the publication, maintenance, and
@@ -148,7 +139,7 @@ impl RuntimeCore {
     }
 
     pub(crate) fn trace_store_kind(&self) -> &'static str {
-        self.inner.config.trace_store_kind.as_str()
+        crate::trace::store_kind_label(self.inner.config.store_kind)
     }
 
     pub(crate) fn record_trace_context(&self, span: &tracing::Span) {
@@ -256,7 +247,7 @@ impl RuntimeCore {
             self.inner.config.execution_budget.content_writes(),
         )
         .with_wall_clock(self.inner.wall_clock.clone())
-        .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)
+        .with_metadata_run_policy(self.inner.config.metadata_run_policy)
         .with_metadata_segment_cache(self.metadata_segment_cache())
     }
 }

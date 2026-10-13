@@ -57,7 +57,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
         )
         .await
         .expect("complete upload");
-    let issued = loonfs_core::time::current_time_ms().expect("wall time");
+    let issued = loonfs_core::time::current_time_ms();
     let token = loonfs_core::content::mint_content_token(
         "secret",
         completed.evidence.as_ref().expect("evidence"),
@@ -77,7 +77,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     publisher.timer = clock;
     publisher.min_publish_interval = Duration::ZERO;
     let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("put-content").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -125,7 +125,7 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     ));
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;

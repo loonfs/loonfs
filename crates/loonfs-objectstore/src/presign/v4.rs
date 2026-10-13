@@ -9,7 +9,8 @@
 //! primitive stay in its own presigner.
 
 use crate::object_store::Result;
-use crate::presign::{PresignedUrl, MAX_PRESIGN_EXPIRY};
+use crate::presign::limits::MAX_PRESIGN_TTL;
+use crate::presign::PresignedUrl;
 use crate::ObjectStoreError;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -50,18 +51,19 @@ pub(crate) fn presign_v4(
     endpoint: V4Endpoint,
     method: &str,
     request_parts: V4RequestParts<'_>,
-    expires_in: Duration,
+    ttl: Duration,
     now: SystemTime,
     sign: impl FnOnce(&[u8]) -> Result<String>,
 ) -> Result<PresignedUrl> {
-    if expires_in.is_zero() {
+    if ttl.is_zero() {
         return Err(ObjectStoreError::Configuration(
             "presigned URL expiry must be greater than zero".to_owned(),
         ));
     }
-    if expires_in.as_secs() > MAX_PRESIGN_EXPIRY {
+    if ttl.as_secs() > MAX_PRESIGN_TTL.as_secs() {
         return Err(ObjectStoreError::Configuration(format!(
-            "presigned URL expiry must not exceed {MAX_PRESIGN_EXPIRY} seconds"
+            "presigned URL expiry must not exceed {} seconds",
+            MAX_PRESIGN_TTL.as_secs()
         )));
     }
 
@@ -97,7 +99,7 @@ pub(crate) fn presign_v4(
         ),
         (
             format!("{}-Expires", scheme.query_prefix),
-            expires_in.as_secs().to_string(),
+            ttl.as_secs().to_string(),
         ),
         (
             format!("{}-SignedHeaders", scheme.query_prefix),
@@ -126,7 +128,9 @@ pub(crate) fn presign_v4(
         scheme.query_prefix,
         signature
     );
-    let expires_at_ms = unix_ms(request_parts.object_key, now)? + expires_in.as_millis() as u64;
+    let ttl_ms = u64::try_from(ttl.as_millis())
+        .expect("a presign TTL of at most seven days should fit u64 milliseconds");
+    let expires_at_ms = unix_ms(request_parts.object_key, now)? + ttl_ms;
 
     Ok(PresignedUrl {
         method: method.to_owned(),
@@ -161,13 +165,18 @@ pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
     let duration = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| before_unix_epoch(object_key, err))?;
-    Ok(duration.as_millis() as u64)
+    u64::try_from(duration.as_millis()).map_err(|_| {
+        ObjectStoreError::transport(
+            object_key,
+            "system time is past the largest unix millisecond".to_owned(),
+        )
+    })
 }
 
-fn before_unix_epoch(object_key: &str, err: SystemTimeError) -> ObjectStoreError {
+fn before_unix_epoch(object_key: &str, error: SystemTimeError) -> ObjectStoreError {
     ObjectStoreError::transport(
         object_key,
-        format!("system time is before unix epoch: {err}"),
+        format!("system time is before unix epoch: {error}"),
     )
 }
 

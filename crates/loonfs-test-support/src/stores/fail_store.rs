@@ -1,8 +1,8 @@
 //! Configurable failures for selected object-store operations.
 
 use super::{
-    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
-    OperationKind,
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationContext, OperationKind,
+    OperationSelector,
 };
 use async_trait::async_trait;
 use loonfs_objectstore::ObjectStoreError;
@@ -75,11 +75,11 @@ impl fmt::Debug for FailInterceptor {
 pub type FailStore<S> = InterceptStore<S, FailInterceptor>;
 
 impl<S> InterceptStore<S, FailInterceptor> {
-    /// Selects operations by key predicate and operation class.
+    /// Selects operations by key predicate and operation selector.
     pub fn new(
         inner: S,
         keys: KeyPredicate,
-        operation: OperationClass,
+        operation: OperationSelector,
         error: InjectedError,
     ) -> Self {
         Self::matching(

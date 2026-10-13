@@ -1,7 +1,7 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
-use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
+use crate::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces};
+use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 pub(super) struct TestOptions {
-    pub(super) binding: BindingOptions,
+    pub(super) binding: BindingConfig,
     pub(super) writer_id: WriterId,
     pub(super) store: SharedObjectStore,
 }
@@ -28,23 +28,22 @@ pub(super) struct TestAppOptions {
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
-        binding: BindingOptions {
-            serves_grep: true,
-            maintains_grep_index: true,
+        binding: BindingConfig {
+            grep: JobMode::ServeAndMaintain,
             serves_maintenance: true,
             snapshot_policy: SnapshotPolicy {
                 max_ttl_ms: 86_400_000,
                 max_lifetime_ms: 604_800_000,
                 max_live_per_namespace: 16,
             },
-            max_upload_bytes: 256 * 1024 * 1024,
-            max_download_bytes: 256 * 1024 * 1024,
+            max_upload_bytes: Some(256 * 1024 * 1024),
+            max_download_bytes: Some(256 * 1024 * 1024),
             max_concurrent_uploads: 8,
             max_concurrent_downloads: 16,
             inline_content: Default::default(),
             content_token_secret: "test-content-token-secret".into(),
             request_deadline_ms: 60_000,
-            idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+            idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
@@ -60,12 +59,18 @@ pub(super) async fn test_app(
     let options = Arc::new(config.binding);
     let metrics = HttpMetrics::new();
     let runtime = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store))
-        .writer_id(config.writer_id.as_str())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            config.writer_id.as_str(),
+        ))
         .min_publish_interval_ms(0)
         .inline_content(options.inline_content.clone())
-        .max_read_content_bytes(options.max_download_bytes)
+        .max_read_content_bytes(
+            options
+                .max_download_bytes
+                .expect("test bindings should cap proxied reads"),
+        )
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::from(options.store_kind))
+        .store_kind(options.store_kind)
         .metrics_recorder(metrics.recorder())
         .build()
         .await?;
@@ -73,7 +78,7 @@ pub(super) async fn test_app(
         WriterId::parse(format!("{}-maintenance", config.writer_id))
             .expect("a suffixed writer id should stay valid"),
     );
-    let grep_worker = (options.serves_grep || options.maintains_grep_index).then(|| {
+    let grep_worker = (options.grep.serves() || options.grep.maintains()).then(|| {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
@@ -81,7 +86,7 @@ pub(super) async fn test_app(
             loonfs_grep::GrepStepBudget::default(),
         )
     });
-    let grep_service = options.serves_grep.then(|| {
+    let grep_service = options.grep.serves().then(|| {
         let cache = Arc::new(new_grep_block_cache(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             metrics.recorder().as_ref(),

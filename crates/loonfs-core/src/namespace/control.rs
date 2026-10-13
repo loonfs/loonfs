@@ -106,10 +106,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
         }
         let bytes =
             loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
-                .map_err(|error| CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            })?;
+                .expect("a namespace hint should encode");
         match store
             .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
             .await
@@ -185,7 +182,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
                 message: "manifest hint must be at least one".to_owned(),
             });
         }
-        let mut current = load_manifest_by_number(store, namespace_id, manifest_no).await?;
+        let mut current = load_manifest_by_no(store, namespace_id, manifest_no).await?;
         while let Some(previous) = &current {
             // A tombstone is the last manifest of its namespace.
             if previous.state.envelope.payload().status.is_deleted() {
@@ -194,7 +191,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
             let Ok(next) = manifest_no.successor() else {
                 break;
             };
-            let Some(manifest) = load_manifest_by_number(store, namespace_id, next).await? else {
+            let Some(manifest) = load_manifest_by_no(store, namespace_id, next).await? else {
                 break;
             };
             previous
@@ -227,7 +224,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_manifest_by_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_types::ManifestNo,
@@ -243,11 +240,11 @@ pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
         crate::manifest::ManifestLoadError::ReadManifest {
             object_key,
             message,
-            class,
+            kind,
         } => ControlObjectLoadError::Store {
             object_key,
             message,
-            class,
+            kind,
         },
         error => ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -288,7 +285,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
         RecordedOperation, RecordingStore,
     };
     use loonfs_types::ManifestNo;
@@ -348,7 +345,7 @@ mod tests {
                 metadata
             }),
             KeyPredicate::hint(&namespace_id),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::PreconditionFailed,
         );
         store.fail_all();

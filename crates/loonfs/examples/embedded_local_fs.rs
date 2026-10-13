@@ -1,6 +1,6 @@
 use loonfs::{
     ActorId, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PutFileOptions,
-    StoreConfig,
+    StoreConfig, WriterId,
 };
 
 #[allow(clippy::print_stdout)]
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
     })
-    .writer_id("embedded-example")
+    .writer_id(WriterId::parse("embedded-example")?)
     .build()
     .await?;
 

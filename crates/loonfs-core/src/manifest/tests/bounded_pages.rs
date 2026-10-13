@@ -50,7 +50,7 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
             )
             .expect("encode fixture row");
     }
-    let built = builder.finish().expect("finish segment");
+    let built = builder.build().expect("finish segment");
     assert!(
         built.bytes.len() > 288 * 1024,
         "exercise ranged, not eager reads"
@@ -229,7 +229,7 @@ async fn bounded_pages_open_and_refill_segments_in_concurrent_waves() {
             BlockingStore::new(
                 LocalFsStore::new(temp.path()).expect("store"),
                 KeyPredicate::any(),
-                OperationClass::Read,
+                OperationSelector::Read,
             ),
             KeyPredicate::any(),
         );
@@ -266,7 +266,7 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     segment_rows.extend(expected.clone());
     segment_rows.extend(rows(2, 2, 1));
     let descriptor = segment(&store, &segment_rows).await;
-    let index = block_fetch::load_segment_index(
+    let index = index_block_load::load_segment_index(
         &store,
         None,
         &load::SessionBlockMemo::default(),
@@ -347,7 +347,7 @@ async fn bounded_pages_preserve_readahead_without_reading_the_entire_range() {
     .await
     .expect("next page");
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "next page uses read-ahead"
     );
@@ -359,7 +359,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     let store = LocalFsStore::new(temp.path()).expect("store");
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
-    let index = block_fetch::load_segment_index(
+    let index = index_block_load::load_segment_index(
         &store,
         None,
         &load::SessionBlockMemo::default(),
@@ -374,7 +374,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         .expect("get object")
         .expect("object exists")
         .to_vec();
-    bytes[index[64].block.offset as usize] ^= 1;
+    bytes[loonfs_types::usize_from_u64(index[64].block.offset)] ^= 1;
     store
         .put_overwrite(&key, Bytes::from(bytes))
         .await
@@ -429,7 +429,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 )
                 .expect("encode row");
         }
-        let built = builder.finish().expect("segment");
+        let built = builder.build().expect("segment");
         let descriptor = write_manifest_segment(
             &store,
             &NamespaceId::parse("lookup-readahead").expect("namespace"),
@@ -439,10 +439,10 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         .await
         .expect("write segment");
         assert_eq!(
-            block_fetch::segment_object_len(&descriptor) <= 256 * 1024,
+            index_block_load::segment_object_bytes(&descriptor) <= 256 * 1024,
             count == 16
         );
-        let index = block_fetch::load_segment_index(
+        let index = index_block_load::load_segment_index(
             &store,
             None,
             &load::SessionBlockMemo::default(),
@@ -457,7 +457,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
             .expect("read segment")
             .expect("segment")
             .to_vec();
-        bytes[index[2].block.offset as usize] ^= 1;
+        bytes[loonfs_types::usize_from_u64(index[2].block.offset)] ^= 1;
         store
             .put_overwrite(&key, Bytes::from(bytes))
             .await
@@ -473,7 +473,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &descriptor,
                 ChangeSeq(1),
                 &lower,
-                loonfs_types::format::sst_blocks::string_prefix_upper_bound(&lower).as_deref(),
+                loonfs_types::format::segment_blocks::string_prefix_upper_bound(&lower).as_deref(),
                 1,
                 scan::Readahead::Stored,
             )
@@ -488,7 +488,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![&expected[position]]);
             }
             assert_eq!(
-                store.count(OperationClass::Read),
+                store.count(OperationSelector::Read),
                 if count == 16 { 1 } else { 2 }
             );
         }
@@ -518,7 +518,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     let pool = Arc::new(ReadWorkingMemory::default());
     let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
     store.reset();
-    let index = block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+    let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)
         .await
         .expect("index");
     let index_bytes = index_block_heap_bytes(&index);
@@ -535,20 +535,20 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         index_reservation > index_bytes,
         "the index and memo containers are charged"
     );
-    assert_eq!(store.count(OperationClass::Read), 1);
-    let filter = block_fetch::load_segment_filter(&store, None, &memo, &descriptor)
+    assert_eq!(store.count(OperationSelector::Read), 1);
+    let filter = index_block_load::load_segment_filter(&store, None, &memo, &descriptor)
         .await
         .expect("filter");
     let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
     assert!(pool.in_use() >= index_reservation + filter_bytes);
-    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(store.count(OperationSelector::Read), 2);
     assert_eq!(
-        *block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+        *index_block_load::load_segment_index(&store, None, &memo, &descriptor)
             .await
             .expect("retained index"),
         *index
     );
-    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(store.count(OperationSelector::Read), 2);
     drop(memo);
     assert_eq!(pool.in_use(), 0);
     assert_eq!(index.len(), 2048);

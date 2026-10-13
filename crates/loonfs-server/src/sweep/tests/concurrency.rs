@@ -1,10 +1,11 @@
 //! Concurrent visits preserve session progress and share the host's slots.
 
 use super::{sweep_config, SweepServer};
+use crate::sweep::GarbageCollection;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
     config.idle_fold_after_ms = 0;
@@ -53,14 +54,24 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
                 if tick_first {
                     sweep.tick().await;
                 } else {
-                    sweep.run_pass(false).await.expect("daily");
+                    sweep
+                        .run_pass(GarbageCollection::Skip)
+                        .await
+                        .expect("daily");
                 }
             }
         });
         store.wait_until_blocked().await;
         store.inner().reset();
         if tick_first {
-            assert_eq!(server.sweep.run_pass(false).await.expect("daily"), 1);
+            assert_eq!(
+                server
+                    .sweep
+                    .run_pass(GarbageCollection::Skip)
+                    .await
+                    .expect("daily"),
+                1
+            );
             let operations = store.inner().take();
             assert_eq!(operations.len(), 1);
             assert!(matches!(&operations[0], RecordedOperation::List { .. }));
@@ -85,7 +96,7 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
     config.idle_fold_after_ms = 0;
@@ -141,7 +152,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
                 KeyPredicate::any(),
             ),
             KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
-            OperationClass::Any,
+            OperationSelector::Any,
         ));
         let mut config = sweep_config(None);
         config.max_concurrent_maintenance = slots;
@@ -155,7 +166,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         store.block_next();
         let daily = tokio::spawn({
             let sweep = server.sweep.clone();
-            async move { sweep.run_pass(false).await }
+            async move { sweep.run_pass(GarbageCollection::Skip).await }
         });
         store.wait_until_blocked().await;
         server
@@ -211,7 +222,7 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
                 KeyPredicate::any(),
             ),
             KeyPredicate::prefix(loonfs_grep::keyspace::grep_prefix(&namespace_id)),
-            OperationClass::Any,
+            OperationSelector::Any,
         ));
         let config = sweep_config(Some(loonfs_grep::GrepWorkerConfig::default()));
         let server = SweepServer::start(store.clone(), &config, 0).await;
@@ -238,7 +249,7 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
                 .sweep
                 .inner
                 .namespaces
-                .with_held(&namespace_id, |held| held.index_dirty),
+                .visit_held(&namespace_id, |held| held.index_dirty),
             Some(true)
         );
         store.inner().reset();
@@ -263,7 +274,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
     config.idle_fold_after_ms = 0;
@@ -298,7 +309,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     store.release();
     visit.await.expect("finish collection");
     assert_eq!(
-        namespaces.with_held(&namespace_id, |held| held.collected_seq),
+        namespaces.visit_held(&namespace_id, |held| held.collected_seq),
         Some(None)
     );
     store.inner().reset();

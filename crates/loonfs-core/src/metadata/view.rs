@@ -5,9 +5,9 @@ use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
-use super::view_session::{latest_visible_binding, LeafRevisionPrefetch};
+use super::view_session::{latest_visible_binding, LeafRevisionPreload};
 use super::visibility::{self, MetadataVisibilityReads};
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
@@ -21,7 +21,7 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
@@ -89,7 +89,7 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
     async fn content_layout(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> crate::error::Result<Option<ContentLayoutRecord>> {
+    ) -> Result<Option<ContentLayoutRecord>> {
         self.content_layout(content_id).await
     }
 
@@ -259,10 +259,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         select_map: fn(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, Arc<Vec<T>>>,
         key: K,
-        fetch: Pin<Box<dyn Future<Output = Result<Vec<T>, CoreError>> + Send + '_>>,
+        fetch: Pin<Box<dyn Future<Output = Result<Vec<T>>> + Send + '_>>,
         rows_of: fn(&MetadataState) -> &[T],
         matches: impl Fn(&T) -> bool,
-    ) -> Result<SharedRows<T>, CoreError>
+    ) -> Result<SharedRows<T>>
     where
         T: Clone,
         K: Clone + Eq + std::hash::Hash,
@@ -307,10 +307,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ///
     /// The lookup requests a single-entry page, so its work does not grow with
     /// the directory's total size.
-    pub(crate) async fn has_visible_children(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<bool, CoreError> {
+    pub(crate) async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool> {
         let mut session = self.session();
         Ok(!session
             .visible_children_page_by_name_key(parent_inode_id, None, 1)
@@ -321,9 +318,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn resolve_visible_path(
         &self,
         absolute_path: &AbsolutePath,
-    ) -> Result<ResolvedVisiblePath, CoreError> {
+    ) -> Result<ResolvedVisiblePath> {
         self.session()
-            .resolve_visible_path(absolute_path, LeafRevisionPrefetch::Skip)
+            .resolve_visible_path(absolute_path, LeafRevisionPreload::Skip)
             .await
     }
 
@@ -331,21 +328,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
     }
 
-    pub(crate) async fn visible_inode(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, CoreError> {
+    pub(crate) async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         visibility::visible_inode(&mut self.reads(), inode_id).await
     }
 
-    pub(crate) async fn inode_at_seq(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, CoreError> {
+    pub(crate) async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         if let Some(inode) = self
             .overlay_states()
             .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()))
@@ -374,7 +365,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn latest_revision_head(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, CoreError> {
+    ) -> Result<Option<RevisionRecord>> {
         if self.visible_inode(inode_id).await?.is_none() {
             return Ok(None);
         }
@@ -384,10 +375,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn latest_revision_record(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, CoreError> {
-        let row_revision = self.row_latest_revision_for_inode(inode_id);
+    ) -> Result<Option<RevisionRecord>> {
+        let row_revision = self.row_latest_revision_by_inode(inode_id);
         let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::latest_revision_for_inode(segments, inode_id).await?
+            manifest_index::latest_revision_by_inode(segments, inode_id).await?
         } else {
             None
         };
@@ -397,11 +388,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(revision_order_key))
     }
 
-    pub(crate) async fn revision_for_inode(
+    pub(crate) async fn revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<RevisionRecord, CoreError> {
+    ) -> Result<RevisionRecord> {
         let inode = self
             .inode_at_seq(inode_id)
             .await?
@@ -424,10 +415,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<Option<RevisionRecord>, CoreError> {
-        let row_revision = self.row_revision_for_inode_no(inode_id, revision_no);
+    ) -> Result<Option<RevisionRecord>> {
+        let row_revision = self.row_revision_by_inode_no(inode_id, revision_no);
         let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revision_for_inode_no(segments, inode_id, revision_no).await?
+            manifest_index::revision_by_inode_no(segments, inode_id, revision_no).await?
         } else {
             None
         };
@@ -437,22 +428,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(revision_order_key))
     }
 
-    pub(crate) async fn revisions_for_inode_page_desc(
+    pub(crate) async fn revisions_by_inode_page_desc(
         &self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
         limit: usize,
-    ) -> Result<Vec<RevisionRecord>, CoreError> {
+    ) -> Result<Vec<RevisionRecord>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let mut revisions = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revisions_for_inode_page_desc(segments, inode_id, start_after, limit)
+            manifest_index::revisions_by_inode_page_desc(segments, inode_id, start_after, limit)
                 .await?
         } else {
             Vec::new()
         };
-        revisions.extend(self.row_revisions_for_inode_page_desc(inode_id, start_after));
+        revisions.extend(self.row_revisions_by_inode_page_desc(inode_id, start_after));
         revisions.retain(|revision| revision.committed_seq <= self.visible_seq());
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
@@ -472,7 +463,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn latest_attributes_revision(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<AttributesRevisionRecord>, CoreError> {
+    ) -> Result<Option<AttributesRevisionRecord>> {
         let row_record = self
             .row_states()
             .flat_map(|state| state.attributes_revisions())
@@ -482,7 +473,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|record| attributes_order_key(record))
             .cloned();
         let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::attributes_for_inode(segments, inode_id, self.visible_seq()).await?
+            manifest_index::attributes_by_inode(segments, inode_id, self.visible_seq()).await?
         } else {
             None
         };
@@ -496,7 +487,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn latest_access_revision(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<AccessRevisionRecord>, CoreError> {
+    ) -> Result<Option<AccessRevisionRecord>> {
         let row_record = self
             .row_states()
             .flat_map(|state| state.access_revisions())
@@ -506,7 +497,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|record| access_order_key(record))
             .cloned();
         let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::access_for_inode(segments, inode_id, self.visible_seq()).await?
+            manifest_index::access_by_inode(segments, inode_id, self.visible_seq()).await?
         } else {
             None
         };
@@ -525,7 +516,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn attributes_at_visible_seq(
         &self,
         inode_id: InodeId,
-    ) -> Result<(AttributesRevisionNo, Attributes), CoreError> {
+    ) -> Result<(AttributesRevisionNo, Attributes)> {
         Ok(self
             .latest_attributes_revision(inode_id)
             .await?
@@ -538,7 +529,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn attributes_projection_at_visible_seq(
         &self,
         inode_id: InodeId,
-    ) -> Result<AttributesProjection, CoreError> {
+    ) -> Result<AttributesProjection> {
         Ok(self
             .latest_attributes_revision(inode_id)
             .await?
@@ -561,7 +552,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn content_head(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<Option<u64>, CoreError> {
+    ) -> Result<Option<u64>> {
         let tail_size = self
             .row_states()
             .flat_map(|state| state.revisions())
@@ -580,7 +571,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn content_published(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<bool> {
         if self.row_states().any(|state| {
             state.revisions().iter().any(|row| {
                 &row.content_ref.content_id == content_id && row.committed_seq <= self.visible_seq()
@@ -594,7 +585,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn content_layout(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<Option<ContentLayoutRecord>, CoreError> {
+    ) -> Result<Option<ContentLayoutRecord>> {
         let tail = self
             .row_states()
             .flat_map(|state| state.content_layouts())
@@ -614,7 +605,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,
-    ) -> Result<Option<CommitReceiptRecord>, CoreError> {
+    ) -> Result<Option<CommitReceiptRecord>> {
         // Each row state answers from its receipt index (newest per commit
         // id) instead of a scan over every receipt row; the seq guard stays
         // as written even though composed states never hold rows past the
@@ -636,10 +627,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|receipt| receipt.committed_seq))
     }
 
-    pub(crate) async fn commit_at_seq(
-        &self,
-        seq: ChangeSeq,
-    ) -> Result<Option<WalCommitPayload>, CoreError> {
+    pub(crate) async fn commit_at_seq(&self, seq: ChangeSeq) -> Result<Option<WalCommitPayload>> {
         if seq > self.visible_seq() {
             return Ok(None);
         }
@@ -660,7 +648,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         after_seq: ChangeSeq,
         limit: usize,
-    ) -> Result<Vec<WalCommitPayload>, CoreError> {
+    ) -> Result<Vec<WalCommitPayload>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -695,14 +683,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn current_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         visibility::current_parent_binding_for_child(&mut self.reads(), child_inode_id).await
     }
 
     pub(super) async fn latest_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         if child_inode_id == ROOT_INODE_ID {
             return Ok(None);
         }
@@ -714,7 +702,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn covering_subtree_tombstone(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
         visibility::covering_subtree_tombstone(&mut self.reads(), inode_id).await
     }
 
@@ -722,7 +710,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<bool> {
         visibility::would_create_directory_cycle(&mut self.reads(), inode_id, new_parent_inode_id)
             .await
     }
@@ -731,7 +719,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
@@ -742,7 +730,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
         let tombstones = self.tombstones_for_root(root_inode_id).await?;
         let active = super::rows::active_tombstone_from_records(
             tombstones.iter().cloned(),
@@ -755,7 +743,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<SharedRows<DirentryBindingRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindingRecord>> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
             name_key: name_key.clone(),
@@ -786,7 +774,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<SharedRows<DirentryBindingRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindingRecord>> {
         self.shared_rows(
             |inner| &mut inner.binds_for_child,
             child_inode_id,
@@ -803,7 +791,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         .await
     }
 
-    fn row_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+    fn row_latest_revision_by_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
         self.row_states()
             .flat_map(|state| state.revisions())
             .filter(|revision| {
@@ -813,7 +801,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned()
     }
 
-    fn row_revision_for_inode_no(
+    fn row_revision_by_inode_no(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -829,7 +817,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned()
     }
 
-    fn row_revisions_for_inode_page_desc(
+    fn row_revisions_by_inode_page_desc(
         &self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
@@ -862,7 +850,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         start_after: Option<(ChangeSeq, InodeId)>,
         limit: usize,
-    ) -> Result<Vec<RecoverableDeletion>, CoreError> {
+    ) -> Result<Vec<RecoverableDeletion>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -908,7 +896,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
                 let segments = self
                     .manifest_segments()
-                    .expect("a view without manifest segments starts its scan exhausted");
+                    .expect("a view without manifest segments should start its scan exhausted");
                 let page = manifest_index::active_deletions_page(
                     segments,
                     &durable.lower_bound,
@@ -933,7 +921,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 durable
                     .buffered
                     .pop_front()
-                    .expect("a non-empty buffer yields a row")
+                    .expect("a non-empty buffer should yield a row")
             };
             // A row present in both the manifest and the replayed tail is one
             // deletion, not two.
@@ -954,7 +942,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
-    ) -> Result<SharedRows<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<SharedRows<SubtreeTombstoneRecord>> {
         self.shared_rows(
             |inner| &mut inner.tombstones_for_root,
             root_inode_id,
@@ -984,7 +972,10 @@ pub(crate) struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, '_, S> {
     type Error = CoreError;
 
-    async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+    async fn find_inode(
+        &mut self,
+        inode_id: InodeId,
+    ) -> std::result::Result<Option<InodeRecord>, Self::Error> {
         self.view.inode_at_seq(inode_id).await
     }
 
@@ -992,14 +983,14 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
+    ) -> std::result::Result<Option<DirentryBindingRecord>, Self::Error> {
         self.view.bound_child(parent_inode_id, name_key).await
     }
 
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
+    ) -> std::result::Result<Option<DirentryBindingRecord>, Self::Error> {
         self.view
             .latest_parent_binding_for_child(child_inode_id)
             .await
@@ -1008,14 +999,14 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
     async fn find_active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+    ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         self.view.active_subtree_tombstone(root_inode_id).await
     }
 
     async fn find_access_row(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<AccessRevisionRecord>, Self::Error> {
+    ) -> std::result::Result<Option<AccessRevisionRecord>, Self::Error> {
         self.view.latest_access_revision(inode_id).await
     }
 }

@@ -195,7 +195,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "retention should validate manifest descriptors without loading metadata segment payloads"
     );
@@ -239,12 +239,12 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "retention should advance from manifest descriptors without materializing rows"
     );
     assert_eq!(
-        store.count(OperationClass::Head),
+        store.count(OperationSelector::Head),
         referenced_segment_count,
         "retention should verify each distinct referenced segment"
     );
@@ -991,7 +991,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
         loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
             &namespace_id,
         )),
-        loonfs_test_support::stores::OperationClass::Read,
+        loonfs_test_support::stores::OperationSelector::Read,
         loonfs_test_support::stores::InjectedError::Transport("verification failed".to_owned()),
     );
     store.fail_next(1);
@@ -1041,7 +1041,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for round in 0..boundary - 2 {
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1068,7 +1068,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         store,
         KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
     );
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("at-the-boundary").expect("commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -1106,8 +1106,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         &original
     );
     assert_eq!(
-        replay.wal_tail_objects,
-        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
+        replay.wal_tail.map(|tail| tail.objects),
+        Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
     );
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 0);
@@ -1167,8 +1167,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         );
     }
     assert_eq!(
-        mixed.wal_tail_objects,
-        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
+        mixed.wal_tail.map(|tail| tail.objects),
+        Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
     );
     assert_eq!(
         store.counts().puts,
@@ -1204,9 +1204,9 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -1313,11 +1313,11 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     }
 
     let manifest_before = current_manifest_no(&store, &namespace_id).await;
-    let tiny_byte_policy = MetadataLsmPolicy {
+    let tiny_byte_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     store.reset();
     let blocked = super::compaction_step(
@@ -1338,18 +1338,18 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         manifest_before,
         "a step that plans a compaction must not publish"
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert!(
-        store.count(OperationClass::Read) <= group.families().len(),
+        store.count(OperationSelector::Read) <= group.families().len(),
         "byte preflight should read only the oldest candidate's index sections"
     );
 
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_rows_per_step: NonZeroUsize::new(6)
             .expect("test row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     store.reset();
     let published = super::compaction_step(
@@ -1377,7 +1377,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
     assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
     assert!(
-        store.count(OperationClass::Read) <= input_runs * group.families().len() * 2,
+        store.count(OperationSelector::Read) <= input_runs * group.families().len() * 2,
         "the step should read index and data sections only for selected-run family segments"
     );
 }
@@ -1417,12 +1417,12 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         .await
         .expect("visible state before bounded compaction");
     let unlimited = NonZeroUsize::new(usize::MAX).expect("usize max should be nonzero");
-    let bounded_policy = MetadataLsmPolicy {
+    let bounded_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     let first = super::compaction_step(
         &bounded_store,
@@ -1448,12 +1448,12 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
 
     let (bounded_manifest_no, bounded_steps_after_first) =
         drain_compaction(&bounded_store, &namespace_id, bounded_policy).await;
-    let unbounded_policy = MetadataLsmPolicy {
+    let unbounded_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: unlimited,
         max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     let (unbounded_manifest_no, unbounded_steps) =
         drain_compaction(&unbounded_store, &namespace_id, unbounded_policy).await;
@@ -1527,11 +1527,11 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -1591,7 +1591,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..policy
         },
@@ -1642,11 +1642,11 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -1696,7 +1696,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..policy
         },
@@ -1737,9 +1737,9 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -1872,7 +1872,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         &store,
         &namespace_id,
         &overrun,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         Arc::default(),
         &tokio::sync::Semaphore::new(32),
     )
@@ -1931,7 +1931,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         .expect("read manifest")
         .state;
 
-    let merge_everything = MetadataLsmPolicy {
+    let merge_everything = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
@@ -1979,7 +1979,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
 async fn select_compaction_window<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     requested_group: Option<MetadataFamilyGroup>,
 ) -> (
     MetadataFamilyGroup,
@@ -2048,14 +2048,14 @@ fn group_segment_object_keys(
 
 /// A per-step row budget one row short of what the group's base run needs,
 /// with the trigger forced so a single delta run still merges.
-fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataLsmPolicy {
+fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataRunPolicy {
     let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
-    MetadataLsmPolicy {
+    MetadataRunPolicy {
         small_run_bytes: NonZeroUsize::MIN,
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
             .expect("test row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     }
 }
 
@@ -2076,9 +2076,9 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -2094,7 +2094,7 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     .await
     .expect("load the parked manifest");
     let (group, _) =
-        select_compaction_window(&store, &namespace_id, MetadataLsmPolicy::default(), None).await;
+        select_compaction_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
     let base = base_tier(&before.manifest);
     let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
@@ -2186,9 +2186,9 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -2232,7 +2232,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let (group, _) = select_compaction_window(
         &store,
         &namespace_id,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         Some(MetadataFamilyGroup::Bindings),
     )
     .await;
@@ -2270,7 +2270,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let base_before = group_base_runs(&before.manifest, group.families());
 
     // The same window also remains a delta when its execution needs a job.
-    let job_policy = MetadataLsmPolicy {
+    let job_policy = MetadataRunPolicy {
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..policy
     };
@@ -2352,9 +2352,9 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -2384,7 +2384,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     .await
     .expect("load the manifest");
     let (group, _) =
-        select_compaction_window(&store, &namespace_id, MetadataLsmPolicy::default(), None).await;
+        select_compaction_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
     let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
     let mut delta_rows = delta_runs(&before.manifest)
         .iter()
@@ -2401,13 +2401,13 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         row_budget < base_rows + wide && row_budget < wide,
         "budget {row_budget} must exclude the wide run ({wide}) alone and beside the base ({base_rows})"
     );
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(
             usize::try_from(row_budget).expect("test row counts are small"),
         )
         .expect("test row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
 
     let (_, selection) = select_compaction_window(&store, &namespace_id, policy, None).await;
@@ -2461,11 +2461,11 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         .expect("bootstrap");
     // Small segments so the merged base is many segments rather than one, and
     // a row budget the groups outgrow within a couple of cycles.
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
         max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
 
     let group = group_containing(ApiMetadataRowFamily::DirentryBinds);

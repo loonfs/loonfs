@@ -41,7 +41,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         .await
         .expect("upload");
     for (commit_id, paths) in [("first", vec!["/one", "/two"]), ("again", vec!["/three"])] {
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::parse(commit_id).expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -92,16 +92,16 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
     assert_eq!(first.layout.extents.len(), 1);
     assert_eq!(first.layout.extents[0].object, ExtentObject::Whole);
     for (revision, added, expected_lengths) in [
-        (2, 10, vec![100, 10]),
+        (2_u8, 10, vec![100, 10]),
         (3, 3, vec![100, 10, 3]),
         (4, 2, vec![100, 15]),
     ] {
         let start = bytes.len();
-        bytes.resize(start + added, b'b' + revision as u8);
+        bytes.resize(start + added, b'b' + revision);
         let reference = commit_piece(
             &store,
             &namespace_id,
-            (inode_id, RevisionNo(revision)),
+            (inode_id, RevisionNo(u64::from(revision))),
             &original.content_id,
             &bytes,
             start,
@@ -138,7 +138,7 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
             ) == (revision == 4)
         );
         assert_eq!(
-            read_file(&store, &namespace_id, RevisionNo(revision)).await,
+            read_file(&store, &namespace_id, RevisionNo(u64::from(revision))).await,
             bytes
         );
     }
@@ -183,7 +183,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         .expect("location");
     store.reset();
     assert_eq!(
-        location.get_bytes(&store, &reference).await.expect("read"),
+        location.read_bytes(&store, &reference).await.expect("read"),
         bytes
     );
     assert_eq!(store.counts().gets, 3);
@@ -200,14 +200,14 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         .expect("prefix location");
     store.reset();
     assert_eq!(
-        older.get_bytes(&store, &prefix).await.expect("prefix"),
+        older.read_bytes(&store, &prefix).await.expect("prefix"),
         bytes[..105]
     );
     assert_eq!(store.counts().gets, 2);
     let missing = content_span(&namespace_id, &original.content_id, 100, 110);
     store.delete(&missing).await.expect("delete span");
     assert!(
-        matches!(location.get_bytes(&store, &reference).await, Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing)
+        matches!(location.read_bytes(&store, &reference).await, Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing)
     );
 }
 
@@ -460,7 +460,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -518,13 +518,13 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
-    for (revision, added) in [(2, 10), (3, 3)] {
+    for (revision, added) in [(2_u8, 10), (3, 3)] {
         let offset = bytes.len();
-        bytes.resize(offset + added, b'b' + revision as u8);
+        bytes.resize(offset + added, b'b' + revision);
         commit_piece(
             &store,
             &namespace_id,
-            (inode_id, RevisionNo(revision)),
+            (inode_id, RevisionNo(u64::from(revision))),
             &original.content_id,
             &bytes,
             offset,
@@ -666,7 +666,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     .await
     .expect("other shard content");
     let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -836,7 +836,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         &mut engine,
         &store,
         &context,
-        CommitCandidate::new(CommitRequest::single(
+        CommitCandidate::new(CommitIntent::single(
             CommitId::parse("copy").expect("commit"),
             loonfs_test_support::test_actor(),
             None,
@@ -983,7 +983,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1000,7 +1000,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let blocked = loonfs_test_support::stores::BlockingStore::new(
             store.clone(),
             KeyPredicate::content_blob(),
-            loonfs_test_support::stores::OperationClass::Put,
+            loonfs_test_support::stores::OperationSelector::Put,
         );
         let view = load_current_metadata_view(&blocked, &namespace_id)
             .await
@@ -1065,7 +1065,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
 
 #[tokio::test]
 async fn two_chains_in_one_fold_share_one_write_permit() {
-    use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationClass};
+    use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationSelector};
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let values = vec![
@@ -1079,7 +1079,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         BlockingStore::new(
             store.clone(),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::content_blob(),
     );
@@ -1137,7 +1137,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
-    let candidate = CommitCandidate::new(CommitRequest::single(
+    let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("copy").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -1198,7 +1198,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             .await
             .expect("view");
         let read = view
-            .get_file_revision_bytes(
+            .read_file_revision_bytes(
                 &store,
                 "/target-0",
                 RevisionNo(2),
@@ -1316,7 +1316,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1333,7 +1333,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("view");
-        let candidate = CommitCandidate::new(CommitRequest::single(
+        let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("reference").expect("commit"),
             loonfs_test_support::test_actor(),
             None,
@@ -1391,7 +1391,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let replacement = CommitCandidate::with_inline_content(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::parse("replace").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1480,7 +1480,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 .await
                 .expect("view");
             let bytes = view
-                .get_file_revision_bytes(
+                .read_file_revision_bytes(
                     &store,
                     if restore { "/file-0" } else { "/target-0" },
                     RevisionNo(if restore { 4 } else { 2 }),

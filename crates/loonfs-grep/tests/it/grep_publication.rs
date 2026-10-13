@@ -8,7 +8,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GREP_GC_GRACE_WINDOW_MS};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use loonfs_types::{ErrorCode, ManifestNo, PageRequest};
 use std::num::NonZeroUsize;
@@ -20,7 +20,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("publication-recovery");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("publication-recovery")
+        .writer_id(loonfs_test_support::ids::writer_id("publication-recovery"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -43,7 +43,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let failing = FailStore::new(
         base.clone(),
         KeyPredicate::exact(first_key.clone()),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost enable acknowledgement".to_owned()),
     )
     .apply_then_fail();
@@ -51,7 +51,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let blocking = Arc::new(BlockingStore::new(
         failing,
         KeyPredicate::exact(first_key.clone()),
-        OperationClass::Get,
+        OperationSelector::Get,
     ));
     let uncertain_store: SharedObjectStore = blocking.clone();
     let uncertain = GrepHost::new(&uncertain_store, "uncertain-enable").await;
@@ -88,12 +88,12 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             .await
             .expect("head")
             .expect("successor exists")
-            .last_modified_ms
+            .last_modified_at_ms
             .expect("timestamp");
         // Advance GC's explicit clock past manifest retention without sleeping.
         successor
             .worker
-            .garbage_collect_namespace(&namespace_id, modified + GREP_GC_GRACE_WINDOW_MS + 1)
+            .gc_namespace(&namespace_id, modified + GREP_GC_GRACE_WINDOW_MS + 1)
             .await
             .expect("collect the old manifest");
         assert!(base.get(&first_key, None).await.expect("first").is_none());
@@ -116,7 +116,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("unknown-enable")
+        .writer_id(loonfs_test_support::ids::writer_id("unknown-enable"))
         .build()
         .await
         .expect("writer");
@@ -127,7 +127,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let failing = FailStore::new(
         base.clone(),
         KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(1))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost enable request".to_owned()),
     );
     failing.fail_next(1);

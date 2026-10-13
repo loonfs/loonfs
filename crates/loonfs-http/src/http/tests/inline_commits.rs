@@ -39,8 +39,7 @@ impl Harness {
         let mut config = test_options(directory.path(), "inline-host");
         config.binding.inline_content = inline_content;
         config.binding.serves_maintenance = false;
-        config.binding.serves_grep = false;
-        config.binding.maintains_grep_index = false;
+        config.binding.grep = JobMode::Disabled;
         let (router, state) = test_app(config, options_with_store(store.clone()))
             .await
             .expect("app");
@@ -169,7 +168,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     let request = inline_request("small", "/file", "c2FtZQ==");
     let (status, first) = harness.commit(request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(harness.store.count(OperationClass::Put), 1);
+    assert_eq!(harness.store.count(OperationSelector::Put), 1);
     assert_eq!(harness.family_requests(DurableObjectFamily::WalObject), 1);
     assert_eq!(
         harness.family_requests(DurableObjectFamily::UploadSession),
@@ -193,7 +192,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["code"], ErrorCode::CommitIdReuseConflict.as_str());
-    assert_eq!(harness.store.count(OperationClass::Put), 0);
+    assert_eq!(harness.store.count(OperationSelector::Put), 0);
 
     let (_, upload) = harness
         .request(
@@ -251,7 +250,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     let (status, conflict) = harness.commit(staged).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["code"], ErrorCode::CommitIdReuseConflict.as_str());
-    assert_eq!(harness.store.count(OperationClass::Put), 0);
+    assert_eq!(harness.store.count(OperationSelector::Put), 0);
     harness.state.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -273,7 +272,7 @@ async fn append_commits_write_only_wal_and_replay_by_bytes() {
     harness.store.reset();
     let (status, appended) = harness.commit(append("append", b" two")).await;
     assert_eq!(status, StatusCode::OK, "{appended}");
-    assert_eq!(harness.store.count(OperationClass::Put), 1);
+    assert_eq!(harness.store.count(OperationSelector::Put), 1);
     assert_eq!(harness.family_requests(DurableObjectFamily::WalObject), 1);
     assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
     assert_eq!(appended["events"][0]["kind"], "content_changed");
@@ -301,7 +300,7 @@ async fn append_commits_write_only_wal_and_replay_by_bytes() {
             assert_eq!(error["param"], "/operations/0/inline_content");
         }
     }
-    assert_eq!(harness.store.count(OperationClass::Put), 0);
+    assert_eq!(harness.store.count(OperationSelector::Put), 0);
     harness.state.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -364,7 +363,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
                 }
             }
         }
-        assert_eq!(harness.store.count(OperationClass::Put), 0);
+        assert_eq!(harness.store.count(OperationSelector::Put), 0);
         harness.state.runtime.shutdown().await.expect("shutdown");
     }
 }

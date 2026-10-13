@@ -1,7 +1,7 @@
 //! Constructor-validated grep manifest payload and its discovery hint.
 
 use super::error::GrepManifestStateError;
-use loonfs_types::format::sst_blocks::BlockHandle;
+use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +18,12 @@ pub struct GrepHint {
 /// Each phase stores only the position it needs. A backfill records its
 /// target and progress. An active index records how far indexing has
 /// progressed.
+///
+/// The wire twin is `GrepIndexLifecycle` in `loonfs-types`, and the fields
+/// differ because this record tags variants with `kind` and always writes
+/// `next_event_index`, while the API response tags variants with `status`,
+/// writes inode IDs in their public `ino_` form, and omits a zero
+/// `next_event_index`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
@@ -159,14 +165,12 @@ impl ChangeFeedResume {
         self.built_through_seq
     }
 
-    pub(crate) fn start_event_index(
-        self,
-        change_seq: ChangeSeq,
-    ) -> std::result::Result<usize, std::num::TryFromIntError> {
+    pub(crate) fn start_event_index(self, change_seq: ChangeSeq) -> usize {
         if change_seq == self.built_through_seq {
             usize::try_from(self.next_event_index)
+                .expect("a `u32` event index should fit in `usize`")
         } else {
-            Ok(0)
+            0
         }
     }
 
@@ -250,10 +254,10 @@ impl GrepManifestState {
     pub fn index_stored_bytes(&self) -> crate::Result<u64> {
         self.segments.iter().try_fold(0_u64, |total, segment| {
             let key = crate::keyspace::segment_key(&self.namespace_id, &segment.segment_id);
-            let bytes = crate::index_read::segment_object_len(&key, segment)?;
+            let bytes = crate::index_read::segment_object_bytes(&key, segment)?;
             total
                 .checked_add(bytes)
-                .ok_or_else(|| crate::GrepError::CorruptIndex {
+                .ok_or_else(|| crate::GrepError::IndexCorrupt {
                     message: "index byte count overflow".to_owned(),
                 })
         })

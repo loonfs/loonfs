@@ -44,7 +44,7 @@ fn state_from_attributes(records: Vec<AttributesRevisionRecord>) -> MetadataStat
     for record in records {
         builder.push_attributes_revision(record);
     }
-    builder.finish()
+    builder.build()
 }
 
 fn attribute_rows(state: &MetadataState) -> BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>> {
@@ -211,9 +211,9 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &namespace_id,
         &state,
         &HashMap::new(),
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -301,9 +301,9 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
     let expected = manifest_rows_for_family(&state, ApiMetadataRowFamily::Attributes);
 
     for target_bytes in [1, 128 * 1024] {
-        let policy = MetadataLsmPolicy {
+        let policy = MetadataRunPolicy {
             target_segment_bytes: NonZeroUsize::new(target_bytes).expect("target"),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         };
         let families = build_manifest_segments(&store, &namespace, &state, &HashMap::new(), policy)
             .await

@@ -78,8 +78,11 @@ impl ObjectStore for MemoryStore {
                         object_key: key.to_owned(),
                     });
                 }
-                let end = range.end_exclusive.min(object.bytes.len() as u64) as usize;
-                Bytes::from(object.bytes).slice(range.start_inclusive as usize..end)
+                let end = loonfs_types::usize_from_u64(
+                    range.end_exclusive.min(object.bytes.len() as u64),
+                );
+                Bytes::from(object.bytes)
+                    .slice(loonfs_types::usize_from_u64(range.start_inclusive)..end)
             }
             None => Bytes::from(object.bytes),
         };
@@ -109,7 +112,7 @@ impl ObjectStore for MemoryStore {
             etag: Some(objects.version.to_string()),
             version: None,
             size_bytes: bytes.len() as u64,
-            last_modified_ms: Some(0),
+            last_modified_at_ms: Some(0),
             checksum: Some(Checksum::compute(self.algorithm, &bytes)),
         };
         objects.entries.insert(
@@ -148,7 +151,7 @@ impl ObjectStore for MemoryStore {
             .map(|(key, object)| {
                 Ok(ListedObject {
                     key: key.clone(),
-                    last_modified_ms: object.metadata.last_modified_ms,
+                    last_modified_at_ms: object.metadata.last_modified_at_ms,
                 })
             })
             .collect();

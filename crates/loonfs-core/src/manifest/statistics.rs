@@ -1,6 +1,6 @@
 //! Activity and referenced storage at one immutable manifest.
 
-use super::block_fetch::segment_object_len;
+use super::index_block_load::segment_object_bytes;
 use super::publish::manifest_ref_for;
 use super::runs::MANIFEST_ROW_FAMILIES;
 use crate::error::{CoreError, Result};
@@ -91,7 +91,7 @@ fn manifest_statistics(
     for segment in payload.runs.iter().flat_map(|run| &run.segments) {
         *segments_by_family.entry(segment.family).or_default() += 1;
         metadata_stored_bytes = metadata_stored_bytes
-            .checked_add(segment_object_len(segment))
+            .checked_add(segment_object_bytes(segment))
             .ok_or_else(|| {
                 CoreError::NamespaceCorrupt("metadata byte count overflow".to_owned())
             })?;

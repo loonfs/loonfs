@@ -372,7 +372,7 @@ impl MetadataStateBuilder {
         self.state.push_access_revision_record(record);
     }
 
-    pub(crate) fn finish(mut self) -> MetadataState {
+    pub(crate) fn build(mut self) -> MetadataState {
         self.state.rebuild_indexes();
         self.state
     }

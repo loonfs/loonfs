@@ -2,10 +2,10 @@
 //! segments a manifest references.
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
-use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, MANIFEST_ROW_FAMILIES};
-use crate::error::{CoreError, Result};
+use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
+use crate::error::Result;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataState;
-use crate::store_waves::STORE_WRITE_WAVE;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -15,14 +15,14 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
 };
 #[cfg(test)]
-pub(super) use loonfs_types::format::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
-use loonfs_types::format::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
+pub(super) use loonfs_types::format::segment_blocks::DEFAULT_MAX_INLINE_FILTER_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
+use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
 use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 
 /// Most encoded segment bytes one fold or compaction holds while their puts
-/// run. The `STORE_WRITE_WAVE` count alone allows 128 MiB of 8 MiB segments;
+/// run. The `STORE_WRITES_IN_FLIGHT` count alone allows 128 MiB of 8 MiB segments;
 /// 32 MiB is about four such segments and still admits a fold's usual seven
 /// small segments at once.
 const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
@@ -32,7 +32,7 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
@@ -78,7 +78,7 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
@@ -106,7 +106,7 @@ pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
     mut rows_for_family: RowsForFamily,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>>
 where
     S: ObjectStore + ?Sized,
@@ -117,7 +117,7 @@ where
     for family in MANIFEST_ROW_FAMILIES {
         let mut writer = MetadataSegmentWriter::new(family, namespace_id);
         for row in rows_for_family(family) {
-            writer.push(row, &mut |_| {})?;
+            writer.push(row, &mut |_| {});
             writer.roll_full_segments(&mut puts, policy).await?;
         }
         segments_by_family.push(MetadataFamilySegments {
@@ -167,7 +167,7 @@ fn prepare_manifest_segment(
 }
 
 /// The segment puts in flight for one fold or compaction, bounded by
-/// `STORE_WRITE_WAVE` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
+/// `STORE_WRITES_IN_FLIGHT` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
 pub(super) struct MetadataSegmentPuts<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
@@ -185,7 +185,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
 
     async fn wait_for_capacity(&mut self, bytes: usize) -> Result<()> {
         while !self.pending.is_empty()
-            && (self.pending.len() >= STORE_WRITE_WAVE
+            && (self.pending.len() >= STORE_WRITES_IN_FLIGHT
                 || self.pending_bytes.saturating_add(bytes) > MAX_PENDING_SEGMENT_BYTES)
         {
             self.wait_for_put().await?;
@@ -265,11 +265,7 @@ impl<'a> MetadataSegmentWriter<'a> {
         }
     }
 
-    pub(super) fn push(
-        &mut self,
-        row: MetadataRow,
-        fold_encoded_row: &mut impl FnMut(&[u8]),
-    ) -> Result<()> {
+    pub(super) fn push(&mut self, row: MetadataRow, fold_encoded_row: &mut impl FnMut(&[u8])) {
         let encoded = self
             .builder
             .push_with_encoded_row(
@@ -277,17 +273,14 @@ impl<'a> MetadataSegmentWriter<'a> {
                 &row.filter_key_for_family(self.family),
                 &row,
             )
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
-            })?;
+            .expect("a metadata segment row should encode in ascending key order");
         fold_encoded_row(&encoded);
-        Ok(())
     }
 
     pub(super) async fn roll_full_segments<S: ObjectStore + ?Sized>(
         &mut self,
         puts: &mut MetadataSegmentPuts<'_, S>,
-        policy: MetadataLsmPolicy,
+        policy: MetadataRunPolicy,
     ) -> Result<()> {
         if self.builder.row_count() >= policy.max_rows_per_segment.get() as u64
             || self.builder.decoded_data_bytes() >= policy.target_segment_bytes.get()
@@ -313,10 +306,8 @@ impl<'a> MetadataSegmentWriter<'a> {
     ) -> Result<()> {
         puts.wait_for_capacity(0).await?;
         let built = std::mem::take(&mut self.builder)
-            .finish()
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
-            })?;
+            .build()
+            .expect("a metadata segment should encode");
         let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);
         puts.put(&descriptor, bytes).await?;
         self.segments.push(descriptor);
@@ -329,7 +320,7 @@ mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{
-        BlockingStore, BufferWatchStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
+        BlockingStore, BufferWatchStore, ConcurrencyWatchStore, KeyPredicate, OperationSelector,
     };
     use tempfile::tempdir;
 
@@ -339,7 +330,7 @@ mod tests {
         prepare_manifest_segment(
             namespace_id,
             MetadataRowFamily::Inodes,
-            builder.finish().expect("segment"),
+            builder.build().expect("segment"),
         )
         .0
     }
@@ -352,14 +343,14 @@ mod tests {
             (vec![budget - 1], 2),
             (vec![1], budget + 1),
             (vec![budget + 1], 1),
-            (vec![1; STORE_WRITE_WAVE], 1),
+            (vec![1; STORE_WRITES_IN_FLIGHT], 1),
         ] {
             let directory = tempdir().expect("tempdir");
             let namespace_id = NamespaceId::parse("segment-byte-budget").expect("namespace id");
             let blocked = BlockingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::metadata_segment(),
-                OperationClass::Put,
+                OperationSelector::Put,
             );
             let concurrency =
                 ConcurrencyWatchStore::new(&blocked, KeyPredicate::metadata_segment());
@@ -395,7 +386,7 @@ mod tests {
             next.await.expect("put after capacity is available");
             puts.finish().await.expect("verified puts");
             assert_eq!(concurrency.puts().total, initial_sizes.len() + 1);
-            assert!(concurrency.puts().peak_in_flight <= STORE_WRITE_WAVE);
+            assert!(concurrency.puts().peak_in_flight <= STORE_WRITES_IN_FLIGHT);
             assert!(
                 store.peaks().peak_live_bytes <= budget.max(next_size).max(initial_sizes[0]) as u64
             );

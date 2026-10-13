@@ -1,7 +1,7 @@
 //! Exact operation logs and derived counts for selected object keys.
 
 use super::{
-    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationContext, OperationSelector,
     Outcome, RecordedOperation,
 };
 use async_trait::async_trait;
@@ -85,7 +85,7 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
     }
 
     /// Returns the current request count for `operation`.
-    pub fn count(&self, operation: OperationClass) -> usize {
+    pub fn count(&self, operation: OperationSelector) -> usize {
         self.interceptor()
             .operations
             .lock()

@@ -10,10 +10,10 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
-use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -53,8 +53,8 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
 
 /// Builds a single-operation request the way every fixture below wants it:
 /// a fixed commit id so retries replay, and no caller annotation.
-fn commit_request(commit_id: &str, operation: FilesystemOperation) -> CommitRequest {
-    CommitRequest::single(
+fn commit_request(commit_id: &str, operation: FilesystemOperation) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("valid test commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -782,7 +782,7 @@ async fn empty_request_is_rejected_before_commit_id_reuse() {
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("empty-reuse").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -858,7 +858,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let candidate = CommitCandidate::new(CommitRequest {
+    let candidate = CommitCandidate::new(CommitIntent {
         preconditions: Vec::new(),
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
@@ -929,7 +929,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
 
     let actor = ActorId::parse("shared-id").expect("actor id");
     let request = |actor: ActorId| {
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("attributed-receipt").expect("commit id"),
             actor,
             Some("receipt identity".to_owned()),
@@ -1323,7 +1323,7 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
     .expect_err("mismatching precondition must fail planning");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");
@@ -1365,7 +1365,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
             prepared_candidate(
                 &store,
                 &namespace_id("demo"),
-                CommitRequest::single(
+                CommitIntent::single(
                     commit_id.clone(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -1399,7 +1399,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     let retry = publish_namespace_commits_batch(
         &store,
         &namespace_id("demo"),
-        vec![CommitCandidate::new(CommitRequest::single(
+        vec![CommitCandidate::new(CommitIntent::single(
             commit_id,
             loonfs_test_support::test_actor(),
             None,
@@ -1427,7 +1427,7 @@ fn directory_with_preconditions(
     commit_id: &str,
     path: &str,
     expected_head_seq: ChangeSeq,
-) -> CommitRequest {
+) -> CommitIntent {
     commit_request(
         commit_id,
         FilesystemOperation::CreateDirectory {
@@ -1515,7 +1515,7 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
 fn scoped_directory(
     commit_id: &str,
     preconditions: Vec<loonfs_types::CommitPrecondition>,
-) -> CommitRequest {
+) -> CommitIntent {
     commit_request(
         commit_id,
         FilesystemOperation::CreateDirectory {

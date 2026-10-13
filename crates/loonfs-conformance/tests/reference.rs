@@ -599,9 +599,9 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     assert_eq!(chunks.len(), expected.part_count);
     let claims = chunks
         .iter()
-        .enumerate()
-        .map(|(index, chunk)| UploadPartChecksumClaim {
-            part_number: index as u32 + 1,
+        .zip(1_u32..)
+        .map(|(chunk, part_number)| UploadPartChecksumClaim {
+            part_number,
             checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect::<Vec<_>>();
@@ -977,7 +977,11 @@ async fn run_append(harness: &Harness, case: &Case) {
         .open_direct_download(&resumed)
         .await
         .expect("open the resumed download");
-    stream.fold_resumed_prefix(&[content, appended].concat()[..expected.resume_offset as usize]);
+    stream
+        .fold_resumed_prefix(
+            &[content, appended].concat()[..loonfs_types::usize_from_u64(expected.resume_offset)],
+        )
+        .expect("fold the held prefix");
     let mut rest = Vec::new();
     while let Some(chunk) = stream
         .next_chunk()
@@ -988,7 +992,8 @@ async fn run_append(harness: &Harness, case: &Case) {
     }
     assert_eq!(
         rest,
-        appended[(expected.resume_offset - expected.previous_size_bytes) as usize..]
+        appended
+            [loonfs_types::usize_from_u64(expected.resume_offset - expected.previous_size_bytes)..]
     );
 
     let refused = client

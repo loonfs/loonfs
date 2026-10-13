@@ -2,7 +2,7 @@ import type { ChecksumAlgorithm, ContentRef, DownloadRange } from "./api/index.j
 const TRANSFER_CHUNK_BYTES = 64 * 1024;
 const MAX_INLINE_BYTES = 64 * 1024;
 const MAX_APPEND_BYTES = 256 * 1024;
-const RANGE_WINDOW = 4;
+const RANGE_RESPONSES_IN_FLIGHT = 4;
 
 interface TransferRequestOptions {
     timeoutInSeconds?: number;
@@ -106,7 +106,7 @@ export function downloadRanges(
     let remaining = 0;
     let cancelled = false;
     const fill = (): void => {
-        while (pending.length < RANGE_WINDOW - 1 && requested < parts.length && !cancelled) {
+        while (pending.length < RANGE_RESPONSES_IN_FLIGHT - 1 && requested < parts.length && !cancelled) {
             scope.check();
             const range = parts[requested++]!;
             const response = send(range.access.url, {

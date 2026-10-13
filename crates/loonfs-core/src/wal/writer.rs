@@ -1,7 +1,8 @@
 //! Assembles and validates data and fence WAL objects before publication.
 
-use super::{PreparedWalObject, WalObjectError};
+use super::PreparedWalObject;
 use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
+use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
 use loonfs_types::{NamespaceId, WriterEpoch};
@@ -11,25 +12,26 @@ pub(crate) fn prepare_wal_object(
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
     records: &[PreparedCommit],
-) -> Result<PreparedWalObject, WalObjectError> {
-    for record in records {
-        if record.commit.namespace_id != namespace_id {
-            return Err(WalObjectError::NamespaceMismatch {
-                expected: namespace_id,
-                actual: record.commit.namespace_id.clone(),
-            });
-        }
-    }
+) -> Result<PreparedWalObject> {
+    assert!(
+        records
+            .iter()
+            .all(|record| record.commit.namespace_id == namespace_id),
+        "every record in a WAL object should belong to namespace `{namespace_id}`"
+    );
     let payload_records: Vec<_> = records
         .iter()
         .map(wal_payload_from_prepared_commit)
         .collect();
     let payload = WalObjectPayload {
         namespace_id,
-        wal_no: head
-            .wal_no
-            .successor()
-            .map_err(|_| WalObjectError::NumberOverflow)?,
+        wal_no: head.wal_no.successor().map_err(|_| {
+            CoreError::NamespaceCorrupt(format!(
+                "the WAL tip is at number {}, the largest WAL number, so no WAL object can \
+                 follow it",
+                head.wal_no
+            ))
+        })?,
         writer_epoch,
         head_seq: payload_records
             .last()
@@ -40,7 +42,8 @@ pub(crate) fn prepare_wal_object(
         records: payload_records,
     };
     let object = encode_wal_object_envelope_zstd(payload)
-        .map_err(|error| WalObjectError::Codec(error.to_string()))?;
-    super::replay::validate_wal_object_for_replay(head.seq, object.envelope())?;
+        .expect("a WAL object this process built should encode");
+    super::replay::validate_wal_object_for_replay(head.seq, object.envelope())
+        .expect("a WAL object this process built should pass replay validation");
     Ok(object)
 }

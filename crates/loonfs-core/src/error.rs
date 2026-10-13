@@ -1,16 +1,17 @@
 //! Core error types and their wire-code classification.
 //!
-//! Core errors must support `Clone` and serialization. Errors from the object
-//! store, codecs, and I/O are therefore stored as messages with the relevant
-//! object key instead of as `#[source]` chains. The server and CLI use source
-//! chains where these constraints do not apply.
+//! Core errors must support `Clone`. Errors from the object store, codecs, and
+//! I/O are therefore stored as messages with the relevant object key instead
+//! of as `#[source]` chains. The server and CLI use source chains where this
+//! constraint does not apply.
 
-use crate::commit::{CommitValidationError, WalPublishError};
+use crate::commit::CommitValidationError;
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
+use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use loonfs_types::{
@@ -19,17 +20,10 @@ use loonfs_types::{
 };
 use thiserror::Error;
 
-/// Public error type returned by `loonfs-core`.
-///
-/// Use [`Error::kind`] for broad caller action and [`Error::code`] for a stable
-/// machine-readable reason.
-pub use self::CoreError as Error;
+/// Result type returned by `loonfs-core`.
+pub type Result<T> = std::result::Result<T, CoreError>;
 
-/// Internal result alias used by core entry points. Public signatures still
-/// expose this as `std::result::Result<T, Error>`.
-pub(crate) type Result<T> = std::result::Result<T, Error>;
-
-pub use loonfs_objectstore::ObjectStoreErrorClass as StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 pub use loonfs_types::{ErrorCode, ErrorKind};
 
 /// Detailed core error.
@@ -57,7 +51,7 @@ pub enum CoreError {
     WalWrite {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
@@ -90,7 +84,7 @@ pub enum CoreError {
         max_bytes: usize,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
-    AppendTooLarge { size_bytes: usize, max_bytes: usize },
+    AppendTooLarge { size_bytes: u64, max_bytes: u64 },
     /// The request contains more items than one batch may read. No items were
     /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]
@@ -108,6 +102,11 @@ pub enum CoreError {
          verification covers the whole object, so all of them are needed first"
     )]
     ResumePrefixIncomplete { start_offset: u64, folded: u64 },
+    /// A resumed read refused prefix bytes: they ran past the resume offset,
+    /// or they arrived after the read fetched content or reached its end.
+    /// None of them was folded.
+    #[error(transparent)]
+    ResumedPrefix(#[from] loonfs_types::ResumedPrefixError),
     #[error("expected file at `{target}` but found `{kind}`")]
     ExpectedFile { target: String, kind: InodeKind },
     #[error("expected directory at `{target}` but found `{kind}`")]
@@ -218,14 +217,22 @@ pub enum CoreError {
     Store {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    #[error("failed to encode `{object_key}`: {message}")]
-    Codec { object_key: String, message: String },
-    /// Non-store internal failure (codec, overflow, invariant breach). Same
-    /// wire code as [`ErrorCode::ServerError`]; the message is the detail.
+    /// A compare-and-swap loop on a control object used every attempt it was
+    /// allowed. Concurrent writers changed the object, or, on snapshot
+    /// renewal, a transport failure left an attempt's outcome unconfirmed.
+    /// Retrying can succeed.
+    #[error(
+        "`{object_key}` reached the limit of {} compare-and-swap attempts",
+        crate::limits::MAX_CONTENTION_ATTEMPTS
+    )]
+    StoreContention { object_key: String },
+    /// A panic that the runtime caught in background work, or a task that
+    /// failed to join. It uses the `server_error` code, and the message is the
+    /// detail. A bug in this process's own computation panics instead.
     #[error("internal error: {0}")]
     Internal(String),
     #[error("namespace `{namespace_id}` already exists")]
@@ -256,10 +263,11 @@ pub enum CoreError {
         actual: ChangeSeq,
         precondition_index: Option<u32>,
     },
-    #[error("{source}")]
+    // The message is the failed operation's own, and `details()` reports the index.
+    #[error("{error}")]
     FailedOperation {
         operation_index: u32,
-        source: Box<CoreError>,
+        error: Box<CoreError>,
     },
 }
 
@@ -269,6 +277,7 @@ pub enum CoreError {
 /// caller action we expect. Normal reads and publishes must return these
 /// errors instead of falling back to a whole-namespace rebuild.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum MetadataViewError {
     #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
     MaintenanceRequired {
@@ -290,6 +299,7 @@ impl MetadataViewError {
 /// These variants name durable/control failure cases without implying that a
 /// full namespace state was reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
@@ -299,8 +309,11 @@ pub enum MetadataProjectionLoadError {
     WalTailLoad(#[from] WalTailLoadError),
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
-    #[error("WAL replay failed: {0}")]
-    WalReplay(#[from] WalObjectError),
+    #[error("WAL object `{object_key}` failed replay: {error}")]
+    WalReplay {
+        object_key: String,
+        error: WalObjectError,
+    },
 }
 
 impl MetadataProjectionLoadError {
@@ -309,11 +322,8 @@ impl MetadataProjectionLoadError {
             Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
-            Self::WalReplay(_) => ErrorCode::NamespaceCorrupt,
-            Self::ManifestLoad(error) => match error.failure_class() {
-                crate::manifest::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
-                crate::manifest::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
-            },
+            Self::WalReplay { .. } => ErrorCode::NamespaceCorrupt,
+            Self::ManifestLoad(error) => error.code(),
         }
     }
 }
@@ -331,29 +341,30 @@ impl From<ImmutableWriteError> for CoreError {
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
                 message: source.public_message().into_owned(),
-                class: StoreFailureClass::of(&source),
+                kind: ObjectStoreErrorKind::of(&source),
             },
             error => Self::Store {
                 object_key: fallback_object_key,
                 message: error.to_string(),
-                class: StoreFailureClass::Other,
+                kind: ObjectStoreErrorKind::Other,
             },
         }
     }
 }
 
-pub(crate) fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
-    match class {
-        StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
-        StoreFailureClass::NotFound
-        | StoreFailureClass::InvalidRequest
-        | StoreFailureClass::InvalidKey
-        | StoreFailureClass::PreconditionFailed
-        | StoreFailureClass::StoredChecksumMissing
-        | StoreFailureClass::Unsupported
-        | StoreFailureClass::Configuration
-        | StoreFailureClass::RetryableTransport
-        | StoreFailureClass::Other => ErrorCode::ServerError,
+/// Returns the wire code for a failed object-store operation of this kind.
+pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
+    match kind {
+        ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
+        ObjectStoreErrorKind::NotFound
+        | ObjectStoreErrorKind::InvalidRequest
+        | ObjectStoreErrorKind::InvalidKey
+        | ObjectStoreErrorKind::PreconditionFailed
+        | ObjectStoreErrorKind::StoredChecksumMissing
+        | ObjectStoreErrorKind::Unsupported
+        | ObjectStoreErrorKind::Configuration
+        | ObjectStoreErrorKind::RetryableTransport
+        | ObjectStoreErrorKind::Other => ErrorCode::ServerError,
     }
 }
 
@@ -364,12 +375,14 @@ impl CoreError {
         Self::Store {
             object_key: object_key.into(),
             message: error.public_message().into_owned(),
-            class: StoreFailureClass::of(error),
+            kind: ObjectStoreErrorKind::of(error),
         }
     }
 
     pub(crate) fn contention_exhausted(object_key: &str) -> Self {
-        Self::Internal(contention_message(object_key))
+        Self::StoreContention {
+            object_key: object_key.to_owned(),
+        }
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -384,12 +397,13 @@ impl CoreError {
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
-            CoreError::Codec { .. } | CoreError::Internal(_) => ErrorCode::ServerError,
-            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                classify_store_failure(*class)
+            CoreError::Internal(_) => ErrorCode::ServerError,
+            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
+                classify_store_failure(*kind)
             }
             CoreError::WalPublish(error) => error.code(),
             CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
+            CoreError::StoreContention { .. } => ErrorCode::StoreContention,
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
             | CoreError::SubjectRequired { .. }
@@ -402,6 +416,7 @@ impl CoreError {
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
+            | CoreError::ResumedPrefix(_)
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::CheckpointNotFound { .. } => ErrorCode::CheckpointNotFound,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
@@ -447,7 +462,7 @@ impl CoreError {
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation stopped a batch says nothing new about
             // what went wrong, so the code stays the failure's own.
-            CoreError::FailedOperation { source, .. } => source.code(),
+            CoreError::FailedOperation { error, .. } => error.code(),
         }
     }
 
@@ -457,7 +472,7 @@ impl CoreError {
         };
         Self::FailedOperation {
             operation_index,
-            source: Box::new(self),
+            error: Box::new(self),
         }
     }
 
@@ -476,10 +491,10 @@ impl CoreError {
             CoreError::WalPublish(WalPublishError::OutcomeUnknown(message)) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
-            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                Some(class.public_message())
+            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
+                Some(kind.public_message())
             }
-            CoreError::FailedOperation { source, .. } => source.object_store_public_message(),
+            CoreError::FailedOperation { error, .. } => error.object_store_public_message(),
             CoreError::DurableContent(
                 DurableContentValidationError::InvalidContentRef(_)
                 | DurableContentValidationError::MissingContentObject { .. }
@@ -506,6 +521,7 @@ impl CoreError {
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
+            | CoreError::ResumedPrefix(_)
             | CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::RootMutationForbidden
@@ -534,8 +550,8 @@ impl CoreError {
             | CoreError::NonDirectoryPathComponent(_)
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
-            | CoreError::Codec { .. }
             | CoreError::OutcomeUnknown { .. }
+            | CoreError::StoreContention { .. }
             | CoreError::Internal(_)
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
@@ -617,21 +633,14 @@ impl CoreError {
             CoreError::CommitValidation(error) => error.details(),
             CoreError::FailedOperation {
                 operation_index,
-                source,
+                error,
             } => Some(ErrorDetails {
                 operation_index: Some(*operation_index),
-                ..source.details().unwrap_or_default()
+                ..error.details().unwrap_or_default()
             }),
             _ => None,
         }
     }
-}
-
-pub(crate) fn contention_message(object_key: &str) -> String {
-    format!(
-        "`{object_key}` lost all {} compare-and-swap attempts to contention",
-        crate::limits::CONTENTION_RETRY_LIMIT
-    )
 }
 
 fn metadata_projection_store_message(
@@ -652,7 +661,7 @@ fn control_object_store_message(
     error: &ControlObjectLoadError,
 ) -> Option<std::borrow::Cow<'static, str>> {
     match error {
-        ControlObjectLoadError::Store { class, .. } => Some(class.public_message()),
+        ControlObjectLoadError::Store { kind, .. } => Some(kind.public_message()),
         _ => None,
     }
 }
@@ -709,8 +718,8 @@ impl std::fmt::Display for WriterFence {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
-        MetadataViewError, StoreFailureClass, WriterFence,
+        CommitValidationError, CoreError, ErrorCode, ErrorKind, ManifestLoadError,
+        MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -924,6 +933,20 @@ mod tests {
         };
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
+
+        let segment_read = CoreError::from(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadSegment {
+                object_key: "namespaces/demo/metadata/segment".to_owned(),
+                message: "permission denied: bucket policy".to_owned(),
+                kind: ObjectStoreErrorKind::PermissionDenied,
+            },
+        ));
+        assert_eq!(segment_read.code(), ErrorCode::StoragePermissionDenied);
+
+        let contended = CoreError::contention_exhausted("namespaces/demo/pins/p");
+        assert_eq!(contended.code(), ErrorCode::StoreContention);
+        assert_eq!(contended.kind(), ErrorKind::Unavailable);
+        assert!(contended.code().retryable_without_operator_action());
     }
 
     #[test]
@@ -931,7 +954,7 @@ mod tests {
         let denied = ControlObjectLoadError::Store {
             object_key: "namespaces/demo/hint.json".to_owned(),
             message: "permission denied: bucket policy".to_owned(),
-            class: StoreFailureClass::PermissionDenied,
+            kind: ObjectStoreErrorKind::PermissionDenied,
         };
 
         let core_wrappers = [

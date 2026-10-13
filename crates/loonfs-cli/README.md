@@ -59,7 +59,7 @@ Global flags
 
   --no-retry
     Disable bounded retry of `server_busy`, `commit_queue_full`,
-    `shutting_down`, and transport errors
+    `store_contention`, `shutting_down`, and transport errors
 
   --no-input
     Never prompt. Fail instead when input would be required

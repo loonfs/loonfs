@@ -30,6 +30,6 @@ mod maintenance;
 mod namespace;
 
 pub use builder::LoonFsBuilder;
-pub use loonfs::{LoonFs, ReadOnly, Writable};
+pub use loonfs::{LoonFs, Mode, ReadOnly, Writable};
 pub use maintenance::{Maintenance, MaintenanceCancellation};
 pub use namespace::Namespace;

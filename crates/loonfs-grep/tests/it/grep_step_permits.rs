@@ -16,7 +16,7 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::delegate_object_store;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -125,7 +125,9 @@ impl ObjectStore for ContentWatch {
 /// reads reach the store.
 async fn content_object_writer(store: &SharedObjectStore) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-step-permits-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "grep-step-permits-writer",
+        ))
         .min_publish_interval_ms(0)
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: None,
@@ -175,7 +177,7 @@ async fn blocking_setup(
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::content_blob(),
-        OperationClass::Get,
+        OperationSelector::Get,
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = content_object_writer(&store).await;

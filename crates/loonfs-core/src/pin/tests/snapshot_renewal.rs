@@ -34,7 +34,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         let failing = FailStore::new(
             inner.clone(),
             KeyPredicate::exact(&key),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost renewal acknowledgement".to_owned()),
         )
         .apply_then_fail();
@@ -44,7 +44,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         let store = BlockingStore::new(
             failing,
             KeyPredicate::exact(&key),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
         );
         let clock = Arc::new(ManualClock::new(context.now_ms));
         store.block_next();
@@ -63,10 +63,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             store.release();
         };
         let (result, ()) = futures::join!(renew, expire);
-        assert_eq!(
-            result.expect("the extension landed").expires_at_ms,
-            Some(1_002)
-        );
+        assert_eq!(result.expect("the extension landed").expires_at_ms, 1_002);
         let stored = load_pin(&inner, &namespace_id, &pin.pin_id)
             .await
             .expect("load");
@@ -110,7 +107,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         let store = BlockingStore::new(
             inner.clone(),
             KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
-            OperationClass::Read,
+            OperationSelector::Read,
         );
         let clock = Arc::new(ManualClock::new(context.now_ms));
         store.block_next();
@@ -176,7 +173,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     let store = BlockingStore::new(
         inner.clone(),
         KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     );
     let clock = Arc::new(ManualClock::new(context.now_ms));
     store.block_next();

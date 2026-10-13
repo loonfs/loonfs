@@ -5,9 +5,9 @@ use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
+use crate::in_flight::STORE_READ_WAVE;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use crate::store_waves::STORE_READ_WAVE;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
@@ -90,11 +90,11 @@ pub(super) fn wal_error(error: WalTailLoadError) -> ControlObjectLoadError {
         WalTailLoadError::ReadWal {
             object_key,
             message,
-            class,
+            kind,
         } => ControlObjectLoadError::Store {
             object_key,
             message,
-            class,
+            kind,
         },
         WalTailLoadError::MissingWalObject { ref object_key }
         | WalTailLoadError::NumberMismatch { ref object_key }

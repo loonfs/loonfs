@@ -3,7 +3,7 @@
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, scrape, series, start_graceful_server};
 use loonfs_client::NamespacePath;
-use loonfs_server::{LocalCacheConfig, MaintenanceMode, ServerConfig};
+use loonfs_server::{JobMode, LocalCacheConfig, ServerConfig};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::CreateCheckpointRequest;
 use std::path::Path;
@@ -34,7 +34,7 @@ fn test_config_with_local_cache(
     writer_id: &str,
 ) -> ServerConfig {
     ServerConfig {
-        maintenance: MaintenanceMode::ServeOnly,
+        maintenance: JobMode::ServeOnly,
         local_cache: Some(LocalCacheConfig {
             path: cache_root.display().to_string(),
             memory_bytes: 4 * 1024 * 1024,

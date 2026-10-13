@@ -40,8 +40,9 @@ use loonfs_types::api::v0::{
     UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus,
+    encode_control_state, ControlObjectKind, ProxiedStaging, UploadAbortOutcome,
+    UploadAlreadyCompletedError, UploadSessionMode, UploadSessionPayload,
+    UploadSessionRecordStatus,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
@@ -211,7 +212,7 @@ fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
         .filter(|size| (MIN_MULTIPART_PART_BYTES..=MAX_MULTIPART_PART_BYTES).contains(&size.get()))
         .ok_or_else(|| {
             CoreError::InvalidUploadContent(format!(
-                "part_size_bytes must be between {MIN_MULTIPART_PART_BYTES} and \
+                "`part_size_bytes` must be between {MIN_MULTIPART_PART_BYTES} and \
                  {MAX_MULTIPART_PART_BYTES} bytes"
             ))
         })
@@ -435,13 +436,8 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
         },
     };
     let object_key = upload_session(catalog.namespace_id(), &upload_id);
-    let encoded =
-        encode_control_state(ControlObjectKind::UploadSession, &state).map_err(|error| {
-            CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
+    let encoded = encode_control_state(ControlObjectKind::UploadSession, &state)
+        .expect("an upload session record should encode");
     let metadata =
         create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
     Ok((state, metadata))
@@ -540,11 +536,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                return Err(CoreError::Internal(
-                    "staging slot requested from a direct upload session".to_owned(),
-                ));
-            };
+            let staging = proxied_staging(&mut state.mode, &upload_id)?;
             match staging {
                 ProxiedStaging::Idle => {
                     *staging = ProxiedStaging::Claimed;
@@ -602,6 +594,26 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Returns the staging state of a service-proxied session.
+///
+/// A session's mode is set when it is created, and every staging step runs
+/// after `read_open_proxied_session` checked that the mode is service-proxied.
+/// Each compare-and-swap attempt reloads the session from the store, so a
+/// reloaded record in another mode is corrupt.
+fn proxied_staging<'a>(
+    mode: &'a mut UploadSessionMode,
+    upload_id: &UploadId,
+) -> Result<&'a mut ProxiedStaging> {
+    match mode {
+        UploadSessionMode::ServiceProxied { staging } => Ok(staging),
+        other => Err(CoreError::NamespaceCorrupt(format!(
+            "upload session `{upload_id}` was service-proxied when staging began, but its \
+             stored mode is now `{}`",
+            upload_mode(other).as_str()
+        ))),
+    }
+}
+
 async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -621,7 +633,7 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     Ok(session)
 }
 
-async fn check_staging_ownership<S: ObjectStore + ?Sized>(
+async fn ensure_staging_ownership<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
@@ -673,7 +685,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
+pub(crate) async fn upload_content_stream<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
@@ -760,7 +772,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             StreamedPayloadKind::Request,
             async {
                 final_request_may_be_sent = true;
-                check_staging_ownership(
+                ensure_staging_ownership(
                     store,
                     namespace_id,
                     upload_id,
@@ -823,11 +835,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
         let staged = staged.clone();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                return Err(CoreError::Internal(
-                    "staged content recorded for a direct upload session".to_owned(),
-                ));
-            };
+            let staging = proxied_staging(&mut state.mode, &upload_id)?;
             if already_present {
                 return Err(CoreError::UploadContentConflict { upload_id });
             }
@@ -1044,7 +1052,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         session.content_id.clone(),
         body,
         payload_kind,
-        check_staging_ownership(
+        ensure_staging_ownership(
             store,
             catalog.namespace_id(),
             &session.upload_id,
@@ -1058,7 +1066,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // The identity is 128 fresh random bits and this session has made no
         // earlier attempt, so an occupied key is corruption rather than a
         // replay, and it fails loudly.
-        return Err(CoreError::Internal(format!(
+        return Err(CoreError::NamespaceCorrupt(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
             content_blob(
                 &staged.content_ref.owner_namespace_id,
@@ -1167,25 +1175,17 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     mode,
                     status: UploadSessionStatus::Aborted { aborted_at_ms },
                 };
-                match state.status {
-                    UploadSessionRecordStatus::Aborted { aborted_at_ms } => Ok(
+                match state.status.abort(now_ms) {
+                    Ok(UploadAbortOutcome::AlreadyAborted { aborted_at_ms }) => Ok(
                         UploadSessionUpdate::Noop((aborted(aborted_at_ms), abandoned)),
                     ),
-                    // Completion is final in the other direction: the
-                    // content may already be published, so an abort cannot
-                    // quietly succeed over it.
-                    UploadSessionRecordStatus::Completed { .. } => {
+                    Err(UploadAlreadyCompletedError) => {
                         Err(CoreError::UploadAlreadyCompleted { upload_id })
                     }
-                    UploadSessionRecordStatus::Open { .. } => {
-                        state.status = UploadSessionRecordStatus::Aborted {
-                            aborted_at_ms: now_ms,
-                        };
-                        Ok(UploadSessionUpdate::Replace {
-                            next: Box::new(state),
-                            outcome: (aborted(now_ms), abandoned),
-                        })
-                    }
+                    Ok(UploadAbortOutcome::Aborted) => Ok(UploadSessionUpdate::Replace {
+                        next: Box::new(state),
+                        outcome: (aborted(now_ms), abandoned),
+                    }),
                 }
             }
         })
@@ -1388,7 +1388,7 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
 ///
 /// The window is what makes content reclamation decidable: past it no new
 /// evidence exists, so no new metadata reference to this content can appear
-/// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
+/// (`limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS`).
 fn evidence_within_window(
     content: &ContentRef,
     completed_at_ms: u64,
@@ -1475,16 +1475,6 @@ fn completion_plan<'a>(
     session: &'a UploadSessionPayload,
     completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
-    let session_mode = upload_mode(&session.mode);
-    let completion_mode = completion.mode();
-    if completion_mode != session_mode {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "completion mode `{}` does not match stored upload mode `{}`",
-            completion_mode.as_str(),
-            session_mode.as_str()
-        )));
-    }
-
     match (&session.mode, completion) {
         (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
             Ok(CompletionPlan::Proxied { staging })
@@ -1518,9 +1508,11 @@ fn completion_plan<'a>(
             checksum_algorithm: *checksum_algorithm,
             parts,
         }),
-        _ => Err(CoreError::Internal(
-            "upload completion mode should match the session mode".to_owned(),
-        )),
+        _ => Err(CoreError::InvalidUploadContent(format!(
+            "completion mode `{}` does not match stored upload mode `{}`",
+            completion.mode().as_str(),
+            upload_mode(&session.mode).as_str()
+        ))),
     }
 }
 
@@ -1611,8 +1603,8 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationContext,
-        OperationKind, RecordingStore,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext, OperationKind,
+        OperationSelector, RecordingStore,
     };
     use loonfs_types::format::control::decode_control_object;
     use tempfile::tempdir;
@@ -1641,7 +1633,7 @@ mod tests {
         let failing = Arc::new(FailStore::new(
             store,
             KeyPredicate::exact(&session_key),
-            OperationClass::Read,
+            OperationSelector::Read,
             InjectedError::Transport("session read failed".to_owned()),
         ));
         let recording = Arc::new(RecordingStore::new(
@@ -1659,7 +1651,7 @@ mod tests {
             .boxed()
         };
 
-        let error = upload_streamed_content(
+        let error = upload_content_stream(
             &recording,
             &namespace_id,
             &session.upload_id,
@@ -1671,7 +1663,7 @@ mod tests {
         .expect_err("the final session read must succeed");
 
         assert!(matches!(error, CoreError::ControlObjectLoad(_)));
-        assert_eq!(recording.count(OperationClass::Read), 1);
+        assert_eq!(recording.count(OperationSelector::Read), 1);
         assert_eq!(recording.counts().puts, 0);
         assert!(recording
             .get(&content_blob(&namespace_id, &loaded.content_id), None)
@@ -1695,7 +1687,7 @@ mod tests {
         let store = FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::Transport("content write timed out".to_owned()),
         );
         store.fail_all();
@@ -1747,7 +1739,7 @@ mod tests {
         let store = BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         let namespace_id = NamespaceId::parse("aborted-buffered-write").expect("namespace id");
         let setup = context(1_000);
@@ -1927,7 +1919,7 @@ mod tests {
         let failing = FailStore::new(
             inner,
             KeyPredicate::exact(&key),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost completion acknowledgement".to_owned()),
         )
         .apply_then_fail();
@@ -2030,7 +2022,7 @@ mod tests {
             .await;
 
             assert_eq!(store.counts().compare_and_swaps, 1);
-            assert_eq!(store.count(OperationClass::Read), usize::from(contended));
+            assert_eq!(store.count(OperationSelector::Read), usize::from(contended));
             if contended {
                 assert!(matches!(completed, Err(CoreError::UploadNotFound { .. })));
             } else {

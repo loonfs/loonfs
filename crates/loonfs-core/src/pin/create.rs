@@ -2,13 +2,13 @@
 
 use super::record::{delete_failed_pin, verify_pin_basis, write_pin, PinBasisVerification};
 use crate::cache::MetadataSegmentCache;
-use crate::commit::WalPublishError;
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::{try_fold_wal, MetadataLsmPolicy, TryFoldWal};
+use crate::manifest::{try_fold_wal, MetadataRunPolicy, TryFoldWalOutcome};
 use crate::time::{Deadline, StdMonotonicTimer};
+use crate::wal::WalPublishError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, PinId};
@@ -16,14 +16,14 @@ use std::sync::Arc;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
 /// format limit.
-const CHECKPOINT_NAME_MAX_CHARS: usize = 128;
+const MAX_CHECKPOINT_NAME_CHARS: usize = 128;
 
 pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     owner: PinOwner,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<PinPayload> {
@@ -42,9 +42,9 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
         )
         .await?
         {
-            TryFoldWal::Settled(basis) => basis,
-            TryFoldWal::RaceLost(_) => {
-                return Ok(CasAttempt::Contended(CoreError::WalPublish(
+            TryFoldWalOutcome::Settled(basis) => basis,
+            TryFoldWalOutcome::RaceLost(_) => {
+                return Ok(CasOutcome::Contended(CoreError::WalPublish(
                     WalPublishError::NumberTaken,
                 )))
             }
@@ -59,8 +59,8 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            Ok(pin) => Ok(CasAttempt::Settled(pin)),
-            Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasAttempt::Contended(error)),
+            Ok(pin) => Ok(CasOutcome::Settled(pin)),
+            Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasOutcome::Contended(error)),
             Err(error) => Err(error),
         }
     })
@@ -126,9 +126,9 @@ fn validate_checkpoint_name(name: &str) -> Result<()> {
             "checkpoint name must not be empty".to_owned(),
         ));
     }
-    if name.chars().count() > CHECKPOINT_NAME_MAX_CHARS {
+    if name.chars().count() > MAX_CHECKPOINT_NAME_CHARS {
         return Err(CoreError::InvalidCheckpointRequest(format!(
-            "checkpoint name exceeds {CHECKPOINT_NAME_MAX_CHARS} characters"
+            "checkpoint name exceeds {MAX_CHECKPOINT_NAME_CHARS} characters"
         )));
     }
     Ok(())

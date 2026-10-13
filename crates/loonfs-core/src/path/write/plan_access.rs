@@ -1,11 +1,11 @@
 //! The publish plan for one access update.
 
-use super::ensure_expected_inode;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
     resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::{CommitOp, CommitValidationError};
+use crate::commit::{CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, ResolvedVisiblePath, VisiblePathError};
 use crate::path::mutation_path::final_component;
@@ -156,7 +156,7 @@ fn update_access(
     let current_revision_no =
         current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
     let base_access_revision_no = expected_access_revision_no.unwrap_or(current_revision_no);
-    CompiledFilesystemOperation::new(vec![CommitOp::UpdateAccess {
+    CompiledFilesystemOperation::new(vec![CommitOperation::UpdateAccess {
         inode_id,
         base_access_revision_no,
         boundary,

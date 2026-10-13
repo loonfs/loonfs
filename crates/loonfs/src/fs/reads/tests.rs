@@ -6,7 +6,7 @@
 //! [`Maintenance::narrow_segment_row_budget`]. Everything else — folds,
 //! compaction planning, and the page read — is the shipped path.
 
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use crate::{
     CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
     SharedObjectStore,
@@ -85,13 +85,15 @@ async fn create_compacted_directory(
     )
     .expect("grants");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("compacted-page-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("compacted-page-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("compacted-page-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "compacted-page-maintenance",
+        ))
         .build()
         .await
         .expect("maintenance")
@@ -161,7 +163,7 @@ async fn create_compacted_directory(
             .collect();
         namespace
             .commit_candidate(CommitCandidate::with_inline_content(
-                CommitRequest {
+                CommitIntent {
                     commit_id: CommitId::generate(),
                     actor_id: actor.clone(),
                     subject: None,
@@ -181,7 +183,7 @@ async fn create_compacted_directory(
     }
     loop {
         let response = maintenance
-            .compact_metadata(namespace_id)
+            .compact_metadata(namespace_id, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact metadata");
         if response.compaction == MetadataCompactionOutcome::NotNeeded {
@@ -264,10 +266,10 @@ async fn compacted_directory_page_overlaps_segment_reads(
         .collect::<BTreeSet<_>>()
         .len();
     let concurrency = reads.reads();
-    let starts_ms = delayed.read_starts_ms();
+    let read_started_at_ms = delayed.read_started_at_ms();
     assert!(
         concurrency.peak_in_flight >= 8,
-        "{concurrency:?}; starts_ms={starts_ms:?}"
+        "{concurrency:?}; read_started_at_ms={read_started_at_ms:?}"
     );
     assert!(
         concurrency.peak_in_flight <= STORE_READ_WAVE,
@@ -276,6 +278,6 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let serial_ms = touched as u128 * latency.as_millis();
     assert!(
         u128::from(elapsed_ms) < serial_ms * 3 / 4,
-        "{elapsed_ms} ms for {touched} segments; starts_ms={starts_ms:?}"
+        "{elapsed_ms} ms for {touched} segments; read_started_at_ms={read_started_at_ms:?}"
     );
 }

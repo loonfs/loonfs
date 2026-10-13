@@ -4,7 +4,7 @@ use super::delete::delete_owned_pin;
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
 use super::record::{encode_pin, load_owned_pin, LoadedPin, PinOwnerKind};
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::{CoreError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::namespace::state::NamespaceReadState;
@@ -12,7 +12,7 @@ use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
+use loonfs_types::{DeleteSnapshotResponse, NamespaceId, PinId, SnapshotSummary};
 use std::sync::Arc;
 
 /// Resolves the read basis a live snapshot lease pins.
@@ -42,7 +42,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     max_lifetime_ms: u64,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<Checkpoint> {
+) -> Result<SnapshotSummary> {
     let deadline = Deadline::start(timer);
     let object_key = pin(namespace_id, snapshot_id);
     retry_while_contended(|| async {
@@ -57,16 +57,16 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
             .min(lifetime_ceiling)
             .max(*expires_at_ms);
         if *expires_at_ms == new_expires_at_ms {
-            return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
+            return Ok(CasOutcome::Settled(super::snapshot_summary(next)));
         }
         *expires_at_ms = new_expires_at_ms;
-        let encoded = encode_pin(&next)?;
+        let encoded = encode_pin(&next);
         match store
             .compare_and_swap(&object_key, &loaded.etag, encoded)
             .await
         {
-            Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+            Ok(_) => Ok(CasOutcome::Settled(super::snapshot_summary(next))),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
                 CoreError::contention_exhausted(&object_key),
             )),
             Err(ObjectStoreError::Transport { .. }) => {
@@ -82,11 +82,9 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                     .expires_at_ms()
                     .expect("a classified snapshot should carry an expiry");
                 if expires_at_ms >= new_expires_at_ms {
-                    Ok(CasAttempt::Settled(super::checkpoint_summary(
-                        current.state,
-                    )))
+                    Ok(CasOutcome::Settled(super::snapshot_summary(current.state)))
                 } else {
-                    Ok(CasAttempt::Contended(CoreError::contention_exhausted(
+                    Ok(CasOutcome::Contended(CoreError::contention_exhausted(
                         &object_key,
                     )))
                 }

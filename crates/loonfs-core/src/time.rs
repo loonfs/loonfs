@@ -12,19 +12,22 @@ pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 #[derive(Debug, Clone)]
 pub struct Deadline {
     timer: Arc<dyn MonotonicTimer>,
-    started_ms: u64,
+    started_at_ms: u64,
 }
 
 impl Deadline {
     /// Starts a deadline at the timer's current time.
     pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
-        let started_ms = timer.monotonic_now_ms();
-        Self { timer, started_ms }
+        let started_at_ms = timer.monotonic_now_ms();
+        Self {
+            timer,
+            started_at_ms,
+        }
     }
 
     /// Returns the milliseconds elapsed since the deadline started.
     pub fn elapsed_ms(&self) -> u64 {
-        self.now_ms().saturating_sub(self.started_ms)
+        self.now_ms().saturating_sub(self.started_at_ms)
     }
 
     fn now_ms(&self) -> u64 {
@@ -40,12 +43,12 @@ impl Deadline {
     pub(crate) fn origin(&self) -> Observation {
         Observation {
             timer: Arc::clone(&self.timer),
-            at_ms: self.started_ms,
+            at_ms: self.started_at_ms,
         }
     }
 
     pub(crate) fn elapsed_at(&self, observation: &Observation) -> u64 {
-        observation.at_ms.saturating_sub(self.started_ms)
+        observation.at_ms.saturating_sub(self.started_at_ms)
     }
 
     /// Returns `MetadataPublicationBudgetExceeded` once more than
@@ -108,7 +111,7 @@ impl Observation {
 /// The wall clock a writer stamps into durable state.
 pub trait WallClock: std::fmt::Debug + Send + Sync {
     /// Unix milliseconds now.
-    fn now_ms(&self) -> Result<u64>;
+    fn now_ms(&self) -> u64;
 }
 
 /// The system wall clock.
@@ -116,7 +119,7 @@ pub trait WallClock: std::fmt::Debug + Send + Sync {
 pub struct SystemWallClock;
 
 impl WallClock for SystemWallClock {
-    fn now_ms(&self) -> Result<u64> {
+    fn now_ms(&self) -> u64 {
         current_time_ms()
     }
 }
@@ -127,16 +130,33 @@ impl WallClock for SystemWallClock {
 /// session, maintenance schedule — is stamped here and then carried as a
 /// value, so replay below this boundary stays deterministic.
 #[allow(clippy::disallowed_methods)]
-pub fn current_time_ms() -> Result<u64> {
+pub fn current_time_ms() -> u64 {
     unix_ms(SystemTime::now())
 }
 
-/// Converts a wall-clock instant to unix milliseconds, failing clearly on a
-/// pre-epoch clock instead of stamping timestamp zero into durable state.
-fn unix_ms(now: SystemTime) -> Result<u64> {
+/// Whether the system clock reads after the unix epoch. A runtime builder
+/// checks this once and refuses to start otherwise, so [`current_time_ms`]
+/// can stay infallible: LoonFS stamps unix milliseconds into durable state
+/// and can't run on a clock that reads before 1970.
+#[allow(clippy::disallowed_methods)]
+pub fn system_clock_reads_after_epoch() -> bool {
+    reads_after_epoch(SystemTime::now())
+}
+
+fn reads_after_epoch(now: SystemTime) -> bool {
+    now.duration_since(UNIX_EPOCH).is_ok()
+}
+
+/// Converts a wall-clock instant to unix milliseconds.
+fn unix_ms(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|_| CoreError::Internal("system time is before unix epoch".to_owned()))
+        .map(|elapsed| {
+            u64::try_from(elapsed.as_millis()).expect("unix milliseconds should fit u64")
+        })
+        .expect(
+            "the system clock should read after the unix epoch, which the runtime builder \
+             checks with `system_clock_reads_after_epoch` before it starts",
+        )
 }
 
 #[cfg(test)]
@@ -159,11 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn pre_epoch_clock_is_an_error_not_timestamp_zero() {
-        let error = unix_ms(UNIX_EPOCH - Duration::from_secs(1)).expect_err("pre-epoch must fail");
-        assert!(
-            error.to_string().contains("before unix epoch"),
-            "unexpected error: {error}"
-        );
+    fn the_startup_clock_check_refuses_a_pre_epoch_clock() {
+        assert!(!reads_after_epoch(UNIX_EPOCH - Duration::from_secs(1)));
+        assert!(reads_after_epoch(UNIX_EPOCH + Duration::from_millis(1)));
+        assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }

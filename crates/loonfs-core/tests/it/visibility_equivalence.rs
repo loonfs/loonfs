@@ -6,9 +6,9 @@
 
 use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
-    CompactionStepOutcome, CreateNamespaceOptions, Error as CoreError, ErrorCode,
+    CompactionStepOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -46,7 +46,7 @@ impl VisibilityHarness {
             .await
             .expect("bootstrap namespace");
         let results = engine
-            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitRequest::single(
+            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("acquire-for-base").expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -85,7 +85,7 @@ impl VisibilityHarness {
     /// Publishes one operation as its own single-operation request, the shape
     /// every scenario below drives except where it deliberately batches.
     async fn publish_operation(&self, operation: FilesystemOperation) -> Result<Commit, CoreError> {
-        self.publish(CommitCandidate::new(CommitRequest::single(
+        self.publish(CommitCandidate::new(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -118,7 +118,7 @@ impl VisibilityHarness {
                 .expect("load namespace catalog");
         let prepared = prepare_stored_content(&catalog, stored);
         self.publish(CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -219,7 +219,7 @@ impl VisibilityHarness {
         &self,
         operations: Vec<FilesystemOperation>,
     ) -> Result<Commit, CoreError> {
-        self.publish(CommitCandidate::new(CommitRequest {
+        self.publish(CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),
@@ -265,7 +265,7 @@ impl VisibilityHarness {
             .collect();
         let states = self
             .engine
-            .resolve_current_files(&inode_ids, context)
+            .stat_current_files_by_inode(&inode_ids, context)
             .await
             .expect("resolve current state for the tracked inodes");
         assert_eq!(
@@ -284,20 +284,24 @@ impl VisibilityHarness {
             // still reach the root, and the expectations below are written
             // by hand, so a disagreement between the two shows up as a
             // visible inode with no expected path or the reverse.
+            let current_path = match state.file {
+                CurrentFile::Visible { path, .. } => Some(path),
+                CurrentFile::Hidden { .. } => None,
+            };
             assert_eq!(
-                state.visible,
+                current_path.is_some(),
                 expectation.path.is_some(),
                 "{checkpoint}: inode {} visibility disagrees with its expected path",
                 expectation.inode_id
             );
             assert_eq!(
-                state.current_path.as_ref().map(AbsolutePath::as_str),
+                current_path.as_ref().map(AbsolutePath::as_str),
                 expectation.path,
                 "{checkpoint}: inode {} derived an unexpected root path",
                 expectation.inode_id
             );
 
-            if let Some(path) = state.current_path {
+            if let Some(path) = current_path {
                 let resolved = self
                     .engine
                     .resolve_path(&path, StatOptions::default(), context)
@@ -1041,7 +1045,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
 
     let revisions = harness
         .engine
-        .list_file_revisions_for_inode_page(
+        .list_file_revisions_by_inode_page(
             inode_id,
             PageRequest {
                 limit: loonfs_test_support::ids::page_limit(32),
@@ -1061,7 +1065,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
     );
     let bytes = harness
         .engine
-        .get_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
+        .read_file_revision_by_inode(inode_id, RevisionNo(1), &context, None)
         .await
         .expect("retained revision bytes remain readable by inode");
     assert_eq!(bytes, b"revision one");
@@ -1096,7 +1100,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
         for page_no in 0..4 {
             let page = harness
                 .engine
-                .list_file_revisions_for_inode_page(
+                .list_file_revisions_by_inode_page(
                     inode_id,
                     PageRequest {
                         limit: loonfs_test_support::ids::page_limit(2),
@@ -1115,7 +1119,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
         for revision in 1..=8u8 {
             let bytes = harness
                 .engine
-                .get_file_revision_for_inode(
+                .read_file_revision_by_inode(
                     inode_id,
                     RevisionNo(u64::from(revision)),
                     &context,

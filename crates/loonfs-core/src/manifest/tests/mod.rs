@@ -19,9 +19,7 @@ mod retention;
 mod streaming_compaction;
 
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
-use super::cache::{
-    CacheScope, MetadataSegmentBlockKind, MetadataSegmentCache, SharedSegmentBlocks,
-};
+use super::cache::{CacheScope, MetadataSegmentCache, SharedSegmentBlocks};
 use super::compaction_merge::locality_of;
 use super::error::ManifestLoadError;
 use super::load::{
@@ -34,7 +32,7 @@ use super::retention::{advance_retention_floor, RetentionTarget};
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
-    MetadataFamilyGroup, MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest,
+    MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
     DEFAULT_MAX_DELTA_RUNS, MANIFEST_ROW_FAMILIES,
 };
 use super::stored_block_cache::{
@@ -45,19 +43,22 @@ use super::streaming_compaction::{
     MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 use super::{
-    block_fetch, compaction_step, data_block_load, fold, load, row, scan, CompactionStepOutcome,
-    MetadataCompactionPolicy,
+    compaction_step, data_block_load, fold, index_block_load, load, row, scan,
+    CompactionStepOutcome, MetadataCompactionPolicy,
 };
+use crate::block_cache::SegmentBlockKind;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
+use crate::path::read::{
+    load_current_metadata_view, stat_current_files_by_inode, CurrentFile, CurrentFileState,
+};
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
     create, delete_path, move_path, put_file, restore_file_revision, write_file_bytes,
@@ -77,14 +78,14 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, lookup_keys, MetadataRow,
     MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
     NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
 };
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
@@ -126,7 +127,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
             })?;
     }
     drop(tail_state);
-    Ok((projection.head, metadata_state.finish()))
+    Ok((projection.head, metadata_state.build()))
 }
 
 /// Every lifecycle test in this file pins as one user owner; owner-specific
@@ -182,7 +183,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
     .publish_batch(
         store,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -218,7 +219,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_types::NamespaceMetadata, crate::error::CoreError> {
+) -> crate::error::Result<loonfs_types::NamespaceMetadata> {
     let summary = create(store, namespace_id, context).await?;
     acquire_writer_epoch(store, namespace_id, context)
         .await
@@ -255,7 +256,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> ManifestNo {
     create_checkpoint(store, namespace_id, context)
         .await
@@ -263,7 +264,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..policy
         },
@@ -329,7 +330,7 @@ fn merge_rows_with_retention(
 async fn drain_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> (ManifestNo, usize) {
     let mut published = 0;
     loop {
@@ -368,7 +369,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) -> MetadataCompactionJobOutcome {
     run_metadata_compaction_job(
@@ -414,7 +415,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     let view = load_current_metadata_view(store, namespace_id)
         .await
         .expect("load the read view");
-    resolve_current_files(
+    stat_current_files_by_inode(
         &view,
         &inode_ids,
         &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
@@ -448,13 +449,13 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
-) -> (MetadataLsmPolicy, MetadataCompactionSpec) {
+) -> (MetadataRunPolicy, MetadataCompactionSpec) {
     // One byte admits no run whole, so the group a step selects has no window
     // that makes progress and is handed to a job.
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     let report = compaction_step(
         store,
@@ -503,7 +504,7 @@ pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) {
     let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
@@ -538,7 +539,7 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<CurrentProjection, CoreError> {
+) -> crate::error::Result<CurrentProjection> {
     let (head, metadata_state) =
         load_manifest_projection_metadata_state(store, namespace_id).await?;
     let manifest = load_current_manifest(store, namespace_id)
@@ -766,7 +767,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     store: &S,
     namespace_id: &NamespaceId,
     source: ManifestMetadataSource<'_>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     manifest_no: ManifestNo,
 ) -> crate::error::Result<NamespaceManifestEnvelope> {
     let head = source.head;
@@ -869,7 +870,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         }
     };
 
-    encode_namespace_manifest_json(NamespaceManifestPayload {
+    Ok(encode_namespace_manifest_json(NamespaceManifestPayload {
         activity: Default::default(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
@@ -891,11 +892,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         runs,
     })
     .map(|encoded| encoded.into_envelope())
-    .map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build namespace manifest envelope: {err}"
-        ))
-    })
+    .expect("a test namespace manifest should encode"))
 }
 
 #[cfg(test)]
@@ -906,7 +903,7 @@ fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     payload: NamespaceManifestPayload,
-) -> Result<NamespaceManifestEnvelope, CoreError> {
+) -> crate::error::Result<NamespaceManifestEnvelope> {
     let key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
     let (envelope, bytes) = encode_namespace_manifest_json(payload)
         .expect("fixture envelope")
@@ -921,7 +918,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
-) -> Result<ManifestPublicationOutcome, CoreError> {
+) -> crate::error::Result<ManifestPublicationOutcome> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     super::publish::publish_manifest(store, manifest, &deadline).await
 }

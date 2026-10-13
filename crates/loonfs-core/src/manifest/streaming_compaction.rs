@@ -9,7 +9,6 @@
 //! Only base merges may remove rows below the
 //! retention floor. Every merge drops superseded layout rows.
 
-use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
 use super::compaction_merge::{
@@ -21,9 +20,10 @@ use super::compaction_step::{
     build_replacement_manifest, group_run_descriptors, MergePlacement, ReplacementOutput,
 };
 use super::error::ManifestLoadError;
+use super::index_block_load::segment_object_bytes;
 use super::load::load_manifest_segments;
 use super::publish::{publish_manifest, ManifestPublicationOutcome};
-use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
+use super::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -186,7 +186,7 @@ impl MetadataCompactionCancellation {
 /// What one finished merge built, held in memory until the caller publishes
 /// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct MetadataMergeResult {
+pub(super) struct MetadataMergeReport {
     /// The output run's segment descriptors, naming the object keys the merge
     /// wrote them to.
     pub(super) output_segments: Vec<MetadataSegmentRef>,
@@ -214,8 +214,8 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     runs: &[MetadataRunManifest],
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    policy: MetadataLsmPolicy,
-) -> Result<MetadataMergeResult> {
+    policy: MetadataRunPolicy,
+) -> Result<MetadataMergeReport> {
     let merge = GroupMerge::new(
         basis,
         index_memo,
@@ -243,9 +243,9 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+) -> Result<std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome>> {
     let merge = GroupMerge::new(
         segments,
         None,
@@ -288,7 +288,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     compactor_epoch: CompactorEpoch,
     spec: &MetadataCompactionSpec,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<MetadataCompactionJobOutcome> {
     let timer = Arc::new(StdMonotonicTimer::default());
@@ -422,7 +422,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
-    result: MetadataMergeResult,
+    result: MetadataMergeReport,
     cancellation: &MetadataCompactionCancellation,
     publication: &CompactionPublication,
 ) -> Result<MetadataCompactionJobOutcome> {
@@ -670,13 +670,12 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// Where the output stands in the group and whether rows may be dropped.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
-    chain_filter: Option<BloomFilter>,
-    keep_every_layout: bool,
-    result: MetadataMergeResult,
+    chain_filter: ChainFilter,
+    result: MetadataMergeReport,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
     /// The last input row key seen in each family, which is what lets the merge
@@ -685,6 +684,16 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// Progress state for an unbounded background merge. `None` for a merge
     /// short enough to have nothing to report.
     progress: Option<ProgressReporter>,
+}
+
+/// Whether a layout merge drops the layout rows of chains no revision names.
+enum ChainFilter {
+    /// The merge isn't a layout merge that may drop rows below the floor.
+    NotNeeded,
+    /// The content IDs the revisions name, which a kept layout row matches.
+    Loaded(BloomFilter),
+    /// The filter would exceed its byte limit, so the merge keeps every layout.
+    OverLimit,
 }
 
 struct MergeControl<'a> {
@@ -725,14 +734,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         group: MetadataFamilyGroup,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
-        policy: MetadataLsmPolicy,
+        policy: MetadataRunPolicy,
         input_runs: Vec<MetadataRunManifest>,
         progress: Option<ProgressReporter>,
     ) -> Self {
         let input_bytes = input_runs
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
-            .map(segment_object_len)
+            .map(segment_object_bytes)
             .sum();
         Self {
             store: basis.store,
@@ -741,8 +750,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .manifest
                 .as_ref()
                 .map(|manifest| manifest.payload().next_run_no),
-            chain_filter: None,
-            keep_every_layout: false,
+            chain_filter: ChainFilter::NotNeeded,
             index_memo,
             namespace_id,
             group,
@@ -750,9 +758,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             frozen_floor_seq,
             policy,
             input_runs,
-            result: MetadataMergeResult {
+            result: MetadataMergeReport {
                 input_bytes,
-                ..MetadataMergeResult::default()
+                ..MetadataMergeReport::default()
             },
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
@@ -765,7 +773,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     async fn run(
         mut self,
         control: &mut MergeControl<'_>,
-    ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+    ) -> Result<std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome>> {
         if let Some(stop) = self.load_chain_filter(control).await? {
             return Ok(Err(stop));
         }
@@ -807,7 +815,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .expect("a layout compaction should have a manifest basis")
                 .0,
         ) else {
-            self.keep_every_layout = true;
+            self.chain_filter = ChainFilter::OverLimit;
             tracing::info!(namespace_id = %self.namespace_id, expected_ids,
                 "chain filter exceeded its byte limit; kept every layout");
             return Ok(None);
@@ -842,7 +850,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 }
             }
         }
-        self.chain_filter = Some(filter);
+        self.chain_filter = ChainFilter::Loaded(filter);
         Ok(None)
     }
 
@@ -856,6 +864,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         row_key: &str,
     ) -> Result<()> {
         if let Some(previous) = self.last_input_key_by_family.get(&family) {
+            // A segment's decode checks key order within each block and the
+            // block index's last keys, but not one block's first key against
+            // the previous block's last, so stored bytes can go backwards here.
             match row_key.cmp(previous.as_str()) {
                 std::cmp::Ordering::Greater => {}
                 std::cmp::Ordering::Equal => {
@@ -865,9 +876,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                     )));
                 }
                 std::cmp::Ordering::Less => {
-                    return Err(CoreError::Internal(format!(
-                        "metadata merge read row key `{row_key}` after `{previous}` in family \
-                         `{family:?}`"
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "metadata family `{family:?}` row key went backwards: `{row_key}` \
+                         follows `{previous}`; refusing to merge it into a run"
                     )));
                 }
             }
@@ -878,7 +889,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     fn rule_for(&self, cluster: &RetentionCluster) -> RetentionRule {
-        if self.keep_every_layout {
+        if matches!(self.chain_filter, ChainFilter::OverLimit) {
             RetentionRule::KeepEveryRow
         } else if self.placement.may_drop_rows_below_the_retention_floor()
             || cluster.rule == RetentionRule::FirstPerGroup
@@ -944,7 +955,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             // per row.
             let opened = {
                 let iterator = &iterators[next];
-                let (row_key, _) = iterator.head().expect("the selected iterator has a row");
+                let (row_key, _) = iterator
+                    .head()
+                    .expect("the selected iterator should have a row");
                 let family = *iterator.sort_key();
                 self.refuse_a_repeated_input_key(family, row_key)?;
                 let row_locality = locality_of(family, row_key, cluster.locality);
@@ -960,7 +973,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
-            if let (Some(filter), MetadataRow::ContentLayout(layout)) = (&self.chain_filter, &row) {
+            if let (ChainFilter::Loaded(filter), MetadataRow::ContentLayout(layout)) =
+                (&self.chain_filter, &row)
+            {
                 if !filter.may_contain(layout.content_id.as_str().as_bytes()) {
                     continue;
                 }
@@ -984,7 +999,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.result.output_bytes = self
                 .result
                 .output_bytes
-                .saturating_add(segments.iter().map(segment_object_len).sum());
+                .saturating_add(segments.iter().map(segment_object_bytes).sum());
             self.result.output_segments.extend(segments);
         }
         Ok(None)
@@ -1042,15 +1057,15 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         self.result.rows_written += 1;
         let writer = writers
             .get_mut(&family)
-            .expect("a cluster writes only the families it merges");
+            .expect("a cluster should write only the families it merges");
         match index_pair(self.group) {
             Some((canonical, _)) if family == canonical => {
-                writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded))?;
+                writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded));
             }
             Some((_, index)) if family == index => {
-                writer.push(row, &mut |encoded| self.index_digest.fold(encoded))?;
+                writer.push(row, &mut |encoded| self.index_digest.fold(encoded));
             }
-            _ => writer.push(row, &mut |_| {})?,
+            _ => writer.push(row, &mut |_| {}),
         }
         writer.roll_full_segments(puts, self.policy).await
     }

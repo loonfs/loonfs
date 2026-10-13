@@ -34,15 +34,15 @@ use loonfs_types::api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::options::{DirectMultipartUploadOptions, ListOptions, StatOptions};
+use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptions, StatOptions};
 use loonfs_types::CompactorEpoch;
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
     FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
-    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
-    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo,
+    SnapshotSummary, Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -114,6 +114,17 @@ pub type NamespaceReaderEngine<S> = NamespaceEngine<S, ReadOnly>;
 /// A namespace engine that exposes both read and mutation operations.
 pub type NamespaceWriterEngine<S> = NamespaceEngine<S, Writable>;
 
+/// The root's access row: its boundary flag, grants, and revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootAccess {
+    /// The root's boundary flag and direct grants, which are empty before the
+    /// root has an access row.
+    pub access: AccessState,
+    /// The row's access revision, which is 0 before the root has an access
+    /// row. Commit validation treats a missing row as revision 0 too.
+    pub access_revision_no: loonfs_types::AccessRevisionNo,
+}
+
 /// A namespace-scoped core API.
 ///
 /// `NamespaceEngine` owns an object store handle and exposes operations
@@ -128,7 +139,7 @@ pub struct NamespaceEngine<S, M> {
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
-    lsm_policy: crate::manifest::MetadataLsmPolicy,
+    run_policy: crate::manifest::MetadataRunPolicy,
     segment_cache: Option<Arc<MetadataSegmentCache>>,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
@@ -203,7 +214,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
     /// that could otherwise answer before any per-subject read.
-    pub fn require_subject(&self, context: &RuntimeReadContext) -> Result<()> {
+    pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
         Authorizer::for_request(
             &self.namespace_id,
             &context.head.access,
@@ -214,7 +225,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// The change feed and bare content reference reads and imports work for
     /// the token holder and for an administrator; any other subject is refused.
-    pub async fn require_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
+    pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         let Some(subject) = &self.subject else {
             return Ok(());
         };
@@ -243,16 +254,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
     }
 
-    /// The root row's current boundary flag and grants. Refused on an
-    /// unrestricted namespace, which holds no access rows.
-    pub async fn root_access(
-        &self,
-        context: &RuntimeReadContext,
-    ) -> Result<(
-        bool,
-        loonfs_types::AccessGrants,
-        loonfs_types::AccessRevisionNo,
-    )> {
+    /// Reads the root's current access row. Refused on an unrestricted
+    /// namespace, which holds no access rows.
+    pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Err(CoreError::NamespaceUnrestricted {
                 namespace_id: self.namespace_id.clone(),
@@ -264,12 +268,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .latest_access_revision(ROOT_INODE_ID)
             .await?;
         Ok(row.map_or(
-            (
-                false,
-                loonfs_types::AccessGrants::default(),
-                loonfs_types::AccessRevisionNo(0),
-            ),
-            |row| (row.boundary, row.grants, row.access_revision_no),
+            RootAccess {
+                access: AccessState {
+                    boundary: false,
+                    grants: loonfs_types::AccessGrants::default(),
+                },
+                access_revision_no: loonfs_types::AccessRevisionNo(0),
+            },
+            |row| RootAccess {
+                access: AccessState {
+                    boundary: row.boundary,
+                    grants: row.grants,
+                },
+                access_revision_no: row.access_revision_no,
+            },
         ))
     }
 
@@ -279,7 +291,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Returns the current wall-clock time.
-    fn now_ms(&self) -> Result<u64> {
+    fn now_ms(&self) -> u64 {
         self.wall_clock.now_ms()
     }
 
@@ -364,7 +376,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
@@ -390,7 +402,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
@@ -405,8 +417,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Sets the budgets this engine's WAL folds and compactions run under.
-    pub fn with_metadata_lsm_policy(mut self, policy: crate::manifest::MetadataLsmPolicy) -> Self {
-        self.lsm_policy = policy;
+    pub fn with_metadata_run_policy(mut self, policy: crate::manifest::MetadataRunPolicy) -> Self {
+        self.run_policy = policy;
         self
     }
 
@@ -417,10 +429,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// The compaction budgets this engine plans and compacts under.
-    fn metadata_lsm_policy(&self) -> crate::manifest::MetadataLsmPolicy {
-        let policy = self.lsm_policy;
+    fn effective_run_policy(&self) -> crate::manifest::MetadataRunPolicy {
+        let policy = self.run_policy;
         #[cfg(any(test, feature = "test-support"))]
-        let policy = crate::manifest::MetadataLsmPolicy {
+        let policy = crate::manifest::MetadataRunPolicy {
             max_decoded_input_rows_per_step: self
                 .compaction_row_budget
                 .unwrap_or(policy.max_decoded_input_rows_per_step),
@@ -478,7 +490,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             actor_id,
             options,
         )
@@ -501,9 +513,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             target,
             actor_id,
             snapshot_id,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::new(crate::time::StdMonotonicTimer::default()),
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -520,7 +532,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             options,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::clone(&self.content_writes),
         )
         .await
@@ -529,7 +541,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads file content against the pinned runtime read context.
-    pub async fn get_file(
+    pub async fn read_file(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
@@ -544,7 +556,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Reads the current content of a visible file inode, wherever it is
     /// bound, with its entry.
-    pub async fn get_file_by_inode(
+    pub async fn read_file_by_inode(
         &self,
         inode_id: InodeId,
         context: &RuntimeReadContext,
@@ -580,7 +592,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Verifies at most 64 KiB of speculative content.
     /// These bytes alone do not establish current path visibility.
-    pub async fn get_speculative_file_content(
+    pub async fn read_speculative_file_content(
         &self,
         target: &ResolvedFileContent,
     ) -> Result<Vec<u8>> {
@@ -594,10 +606,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Fetches and verifies content after `resolve_file_content` authorizes it.
     /// A cached target must first be validated against the current view.
-    pub async fn get_resolved_file_content(&self, target: &ResolvedFileContent) -> Result<Vec<u8>> {
+    pub async fn read_resolved_file_content(
+        &self,
+        target: &ResolvedFileContent,
+    ) -> Result<Vec<u8>> {
         Ok(target
             .location
-            .get_bytes(&self.store, &target.content_ref)
+            .read_bytes(&self.store, &target.content_ref)
             .await?)
     }
 
@@ -662,10 +677,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.load_read_view(context).await?;
         let content_ref = match revision_no {
             Some(revision_no) => {
-                view.authorized_revision_for_inode(inode_id, revision_no, &access)
+                view.authorized_revision_by_inode(inode_id, revision_no, &access)
                     .await?
             }
-            None => view.current_revision_for_inode(inode_id, &access).await?,
+            None => view.current_revision_by_inode(inode_id, &access).await?,
         }
         .content_ref;
         if start_offset > content_ref.size_bytes {
@@ -802,18 +817,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// All results use the same pinned snapshot and preserve input order. Missing
     /// inode IDs are returned as not visible because callers may hold IDs from an
     /// older listing. Requests above
-    /// [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES) fail before
+    /// [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT) fail before
     /// reading metadata.
-    pub async fn resolve_current_files(
+    pub async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
         context: &RuntimeReadContext,
     ) -> Result<Vec<CurrentFileState>> {
-        crate::path::read::ensure_resolve_batch_within_cap(inode_ids.len())?;
+        crate::path::read::ensure_stat_batch_within_cap(inode_ids.len())?;
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        crate::path::read::resolve_current_files(&view, inode_ids, &access).await
+        crate::path::read::stat_current_files_by_inode(&view, inode_ids, &access).await
     }
 
     /// Resolves an import source, including an unpublished upload.
@@ -852,7 +867,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         max_bytes: u64,
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
-        self.require_administrator(context).await?;
+        self.ensure_administrator(context).await?;
         self.ensure_live_context(context)?;
         let view = self.load_read_view(context).await?;
         if !view
@@ -865,7 +880,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = view.resolve_content_location(content_ref).await?;
         location
-            .get_bytes(&self.store, content_ref)
+            .read_bytes(&self.store, content_ref)
             .await
             .map_err(|error| match error {
                 DurableContentValidationError::MissingContentObject { .. } => {
@@ -887,7 +902,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
-    pub async fn list_file_revisions_for_inode_page(
+    pub async fn list_file_revisions_by_inode_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
@@ -896,13 +911,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.list_file_revisions_for_inode_page(inode_id, request, &access)
+        view.list_file_revisions_by_inode_page(inode_id, request, &access)
             .await
     }
 
     /// Reads one revision's content by path against the pinned runtime
     /// read context.
-    pub async fn get_file_revision(
+    pub async fn read_file_revision(
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
@@ -912,7 +927,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_revision_bytes(
+        view.read_file_revision_bytes(
             &self.store,
             path.as_ref(),
             revision_no,
@@ -923,7 +938,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Reads one revision's content against the pinned runtime read context.
-    pub async fn get_file_revision_for_inode(
+    pub async fn read_file_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -933,7 +948,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_revision_bytes_for_inode(
+        view.read_file_revision_bytes_by_inode(
             &self.store,
             inode_id,
             revision_no,
@@ -963,7 +978,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         candidates: Vec<CommitCandidate>,
     ) -> Result<Vec<Result<Commit>>> {
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         Ok(crate::commit_engine::publish_namespace_commits_batch(
             &self.store,
             &self.namespace_id,
@@ -996,7 +1011,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1010,7 +1025,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1028,7 +1043,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             subject,
             options,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1049,7 +1064,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             upload_id,
             subject,
             requested,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1074,14 +1089,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             bytes,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
 
     /// Uploads content that arrives as a stream into an upload session,
     /// hashing it on the way through instead of holding it.
-    pub async fn upload_streamed_content(
+    pub async fn upload_content_stream(
         &self,
         upload_id: &UploadId,
         subject: Option<&Subject>,
@@ -1092,13 +1107,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .acquire()
             .await
             .expect("content write semaphore should remain open");
-        crate::protocol::upload_streamed_content(
+        crate::protocol::upload_content_stream(
             &self.store,
             &self.namespace_id,
             upload_id,
             subject,
             body,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1113,14 +1128,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
-        self.own_catalog(catalog)?;
+        self.own_catalog(catalog);
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
             upload_id,
             subject,
             completion,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1140,14 +1155,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
     {
-        self.own_catalog(catalog)?;
+        self.own_catalog(catalog);
         crate::protocol::complete_upload_for_mode(
             &self.store,
             &self.namespace_id,
             upload_id,
             subject,
             resolve,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1172,10 +1187,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_bytes(
             &self.store,
-            self.own_catalog(catalog)?,
+            self.own_catalog(catalog),
             subject_id,
             bytes,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1200,8 +1215,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         S: Clone + 'static,
     {
-        let catalog = self.own_catalog(catalog)?;
-        let context = self.mutation_context()?;
+        let catalog = self.own_catalog(catalog);
+        let context = self.mutation_context();
         let location = match owner_location {
             Some(location) => location,
             None => ContentLocation::whole(content_ref)?,
@@ -1241,11 +1256,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_stream(
             &self.store,
-            self.own_catalog(catalog)?,
+            self.own_catalog(catalog),
             subject_id,
             body,
             StreamedPayloadKind::Request,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1255,15 +1270,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     fn own_catalog<'c>(
         &self,
         catalog: &'c VerifiedNamespaceCatalogEntry,
-    ) -> Result<&'c VerifiedNamespaceCatalogEntry> {
-        if catalog.namespace_id() != &self.namespace_id {
-            return Err(CoreError::Internal(format!(
-                "an operation on namespace `{}` was given namespace `{}`'s catalog",
-                self.namespace_id,
-                catalog.namespace_id()
-            )));
-        }
-        Ok(catalog)
+    ) -> &'c VerifiedNamespaceCatalogEntry {
+        assert_eq!(
+            catalog.namespace_id(),
+            &self.namespace_id,
+            "a runtime should give an engine its own namespace's catalog"
+        );
+        catalog
     }
 
     /// Aborts an upload session, then deletes the content object it owned.
@@ -1285,7 +1298,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &catalog,
             upload_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1304,7 +1317,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &self.namespace_id,
             upload_id,
             subject,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1320,7 +1333,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// listed and readable, and keeps its manifest retained, until collection
     /// deletes it. `None` keeps the checkpoint until it is deleted.
     pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::pin::create_pin(
             &self.store,
@@ -1330,7 +1343,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -1339,8 +1352,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Creates a snapshot of the current namespace state.
-    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Checkpoint> {
-        let context = self.mutation_context()?;
+    pub async fn create_snapshot(
+        &self,
+        name: String,
+        expires_at_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        let context = self.mutation_context();
         crate::pin::create_pin(
             &self.store,
             &self.namespace_id,
@@ -1349,12 +1366,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::pin::snapshot_summary)
     }
 }
 
@@ -1387,14 +1404,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         checkpoint_id: &PinId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
-    ) -> Result<Checkpoint> {
+    ) -> Result<SnapshotSummary> {
         crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,
             checkpoint_id,
             requested_expires_at_ms,
             max_lifetime_ms,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::new(crate::time::StdMonotonicTimer::default()),
         )
         .await
@@ -1402,7 +1419,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     pub async fn delete_snapshot(&self, checkpoint_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        self.mutation_context()?;
         crate::pin::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
@@ -1414,12 +1430,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn fold_wal(&self) -> Result<FoldWalResponse> {
-        self.mutation_context()?;
         crate::manifest::fold_wal_with_deadline(
             &self.store,
             &self.namespace_id,
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
             &self.content_writes,
         )
@@ -1441,7 +1456,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             compactor_epoch,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             compaction_policy,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
         )
@@ -1460,7 +1475,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             compactor_epoch,
             spec,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             cancellation,
         )
         .await
@@ -1472,7 +1487,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         target: crate::manifest::RetentionTarget,
     ) -> Result<AdvanceRetentionResponse> {
-        self.mutation_context()?;
         crate::manifest::advance_retention_floor(
             &self.store,
             self.segment_cache.as_deref(),
@@ -1483,11 +1497,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Builds the mutation context for this engine's writer identity.
-    fn mutation_context(&self) -> Result<MutationContext> {
-        Ok(MutationContext {
+    fn mutation_context(&self) -> MutationContext {
+        MutationContext {
             writer_id: self.mode.writer_id.clone(),
-            now_ms: self.now_ms()?,
-        })
+            now_ms: self.now_ms(),
+        }
     }
 }
 
@@ -1524,13 +1538,9 @@ mod tests {
             WriterId::parse("writer-a").expect("writer id"),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
-        crate::test_support::ops::create(
-            &writer.store,
-            &namespace_id,
-            &writer.mutation_context().expect("context"),
-        )
-        .await
-        .expect("bootstrap namespace");
+        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
+            .await
+            .expect("bootstrap namespace");
 
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1550,7 +1560,7 @@ mod tests {
             .list_changes_after(
                 ChangeSeq(0),
                 loonfs_types::PaginationPolicy::default()
-                    .resolve_limit(None)
+                    .effective_limit(None)
                     .expect("default limit"),
                 &context,
             )
@@ -1569,13 +1579,9 @@ mod tests {
             WriterId::parse("writer-a").expect("writer id"),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
-        crate::test_support::ops::create(
-            &writer.store,
-            &namespace_id,
-            &writer.mutation_context().expect("context"),
-        )
-        .await
-        .expect("bootstrap namespace");
+        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
+            .await
+            .expect("bootstrap namespace");
         let begun = writer.begin_upload(None).await.expect("begin upload");
 
         let reader = NamespaceEngine::reader(

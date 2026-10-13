@@ -41,7 +41,7 @@ pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
 /// Maximum decoded input size for one build or compaction step.
 pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum stored filter size embedded in a segment descriptor.
-pub const DEFAULT_INLINE_FILTER_MAX_BYTES: u32 = 1024;
+pub const DEFAULT_MAX_INLINE_FILTER_BYTES: u32 = 1024;
 /// Entries between restart points inside a data block.
 pub const RESTART_INTERVAL: usize = 16;
 /// Bloom filter sizing: bits reserved per inserted filter key.
@@ -100,8 +100,8 @@ pub struct BuiltSegmentBlocks {
 impl BuiltSegmentBlocks {
     /// Encodes a small stored filter for an inline segment descriptor.
     pub fn inline_filter_hex(&self) -> Option<String> {
-        (self.filter.stored_bytes <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
-            let start = self.filter.offset as usize;
+        (self.filter.stored_bytes <= DEFAULT_MAX_INLINE_FILTER_BYTES).then(|| {
+            let start = crate::usize_from_u64(self.filter.offset);
             crate::format::hex::hex_encode_bytes(
                 &self.bytes[start..start + self.filter.stored_bytes as usize],
             )
@@ -146,7 +146,7 @@ pub struct SegmentFilter {
 /// See [metadata segments](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum SstBlockCodecError {
+pub enum SegmentBlockCodecError {
     /// Reports a request to finish a segment before any row was supplied.
     #[error("segment must contain at least one row")]
     EmptySegment,
@@ -244,7 +244,7 @@ impl SegmentBlocksBuilder {
         row_key: &str,
         filter_key: &str,
         row: &R,
-    ) -> Result<(), SstBlockCodecError> {
+    ) -> Result<(), SegmentBlockCodecError> {
         self.push_with_encoded_row(row_key, filter_key, row)
             .map(drop)
     }
@@ -255,9 +255,9 @@ impl SegmentBlocksBuilder {
         row_key: &str,
         filter_key: &str,
         row: &R,
-    ) -> Result<Vec<u8>, SstBlockCodecError> {
+    ) -> Result<Vec<u8>, SegmentBlockCodecError> {
         if self.row_count > 0 && row_key < self.previous_key.as_str() {
-            return Err(SstBlockCodecError::RowKeysOutOfOrder {
+            return Err(SegmentBlockCodecError::RowKeysOutOfOrder {
                 previous: self.previous_key.clone(),
                 offered: row_key.to_owned(),
             });
@@ -269,7 +269,10 @@ impl SegmentBlocksBuilder {
 
         let restart = self.entry_count.is_multiple_of(RESTART_INTERVAL);
         if restart {
-            self.restarts.push(self.entries.len() as u32);
+            self.restarts.push(
+                u32::try_from(self.entries.len())
+                    .expect("an unfinished data block should be below its target size"),
+            );
         }
         let shared_len = if restart {
             0
@@ -279,7 +282,7 @@ impl SegmentBlocksBuilder {
         let suffix = &row_key.as_bytes()[shared_len..];
         let mut row_bytes = Vec::new();
         ciborium::ser::into_writer(row, &mut row_bytes)
-            .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+            .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
         let previous_len = self.entries.len();
         write_varint(&mut self.entries, shared_len as u64);
         write_varint(&mut self.entries, suffix.len() as u64);
@@ -298,7 +301,7 @@ impl SegmentBlocksBuilder {
         Ok(row_bytes)
     }
 
-    fn finish_data_block(&mut self) -> Result<(), SstBlockCodecError> {
+    fn finish_data_block(&mut self) -> Result<(), SegmentBlockCodecError> {
         if self.entries.is_empty() {
             return Ok(());
         }
@@ -306,7 +309,9 @@ impl SegmentBlocksBuilder {
         for restart in &self.restarts {
             payload.extend_from_slice(&restart.to_le_bytes());
         }
-        payload.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
+        let restart_count =
+            u32::try_from(self.restarts.len()).expect("a block's restart count should fit u32");
+        payload.extend_from_slice(&restart_count.to_le_bytes());
         self.decoded_data_bytes += (self.restarts.len() + 1) * 4;
         self.restarts.clear();
         self.entry_count = 0;
@@ -335,9 +340,9 @@ impl SegmentBlocksBuilder {
     }
 
     /// Encodes the remaining rows and assembles the object bytes.
-    pub fn finish(mut self) -> Result<BuiltSegmentBlocks, SstBlockCodecError> {
+    pub fn build(mut self) -> Result<BuiltSegmentBlocks, SegmentBlockCodecError> {
         if self.row_count == 0 {
-            return Err(SstBlockCodecError::EmptySegment);
+            return Err(SegmentBlockCodecError::EmptySegment);
         }
         self.finish_data_block()?;
         let mut bytes = self.bytes;
@@ -348,7 +353,7 @@ impl SegmentBlocksBuilder {
 
         let mut index_payload = Vec::new();
         ciborium::ser::into_writer(&index, &mut index_payload)
-            .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+            .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
         let index = append_section(&mut bytes, &index_payload, true)?;
 
         Ok(BuiltSegmentBlocks {
@@ -366,10 +371,10 @@ impl SegmentBlocksBuilder {
 pub fn decode_index_block(
     stored: &[u8],
     handle: &BlockHandle,
-) -> Result<Vec<SegmentIndexEntry>, SstBlockCodecError> {
+) -> Result<Vec<SegmentIndexEntry>, SegmentBlockCodecError> {
     let payload = decode_section(stored, handle, true)?;
     let entries: Vec<SegmentIndexEntry> = ciborium::de::from_reader(payload.as_slice())
-        .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+        .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
     // Index keys must be sorted, and block ranges must tile their region:
     // every range fits in `u64`, and each block starts exactly where its
     // predecessor ends — the builder writes blocks back to back. Range
@@ -382,20 +387,20 @@ pub fn decode_index_block(
             .offset
             .checked_add(u64::from(entry.block.stored_bytes))
             .ok_or_else(|| {
-                SstBlockCodecError::Malformed(format!(
+                SegmentBlockCodecError::Malformed(format!(
                     "index block `{}` byte range overflows",
                     entry.last_row_key
                 ))
             })?;
         if let Some((previous_key, previous_end)) = previous {
             if previous_key > &entry.last_row_key {
-                return Err(SstBlockCodecError::Malformed(format!(
+                return Err(SegmentBlockCodecError::Malformed(format!(
                     "index blocks out of key order: `{}` follows `{previous_key}`",
                     entry.last_row_key
                 )));
             }
             if entry.block.offset != previous_end {
-                return Err(SstBlockCodecError::Malformed(format!(
+                return Err(SegmentBlockCodecError::Malformed(format!(
                     "index block `{}` does not start where `{previous_key}` ends",
                     entry.last_row_key
                 )));
@@ -410,7 +415,7 @@ pub fn decode_index_block(
 pub fn decode_data_block(
     stored: &[u8],
     handle: &BlockHandle,
-) -> Result<DecodedDataBlock, SstBlockCodecError> {
+) -> Result<DecodedDataBlock, SegmentBlockCodecError> {
     decode_data_block_rows::<MetadataRow>(stored, handle)
 }
 
@@ -419,10 +424,10 @@ pub fn decode_data_block(
 pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
     stored: &[u8],
     handle: &BlockHandle,
-) -> Result<DecodedDataBlock<R>, SstBlockCodecError> {
+) -> Result<DecodedDataBlock<R>, SegmentBlockCodecError> {
     let payload = decode_section(stored, handle, true)?;
     if payload.len() < 4 {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "data block shorter than its restart count".to_owned(),
         ));
     }
@@ -435,7 +440,9 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
     let restarts_len = restart_count
         .checked_mul(4)
         .filter(|len| *len <= body.len())
-        .ok_or_else(|| SstBlockCodecError::Malformed("restart array exceeds block".to_owned()))?;
+        .ok_or_else(|| {
+            SegmentBlockCodecError::Malformed("restart array exceeds block".to_owned())
+        })?;
     let (entries, restarts) = body.split_at(body.len() - restarts_len);
     let (restarts, _) = restarts.as_chunks::<4>();
     let mut restarts = restarts.iter();
@@ -449,7 +456,7 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         if restart {
             let offset = restarts.next().map(|bytes| u32::from_le_bytes(*bytes));
             if offset.map(u64::from) != Some(cursor as u64) {
-                return Err(SstBlockCodecError::Malformed(
+                return Err(SegmentBlockCodecError::Malformed(
                     "restart offset disagrees with its entry".to_owned(),
                 ));
             }
@@ -457,20 +464,20 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         let shared_len = read_entry_length(entries, &mut cursor)?;
         let suffix_len = read_entry_length(entries, &mut cursor)?;
         if restart && shared_len != 0 {
-            return Err(SstBlockCodecError::Malformed(
+            return Err(SegmentBlockCodecError::Malformed(
                 "restart entry has a shared prefix".to_owned(),
             ));
         }
         if shared_len > previous_key.len() || !previous_key.is_char_boundary(shared_len) {
-            return Err(SstBlockCodecError::Malformed(
+            return Err(SegmentBlockCodecError::Malformed(
                 "shared prefix exceeds previous key".to_owned(),
             ));
         }
         let suffix = take_slice(entries, &mut cursor, suffix_len)?;
         let suffix = std::str::from_utf8(suffix)
-            .map_err(|_| SstBlockCodecError::Malformed("row key is not utf-8".to_owned()))?;
+            .map_err(|_| SegmentBlockCodecError::Malformed("row key is not utf-8".to_owned()))?;
         let key_len = shared_len.checked_add(suffix.len()).ok_or_else(|| {
-            SstBlockCodecError::Malformed("row key length exceeds address space".to_owned())
+            SegmentBlockCodecError::Malformed("row key length exceeds address space".to_owned())
         })?;
         let mut key = String::with_capacity(key_len);
         key.push_str(&previous_key[..shared_len]);
@@ -478,11 +485,11 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         let row_len = read_entry_length(entries, &mut cursor)?;
         let row_bytes = take_slice(entries, &mut cursor, row_len)?;
         let row: R = ciborium::de::from_reader(row_bytes)
-            .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+            .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
         // Ascending row-key order is a format requirement; readers
         // binary-search on it, so an out-of-order block is malformed.
         if key.as_str() < previous_key.as_str() {
-            return Err(SstBlockCodecError::Malformed(format!(
+            return Err(SegmentBlockCodecError::Malformed(format!(
                 "rows out of row-key order: `{key}` follows `{previous_key}`"
             )));
         }
@@ -492,7 +499,7 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         rows.push(row);
     }
     if restarts.next().is_some() {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "restart array contains unused offsets".to_owned(),
         ));
     }
@@ -507,36 +514,36 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
 pub fn decode_filter_block(
     stored: &[u8],
     handle: &BlockHandle,
-) -> Result<SegmentFilter, SstBlockCodecError> {
+) -> Result<SegmentFilter, SegmentBlockCodecError> {
     let payload = decode_section(stored, handle, false)?;
     if payload.len() < 12 {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "filter block shorter than its header".to_owned(),
         ));
     }
     let n_hashes = u32::from_le_bytes(
         payload[0..4]
             .try_into()
-            .expect("header length should be checked above"),
+            .expect("the filter header length check should leave four bytes for the hash count"),
     );
     let bit_len = u64::from_le_bytes(
         payload[4..12]
             .try_into()
-            .expect("header length should be checked above"),
+            .expect("the filter header length check should leave eight bytes for the bit length"),
     );
     if n_hashes != FILTER_HASH_COUNT {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "filter hash count must be seven".to_owned(),
         ));
     }
     if bit_len < 64 {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "filter bit length must be at least 64".to_owned(),
         ));
     }
     let bits = &payload[12..];
     if bit_len.div_ceil(8) != bits.len() as u64 {
-        return Err(SstBlockCodecError::Malformed(
+        return Err(SegmentBlockCodecError::Malformed(
             "filter bit length disagrees with its bytes".to_owned(),
         ));
     }
@@ -608,17 +615,22 @@ fn append_section(
     bytes: &mut Vec<u8>,
     payload: &[u8],
     compress: bool,
-) -> Result<BlockHandle, SstBlockCodecError> {
+) -> Result<BlockHandle, SegmentBlockCodecError> {
     let stored = if compress {
         zstd::bulk::compress(payload, ZSTD_LEVEL)
-            .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?
+            .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?
     } else {
         payload.to_vec()
     };
+    let handle_bytes = |len: usize| {
+        u32::try_from(len).map_err(|_| {
+            SegmentBlockCodecError::Malformed(format!("a {len}-byte block does not fit a handle"))
+        })
+    };
     let handle = BlockHandle {
         offset: bytes.len() as u64,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: handle_bytes(stored.len())?,
+        decoded_bytes: handle_bytes(payload.len())?,
         crc32c: crc32c::crc32c(&stored),
     };
     bytes.extend_from_slice(&stored);
@@ -629,16 +641,16 @@ fn decode_section(
     stored: &[u8],
     handle: &BlockHandle,
     compressed: bool,
-) -> Result<Vec<u8>, SstBlockCodecError> {
+) -> Result<Vec<u8>, SegmentBlockCodecError> {
     if stored.len() != handle.stored_bytes as usize {
-        return Err(SstBlockCodecError::StoredLengthMismatch {
+        return Err(SegmentBlockCodecError::StoredLengthMismatch {
             expected: handle.stored_bytes,
             actual: stored.len(),
         });
     }
     let actual = crc32c::crc32c(stored);
     if actual != handle.crc32c {
-        return Err(SstBlockCodecError::ChecksumMismatch {
+        return Err(SegmentBlockCodecError::ChecksumMismatch {
             expected: handle.crc32c,
             actual,
         });
@@ -652,11 +664,11 @@ fn decode_section(
                     .take(u64::from(handle.decoded_bytes) + 1)
                     .read_to_end(&mut payload)
             })
-            .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+            .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
         payload
     } else {
         if stored.len() != handle.decoded_bytes as usize {
-            return Err(SstBlockCodecError::DecodedLengthMismatch {
+            return Err(SegmentBlockCodecError::DecodedLengthMismatch {
                 expected: handle.decoded_bytes,
                 actual: stored.len(),
             });
@@ -664,7 +676,7 @@ fn decode_section(
         stored.to_vec()
     };
     if payload.len() != handle.decoded_bytes as usize {
-        return Err(SstBlockCodecError::DecodedLengthMismatch {
+        return Err(SegmentBlockCodecError::DecodedLengthMismatch {
             expected: handle.decoded_bytes,
             actual: payload.len(),
         });
@@ -673,8 +685,9 @@ fn decode_section(
 }
 
 fn build_filter_payload(hashes: &[(u64, u64)]) -> Vec<u8> {
-    let bit_len = (hashes.len() * FILTER_BITS_PER_KEY).max(64) as u64;
-    let mut bits = vec![0u8; bit_len.div_ceil(8) as usize];
+    let bits_len = (hashes.len() * FILTER_BITS_PER_KEY).max(64);
+    let mut bits = vec![0u8; bits_len.div_ceil(8)];
+    let bit_len = bits_len as u64;
     for (h1, h2) in hashes {
         for probe in 0..u64::from(FILTER_HASH_COUNT) {
             let bit = h1.wrapping_add(probe.wrapping_mul(*h2)) % bit_len;
@@ -724,16 +737,16 @@ pub fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
 }
 
 /// Reads the LEB128 varint at `cursor` and advances `cursor` past it.
-pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCodecError> {
+pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SegmentBlockCodecError> {
     let mut value = 0u64;
     let mut shift = 0u32;
     loop {
         let byte = *bytes.get(*cursor).ok_or_else(|| {
-            SstBlockCodecError::Malformed("varint runs past the block".to_owned())
+            SegmentBlockCodecError::Malformed("varint runs past the block".to_owned())
         })?;
         *cursor += 1;
         if shift == 63 && byte > 1 {
-            return Err(SstBlockCodecError::Malformed(
+            return Err(SegmentBlockCodecError::Malformed(
                 "varint exceeds 64 bits".to_owned(),
             ));
         }
@@ -745,16 +758,17 @@ pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCode
     }
 }
 
-fn read_entry_length(bytes: &[u8], cursor: &mut usize) -> Result<usize, SstBlockCodecError> {
-    usize::try_from(read_varint(bytes, cursor)?)
-        .map_err(|_| SstBlockCodecError::Malformed("entry length exceeds address space".to_owned()))
+fn read_entry_length(bytes: &[u8], cursor: &mut usize) -> Result<usize, SegmentBlockCodecError> {
+    usize::try_from(read_varint(bytes, cursor)?).map_err(|_| {
+        SegmentBlockCodecError::Malformed("entry length exceeds address space".to_owned())
+    })
 }
 
 fn take_slice<'a>(
     bytes: &'a [u8],
     cursor: &mut usize,
     len: usize,
-) -> Result<&'a [u8], SstBlockCodecError> {
+) -> Result<&'a [u8], SegmentBlockCodecError> {
     let end = cursor.checked_add(len).filter(|end| *end <= bytes.len());
     match end {
         Some(end) => {
@@ -762,7 +776,7 @@ fn take_slice<'a>(
             *cursor = end;
             Ok(slice)
         }
-        None => Err(SstBlockCodecError::Malformed(
+        None => Err(SegmentBlockCodecError::Malformed(
             "entry runs past the block".to_owned(),
         )),
     }
@@ -787,8 +801,8 @@ mod tests {
             !builder.index.is_empty(),
             "completed blocks are already compressed"
         );
-        let built = builder.finish().expect("finish segment");
-        let start = built.index.offset as usize;
+        let built = builder.build().expect("finish segment");
+        let start = crate::usize_from_u64(built.index.offset);
         let end = start + built.index.stored_bytes as usize;
         let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
         assert_eq!(
@@ -820,7 +834,7 @@ mod tests {
             let (key, filter_key, row) = inode_row(index as u64);
             builder.push(&key, &filter_key, &row).expect("push row");
         }
-        builder.finish().expect("finish segment")
+        builder.build().expect("finish segment")
     }
 
     const SHARED_SEGMENT_ROWS: usize = 5_000;
@@ -831,7 +845,8 @@ mod tests {
     }
 
     fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-        &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+        let start = crate::usize_from_u64(handle.offset);
+        &bytes[start..start + handle.stored_bytes as usize]
     }
 
     fn encode_index(entries: &[SegmentIndexEntry]) -> (Vec<u8>, BlockHandle) {
@@ -931,13 +946,13 @@ mod tests {
             .expect_err("descending key should be rejected");
         assert!(matches!(
             error,
-            SstBlockCodecError::RowKeysOutOfOrder { .. }
+            SegmentBlockCodecError::RowKeysOutOfOrder { .. }
         ));
 
         let error = SegmentBlocksBuilder::default()
-            .finish()
+            .build()
             .expect_err("empty segment should be rejected");
-        assert!(matches!(error, SstBlockCodecError::EmptySegment));
+        assert!(matches!(error, SegmentBlockCodecError::EmptySegment));
     }
 
     #[test]
@@ -963,13 +978,13 @@ mod tests {
             let (key, filter_key, row) = inode_row(index as u64);
             builder.push(&key, &filter_key, &row).expect("push row");
         }
-        let built = builder.finish().expect("finish segment");
+        let built = builder.build().expect("finish segment");
 
         let expected_max = inode_row((rows - 1) as u64).0;
         assert_eq!(built.min_row_key, inode_row(0).0);
         assert_eq!(built.max_row_key, expected_max);
         assert_eq!(built.row_count, rows as u64);
-        // The last push closed the block, so `finish` appended nothing. The
+        // The last push closed the block, so `build` appended nothing. The
         // object must still be the same bytes a larger target produces.
         assert_eq!(built.bytes, single_block.bytes);
         let index =
@@ -989,7 +1004,7 @@ mod tests {
                 let (key, filter_key, row) = inode_row(index as u64);
                 builder.push(&key, &filter_key, &row).expect("push row");
             }
-            let built = builder.finish().expect("finish segment");
+            let built = builder.build().expect("finish segment");
             assert_eq!(built.min_row_key, expected[0], "target {target}");
             assert_eq!(
                 &built.max_row_key,
@@ -1036,7 +1051,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                SstBlockCodecError::RowKeysOutOfOrder { previous, offered }
+                SegmentBlockCodecError::RowKeysOutOfOrder { previous, offered }
                     if previous == &key_high && offered == &key_low
             ),
             "unexpected error: {error}"
@@ -1049,7 +1064,7 @@ mod tests {
         let (key, filter_key, row) = inode_row(7);
         builder.push(&key, &filter_key, &row).expect("first copy");
         builder.push(&key, &filter_key, &row).expect("second copy");
-        let built = builder.finish().expect("finish");
+        let built = builder.build().expect("finish");
         assert_eq!(built.row_count, 2);
     }
 
@@ -1060,25 +1075,34 @@ mod tests {
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
 
         let mut corrupted = built.bytes.clone();
-        let target = index[0].block.offset as usize + 3;
+        let target = crate::usize_from_u64(index[0].block.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_data_block(section(&corrupted, &index[0].block), &index[0].block)
             .expect_err("corrupted data block should fail");
-        assert!(matches!(error, SstBlockCodecError::ChecksumMismatch { .. }));
+        assert!(matches!(
+            error,
+            SegmentBlockCodecError::ChecksumMismatch { .. }
+        ));
 
         let mut corrupted = built.bytes.clone();
-        let target = built.index.offset as usize + 3;
+        let target = crate::usize_from_u64(built.index.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_index_block(section(&corrupted, &built.index), &built.index)
             .expect_err("corrupted index should fail");
-        assert!(matches!(error, SstBlockCodecError::ChecksumMismatch { .. }));
+        assert!(matches!(
+            error,
+            SegmentBlockCodecError::ChecksumMismatch { .. }
+        ));
 
         let mut corrupted = built.bytes.clone();
-        let target = built.filter.offset as usize + 12;
+        let target = crate::usize_from_u64(built.filter.offset) + 12;
         corrupted[target] ^= 0xff;
         let error = decode_filter_block(section(&corrupted, &built.filter), &built.filter)
             .expect_err("corrupted filter should fail");
-        assert!(matches!(error, SstBlockCodecError::ChecksumMismatch { .. }));
+        assert!(matches!(
+            error,
+            SegmentBlockCodecError::ChecksumMismatch { .. }
+        ));
     }
 
     #[test]
@@ -1088,7 +1112,7 @@ mod tests {
         handle.decoded_bytes = 8;
         assert_eq!(
             decode_data_block(&bytes, &handle).expect_err("expansion exceeds the handle"),
-            SstBlockCodecError::DecodedLengthMismatch {
+            SegmentBlockCodecError::DecodedLengthMismatch {
                 expected: 8,
                 actual: 9,
             }
@@ -1102,7 +1126,7 @@ mod tests {
         handle.decoded_bytes = u32::MAX;
         assert_eq!(
             decode_index_block(&bytes, &handle).expect_err("declared length exceeds expansion"),
-            SstBlockCodecError::DecodedLengthMismatch {
+            SegmentBlockCodecError::DecodedLengthMismatch {
                 expected: u32::MAX,
                 actual: 4,
             }
@@ -1128,7 +1152,7 @@ mod tests {
         ] {
             assert_eq!(
                 error,
-                SstBlockCodecError::StoredLengthMismatch {
+                SegmentBlockCodecError::StoredLengthMismatch {
                     expected: handle.stored_bytes,
                     actual: handle.stored_bytes as usize - 1,
                 }
@@ -1142,12 +1166,12 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&n_hashes.to_le_bytes());
             payload.extend_from_slice(&bit_len.to_le_bytes());
-            payload.resize(12 + bit_len.div_ceil(8) as usize, 0xff);
+            payload.resize(12 + crate::usize_from_u64(bit_len.div_ceil(8)), 0xff);
             let mut bytes = Vec::new();
             let handle = append_section(&mut bytes, &payload, false).expect("filter section");
             assert!(matches!(
                 decode_filter_block(&bytes, &handle),
-                Err(SstBlockCodecError::Malformed(_))
+                Err(SegmentBlockCodecError::Malformed(_))
             ));
         }
     }
@@ -1158,7 +1182,8 @@ mod tests {
         let mut restart_offsets = Vec::new();
         for index in 0..=RESTART_INTERVAL {
             if index.is_multiple_of(RESTART_INTERVAL) {
-                restart_offsets.push(payload.len() as u32);
+                restart_offsets
+                    .push(u32::try_from(payload.len()).expect("the offset should fit u32"));
             }
             write_varint(&mut payload, u64::from(index != 0));
             write_varint(&mut payload, u64::from(index == 0));
@@ -1176,7 +1201,7 @@ mod tests {
         let handle = append_section(&mut bytes, &payload, true).expect("data section");
         assert_eq!(
             decode_data_block_rows::<u8>(&bytes, &handle).expect_err("shared restart prefix"),
-            SstBlockCodecError::Malformed("restart entry has a shared prefix".to_owned())
+            SegmentBlockCodecError::Malformed("restart entry has a shared prefix".to_owned())
         );
     }
 
@@ -1187,7 +1212,7 @@ mod tests {
         let handle = append_section(&mut bytes, &payload, true).expect("data section");
         assert_eq!(
             decode_data_block_rows::<u8>(&bytes, &handle).expect_err("wrong restart offset"),
-            SstBlockCodecError::Malformed("restart offset disagrees with its entry".to_owned())
+            SegmentBlockCodecError::Malformed("restart offset disagrees with its entry".to_owned())
         );
     }
 
@@ -1198,7 +1223,7 @@ mod tests {
             bytes[9] = last;
             assert_eq!(
                 read_varint(&bytes, &mut 0).expect_err("overflowing varint"),
-                SstBlockCodecError::Malformed("varint exceeds 64 bits".to_owned())
+                SegmentBlockCodecError::Malformed("varint exceeds 64 bits".to_owned())
             );
         }
         bytes[9] = 1;
@@ -1254,7 +1279,7 @@ mod tests {
         let error =
             decode_data_block(&bytes, &handle).expect_err("descending rows should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("row-key order")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("row-key order")),
             "unexpected error: {error}"
         );
     }
@@ -1283,7 +1308,7 @@ mod tests {
             .expect_err("a partial utf-8 prefix should be rejected");
         assert!(matches!(
             &error,
-            SstBlockCodecError::Malformed(message)
+            SegmentBlockCodecError::Malformed(message)
                 if message == "shared prefix exceeds previous key"
         ));
     }
@@ -1299,7 +1324,7 @@ mod tests {
         let error =
             decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("key order")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("key order")),
             "unexpected error: {error}"
         );
     }
@@ -1312,7 +1337,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("descending block offsets should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
             "unexpected error: {error}"
         );
     }
@@ -1325,7 +1350,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("overlapping block ranges should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
             "unexpected error: {error}"
         );
     }
@@ -1338,7 +1363,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a gap between block ranges should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
             "unexpected error: {error}"
         );
     }
@@ -1351,7 +1376,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("an overflowing single range should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
             "unexpected error: {error}"
         );
     }
@@ -1367,7 +1392,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a trailing overflowing range should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
             "unexpected error: {error}"
         );
     }

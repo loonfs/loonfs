@@ -634,7 +634,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
         committed_seq: ChangeSeq(3),
     });
-    let metadata_state = builder.finish();
+    let metadata_state = builder.build();
 
     assert_eq!(metadata_state.row_count(), 4);
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(3));

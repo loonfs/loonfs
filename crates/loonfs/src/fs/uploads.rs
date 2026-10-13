@@ -176,7 +176,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .upload_streamed_content(upload_id, self.core.subject.as_ref(), body)
+            .upload_content_stream(upload_id, self.core.subject.as_ref(), body)
             .await?)
     }
 

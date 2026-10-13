@@ -3,7 +3,7 @@
 //! one result per candidate.
 
 use crate::authorize::CommitAuthority;
-use crate::commit::{settle_publish_attempt, CommitFingerprint};
+use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::{HeadStateCache, MetadataSegmentCache};
@@ -12,13 +12,14 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
+use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
     load_publish_metadata_view, PublishTailPosition, PublishTailProjection, PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
+use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
@@ -40,7 +41,7 @@ use thiserror::Error;
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
-    request: CommitRequest,
+    intent: CommitIntent,
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
@@ -80,20 +81,20 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 impl CommitCandidate {
     /// Uses the handle subject to authorize this publication.
     pub fn with_subject(mut self, subject: loonfs_types::Subject) -> Self {
-        self.request.subject = Some(subject);
+        self.intent.subject = Some(subject);
         self.maintenance = false;
         self
     }
 
     /// Supplies the subject used to own content staged for this candidate.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.request.subject.as_ref()
+        self.intent.subject.as_ref()
     }
 
     /// A commit no subject check applies to. Only maintenance builds one.
-    pub fn maintenance(request: CommitRequest) -> Self {
+    pub fn maintenance(intent: CommitIntent) -> Self {
         Self {
-            request,
+            intent,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
             inline_content: Vec::new(),
@@ -105,14 +106,14 @@ impl CommitCandidate {
         if self.maintenance {
             CommitAuthority::Maintenance
         } else {
-            CommitAuthority::Subject(self.request.subject.as_ref())
+            CommitAuthority::Subject(self.intent.subject.as_ref())
         }
     }
 
     /// Wraps a mutation request with no attached content proofs.
-    pub fn new(request: CommitRequest) -> Self {
+    pub fn new(intent: CommitIntent) -> Self {
         Self {
-            request,
+            intent,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
             inline_content: Vec::new(),
@@ -121,8 +122,8 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request with opaque proofs for its prepared content.
-    pub fn prepared(request: CommitRequest, content: Vec<PreparedContent>) -> Self {
-        let mut candidate = Self::new(request);
+    pub fn prepared(intent: CommitIntent, content: Vec<PreparedContent>) -> Self {
+        let mut candidate = Self::new(intent);
         let mut proofs = Vec::new();
         for value in content {
             match value.inline_content() {
@@ -135,8 +136,8 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request whose content preparation failed.
-    pub fn rejected(request: CommitRequest, error: ContentPreparationError) -> Self {
-        Self::new(request).reject_content_preparation(error)
+    pub fn rejected(intent: CommitIntent, error: ContentPreparationError) -> Self {
+        Self::new(intent).reject_content_preparation(error)
     }
 
     /// Rejects new publication while preserving the identity needed for receipt replay.
@@ -154,11 +155,11 @@ impl CommitCandidate {
 
     /// Takes `inline_content` as the content bytes carried by the commit.
     pub fn with_inline_content(
-        request: CommitRequest,
+        intent: CommitIntent,
         content: Vec<PreparedContent>,
         inline_content: Vec<InlineContent>,
     ) -> Self {
-        let mut candidate = Self::prepared(request, content);
+        let mut candidate = Self::prepared(intent, content);
         candidate.inline_content.extend(inline_content);
         candidate
     }
@@ -171,7 +172,7 @@ impl CommitCandidate {
     /// Lists inline values in the order their operations first name them.
     pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
         crate::protocol::validate_inline_content_references(
-            &self.request,
+            &self.intent,
             &self.inline_content,
             namespace_id,
         )?;
@@ -181,7 +182,7 @@ impl CommitCandidate {
             .map(|value| (&value.content_ref().content_id, value))
             .collect();
         Ok(self
-            .request
+            .intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::content_ref)
@@ -192,7 +193,7 @@ impl CommitCandidate {
     /// Replaces an inline value with a staged proof without changing its identity form.
     pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
         let reference = proof.content_ref();
-        for operation in &mut self.request.operations {
+        for operation in &mut self.intent.operations {
             match operation {
                 FilesystemOperation::PutFile {
                     content_ref: Some(content_ref),
@@ -258,7 +259,7 @@ impl CommitCandidate {
 
     /// Bytes the request's appends add. They always travel in the WAL.
     pub fn appended_bytes(&self) -> usize {
-        self.request
+        self.intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::appended_content)
@@ -268,7 +269,7 @@ impl CommitCandidate {
     /// Rejects an append of no bytes or of more than one WAL piece holds,
     /// naming the operation.
     pub fn validate_appended_content(&self) -> Result<()> {
-        for (index, operation) in self.request.operations.iter().enumerate() {
+        for (index, operation) in self.intent.operations.iter().enumerate() {
             let Some(bytes) = operation.appended_content() else {
                 continue;
             };
@@ -280,8 +281,8 @@ impl CommitCandidate {
                 }
             } else if bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
                 CoreError::AppendTooLarge {
-                    size_bytes: bytes.len(),
-                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
+                    size_bytes: bytes.len() as u64,
+                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES as u64,
                 }
             } else {
                 continue;
@@ -291,8 +292,8 @@ impl CommitCandidate {
         Ok(())
     }
 
-    pub(crate) fn request(&self) -> &CommitRequest {
-        &self.request
+    pub(crate) fn intent(&self) -> &CommitIntent {
+        &self.intent
     }
 
     pub(crate) fn content_preparation(&self) -> &ContentPreparation {
@@ -301,14 +302,14 @@ impl CommitCandidate {
 
     /// Returns the idempotency key carried by the mutation request.
     pub fn commit_id(&self) -> &CommitId {
-        &self.request.commit_id
+        &self.intent.commit_id
     }
 
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
         commit_fingerprint(
             namespace_id,
-            &self.request,
+            &self.intent,
             &self
                 .inline_content
                 .iter()
@@ -370,21 +371,21 @@ impl CommitCandidate {
     ) -> Result<usize> {
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
-                .saturating_add(std::mem::size_of_val(self.request.operations.as_slice()))
-                .saturating_add(std::mem::size_of_val(self.request.preconditions.as_slice())),
+                .saturating_add(std::mem::size_of_val(self.intent.operations.as_slice()))
+                .saturating_add(std::mem::size_of_val(self.intent.preconditions.as_slice())),
         );
         serde_json::to_writer(
             &mut bytes,
             &(
-                &self.request.commit_id,
-                &self.request.actor_id,
-                &self.request.message,
-                &self.request.operations,
-                &self.request.preconditions,
+                &self.intent.commit_id,
+                &self.intent.actor_id,
+                &self.intent.message,
+                &self.intent.operations,
+                &self.intent.preconditions,
             ),
         )
         .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-        if let Some(subject) = &self.request.subject {
+        if let Some(subject) = &self.intent.subject {
             serde_json::to_writer(&mut bytes, &subject.subject_id)
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
             for principal_id in subject.principals.iter() {
@@ -442,7 +443,7 @@ impl CommitCandidate {
     /// Bounds the request's WAL bytes before planning adds carried layouts.
     /// Publication adds their extent bounds before accepting the plan.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
-        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, &self.inline_content)
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.intent, &self.inline_content)
     }
 
     /// Bounds the request after inline selection, before carried layouts.
@@ -450,28 +451,28 @@ impl CommitCandidate {
         &self,
         inline_content: &[InlineContent],
     ) -> usize {
-        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, inline_content)
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.intent, inline_content)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
         self.validate_request_has_operations()?;
-        if self.request.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
+        if self.intent.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} operations; maximum is {}",
-                self.request.operations.len(),
+                self.intent.operations.len(),
                 crate::limits::MAX_COMMIT_OPERATIONS
             )));
         }
-        if self.request.preconditions.len() > crate::limits::MAX_COMMIT_PRECONDITIONS {
+        if self.intent.preconditions.len() > crate::limits::MAX_COMMIT_PRECONDITIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} preconditions; maximum is {}",
-                self.request.preconditions.len(),
+                self.intent.preconditions.len(),
                 crate::limits::MAX_COMMIT_PRECONDITIONS
             )));
         }
-        if let Some(message) = &self.request.message {
+        if let Some(message) = &self.intent.message {
             if message.len() > crate::limits::MAX_COMMIT_MESSAGE_BYTES {
                 return Err(CoreError::InvalidCommitRequest(format!(
                     "mutation message is {} bytes; maximum is {}",
@@ -509,7 +510,7 @@ impl CommitCandidate {
             )));
         }
         let distinct_content_refs = self
-            .request
+            .intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::content_ref)
@@ -525,7 +526,7 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_has_operations(&self) -> Result<()> {
-        if self.request.operations.is_empty() {
+        if self.intent.operations.is_empty() {
             return Err(CoreError::InvalidCommitRequest(
                 "mutation request carries no operations".to_owned(),
             ));
@@ -550,19 +551,33 @@ impl std::io::Write for RequestByteCounter {
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<Commit>>,
-    /// WAL tail length observed by this publish, for opportunistic
-    /// maintenance scheduling. Zero when no projection was loaded.
-    pub wal_tail_objects: u64,
-    pub wal_tail_inline_bytes: usize,
-    /// Whether this attempt loaded the tail. The inline count then includes
-    /// the inline bytes of a put whose outcome is unknown.
-    pub wal_tail_observed: bool,
-    /// Whether this attempt read the WAL tail from the store instead of
-    /// finding it in the head-state cache.
-    pub wal_tail_discovered: bool,
+    /// The WAL tail this attempt loaded, for opportunistic maintenance
+    /// scheduling, or `None` when it loaded no projection.
+    pub wal_tail: Option<WalTailReport>,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
+}
+
+/// The WAL tail one publish attempt loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalTailReport {
+    /// Unfolded WAL objects.
+    pub objects: u64,
+    /// Inline content bytes in the tail, including the inline bytes of a put
+    /// whose outcome is unknown.
+    pub inline_bytes: usize,
+    /// Where the attempt found the tail.
+    pub source: TailSource,
+}
+
+/// Where a publish attempt found the WAL tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailSource {
+    /// The head-state cache.
+    Cached,
+    /// The store.
+    Store,
 }
 
 /// The tail a fold publishes: the head it was replayed against, the basis
@@ -599,7 +614,7 @@ pub struct ResultingReadState {
 /// namespace and keep it outside rebuildable caches. An engine without shared
 /// state treats each one-shot commit as a separate session.
 #[derive(Debug, Default)]
-pub enum WriterSessionState {
+pub enum WriterSessionStatus {
     /// No epoch yet: the session's first publish acquires one.
     #[default]
     Unacquired,
@@ -612,8 +627,8 @@ pub enum WriterSessionState {
     Fenced(WriterFence),
 }
 
-/// Shared handle to one namespace's [`WriterSessionState`].
-pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
+/// Shared handle to one namespace's [`WriterSessionStatus`].
+pub type SharedWriterSessionStatus = Arc<Mutex<WriterSessionStatus>>;
 
 #[derive(Debug)]
 pub struct NamespaceCommitEngine {
@@ -627,8 +642,8 @@ pub struct NamespaceCommitEngine {
     /// current: the discovery that loaded it, or a HEAD that found no successor.
     basis_checked: Option<Observation>,
     /// This session's epoch and fencing for the namespace; see
-    /// [`WriterSessionState`].
-    session: SharedWriterSessionState,
+    /// [`WriterSessionStatus`].
+    session: SharedWriterSessionStatus,
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
@@ -649,7 +664,7 @@ impl NamespaceCommitEngine {
             acquired_anchor: None,
             fold_observed: None,
             basis_checked: None,
-            session: SharedWriterSessionState::default(),
+            session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
             head_state: None,
@@ -669,12 +684,12 @@ impl NamespaceCommitEngine {
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
     /// persist across engine instances.
-    pub fn writer_session(mut self, session: SharedWriterSessionState) -> Self {
+    pub fn writer_session(mut self, session: SharedWriterSessionStatus) -> Self {
         self.session = session;
         self
     }
 
-    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionState> {
+    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionStatus> {
         // Treat a poisoned lock as fatal because another thread panicked while
         // updating the session state.
         self.session
@@ -755,9 +770,9 @@ impl NamespaceCommitEngine {
         }
     }
 
-    fn remove_tail(&self, position: &PublishTailPosition) {
+    fn invalidate_tail(&self, position: &PublishTailPosition) {
         if let Some(head_state) = &self.head_state {
-            head_state.remove_tail(&position.tail_key(&self.namespace_id));
+            head_state.invalidate_tail(&position.tail_key(&self.namespace_id));
         }
     }
 
@@ -847,11 +862,11 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
     ) -> Result<AcquiredWriter> {
         let already_acquired = match &*self.lock_session() {
-            WriterSessionState::Fenced(fence) => {
+            WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
-            WriterSessionState::Acquired(acquired_writer) => Some(acquired_writer.clone()),
-            WriterSessionState::Unacquired => None,
+            WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
+            WriterSessionStatus::Unacquired => None,
         };
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
@@ -860,12 +875,12 @@ impl NamespaceCommitEngine {
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
-        if let WriterSessionState::Fenced(fence) = &*session {
+        if let WriterSessionStatus::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
             // the epoch. Preserve the fenced state.
             return Err(CoreError::WriterFenced(fence.clone()));
         }
-        *session = WriterSessionState::Acquired(acquired_writer.clone());
+        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 
@@ -897,7 +912,7 @@ impl NamespaceCommitEngine {
         .await;
         self.invalidate_projection();
         if let Err(CoreError::WriterFenced(fence)) = &deleted {
-            *self.lock_session() = WriterSessionState::Fenced(fence.clone());
+            *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
         }
         deleted
     }
@@ -915,10 +930,7 @@ impl NamespaceCommitEngine {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                wal_tail_objects: 0,
-                wal_tail_inline_bytes: 0,
-                wal_tail_observed: false,
-                wal_tail_discovered: false,
+                wal_tail: None,
                 resulting_read_state: None,
             };
         }
@@ -929,10 +941,7 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_objects: 0,
-                    wal_tail_inline_bytes: 0,
-                    wal_tail_observed: false,
-                    wal_tail_discovered: false,
+                    wal_tail: None,
                     resulting_read_state: None,
                 };
             }
@@ -994,14 +1003,11 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
-                    *self.lock_session() = WriterSessionState::Fenced(fence.clone());
+                    *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_objects: 0,
-                    wal_tail_inline_bytes: 0,
-                    wal_tail_observed: false,
-                    wal_tail_discovered: false,
+                    wal_tail: None,
                     resulting_read_state: None,
                 };
             }
@@ -1035,20 +1041,25 @@ impl NamespaceCommitEngine {
         let projection = publish_view.into_projection();
         self.projection_observed = Some(projection_observed);
         let unknown_inline_bytes = published.unconfirmed_inline_bytes;
-        let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
+        let update =
             self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if resulting_read_state.is_some() && self.publish_tail.is_some() {
+        if update.resulting_read_state.is_some() && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            wal_tail_objects,
-            wal_tail_inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
-            wal_tail_observed: true,
-            wal_tail_discovered,
-            resulting_read_state,
+            wal_tail: Some(WalTailReport {
+                objects: update.wal_tail_objects,
+                inline_bytes: update.wal_tail_inline_bytes + unknown_inline_bytes,
+                source: if wal_tail_discovered {
+                    TailSource::Store
+                } else {
+                    TailSource::Cached
+                },
+            }),
+            resulting_read_state: update.resulting_read_state,
         }
     }
 
@@ -1061,44 +1072,38 @@ impl NamespaceCommitEngine {
         mut projection: PublishTailProjection,
         effect: PublishViewEffect,
         tail_discovered: bool,
-    ) -> (u64, usize, Option<ResultingReadState>) {
+    ) -> TailProjectionUpdate {
         let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
         let state = match effect {
             PublishViewEffect::Unchanged => None,
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
-                return (
-                    projection.position.wal_tail_objects,
-                    projection.tail_state.inline_bytes(),
-                    None,
-                );
+                return TailProjectionUpdate {
+                    wal_tail_objects: projection.position.wal_tail_objects,
+                    wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                    resulting_read_state: None,
+                };
             }
             PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
-                self.remove_tail(&projection.position);
-                let tail_state = Arc::make_mut(&mut projection.tail_state);
-                let chunk = match tail_state.push_object(&self.namespace_id, &records) {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        // The WAL is already durable. Discard this cache; replay
-                        // and folding will report the accounting error.
-                        tracing::error!(%error, "could not update the committed WAL projection");
-                        self.invalidate_projection();
-                        return (
-                            projection.position.wal_tail_objects,
-                            tail_state.inline_bytes(),
-                            None,
-                        );
-                    }
-                };
-                if let Err(error) = projection.apply_fold_object(chunk) {
-                    tracing::error!(%error, "could not update the committed WAL projection");
-                    self.invalidate_projection();
-                    return (
-                        projection.position.wal_tail_objects,
-                        projection.tail_state.inline_bytes(),
-                        None,
+                self.invalidate_tail(&projection.position);
+                let applied = Arc::make_mut(&mut projection.tail_state)
+                    .push_object(&self.namespace_id, &records)
+                    .and_then(|chunk| projection.apply_fold_object(chunk));
+                if let Err(error) = applied {
+                    // The WAL is already durable. Discard this cache; replay
+                    // and folding will report the accounting error.
+                    tracing::warn!(
+                        namespace_id = %self.namespace_id,
+                        error = %error,
+                        "could not update the committed WAL projection"
                     );
+                    self.invalidate_projection();
+                    return TailProjectionUpdate {
+                        wal_tail_objects: projection.position.wal_tail_objects,
+                        wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                        resulting_read_state: None,
+                    };
                 }
                 projection.reanchor(head.clone());
                 // A put lands only from a view whose basis was confirmed, so this is
@@ -1117,10 +1122,23 @@ impl NamespaceCommitEngine {
         if advanced || tail_discovered {
             self.insert_tail(&position, tail_state);
         }
-        let reported = (position.wal_tail_objects, position.wal_tail_inline_bytes);
+        let update = TailProjectionUpdate {
+            wal_tail_objects: position.wal_tail_objects,
+            wal_tail_inline_bytes: position.wal_tail_inline_bytes,
+            resulting_read_state: state,
+        };
         self.publish_tail = Some(position);
-        (reported.0, reported.1, state)
+        update
     }
+}
+
+/// What folding one batch into the tail projection left: the WAL-tail length
+/// the caller schedules maintenance on, and the read state a landed put
+/// produced.
+struct TailProjectionUpdate {
+    wal_tail_objects: u64,
+    wal_tail_inline_bytes: usize,
+    resulting_read_state: Option<ResultingReadState>,
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {
@@ -1139,7 +1157,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
-    for _ in 0..crate::limits::CONTENTION_RETRY_LIMIT {
+    for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
         let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
         let observed = engine
             .publish_batch(store, &attempted, context, &batch)
@@ -1196,7 +1214,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
     };
     use loonfs_types::{
         ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -1213,8 +1231,8 @@ mod tests {
         }
     }
 
-    fn create_dir_request(commit_id: &str, name: &str) -> CommitRequest {
-        CommitRequest::single(
+    fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {
+        CommitIntent::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -1276,7 +1294,7 @@ mod tests {
                 PrincipalId::parse(format!("{index:03}{}", "x".repeat(253))).expect("principal")
             })
             .collect::<BTreeSet<_>>();
-        candidate.request.subject = Some(Subject {
+        candidate.intent.subject = Some(Subject {
             principal_scope: PrincipalScope::parse("scope").expect("scope"),
             subject_id: SubjectId::parse("subject").expect("subject"),
             principals: PrincipalSet::new(principals).expect("principals"),
@@ -1307,7 +1325,7 @@ mod tests {
     #[test]
     fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let oversized_ops = CommitCandidate::new(CommitRequest {
+        let oversized_ops = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1340,7 +1358,7 @@ mod tests {
             .semantic_identity(&namespace_id)
             .expect("prepared proof limits must not affect identity");
 
-        let oversized_message = CommitCandidate::new(CommitRequest {
+        let oversized_message = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1358,7 +1376,7 @@ mod tests {
 
     #[test]
     fn a_batch_past_the_operation_ceiling_is_rejected() {
-        let oversized = CommitCandidate::new(CommitRequest {
+        let oversized = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1378,7 +1396,7 @@ mod tests {
             .expect_err("the batch is over the operation ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = CommitCandidate::new(CommitRequest {
+        let at_ceiling = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1404,7 +1422,7 @@ mod tests {
             parents: false,
         }];
 
-        let oversized = CommitCandidate::new(CommitRequest {
+        let oversized = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1417,7 +1435,7 @@ mod tests {
             .expect_err("the message is over the byte ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = CommitCandidate::new(CommitRequest {
+        let at_ceiling = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1530,7 +1548,7 @@ mod tests {
         let store = StdArc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::prefix(wal_prefix(&namespace_id)),
-            OperationClass::Read,
+            OperationSelector::Read,
         ));
 
         create(store.inner(), &namespace_id, &writer_a)
@@ -1606,7 +1624,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let session = SharedWriterSessionState::default();
+        let session = SharedWriterSessionStatus::default();
         let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .writer_session(Arc::clone(&session));
         engine_a1
@@ -1820,7 +1838,7 @@ mod tests {
                 .manifest_no(),
             basis
         );
-        assert_eq!(store.count(OperationClass::Head), 0);
+        assert_eq!(store.count(OperationSelector::Head), 0);
 
         // Two budgets after the load the check finds the successor, and the
         // view is reloaded from the hint before the put.
@@ -1858,7 +1876,7 @@ mod tests {
                 KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
                     &namespace_id,
                 )),
-                OperationClass::Head,
+                OperationSelector::Head,
             ),
             KeyPredicate::any(),
         );
@@ -1900,7 +1918,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
+                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
             ),
             "unexpected error: {error:?}"
         );
@@ -1927,7 +1945,7 @@ mod tests {
             BlockingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 gated,
-                OperationClass::Head,
+                OperationSelector::Head,
             ),
             KeyPredicate::any(),
         )
@@ -2032,7 +2050,7 @@ mod tests {
                 .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
             "{operations:?}"
         );
-        assert_eq!(store.count(OperationClass::Put), 0, "{operations:?}");
+        assert_eq!(store.count(OperationSelector::Put), 0, "{operations:?}");
     }
 
     #[tokio::test]
@@ -2086,7 +2104,7 @@ mod tests {
     #[tokio::test]
     async fn a_quiet_writer_reloads_after_its_own_compaction() {
         use crate::manifest::{
-            compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy,
+            compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
         };
 
         let directory = tempdir().expect("tempdir");
@@ -2117,7 +2135,7 @@ mod tests {
             &store,
             &namespace_id,
             current.state.compactor_epoch(),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::read_working_memory(engine.segment_cache.as_deref()),
         )
@@ -2144,7 +2162,10 @@ mod tests {
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
         store.reset();
         let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
-        assert!(published.wal_tail_discovered);
+        assert_eq!(
+            published.wal_tail.map(|tail| tail.source),
+            Some(TailSource::Store)
+        );
         assert_eq!(
             published
                 .resulting_read_state
@@ -2182,7 +2203,7 @@ mod tests {
                 store.inner().release();
             });
         assert!(replayed.resulting_read_state.is_none());
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(
             engine.projection_observed.as_ref().expect("tip").age_ms(),
             1_000
@@ -2352,7 +2373,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
+                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
             ),
             "unexpected error: {error:?}"
         );
@@ -2450,7 +2471,7 @@ mod tests {
             .remove(0)
             .expect("uncached publish a");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "publish validation should read segment blocks"
         );
         store.reset();
@@ -2466,7 +2487,7 @@ mod tests {
             .remove(0)
             .expect("uncached publish b");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "without a cache the next publish re-fetches the same blocks"
         );
 
@@ -2489,7 +2510,7 @@ mod tests {
             .remove(0)
             .expect("cached publish a");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "the first cached publish fills the cache"
         );
         store.reset();
@@ -2505,7 +2526,7 @@ mod tests {
             .remove(0)
             .expect("cached publish b");
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             0,
             "a warm cache serves every publish-view segment read"
         );

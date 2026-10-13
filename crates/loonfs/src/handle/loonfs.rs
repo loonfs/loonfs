@@ -2,7 +2,7 @@
 
 use super::{LoonFsBuilder, Maintenance, Namespace};
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
-use crate::publisher::PublisherRegistry;
+use crate::publisher::{NamespaceSession, PublisherRegistry};
 use crate::{
     CapabilityDocument, ExecutionBudget, MetadataCache, NamespaceId, Result, SharedObjectStore,
     StoreConfig,
@@ -52,6 +52,38 @@ pub struct Writable {
 impl fmt::Debug for Writable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Writable").finish_non_exhaustive()
+    }
+}
+
+/// A handle mode: [`ReadOnly`] or [`Writable`].
+///
+/// The trait is sealed, so these two are the only modes.
+#[allow(
+    private_bounds,
+    reason = "the crate-private supertrait seals the trait and holds the data each mode adds"
+)]
+pub trait Mode: sealed::Sealed {}
+
+impl Mode for ReadOnly {}
+impl Mode for Writable {}
+
+pub(crate) mod sealed {
+    use super::{NamespaceSession, ReadOnly, Writable};
+    use std::sync::Arc;
+
+    /// The data each mode adds to a namespace handle.
+    pub(crate) trait Sealed {
+        /// What a namespace handle holds for its writer session: nothing in
+        /// the read-only mode.
+        type Session: Clone;
+    }
+
+    impl Sealed for ReadOnly {
+        type Session = ();
+    }
+
+    impl Sealed for Writable {
+        type Session = Arc<NamespaceSession>;
     }
 }
 
@@ -115,7 +147,7 @@ impl<M> LoonFs<M> {
     }
 
     /// Reads this runtime's wall clock as unix milliseconds.
-    pub fn now_ms(&self) -> Result<u64> {
+    pub fn now_ms(&self) -> u64 {
         self.core.now_ms()
     }
 
@@ -276,7 +308,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -287,7 +319,9 @@ mod tests {
         let runtime = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("no-stored-block-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "no-stored-block-cache-writer",
+        ))
         .build()
         .await
         .expect("build runtime");
@@ -305,7 +339,9 @@ mod tests {
         let runtime = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("stored-block-cache-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "stored-block-cache-writer",
+        ))
         .stored_metadata_block_cache(stored_blocks.clone())
         .build()
         .await
@@ -328,7 +364,9 @@ mod tests {
         let writer = LoonFs::builder_with_store(Arc::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         ))
-        .writer_id("converted-builder-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "converted-builder-writer",
+        ))
         .build()
         .await
         .expect("build writer");
@@ -366,7 +404,7 @@ mod tests {
             "the reader reads through the cache given before the conversion"
         );
         assert!(
-            recording.count(OperationClass::Head) > 0,
+            recording.count(OperationSelector::Head) > 0,
             "the zero interval given before the conversion probes on every read"
         );
     }
@@ -381,10 +419,10 @@ mod tests {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir).expect("create local-fs store"),
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         ));
         let runtime = LoonFs::builder_with_store(blocking.clone())
-            .writer_id(writer_id)
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id))
             .build()
             .await
             .expect("build runtime");

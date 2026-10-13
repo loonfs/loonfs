@@ -1,6 +1,7 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
 use super::{seed_unfolded_tail, seed_writer, sweep_config, SweepServer, DAY_MS};
+use crate::sweep::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -41,7 +42,7 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
         "a session that published nothing is skipped"
     );
     assert!(held.metadata_caught_up());
-    assert_eq!(held.last_published_ms(), None);
+    assert_eq!(held.last_published_at_ms(), None);
     for index in 0..2 {
         let commit = held
             .put_file(&format!("/note-{index}"), b"data", &test_actor())
@@ -49,7 +50,7 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
             .expect("publish");
         assert_eq!(held.last_published_seq(), Some(commit.committed_seq));
         assert_eq!(
-            held.last_published_ms(),
+            held.last_published_at_ms(),
             Some(server.sweep.inner.namespaces.now_ms())
         );
         assert!(!held.metadata_caught_up());
@@ -103,7 +104,14 @@ async fn ticks_leave_unheld_namespaces_for_the_daily_pass() {
     }
     assert!(store.take().is_empty());
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
-    assert_eq!(server.sweep.run_pass(true).await.expect("daily pass"), 1);
+    assert_eq!(
+        server
+            .sweep
+            .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("daily pass"),
+        1
+    );
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
 }
 
@@ -129,7 +137,7 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
         .open(&namespace_id)
         .await
         .expect("open");
-    for index in 0..3 * loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..3 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         held.put_file(&format!("/file-{index}"), b"data", &test_actor())
             .await
             .expect("publish");
@@ -199,7 +207,7 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         .open(&namespace_id)
         .await
         .expect("open");
-    for index in 0..2 * loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..2 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         held.put_file(&format!("/note-{index}"), b"data", &test_actor())
             .await
             .expect("publish");
@@ -211,17 +219,17 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
     }
     server
         .maintenance
-        .compact_metadata(&namespace_id)
+        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim compactor");
     let other = loonfs::LoonFs::builder_with_store(store.clone())
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("other runtime");
     other
         .maintenance(writer_id("other"))
-        .compact_metadata(&namespace_id)
+        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim newer compactor");
     store.reset();
@@ -491,7 +499,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         0,
     )));
     let runtime = loonfs::LoonFs::builder_with_store(store.clone())
-        .writer_id("self-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())
         .monotonic_timer(clock.clone())
         .inline_content(loonfs::InlineContentPolicy {
@@ -512,7 +520,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         .expect("publish");
     runtime.drain().await.expect("self-maintenance finishes");
     assert!(held.metadata_caught_up());
-    assert_eq!(held.last_published_ms(), Some(0));
+    assert_eq!(held.last_published_at_ms(), Some(0));
     let recorder = loonfs::metrics::DefaultMetricsRecorder::new();
     let namespaces = Arc::new(loonfs_http::Namespaces::new_with_timer(
         runtime.clone(),

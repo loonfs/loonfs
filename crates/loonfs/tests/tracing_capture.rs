@@ -14,7 +14,7 @@
 //! process, the callsites are first hit with the capture subscriber
 //! installed, and the assertion is deterministic.
 
-use loonfs::{LoonFs, MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable};
+use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, StoreConfig, Writable};
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -34,7 +34,7 @@ fn store_config(root: &Path) -> StoreConfig {
 
 fn writes_past_wal_tail_threshold() -> u32 {
     u32::try_from(
-        MetadataMaintenanceOptions::default()
+        MaintainMetadataOptions::default()
             .max_wal_tail_objects
             .get()
             + 1,
@@ -44,7 +44,9 @@ fn writes_past_wal_tail_threshold() -> u32 {
 
 async fn writer(root: &Path) -> LoonFs<Writable> {
     LoonFs::builder(store_config(root))
-        .writer_id("tracing-capture-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "tracing-capture-writer",
+        ))
         .build()
         .await
         .expect("build writer")

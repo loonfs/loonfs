@@ -8,13 +8,14 @@ use super::candidates::{
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
-use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit, WalPublishError};
+use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::{Deadline, Observation};
+use crate::wal::WalPublishError;
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
@@ -26,7 +27,7 @@ use loonfs_types::NamespaceId;
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PublishBatchAgainstViewResult {
+pub(crate) struct PublishBatchReport {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) effect: PublishViewEffect,
     pub(crate) unconfirmed_inline_bytes: usize,
@@ -51,7 +52,7 @@ pub(crate) enum PublishViewEffect {
     },
 }
 
-impl PublishBatchAgainstViewResult {
+impl PublishBatchReport {
     fn unchanged(results: Vec<Result<Commit>>) -> Self {
         Self {
             results,
@@ -97,28 +98,20 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
     content_writes: &tokio::sync::Semaphore,
-) -> PublishBatchAgainstViewResult {
+) -> PublishBatchReport {
     if candidates.is_empty() {
-        return PublishBatchAgainstViewResult::unchanged(Vec::new());
+        return PublishBatchReport::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-    if view.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstViewResult::unchanged(vec![
-            Err(CoreError::Internal(
-                "publish view namespace mismatch".to_owned()
-            ));
-            candidates.len()
-        ]);
-    }
+    assert_eq!(
+        view.head.namespace_id, *namespace_id,
+        "a batch should publish against its own namespace's view"
+    );
     let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
-    let Some(admission_now_ms) = context.now_ms.checked_add(elapsed_before_attempt_ms) else {
-        return PublishBatchAgainstViewResult::unchanged(vec![
-            Err(CoreError::Internal(
-                "publication time overflow".to_owned()
-            ));
-            candidates.len()
-        ]);
-    };
+    let admission_now_ms = context
+        .now_ms
+        .checked_add(elapsed_before_attempt_ms)
+        .expect("the admission time should fit in `u64` milliseconds");
     let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(&view.head, view.wal_tail());
     let mut accepted_commits = Vec::new();
@@ -162,7 +155,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let validated = candidate_request.validated;
             let record_bytes = crate::commit_wal_size::planned_wal_record_bytes(
-                candidate.request(),
+                candidate.intent(),
                 candidate.inline_content(),
                 &validated.deltas,
                 &validated.appended,
@@ -195,19 +188,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 continue;
             }
             let allocation = candidate_request.allocation;
-            let resulting_next_inode_id = match session.commit_candidate(allocation) {
-                Ok(resulting_next_inode_id) => resulting_next_inode_id,
-                Err(error) => {
-                    slots.push(settle_admission(
-                        BatchOutcomeSlot::Settled {
-                            outcome: Err(error),
-                            depends_on_batch: true,
-                        },
-                        !accepted_commits.is_empty(),
-                    ));
-                    continue;
-                }
-            };
+            let resulting_next_inode_id = session.commit_candidate(allocation);
             let plan = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
@@ -244,7 +225,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     drop(prepare_span);
 
     if accepted_commits.is_empty() {
-        return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
+        return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
     let wal = match prepare_wal_object(
         namespace_id.clone(),
@@ -253,21 +234,14 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         &accepted_commits,
     ) {
         Ok(wal) => wal,
-        Err(error) => {
-            return abort_batch(
-                slots,
-                &CoreError::Internal(format!("WAL build failed: {error}")),
-            )
-        }
+        Err(error) => return abort_batch(slots, &error),
     };
     let resulting_head = view.head.after_wal_object(wal.envelope().payload());
     let elapsed_ms = clock.batch.elapsed_ms();
-    let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
-        return abort_batch(
-            slots,
-            &CoreError::Internal("publication time overflow".to_owned()),
-        );
-    };
+    let publication_now_ms = context
+        .now_ms
+        .checked_add(elapsed_ms)
+        .expect("the publication time should fit in `u64` milliseconds");
     for (candidate, slot) in candidates.iter().zip(&mut slots) {
         if matches!(slot, BatchOutcomeSlot::Accepted) {
             if let Err(error) =
@@ -313,7 +287,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
         }
     }
-    PublishBatchAgainstViewResult {
+    PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         unconfirmed_inline_bytes: 0,
         effect: PublishViewEffect::Advanced {
@@ -324,12 +298,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
 }
 
 /// Applies the publication error and invalidates the loaded projection.
-fn abort_batch(
-    mut slots: Vec<BatchOutcomeSlot>,
-    error: &CoreError,
-) -> PublishBatchAgainstViewResult {
+fn abort_batch(mut slots: Vec<BatchOutcomeSlot>, error: &CoreError) -> PublishBatchReport {
     fail_unpublished_slots(&mut slots, error);
-    PublishBatchAgainstViewResult {
+    PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
         unconfirmed_inline_bytes: 0,
@@ -391,7 +362,7 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 mod tests {
     use super::*;
     use crate::namespace::writer_epoch::acquire_writer_epoch;
-    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
@@ -405,7 +376,7 @@ mod tests {
     async fn one_expired_candidate_replans_the_other_without_writing() {
         use crate::storage::content_admission::PreparedContent;
         use loonfs_test_support::clock::ManualClock;
-        use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+        use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 
         let directory = tempdir().expect("directory");
         let store = RecordingStore::new(
@@ -435,7 +406,7 @@ mod tests {
             .content_ref()
             .clone();
             CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::parse(name).expect("commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -486,9 +457,9 @@ mod tests {
             result.results[1],
             Err(CoreError::WalPublish(WalPublishError::NumberTaken))
         ));
-        assert_eq!(store.count(OperationClass::Put), 0);
-        assert_eq!(store.count(OperationClass::CompareAndSwap), 0);
-        assert_eq!(store.count(OperationClass::Delete), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
+        assert_eq!(store.count(OperationSelector::CompareAndSwap), 0);
+        assert_eq!(store.count(OperationSelector::Delete), 0);
     }
 
     #[tokio::test]
@@ -525,7 +496,7 @@ mod tests {
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
         view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
-        let candidate = CommitCandidate::new(CommitRequest::single(
+        let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -553,8 +524,8 @@ mod tests {
         let error = result.results[0]
             .as_ref()
             .expect_err("exhausted sequence must reject the commit");
-        assert_eq!(error.code(), loonfs_types::ErrorCode::ServerError);
-        assert!(error.to_string().contains("cannot exceed"));
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+        assert!(error.to_string().contains("largest sequence number"));
         assert!(matches!(result.effect, PublishViewEffect::Unchanged));
         assert_eq!(
             store

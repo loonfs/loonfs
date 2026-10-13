@@ -25,7 +25,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
     let failed_hint = FailStore::new(
         store,
         KeyPredicate::hint(&namespace_id),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
         InjectedError::Transport("hint unavailable".into()),
     );
     failed_hint.fail_all();
@@ -45,7 +45,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
     let blocked = BlockingStore::new(
         failed_hint,
         KeyPredicate::exact(&blocked_key),
-        OperationClass::Get,
+        OperationSelector::Get,
     );
     blocked.block_next();
     let (discovered, ()) = tokio::join!(
@@ -145,13 +145,13 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .expect("current");
     let mut payload = current.state.envelope.payload().clone();
     payload.manifest_no = ManifestNo(2);
-    let manifest = encode_manifest(payload.clone()).expect("manifest");
+    let manifest = encode_manifest(payload.clone());
     let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
     let recorded = Arc::new(RecordingStore::new(store.clone(), KeyPredicate::any()));
     let failing = FailStore::new(
         recorded.clone(),
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost acknowledgement".to_owned()),
     )
     .apply_then_fail();
@@ -159,7 +159,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     let blocked = BlockingStore::new(
         failing,
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let deadline = Deadline::start(timer.clone());
@@ -172,7 +172,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
                 .await
                 .expect("publish manifest two");
             payload.manifest_no = ManifestNo(3);
-            publish_manifest(&store, encode_manifest(payload).expect("successor"))
+            publish_manifest(&store, encode_manifest(payload))
                 .await
                 .expect("publish manifest three");
             let options = crate::gc::GcOptions::default();

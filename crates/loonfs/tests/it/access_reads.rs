@@ -1,7 +1,7 @@
 //! Subject reads observe access changes through the runtime cache.
 
-use loonfs::publish::{CommitRequest, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
+use loonfs::{CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -41,7 +41,7 @@ async fn check_buffered_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("access-reads")
+        .writer_id(loonfs_test_support::ids::writer_id("access-reads"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -87,7 +87,7 @@ async fn check_buffered_read_access(content_size: usize) {
     ] {
         namespace_writer
             .commit(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -107,7 +107,7 @@ async fn check_buffered_read_access(content_size: usize) {
             .expect("prepare file");
         namespace_writer
             .commit_prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -149,7 +149,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .inode_id;
     namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -178,16 +178,13 @@ async fn check_buffered_read_access(content_size: usize) {
         ErrorCode::PathNotFound
     );
     let states = namespace
-        .resolve_current_files(&[inode_id])
+        .stat_current_files_by_inode(&[inode_id])
         .await
         .expect("resolve revoked file");
     assert_eq!(states.len(), 1);
     let state = &states[0];
     assert_eq!(state.inode_id, inode_id);
-    assert!(!state.visible);
-    assert!(!state.readable);
-    assert_eq!(state.current_revision_no, None);
-    assert_eq!(state.current_path, None);
+    assert_eq!(state.file, CurrentFile::Hidden { readable: false });
 }
 
 #[tokio::test]
@@ -204,7 +201,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let old_writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("old-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("old-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -247,7 +244,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     };
     old_namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -270,7 +267,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         );
     }
     let peer = LoonFs::builder_with_store(store)
-        .writer_id("peer")
+        .writer_id(loonfs_test_support::ids::writer_id("peer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -278,7 +275,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     let peer_namespace_writer = peer.open_namespace(&namespace_id).expect("open namespace");
     peer_namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

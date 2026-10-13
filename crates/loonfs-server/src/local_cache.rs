@@ -33,7 +33,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 /// The directory beneath the configured root that the disk tier writes.
 ///
@@ -97,7 +97,7 @@ const BLOCK_KINDS: [StoredMetadataBlockKind; 3] = [
 ];
 
 /// One counter per block kind, indexed by [`kind_index`].
-type PerKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
+type CountersPerBlockKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
 
 /// Foyer-backed cache with a byte-limited memory tier and local disk tier.
 ///
@@ -233,13 +233,15 @@ impl FoyerStoredMetadataBlockCache {
         if self.get_failure_logged.swap(true, Ordering::Relaxed) {
             tracing::debug!(
                 cache = CACHE_NAME,
-                "local block cache lookup failed: {error}"
+                error = %error,
+                "local block cache lookup failed"
             );
         } else {
             tracing::error!(
                 cache = CACHE_NAME,
+                error = %error,
                 "local block cache lookup failed, and reads are falling back to object \
-                 storage; further failures are logged at debug: {error}"
+                 storage; further failures are logged at debug"
             );
         }
     }
@@ -299,7 +301,7 @@ impl StoredMetadataBlockCache for FoyerStoredMetadataBlockCache {
                 drop(
                     self.directory_lock
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
+                        .expect("the cache directory lock should not be poisoned")
                         .take(),
                 );
                 Ok(())
@@ -442,7 +444,10 @@ fn read_geometry(directory: &Path) -> Result<Option<DiskGeometry>, ServerConfigE
 fn write_geometry(directory: &Path, geometry: DiskGeometry) -> Result<(), ServerConfigError> {
     let path = directory.join(GEOMETRY_MARKER);
     let bytes = serde_json::to_vec(&geometry).map_err(|error| {
-        invalid_local_cache(format!("failed to encode `{geometry:?}`: {error}"))
+        invalid_local_cache(format!(
+            "failed to encode the cache geometry with `block_bytes` {} and `blocks` {}: {error}",
+            geometry.block_bytes, geometry.blocks
+        ))
     })?;
     std::fs::write(&path, bytes).map_err(|error| {
         invalid_local_cache(format!(
@@ -535,7 +540,7 @@ fn kind_label(kind: StoredMetadataBlockKind) -> &'static str {
     }
 }
 
-/// Where one block kind's counter sits in a [`PerKind`] array.
+/// Where one block kind's counter sits in a [`CountersPerBlockKind`] array.
 fn kind_index(kind: StoredMetadataBlockKind) -> usize {
     BLOCK_KINDS
         .iter()
@@ -549,11 +554,11 @@ fn kind_index(kind: StoredMetadataBlockKind) -> usize {
 /// closed: the only labels are the three block kinds and the two close
 /// outcomes, all of them `&'static str`, and no call path can add another.
 struct LocalCacheMetrics {
-    hits: PerKind,
-    misses: PerKind,
-    get_failures: PerKind,
-    inserts: PerKind,
-    rejections: PerKind,
+    hits: CountersPerBlockKind,
+    misses: CountersPerBlockKind,
+    get_failures: CountersPerBlockKind,
+    inserts: CountersPerBlockKind,
+    rejections: CountersPerBlockKind,
     closes_clean: Arc<dyn CounterHandle>,
     closes_failed: Arc<dyn CounterHandle>,
 }

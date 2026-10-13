@@ -19,13 +19,14 @@ use tempfile::tempdir;
 const PATH: &str = "/big.bin";
 /// Three parts and a bit: enough that holding the payload whole would show
 /// up plainly against holding one part of it.
-const PAYLOAD_BYTES: usize = 3 * PROVIDER_MULTIPART_PART_BYTES as usize + 4_096;
+const PAYLOAD_BYTES: usize =
+    3 * loonfs_types::usize_from_u64(PROVIDER_MULTIPART_PART_BYTES) + 4_096;
 /// Chunks the size of a source's reads, not the store's parts, so the
 /// store's own regrouping is what the bound has to survive.
 const CHUNK_BYTES: usize = 64 * 1024;
 
 fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+    (0..251_u8).cycle().take(len).collect()
 }
 
 fn streamed(payload: &[u8]) -> ByteStream {

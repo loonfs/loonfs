@@ -11,7 +11,7 @@ import httpx
 from .types import Checksum, ChecksumAlgorithm, ContentRef
 
 _TRANSFER_CHUNK_BYTES = 64 * 1024
-_RANGE_WINDOW = 4
+_RANGE_RESPONSES_IN_FLIGHT = 4
 
 
 def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
@@ -130,11 +130,11 @@ def _download_ranges(client, ranges, timeout):
     parts = collections.deque(part for part in ranges if part.length != 0)
     pending = collections.deque()
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=_RANGE_WINDOW - 1
+        max_workers=_RANGE_RESPONSES_IN_FLIGHT - 1
     ) as executor:
 
         def fill():
-            while parts and len(pending) < _RANGE_WINDOW - 1:
+            while parts and len(pending) < _RANGE_RESPONSES_IN_FLIGHT - 1:
                 part = parts.popleft()
                 future = executor.submit(_send_download_range, client, part, timeout)
                 pending.append((part, future))
@@ -176,7 +176,7 @@ async def _async_download_ranges(client, ranges, timeout):
     pending = collections.deque()
 
     def fill():
-        while parts and len(pending) < _RANGE_WINDOW - 1:
+        while parts and len(pending) < _RANGE_RESPONSES_IN_FLIGHT - 1:
             part = parts.popleft()
             task = asyncio.create_task(_send_download_range(client, part, timeout))
             pending.append((part, task))

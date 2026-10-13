@@ -141,11 +141,9 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 /// processes this order without retaining the complete history.
 #[derive(Debug, Default)]
 pub(super) struct WholeStateRetention {
-    /// Whether this inode has already kept its newest row at or below the
-    /// floor.
-    kept_at_floor: bool,
-    /// The revision of the previous row at or below the floor, which is what
-    /// catches two rows sharing one revision number. Descending revision
+    /// The revision of the previous row at or below the floor. The inode has
+    /// kept its newest row at or below the floor once this is set. It also
+    /// catches two rows sharing one revision number: descending revision
     /// order puts any such pair next to each other, so one field sees them.
     previous_at_floor: Option<u64>,
 }
@@ -175,16 +173,13 @@ impl WholeStateRetention {
                  `{revision}` at or below the retention floor; refusing to drop rows"
             )));
         }
-        self.previous_at_floor = Some(revision);
-        if self.kept_at_floor {
+        if self.previous_at_floor.replace(revision).is_some() {
             return Ok(None);
         }
-        self.kept_at_floor = true;
         Ok(Some(row))
     }
 
     fn close_group(&mut self) {
-        self.kept_at_floor = false;
         self.previous_at_floor = None;
     }
 }

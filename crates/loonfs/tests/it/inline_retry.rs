@@ -1,7 +1,7 @@
 //! Retrying an inline commit with a retained receipt must not upload the content again.
 
 use bytes::Bytes;
-use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use loonfs::{
     CreateNamespaceOptions, InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable,
 };
@@ -9,7 +9,7 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
 use loonfs_types::{
@@ -55,8 +55,8 @@ fn access(grants: AccessGrants) -> FilesystemOperation {
     }
 }
 
-fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitRequest {
-    CommitRequest::single(
+fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(id).expect("commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -92,7 +92,7 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
 
 async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id("inline-retry")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-retry"))
         .min_publish_interval_ms(0)
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .inline_content(InlineContentPolicy {
@@ -148,7 +148,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
     let failing = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PermissionDenied("content writes refused".to_owned()),
     ));
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
@@ -265,7 +265,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-        OperationClass::Read,
+        OperationSelector::Read,
     ));
     let recording = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let original_writer = open(recording.clone(), 1).await;
@@ -284,7 +284,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
     let retry = cold_namespace_writer.commit_candidate(inline("retained", "alice", b"recorded"));
     let submissions = async {
         blocking.wait_until_blocked().await;
-        assert_eq!(recording.count(OperationClass::Put), 0);
+        assert_eq!(recording.count(OperationSelector::Put), 0);
         original_namespace_writer
             .commit(request(
                 "old-writer",
@@ -325,7 +325,7 @@ async fn failed_receipt_lookup_writes_no_durable_state() {
     let failing = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::PermissionDenied("metadata reads refused".to_owned()),
     ));
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
@@ -349,7 +349,7 @@ async fn failed_receipt_lookup_writes_no_durable_state() {
         ErrorCode::StoragePermissionDenied
     );
     assert!(failing.attempts() > 0);
-    assert_eq!(recording.count(OperationClass::Put), 0);
-    assert_eq!(recording.count(OperationClass::Delete), 0);
+    assert_eq!(recording.count(OperationSelector::Put), 0);
+    assert_eq!(recording.count(OperationSelector::Delete), 0);
     writer.shutdown().await.expect("shutdown");
 }

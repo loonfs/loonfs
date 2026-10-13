@@ -3,7 +3,8 @@
 use super::*;
 use crate::gc::{gc_namespace, GcOptions};
 use crate::limits::{
-    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS,
+    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS,
+    GC_MIN_GRACE_WINDOW_MS,
 };
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
@@ -13,7 +14,9 @@ use crate::protocol::{
 use crate::test_support::ops::create;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, MetadataMapStore, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
+};
 use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
@@ -67,7 +70,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
 
 fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
     CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("publish-content").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -84,8 +87,8 @@ fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
     )
 }
 
-fn directory_request(commit_id: &str, name: &str) -> CommitRequest {
-    CommitRequest::single(
+fn directory_request(commit_id: &str, name: &str) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -137,7 +140,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())
         .expect("token remains valid");
     let candidate =
-        CommitCandidate::prepared(put_candidate(&completed).request().clone(), vec![prepared]);
+        CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
     let mut engine = NamespaceCommitEngine::new(
         namespace_id,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -166,7 +169,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -175,7 +178,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let content_key = content_blob(&namespace_id, &completed.prepared.content_ref().content_id);
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
-    let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
@@ -261,7 +264,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -292,7 +295,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     engine.invalidate_projection();
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
-    let alias = CommitCandidate::new(primary.request().clone());
+    let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let candidates = vec![primary, alias, later, replay];
@@ -307,7 +310,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             matches!(
                 result,
                 Err(CoreError::WalPublish(
-                    crate::commit::WalPublishError::NumberTaken
+                    crate::wal::WalPublishError::NumberTaken
                 ))
             )
         }) {
@@ -388,7 +391,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -418,7 +421,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .expect("head");
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
-    let alias = CommitCandidate::new(primary.request().clone());
+    let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let batch = Deadline::start(timer.clone());
@@ -495,7 +498,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 #[tokio::test]
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
     use crate::content::{mint_content_token, verify_content_token};
-    use crate::manifest::{CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy};
+    use crate::manifest::{CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy};
     use crate::namespace::catalog::load_namespace_catalog_entry;
     use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
     use std::num::NonZeroUsize;
@@ -528,7 +531,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         );
     }
     let candidate =
-        CommitCandidate::prepared(put_candidate(&completed).request().clone(), proofs.clone());
+        CommitCandidate::prepared(put_candidate(&completed).intent().clone(), proofs.clone());
     let metadata = CommitCandidate::prepared(
         directory_request("metadata", "metadata"),
         proofs[1..].to_vec(),
@@ -578,9 +581,9 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             &store,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
-            MetadataLsmPolicy {
+            MetadataRunPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             },
             MetadataCompactionPolicy::default(),
             Arc::default(),
@@ -596,7 +599,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         );
         break;
     }
-    let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.reset();
     let replay = engine
@@ -661,7 +664,10 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
         assert_eq!(expires_at_ms, now_ms + CONTENT_RECEIPT_TTL_MS);
         assert!(expires_at_ms <= setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS);
     }
-    for now_ms in [deadline_ms, setup.now_ms + CONTENT_RECLAMATION_GRACE_MS * 2] {
+    for now_ms in [
+        deadline_ms,
+        setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS * 2,
+    ] {
         assert_eq!(
             mint_content_token("secret", &evidence, now_ms),
             Err(ContentTokenError::Expired)

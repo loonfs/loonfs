@@ -10,7 +10,7 @@ const NAMESPACES_PREFIX: &str = "namespaces/";
 
 /// Most namespace ids one [`list_namespace_ids`] page holds: the most keys
 /// S3 and Google Cloud Storage return for one list request.
-pub const MAX_NAMESPACE_IDS_PAGE_LIMIT: u32 = 1_000;
+pub const MAX_NAMESPACE_IDS_PER_PAGE: u32 = 1_000;
 
 /// One family in the [durable object key grammar].
 ///
@@ -205,7 +205,7 @@ impl NamespacePageCursor {
 /// Lists one page of the namespace ids in `store`, in ascending key order.
 ///
 /// The page starts after `start_after` and holds at most `limit` ids, or
-/// [`MAX_NAMESPACE_IDS_PAGE_LIMIT`] when `limit` is larger. One page costs
+/// [`MAX_NAMESPACE_IDS_PER_PAGE`] when `limit` is larger. One page costs
 /// one store list request, however many objects each namespace holds; see
 /// [`ObjectStore::list_child_prefixes`]. A child of `namespaces/` whose name
 /// is not a namespace id is skipped and counted in `skipped_entries`. A
@@ -218,7 +218,7 @@ pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
     limit: EffectiveLimit,
 ) -> Result<NamespaceIdPage> {
     let max_limit =
-        EffectiveLimit::new(const { NonZeroU32::new(MAX_NAMESPACE_IDS_PAGE_LIMIT).unwrap() });
+        EffectiveLimit::new(const { NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE).unwrap() });
     let page = store
         .list_child_prefixes(
             NAMESPACES_PREFIX,

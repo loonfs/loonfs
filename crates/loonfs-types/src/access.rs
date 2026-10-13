@@ -201,7 +201,7 @@ impl AccessRights {
     pub const EMPTY: Self = Self(0);
 
     /// Every right.
-    pub const ALL: Self = Self(((1_u16 << AccessRight::ALL.len()) - 1) as u8);
+    pub const ALL: Self = Self(u8::MAX >> (8 - AccessRight::ALL.len()));
     /// The set holding only `admin`.
     pub const ADMIN: Self = Self(AccessRight::Admin.bit());
 
@@ -387,6 +387,7 @@ impl<'de> Deserialize<'de> for AccessGrants {
 
 /// Why a grant map was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum AccessGrantsError {
     /// A principal appeared more than once.
     #[error("access grants name principal `{principal_id}` more than once")]
@@ -465,6 +466,7 @@ impl TryFrom<BTreeSet<PrincipalId>> for PrincipalSet {
 
 /// Why a request's principal set was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PrincipalSetError {
     /// More identities than one request may act as.
     #[error("principal set names {principals} principals, which exceeds the maximum of {MAX_SUBJECT_PRINCIPALS}")]

@@ -5,10 +5,10 @@ use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::in_flight::STORE_READ_WAVE;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
 use crate::namespace::state::NamespaceReadState;
-use crate::store_waves::STORE_READ_WAVE;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -60,6 +60,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
                 .map_err(|error| ManifestLoadError::ReadSegment {
                     object_key: object_key.clone(),
                     message: error.public_message().into_owned(),
+                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })? {
                 Some(_) => Ok(()),
                 None => Err(ManifestLoadError::MissingSegment {

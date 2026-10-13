@@ -34,14 +34,14 @@ pub struct SimTraceEvent {
     pub operation: String,
     pub object_op: Option<ObjectOperation>,
     pub injected_fault: Option<ObjectStoreFault>,
-    pub result: SimEventResult,
+    pub result: SimEventOutcome,
     pub model_hash: Option<String>,
     pub core_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
-pub enum SimEventResult {
+pub enum SimEventOutcome {
     Ok,
     Error { class: String },
     Skipped { reason: String },
@@ -66,12 +66,15 @@ impl SharedSimTrace {
     pub fn push(&self, event: SimTraceEvent) {
         self.inner
             .lock()
-            .expect("sim trace lock poisoned")
+            .expect("the sim trace lock should not be poisoned")
             .events
             .push(event);
     }
 
     pub fn snapshot(&self) -> SimTrace {
-        self.inner.lock().expect("sim trace lock poisoned").clone()
+        self.inner
+            .lock()
+            .expect("the sim trace lock should not be poisoned")
+            .clone()
     }
 }

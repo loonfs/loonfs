@@ -1,7 +1,7 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
 use super::*;
-use crate::{InlineContentPolicy, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
+use crate::{InlineContentPolicy, MaintainMetadataOptions, MetadataCache, PutFileOptions};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
@@ -67,7 +67,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     ));
     store.fail_all();
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
@@ -286,9 +286,9 @@ async fn writer_with_policy_and_byte_limit(
         KeyPredicate::any(),
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(policy)
-        .publication_limits(crate::PublicationLimits {
+        .publication_policy(crate::PublicationPolicy {
             max_estimated_bytes_per_namespace: NonZeroUsize::new(max_estimated_bytes_per_namespace)
                 .expect("namespace byte limit"),
             ..Default::default()
@@ -373,7 +373,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
         )
         .await
         .expect("put");
-    assert_eq!(store.count(OperationClass::Put), 1);
+    assert_eq!(store.count(OperationSelector::Put), 1);
     assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
     assert_eq!(
         family_requests(&store, DurableObjectFamily::UploadSession),
@@ -401,7 +401,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
             .expect("replay"),
         first
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
         namespace_writer
             .put_file_with_options(
@@ -415,7 +415,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
             .code(),
         loonfs_types::ErrorCode::CommitIdReuseConflict
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -495,7 +495,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
             )
             .await
             .expect("publish");
-        assert_eq!(store.count(OperationClass::Put), 1);
+        assert_eq!(store.count(OperationSelector::Put), 1);
         let reference = namespace_reader
             .read_file(path)
             .await
@@ -518,7 +518,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
                 .expect("replay"),
             first
         );
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
     }
     writer.shutdown().await.expect("shutdown");
 }
@@ -582,7 +582,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
                 .expect("replay"),
             first
         );
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
     }
     writer.shutdown().await.expect("shutdown");
 }
@@ -610,7 +610,7 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
         .prepare_content(b"four")
         .await
         .expect("prepare");
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("put-then-append").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -684,7 +684,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         .prepare_content(b"next")
         .await
         .expect("prepare");
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("fallback").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -742,7 +742,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
             .expect("replay inline after fold"),
         first
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -753,12 +753,12 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         let failing = Arc::new(FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
         let writer = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("inline-writer")
+            .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: Some(8),
                 inline_content_wal_object_budget_bytes: 4,
@@ -823,7 +823,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .await
             .expect_err("receipt rejects different bytes before staging");
         assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(failing.attempts(), 0);
         writer.shutdown().await.expect("shutdown");
     }
@@ -892,7 +892,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
                 .expect("prepare"),
         );
     }
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("batch").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -957,7 +957,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
             .expect("retained receipt"),
         published
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -1016,7 +1016,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 )
                 .await
                 .expect_err("directory cannot be replaced by a file");
-            assert_eq!(store.count(OperationClass::Put), 0);
+            assert_eq!(store.count(OperationSelector::Put), 0);
             let folds = hold_every_fold_permit(&writer).await;
             namespace
                 .put_file_with_options(
@@ -1027,11 +1027,11 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 )
                 .await
                 .expect("reservation released on failure");
-            assert_eq!(store.count(OperationClass::Put), 1);
+            assert_eq!(store.count(OperationSelector::Put), 1);
             assert_eq!(written_records(&store).await[0].inline_content.len(), 1);
             drop(folds);
         } else {
-            assert_eq!(store.count(OperationClass::Put), 2);
+            assert_eq!(store.count(OperationSelector::Put), 2);
             assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
         }
         writer.shutdown().await.expect("shutdown");
@@ -1075,7 +1075,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         metadata_manifest_prefix(&namespace),
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
@@ -1168,7 +1168,7 @@ async fn commit_two_values(
             .await
             .expect("prepare second value"),
     ];
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse(label).expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -1223,12 +1223,12 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         assert_eq!(usage.wal_tail_inline_bytes, 4);
         assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-        let options = MetadataMaintenanceOptions {
+        let options = MaintainMetadataOptions {
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
             ..Default::default()
         };
         let independent = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("independent")
+            .writer_id(loonfs_test_support::ids::writer_id("independent"))
             .build()
             .await
             .expect("independent maintenance")
@@ -1320,7 +1320,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         },
     ] {
         let error = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id("writer")
+            .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .inline_content(options)
             .build()
             .await
@@ -1330,7 +1330,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         assert!(store.snapshot().is_empty());
     }
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(0),
             ..policy()
@@ -1364,12 +1364,12 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     ));
     // The session folds only a full tail, so nothing but the explicit fold
     // runs until the last commit fills it.
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("inline-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .metadata_cache(cache)
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
@@ -1449,7 +1449,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
             .await
             .expect("prepare"),
     ];
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("after-fold").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,

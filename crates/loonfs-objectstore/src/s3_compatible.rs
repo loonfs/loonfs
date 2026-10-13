@@ -32,14 +32,16 @@ use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
-    ObjectStoreErrorClass, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
+    ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
-use loonfs_types::{format::hex::hex_encode_bytes, SecretString};
-use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
+use loonfs_types::SecretString;
+use loonfs_types::{
+    Checksum, ChecksumAlgorithm, ChecksumHex, OperationDeadline, StreamingChecksum,
+};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
@@ -400,7 +402,10 @@ impl MultipartController for S3RequestSigner {
                 }
                 crc.update(&payload);
                 size_bytes += payload.len() as u64;
-                Ok(self.upload_part(key, &upload_id, index as u32 + 1, payload))
+                let part_number = u32::try_from(index)
+                    .expect("a part index below the provider part limit should fit u32")
+                    + 1;
+                Ok(self.upload_part(key, &upload_id, part_number, payload))
             })
             .try_buffer_unordered(part_window)
             .try_collect()
@@ -421,7 +426,7 @@ impl MultipartController for S3RequestSigner {
             etag: Some(etag),
             version: None,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: Some(crc),
         })
     }
@@ -474,7 +479,7 @@ impl S3RequestSigner {
                         provider_upload_id: upload_id,
                         part_number,
                         checksum: &checksum,
-                        expires_in: MULTIPART_CONTROL_TTL,
+                        ttl: MULTIPART_CONTROL_TTL,
                     },
                     Self::signing_time(),
                 )
@@ -551,7 +556,7 @@ impl S3RequestSigner {
                 PresignedGetRequest {
                     object_key: key,
                     range: range.clone(),
-                    expires_in: MULTIPART_CONTROL_TTL,
+                    ttl: MULTIPART_CONTROL_TTL,
                 },
                 Self::signing_time(),
             )
@@ -695,7 +700,7 @@ where
         operation,
         payload_bytes,
         Some(&deadline),
-        |error: &ObjectStoreError| error.class() == ObjectStoreErrorClass::RetryableTransport,
+        |error: &ObjectStoreError| error.kind() == ObjectStoreErrorKind::RetryableTransport,
         attempt,
     )
     .await
@@ -725,7 +730,7 @@ fn base64_checksum(algorithm: ChecksumAlgorithm, value: &str) -> Option<Checksum
         .ok()?;
     (raw.len() == algorithm.value_bytes()).then(|| Checksum {
         algorithm,
-        value: hex_encode_bytes(&raw),
+        value: ChecksumHex::encode(&raw),
     })
 }
 
@@ -827,7 +832,7 @@ mod tests {
     use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
-        ObjectStoreErrorClass,
+        ObjectStoreErrorKind,
     };
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -893,7 +898,7 @@ mod tests {
                         .split_once('-').expect("bounds");
                     let first: usize = first.parse().expect("first");
                     let end = last.parse::<usize>().expect("last") + 1;
-                    assert!(end - first <= crate::assembly::READ_BYTES as usize);
+                    assert!(end - first <= loonfs_types::usize_from_u64(crate::assembly::READ_BYTES));
                     assert_eq!(request.headers()[http::header::IF_MATCH], "\"base\"");
                     ("get", response.body(Bytes::copy_from_slice(&self.base[first..end])))
                 }
@@ -1171,7 +1176,7 @@ mod tests {
             let length = if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                 64 * 1024 * 1024
             } else {
-                crate::assembly::READ_BYTES as usize
+                loonfs_types::usize_from_u64(crate::assembly::READ_BYTES)
             };
             let base = vec![b'a'; length];
             let tail = Bytes::from_static(b"tail");
@@ -1272,19 +1277,19 @@ mod tests {
     #[test]
     fn multipart_provider_codes_are_classified_at_the_adapter_boundary() {
         for (code, expected) in [
-            ("AccessDenied", ObjectStoreErrorClass::PermissionDenied),
-            ("NoSuchKey", ObjectStoreErrorClass::NotFound),
+            ("AccessDenied", ObjectStoreErrorKind::PermissionDenied),
+            ("NoSuchKey", ObjectStoreErrorKind::NotFound),
             (
                 "PreconditionFailed",
-                ObjectStoreErrorClass::PreconditionFailed,
+                ObjectStoreErrorKind::PreconditionFailed,
             ),
-            ("SlowDown", ObjectStoreErrorClass::RetryableTransport),
-            ("MalformedXML", ObjectStoreErrorClass::Other),
+            ("SlowDown", ObjectStoreErrorKind::RetryableTransport),
+            ("MalformedXML", ObjectStoreErrorKind::Other),
         ] {
             assert_eq!(
                 classify_signed_response("private-key", http::StatusCode::BAD_REQUEST, Some(code),)
                     .expect("provider error should classify")
-                    .class(),
+                    .kind(),
                 expected,
                 "wrong class for {code}"
             );

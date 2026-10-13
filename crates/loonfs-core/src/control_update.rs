@@ -5,7 +5,7 @@ use crate::control_object::{
     LoadedControl,
 };
 use crate::error::CoreError;
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use bytes::Bytes;
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -18,24 +18,24 @@ use std::future::Future;
 
 /// An attempt whose write may have landed reads it back before it answers.
 #[derive(Debug)]
-pub(crate) enum CasAttempt<T, R> {
+pub(crate) enum CasOutcome<T, R> {
     Settled(T),
     Contended(R),
 }
 
-/// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
+/// Runs up to [`MAX_CONTENTION_ATTEMPTS`] attempts.
 pub(crate) async fn retry_while_contended<T, R, E, F, Fut>(
     mut attempt: F,
 ) -> std::result::Result<std::result::Result<T, R>, E>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<CasAttempt<T, R>, E>>,
+    Fut: Future<Output = std::result::Result<CasOutcome<T, R>, E>>,
 {
     let mut last_reason = None;
-    for _attempt in 0..CONTENTION_RETRY_LIMIT {
+    for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
         match attempt().await? {
-            CasAttempt::Settled(outcome) => return Ok(Ok(outcome)),
-            CasAttempt::Contended(reason) => last_reason = Some(reason),
+            CasOutcome::Settled(outcome) => return Ok(Ok(outcome)),
+            CasOutcome::Contended(reason) => last_reason = Some(reason),
         }
     }
     Ok(Err(last_reason.expect(
@@ -57,13 +57,13 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
 ) -> crate::error::Result<ObjectMetadata> {
     retry_while_contended(|| async {
         match store.put_if_absent(object_key, encoded.clone()).await {
-            Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
+            Ok(metadata) => Ok(CasOutcome::Settled(metadata)),
             Err(
                 error @ (ObjectStoreError::PreconditionFailed { .. }
                 | ObjectStoreError::Transport { .. }),
             ) => match store.get_with_metadata(object_key).await {
-                Ok(Some(stored)) => Ok(CasAttempt::Settled(stored.metadata)),
-                Ok(None) => Ok(CasAttempt::Contended(CoreError::store(object_key, &error))),
+                Ok(Some(stored)) => Ok(CasOutcome::Settled(stored.metadata)),
+                Ok(None) => Ok(CasOutcome::Contended(CoreError::store(object_key, &error))),
                 Err(error) => Err(CoreError::store(object_key, &error)),
             },
             Err(error) => Err(CoreError::store(object_key, &error)),
@@ -128,7 +128,7 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     update: F,
-) -> crate::error::Result<CasAttempt<T, CoreError>>
+) -> crate::error::Result<CasOutcome<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionPayload) -> Fut,
@@ -142,14 +142,14 @@ async fn try_update_loaded_upload_session<S, T, F, Fut>(
     store: &S,
     loaded: LoadedControl<UploadSessionPayload>,
     update: F,
-) -> crate::error::Result<CasAttempt<T, CoreError>>
+) -> crate::error::Result<CasOutcome<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     match update(loaded.state).await? {
-        UploadSessionUpdate::Noop(outcome) => Ok(CasAttempt::Settled(outcome)),
+        UploadSessionUpdate::Noop(outcome) => Ok(CasOutcome::Settled(outcome)),
         UploadSessionUpdate::Replace { mut next, outcome } => {
             if !matches!(next.status, UploadSessionRecordStatus::Open { .. }) {
                 if let UploadSessionMode::ServiceProxied { staging } = &mut next.mode {
@@ -157,16 +157,13 @@ where
                 }
             }
             let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
-                .map_err(|error| CoreError::Codec {
-                    object_key: loaded.object_key.clone(),
-                    message: error.to_string(),
-                })?;
+                .expect("an upload session record should encode");
             match store
                 .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await
             {
-                Ok(_) => Ok(CasAttempt::Settled(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                Ok(_) => Ok(CasOutcome::Settled(outcome)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
                     CoreError::contention_exhausted(&loaded.object_key),
                 )),
                 // A generic upload update has no state predicate that proves an
@@ -221,7 +218,7 @@ mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
     };
     use tempfile::tempdir;
 
@@ -234,7 +231,7 @@ mod tests {
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost write acknowledgement".to_owned()),
         )
         .apply_then_fail();
@@ -262,10 +259,10 @@ mod tests {
             BlockingStore::new(
                 LocalFsStore::new(temp_dir.path()).expect("store"),
                 KeyPredicate::exact(object_key),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
             ),
             KeyPredicate::exact(object_key),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost write request".to_owned()),
         );
         store.fail_next(1);
@@ -328,11 +325,11 @@ mod tests {
         let exhausted = retry_while_contended(|| {
             let reason = attempt.get();
             attempt.set(reason + 1);
-            async move { Ok::<CasAttempt<(), usize>, ()>(CasAttempt::Contended(reason)) }
+            async move { Ok::<CasOutcome<(), usize>, ()>(CasOutcome::Contended(reason)) }
         })
         .await
         .expect("contention attempts should not fail");
 
-        assert_eq!(exhausted, Err(CONTENTION_RETRY_LIMIT - 1));
+        assert_eq!(exhausted, Err(MAX_CONTENTION_ATTEMPTS - 1));
     }
 }

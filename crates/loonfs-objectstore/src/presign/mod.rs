@@ -3,14 +3,9 @@
 
 mod gcs;
 mod issuer;
+mod limits;
 mod s3_compatible;
 mod v4;
-
-/// Maximum lifetime supported by both signed-URL implementations.
-const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
-
-/// Lifetime of a signed checksum-readback request.
-pub(crate) const CHECKSUM_HEAD_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub use gcs::{GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
 pub use issuer::{
@@ -23,5 +18,6 @@ pub use s3_compatible::{
 };
 
 pub(crate) use gcs::stored_crc32c;
+pub(crate) use limits::CHECKSUM_HEAD_TTL;
 pub(crate) use s3_compatible::base64_crc64nvme;
 pub(crate) use v4::percent_encode_segment;

@@ -41,14 +41,14 @@ pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result,
+    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode, Result,
     SharedObjectStore,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
     PROVIDER_CONNECT_TIMEOUT, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_MIN_COPIED_PART_BYTES,
-    PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,
+    PROVIDER_MULTIPART_PARTS_IN_FLIGHT, PROVIDER_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
     PROVIDER_PUBLICATION_REQUEST_BOUND, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };

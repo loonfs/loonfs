@@ -216,7 +216,7 @@ impl CliError {
         Self::new(
             CliErrorCode::DestinationExists.as_str(),
             format!(
-                "local file `{}` already exists; pass --force to overwrite",
+                "local file `{}` already exists; pass `--force` to overwrite",
                 path.display()
             ),
         )

@@ -7,7 +7,7 @@ use loonfs::{ExecutionBudget, MetadataCache};
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
 use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
-use loonfs_types::SecretString;
+use loonfs_types::{SecretString, WriterId};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -16,12 +16,13 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub use loonfs_http::JobMode;
 pub use loonfs_objectstore::StoreConfig;
 
 /// Overrides the embedded writer's inline content policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct InlineContentOverrides {
+pub struct InlineContentConfig {
     #[serde(
         serialize_with = "serialize_inline_content_threshold",
         deserialize_with = "deserialize_inline_content_threshold"
@@ -32,7 +33,7 @@ pub struct InlineContentOverrides {
     pub inline_content_tail_limit_bytes: Option<usize>,
 }
 
-impl Default for InlineContentOverrides {
+impl Default for InlineContentConfig {
     fn default() -> Self {
         Self {
             inline_content_threshold_bytes: loonfs::InlineContentPolicy::default()
@@ -77,8 +78,8 @@ where
     }
 }
 
-impl InlineContentOverrides {
-    pub(crate) fn resolve(&self) -> loonfs::InlineContentPolicy {
+impl InlineContentConfig {
+    pub(crate) fn effective_policy(&self) -> loonfs::InlineContentPolicy {
         let defaults = loonfs::InlineContentPolicy::default();
         loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: self.inline_content_threshold_bytes,
@@ -102,7 +103,7 @@ impl InlineContentOverrides {
 /// are the runtime's publication limits.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublicationLimitsOverrides {
+pub struct PublicationLimitsConfig {
     pub max_requests: Option<std::num::NonZeroUsize>,
     pub max_requests_per_namespace: Option<std::num::NonZeroUsize>,
     pub max_estimated_bytes: Option<std::num::NonZeroUsize>,
@@ -110,11 +111,11 @@ pub struct PublicationLimitsOverrides {
     pub max_concurrent_publications: Option<std::num::NonZeroUsize>,
 }
 
-impl PublicationLimitsOverrides {
+impl PublicationLimitsConfig {
     /// The per-namespace limits the server's runtime applies.
-    pub(crate) fn resolve(&self) -> loonfs::PublicationLimits {
-        let defaults = loonfs::PublicationLimits::default();
-        loonfs::PublicationLimits {
+    pub(crate) fn effective_policy(&self) -> loonfs::PublicationPolicy {
+        let defaults = loonfs::PublicationPolicy::default();
+        loonfs::PublicationPolicy {
             max_requests_per_namespace: self
                 .max_requests_per_namespace
                 .unwrap_or(defaults.max_requests_per_namespace),
@@ -144,7 +145,7 @@ pub struct ServerConfig {
     /// `LOONFS_CONTENT_TOKEN_SECRET`.
     #[serde(default)]
     pub content_token_secret: SecretString,
-    pub writer_id: String,
+    pub writer_id: WriterId,
     /// Maximum public reads running at once. Reads past this limit wait.
     #[serde(default = "default_max_concurrent_reads")]
     pub max_concurrent_reads: usize,
@@ -165,13 +166,13 @@ pub struct ServerConfig {
     pub max_concurrent_compactions: usize,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
-    pub publication: PublicationLimitsOverrides,
+    pub publication: PublicationLimitsConfig,
     /// Defaults to a 64 KiB threshold; `false` disables inline writes in TOML.
     #[serde(default)]
-    pub inline_content: InlineContentOverrides,
+    pub inline_content: InlineContentConfig,
     /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
-    pub metadata_cache: MetadataCacheOverrides,
+    pub metadata_cache: MetadataCacheConfig,
     /// The node-local cache of encoded metadata blocks, if this deployment
     /// keeps one. Absent means no local cache: every metadata block read
     /// that misses the decoded cache goes to object storage, which is the
@@ -185,8 +186,8 @@ pub struct ServerConfig {
     pub grep: GrepConfig,
     /// Whether this server serves maintenance requests, runs the maintenance
     /// sweep, both, or neither.
-    #[serde(default)]
-    pub maintenance: MaintenanceMode,
+    #[serde(default = "default_maintenance")]
+    pub maintenance: JobMode,
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A request to an idle namespace publishes immediately;
     /// the interval paces requests that queued behind a publish, so hot
@@ -319,6 +320,10 @@ pub struct TlsServerConfig {
     pub key_path: String,
 }
 
+fn default_maintenance() -> JobMode {
+    JobMode::ServeAndMaintain
+}
+
 fn default_min_publish_interval_ms() -> u64 {
     1_000
 }
@@ -409,11 +414,11 @@ fn default_idle_session_close_after_ms() -> u64 {
 }
 
 fn default_max_merge_input_bytes() -> usize {
-    loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
+    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
 }
 
 fn default_idle_fold_after_ms() -> u64 {
-    loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms
+    loonfs::MaintainMetadataOptions::default().idle_fold_after_ms
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -451,78 +456,19 @@ pub struct LocalCacheConfig {
 /// cache the server builds at startup. Omitted fields are derived when sized.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MetadataCacheOverrides {
+pub struct MetadataCacheConfig {
     pub max_segment_bytes: Option<usize>,
     pub max_head_state_bytes: Option<usize>,
-}
-
-/// What this server does about maintenance: serve the API group, run the
-/// maintenance sweep, both, or neither.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceMode {
-    /// Neither serve the maintenance API group nor run the sweep.
-    Disabled,
-    /// Serve explicit maintenance requests without running the sweep.
-    ServeOnly,
-    /// Run the sweep without serving the maintenance API group.
-    MaintainOnly,
-    /// Serve explicit maintenance requests and run the sweep.
-    #[default]
-    ServeAndMaintain,
-}
-
-impl MaintenanceMode {
-    /// Whether this server serves the maintenance API group.
-    pub fn serves(self) -> bool {
-        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
-    }
-
-    /// Whether this server runs the maintenance sweep.
-    pub fn maintains(self) -> bool {
-        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
-    }
-}
-
-/// What this server does about grep: answer queries, keep the index built,
-/// both, or neither.
-///
-/// The two jobs are independent. A read replica can serve searches over an
-/// index another process maintains; a write node can maintain the index for
-/// namespaces it never answers searches about; the reference deployment
-/// does both. Every combination is named here, so none has to be validated
-/// away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrepMode {
-    /// Neither answer grep queries nor maintain the index.
-    Disabled,
-    /// Answer queries over an index some other process maintains.
-    ServeOnly,
-    /// Maintain the index without answering queries about it.
-    MaintainOnly,
-    /// Answer queries and maintain the index in this process.
-    ServeAndMaintain,
-}
-
-impl GrepMode {
-    /// Whether the grep query endpoint is supported.
-    pub fn serves_grep(self) -> bool {
-        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
-    }
-
-    /// Whether this server serves the index-maintenance endpoints, and
-    /// whether its maintenance sweep builds and collects the index.
-    pub fn maintains_index(self) -> bool {
-        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
-    }
 }
 
 /// The server's `[grep]` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
-    pub mode: GrepMode,
+    /// Whether this server answers grep queries, and whether it serves the
+    /// index-maintenance endpoints and its sweep builds and collects the
+    /// index.
+    pub mode: JobMode,
     pub max_cache_bytes: Option<usize>,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
@@ -533,7 +479,7 @@ pub struct GrepConfig {
 impl Default for GrepConfig {
     fn default() -> Self {
         Self {
-            mode: GrepMode::Disabled,
+            mode: JobMode::Disabled,
             max_cache_bytes: None,
             worker: GrepWorkerConfig::default(),
         }
@@ -599,10 +545,10 @@ impl ServerConfig {
     /// It names the address, provider, and maintenance settings.
     pub fn check_summary(&self) -> String {
         let maintenance = match self.maintenance {
-            MaintenanceMode::Disabled => "disabled",
-            MaintenanceMode::ServeOnly => "serve_only",
-            MaintenanceMode::MaintainOnly => "maintain_only",
-            MaintenanceMode::ServeAndMaintain => "serve_and_maintain",
+            JobMode::Disabled => "disabled",
+            JobMode::ServeOnly => "serve_only",
+            JobMode::MaintainOnly => "maintain_only",
+            JobMode::ServeAndMaintain => "serve_and_maintain",
         };
         format!(
             "config ok: bind {}, store {}, maintenance {}",
@@ -620,7 +566,6 @@ impl ServerConfig {
 
     pub(crate) fn validate(&self) -> Result<MemorySizing, ServerConfigError> {
         let bind = self.bind_addr()?;
-        require_non_empty("writer_id", &self.writer_id)?;
 
         if let Some(token) = &self.auth_token {
             if token.expose().trim().is_empty() {
@@ -641,8 +586,8 @@ impl ServerConfig {
             });
         }
         if let Some(tls) = &self.tls {
-            require_non_empty("tls.cert_path", &tls.cert_path)?;
-            require_non_empty("tls.key_path", &tls.key_path)?;
+            validate_non_empty("tls.cert_path", &tls.cert_path)?;
+            validate_non_empty("tls.key_path", &tls.key_path)?;
         } else if bind_serves_beyond_localhost(&bind) && !self.allow_remote_without_tls {
             return Err(ServerConfigError::InvalidField {
                 field: "tls",
@@ -683,13 +628,13 @@ impl ServerConfig {
                     .unwrap_or(default_max_merge_input_bytes()) as u64,
             ),
         ] {
-            require_positive(field, value, None)?;
+            validate_positive(field, value, None)?;
         }
         for (field, value) in [
             ("max_in_flight_requests", self.max_in_flight_requests),
             ("max_connections", self.max_connections),
         ] {
-            require_positive(field, value as u64, None)?;
+            validate_positive(field, value as u64, None)?;
             if value > tokio::sync::Semaphore::MAX_PERMITS {
                 return Err(ServerConfigError::InvalidField {
                     field,
@@ -717,15 +662,15 @@ impl ServerConfig {
                 self.idle_session_close_after_ms,
             ),
         ] {
-            require_positive(
+            validate_positive(
                 field,
                 value,
                 Some("set `maintenance = \"serve_only\"` to turn the maintenance sweep off"),
             )?;
         }
         if let Some(local_cache) = &self.local_cache {
-            require_non_empty("local_cache.path", &local_cache.path)?;
-            require_positive(
+            validate_non_empty("local_cache.path", &local_cache.path)?;
+            validate_positive(
                 "local_cache.memory_bytes",
                 local_cache.memory_bytes,
                 Some("omit the `[local_cache]` table to run without a local cache"),
@@ -752,7 +697,7 @@ impl ServerConfig {
                 reason: error.to_string(),
             });
         }
-        require_non_empty("content_token_secret", self.content_token_secret.expose())?;
+        validate_non_empty("content_token_secret", self.content_token_secret.expose())?;
         self.store.validate()?;
 
         let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
@@ -945,8 +890,8 @@ impl ServerConfig {
             (limit.unwrap_or(0) as u128).saturating_sub(fixed_bytes + headroom as u128) as usize;
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
-        let serves_grep = self.grep.mode.serves_grep();
-        require_positive(
+        let serves_grep = self.grep.mode.serves();
+        validate_positive(
             "max_concurrent_compactions",
             self.max_concurrent_compactions as u64,
             None,
@@ -1005,7 +950,7 @@ impl ServerConfig {
             serves_grep,
         };
         memory.validate()?;
-        require_positive(
+        validate_positive(
             "max_merge_input_bytes",
             memory.merge_input.bytes as u64,
             None,
@@ -1067,7 +1012,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
+fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
     if value.trim().is_empty() {
         Err(ServerConfigError::MissingField { field })
     } else {
@@ -1075,7 +1020,7 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfi
     }
 }
 
-fn require_positive(
+fn validate_positive(
     field: &'static str,
     value: u64,
     hint: Option<&str>,
@@ -1117,7 +1062,7 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        load_server_config, InlineContentOverrides, PublicationLimitsOverrides, ServerConfigError,
+        load_server_config, InlineContentConfig, PublicationLimitsConfig, ServerConfigError,
         AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
     };
     use loonfs_test_support::EnvGuard;
@@ -1146,9 +1091,9 @@ root = "unused"
     fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
         let mut config = memory_config("memory_limit_bytes = 4294967296");
         for mode in [
-            super::GrepMode::ServeOnly,
-            super::GrepMode::Disabled,
-            super::GrepMode::MaintainOnly,
+            super::JobMode::ServeOnly,
+            super::JobMode::Disabled,
+            super::JobMode::MaintainOnly,
         ] {
             config.grep.mode = mode;
             let memory = config.memory_sizing(Some(1)).expect("explicit limit wins");
@@ -1160,7 +1105,7 @@ root = "unused"
             assert_eq!(memory.managed, 3_034_998_375);
             assert_eq!(
                 memory.segment.bytes,
-                if mode.serves_grep() {
+                if mode.serves() {
                     1_213_999_350
                 } else {
                     1_517_499_187
@@ -1169,7 +1114,7 @@ root = "unused"
             assert_eq!(memory.head_state.bytes, 303_499_837);
             assert_eq!(
                 memory.grep.bytes,
-                if mode.serves_grep() { 303_499_837 } else { 0 }
+                if mode.serves() { 303_499_837 } else { 0 }
             );
             assert_eq!(memory.read_working.bytes, 606_999_675);
             assert_eq!(memory.publication.bytes, 303_499_837);
@@ -1370,22 +1315,17 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let config = load_server_config(&path).expect("valid config");
-        assert_eq!(config.maintenance, super::MaintenanceMode::ServeAndMaintain);
+        assert_eq!(config.maintenance, super::JobMode::ServeAndMaintain);
         assert!(config.maintenance.serves());
         assert!(config.maintenance.maintains());
 
         for (spelling, mode, serves, maintains) in [
-            ("disabled", super::MaintenanceMode::Disabled, false, false),
-            ("serve_only", super::MaintenanceMode::ServeOnly, true, false),
-            (
-                "maintain_only",
-                super::MaintenanceMode::MaintainOnly,
-                false,
-                true,
-            ),
+            ("disabled", super::JobMode::Disabled, false, false),
+            ("serve_only", super::JobMode::ServeOnly, true, false),
+            ("maintain_only", super::JobMode::MaintainOnly, false, true),
             (
                 "serve_and_maintain",
-                super::MaintenanceMode::ServeAndMaintain,
+                super::JobMode::ServeAndMaintain,
                 true,
                 true,
             ),
@@ -1496,7 +1436,10 @@ root = "/tmp/loonfs-server"
 
         let error = load_server_config(&path).expect_err("blank writer fields");
 
-        assert_missing_field(error, "writer_id");
+        let ServerConfigError::Decode(message) = &error else {
+            panic!("expected a decode error for the blank writer id, got {error:?}");
+        };
+        assert!(message.contains("must not be blank"), "{message}");
     }
 
     #[test]
@@ -1895,12 +1838,12 @@ root = "/tmp/loonfs-server"
         assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
         assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
         assert_eq!(
-            loonfs::MetadataMaintenanceOptions::default()
+            loonfs::MaintainMetadataOptions::default()
                 .inline_content_fold_at_bytes
                 .get(),
             defaults.inline_content_fold_at_bytes
         );
-        assert_eq!(InlineContentOverrides::default().resolve(), defaults);
+        assert_eq!(InlineContentConfig::default().effective_policy(), defaults);
         for (source, threshold) in [
             ("", Some(64 * 1024)),
             (
@@ -1911,22 +1854,24 @@ root = "/tmp/loonfs-server"
             ("inline_content_threshold_bytes = 0", Some(0)),
             ("inline_content_threshold_bytes = false", None),
         ] {
-            let overrides: InlineContentOverrides = toml::from_str(source).expect("overrides");
+            let overrides: InlineContentConfig = toml::from_str(source).expect("overrides");
             assert_eq!(
-                overrides.resolve().inline_content_threshold_bytes,
+                overrides.effective_policy().inline_content_threshold_bytes,
                 threshold
             );
         }
         assert!(
-            toml::from_str::<InlineContentOverrides>("inline_content_threshold_bytes = true")
-                .is_err()
+            toml::from_str::<InlineContentConfig>("inline_content_threshold_bytes = true").is_err()
         );
     }
 
     #[test]
     fn publication_overrides_are_strict_and_positive() {
-        let defaults: PublicationLimitsOverrides = toml::from_str("").expect("empty overrides");
-        assert_eq!(defaults.resolve(), loonfs::PublicationLimits::default());
+        let defaults: PublicationLimitsConfig = toml::from_str("").expect("empty overrides");
+        assert_eq!(
+            defaults.effective_policy(),
+            loonfs::PublicationPolicy::default()
+        );
         for field in [
             "max_requests",
             "max_requests_per_namespace",
@@ -1934,16 +1879,24 @@ root = "/tmp/loonfs-server"
             "max_estimated_bytes_per_namespace",
             "max_concurrent_publications",
         ] {
-            assert!(toml::from_str::<PublicationLimitsOverrides>(&format!("{field} = 0")).is_err());
+            assert!(toml::from_str::<PublicationLimitsConfig>(&format!("{field} = 0")).is_err());
         }
-        assert!(toml::from_str::<PublicationLimitsOverrides>("max_requsets = 10").is_err());
-        let overrides: PublicationLimitsOverrides =
+        assert!(toml::from_str::<PublicationLimitsConfig>("max_requsets = 10").is_err());
+        let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
         assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
-        assert_eq!(overrides.resolve().max_requests_per_namespace.get(), 3);
         assert_eq!(
-            overrides.resolve().max_estimated_bytes_per_namespace,
-            loonfs::PublicationLimits::default().max_estimated_bytes_per_namespace
+            overrides
+                .effective_policy()
+                .max_requests_per_namespace
+                .get(),
+            3
+        );
+        assert_eq!(
+            overrides
+                .effective_policy()
+                .max_estimated_bytes_per_namespace,
+            loonfs::PublicationPolicy::default().max_estimated_bytes_per_namespace
         );
     }
 
@@ -2333,10 +2286,7 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
-        assert_eq!(
-            config.metadata_cache,
-            super::MetadataCacheOverrides::default()
-        );
+        assert_eq!(config.metadata_cache, super::MetadataCacheConfig::default());
         assert_eq!(config.manifest_revalidation_interval_ms, None);
         assert_eq!(config.max_read_working_bytes, None);
     }
@@ -2366,7 +2316,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_read_working_bytes, Some(8192));
         assert_eq!(
             config.metadata_cache,
-            super::MetadataCacheOverrides {
+            super::MetadataCacheConfig {
                 max_segment_bytes: Some(16384),
                 max_head_state_bytes: Some(4096),
             }
@@ -2394,7 +2344,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("load config");
         assert_eq!(
             config.metadata_cache,
-            super::MetadataCacheOverrides {
+            super::MetadataCacheConfig {
                 max_segment_bytes: Some(0),
                 max_head_state_bytes: Some(0),
             }
@@ -2579,7 +2529,7 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
-        assert_eq!(config.grep.mode, super::GrepMode::Disabled);
+        assert_eq!(config.grep.mode, super::JobMode::Disabled);
     }
 
     #[test]
@@ -2605,12 +2555,12 @@ root = "/tmp/loonfs-server"
     #[test]
     fn every_grep_mode_names_the_two_jobs_it_does() {
         for (spelling, mode, serves, maintains) in [
-            ("disabled", super::GrepMode::Disabled, false, false),
-            ("serve_only", super::GrepMode::ServeOnly, true, false),
-            ("maintain_only", super::GrepMode::MaintainOnly, false, true),
+            ("disabled", super::JobMode::Disabled, false, false),
+            ("serve_only", super::JobMode::ServeOnly, true, false),
+            ("maintain_only", super::JobMode::MaintainOnly, false, true),
             (
                 "serve_and_maintain",
-                super::GrepMode::ServeAndMaintain,
+                super::JobMode::ServeAndMaintain,
                 true,
                 true,
             ),
@@ -2632,8 +2582,8 @@ root = "/tmp/loonfs-server"
 
             let config = load_server_config(&path).expect("load config");
             assert_eq!(config.grep.mode, mode);
-            assert_eq!(config.grep.mode.serves_grep(), serves);
-            assert_eq!(config.grep.mode.maintains_index(), maintains);
+            assert_eq!(config.grep.mode.serves(), serves);
+            assert_eq!(config.grep.mode.maintains(), maintains);
         }
     }
 
@@ -2690,7 +2640,7 @@ root = "/tmp/loonfs-server"
         );
 
         let grep = load_server_config(&path).expect("load config").grep;
-        assert_eq!(grep.mode, super::GrepMode::ServeOnly);
+        assert_eq!(grep.mode, super::JobMode::ServeOnly);
         let policy = grep
             .worker_config()
             .build_policy()

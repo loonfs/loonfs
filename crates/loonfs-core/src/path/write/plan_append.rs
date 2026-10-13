@@ -1,13 +1,13 @@
 //! Publish plans that add bytes to the end of a file.
 
-use super::ensure_expected_inode;
 use super::planned_pieces::CommitPieces;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
     resolve_visible_inode, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
     PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::{AppendedContent, CommitOp, CommitValidationError};
+use crate::commit::{AppendedContent, CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
@@ -68,7 +68,6 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         content_writes,
         view,
         pieces,
-        absolute_path.as_str(),
         revision,
         expected.and_then(|expected| expected.revision_no),
         bytes,
@@ -108,7 +107,6 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         content_writes,
         view,
         pieces,
-        target.absolute_path.as_str(),
         revision,
         expected_revision_no,
         bytes,
@@ -119,16 +117,11 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// Plans the next revision of a file as its current bytes followed by
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "an append carries the commit's pieces, the store, and content write permits"
-)]
 async fn plan_append<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
-    target: &str,
     revision: RevisionRecord,
     expected_revision_no: Option<RevisionNo>,
     bytes: &[u8],
@@ -144,18 +137,9 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(
-        store,
-        content_writes,
-        view,
-        pieces,
-        target,
-        &revision,
-        bytes,
-    )
-    .await?;
+    let appended = append_to(store, content_writes, view, pieces, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
-        ops: vec![CommitOp::ReplaceFile {
+        ops: vec![CommitOperation::ReplaceFile {
             inode_id: revision.inode_id,
             base_revision_no: revision.revision_no,
             content_ref: appended.content_ref.clone(),
@@ -169,7 +153,6 @@ async fn append_to<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
-    target: &str,
     base_row: &RevisionRecord,
     bytes: &[u8],
 ) -> Result<AppendedContent> {
@@ -184,9 +167,9 @@ async fn append_to<S: ObjectStore + ?Sized>(
         && base.size_bytes > 0;
     let added = bytes.len() as u64;
     let size_bytes = base.size_bytes.checked_add(added).ok_or_else(|| {
-        CoreError::Internal(format!(
-            "appending {added} bytes to `{target}` overflows its {} bytes",
-            base.size_bytes
+        CoreError::NamespaceCorrupt(format!(
+            "content `{}` records a size of {} bytes, too large to append {added} bytes to",
+            base.content_id, base.size_bytes
         ))
     })?;
     let algorithm = store.checksum_algorithm();

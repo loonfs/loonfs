@@ -9,8 +9,8 @@
 
 use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
 use loonfs_server::{
-    app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
-    MetadataCacheOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    app, serve_with_shutdown, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServeError,
+    ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
@@ -118,7 +118,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -310,19 +310,19 @@ pub(crate) fn test_config(
         memory_limit_bytes: None,
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
-        writer_id: writer_id.to_owned(),
+        writer_id: loonfs_test_support::ids::writer_id(writer_id),
         max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: GrepConfig {
-            mode: GrepMode::ServeAndMaintain,
+            mode: JobMode::ServeAndMaintain,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::ServeAndMaintain,
+        maintenance: JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
@@ -344,7 +344,7 @@ pub(crate) fn test_config(
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

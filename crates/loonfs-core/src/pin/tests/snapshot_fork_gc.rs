@@ -64,7 +64,7 @@ impl Fixture {
             &store,
             &source,
             selected.state.compactor_epoch(),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
         )
@@ -106,7 +106,10 @@ impl Fixture {
             replaced,
             // Old objects can be collected, but a fork pin created by this
             // attempt is still inside its installation grace.
-            context: mutation_context("fork", crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1),
+            context: mutation_context(
+                "fork",
+                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
+            ),
         }
     }
 
@@ -133,12 +136,12 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     let gc_gate = BlockingStore::new(
         fixture.store.clone(),
         KeyPredicate::exact(metadata_manifest_prefix(&fixture.source)),
-        OperationClass::List,
+        OperationSelector::List,
     );
     let fork_gate = BlockingStore::new(
         fixture.store.clone(),
         KeyPredicate::exact(metadata_manifest_object(&fixture.target, &ManifestNo(1))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     gc_gate.block_next();
     fork_gate.block_next();
@@ -293,7 +296,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
     let gate = BlockingStore::new(
         fixture.store.clone(),
         KeyPredicate::prefix(pin_prefix(&fixture.source)),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     gate.block_next();
     let actor = loonfs_test_support::test_actor();
@@ -375,7 +378,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     let store = BlockingStore::new(
         RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
         KeyPredicate::exact(hint(&target)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let actor = loonfs_test_support::test_actor();

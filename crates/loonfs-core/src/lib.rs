@@ -13,7 +13,7 @@
 //! ```no_run
 //! use loonfs_types::{AbsolutePath, ActorId, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
-//!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
+//!     FilesystemOperation, CommitIntent, NamespaceCommitEngine, CommitCandidate,
 //! };
 //! use loonfs_core::time::Deadline;
 //! use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -43,7 +43,7 @@
 //! let mut publisher = NamespaceCommitEngine::new(namespace, content_writes);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
-//!     vec![CommitCandidate::new(CommitRequest::single(
+//!     vec![CommitCandidate::new(CommitIntent::single(
 //!         CommitId::generate(),
 //!         ActorId::parse("example-service").expect("a static actor ID should parse"),
 //!         None,
@@ -70,6 +70,7 @@ mod engine;
 mod error;
 mod gc;
 mod heap_bytes;
+mod in_flight;
 mod manifest;
 mod namespace;
 mod options;
@@ -78,7 +79,6 @@ mod protocol;
 mod read_working_memory;
 mod recency;
 mod storage;
-mod store_waves;
 mod wal;
 mod write_waves;
 
@@ -162,15 +162,16 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::{CommitFingerprint, WalPublishError};
+    pub use crate::commit::CommitFingerprint;
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
-        WalFoldInput, WriterSessionState,
+        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
+        TailSource, WalFoldInput, WalTailReport, WriterSessionStatus,
     };
-    pub use crate::path::write::{CommitRequest, FilesystemOperation};
+    pub use crate::path::write::{CommitIntent, FilesystemOperation};
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
+    pub use crate::wal::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
@@ -178,25 +179,25 @@ pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, ResolvedFileContent,
-    Writable,
+    RootAccess, Writable,
 };
 pub use error::{
-    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
-    WriterFence,
+    classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
+    MetadataViewError, Result, WriterFence,
 };
 pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
+pub use manifest::ManifestLoadError;
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
     MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
-    MetadataFamilyGroup, MetadataLsmPolicy, RetentionTarget, SegmentBlockLoader,
+    MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget, SegmentBlockLoader,
     SegmentRowIterator,
 };
-pub use manifest::{ManifestLoadError, ManifestLoadFailureClass};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
-    CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
-    MAX_RESOLVE_CURRENT_FILES,
+    CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,

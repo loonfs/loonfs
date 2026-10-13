@@ -16,7 +16,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 KeyPredicate::metadata_segment(),
             ),
             KeyPredicate::prefix(pin_prefix(&namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         );
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context)
@@ -93,7 +93,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         store,
         namespace_id,
         selected.state.compactor_epoch(),
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
         Arc::default(),
     )
@@ -140,7 +140,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .await
         .expect("successor metadata")
         .expect("successor exists")
-        .last_modified_ms
+        .last_modified_at_ms
         .expect("test store provides a timestamp");
     let collection = crate::gc::gc_namespace(
         store,
@@ -150,12 +150,12 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         &mutation_context(
             "collector",
             (successor_modified_ms + options.grace_window_ms + 1)
-                .max(crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1),
+                .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
         ),
     )
     .await
     .expect("collect before pin write");
-    assert!(collection.deleted.metadata_segments as usize >= replaced.len());
+    assert!(collection.deleted.metadata_segments >= replaced.len() as u64);
     for key in replaced {
         assert!(store.head(&key).await.expect("replaced segment").is_none());
     }
@@ -169,7 +169,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -284,7 +284,7 @@ async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(pin_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
         InjectedError::Transport("lost pin acknowledgement".to_owned()),
     )
     .apply_then_fail();

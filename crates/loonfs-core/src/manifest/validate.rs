@@ -139,7 +139,7 @@ pub(super) fn validate_manifest_materialization_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "namespace manifest has no metadata file at head_seq `{}`",
+                "namespace manifest has no metadata file at `head_seq` {}",
                 payload.head_seq
             ),
         });

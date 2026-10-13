@@ -6,7 +6,7 @@
 use crate::{GrepError, Result};
 use loonfs::{
     CheckpointFilesPager, CoreError, CurrentFileState, ListCheckpointFilesOptions, Namespace,
-    NamespaceMetadata, ReadOnly, ReadView, StatOptions, MAX_RESOLVE_CURRENT_FILES,
+    NamespaceMetadata, ReadOnly, ReadView, StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
@@ -49,7 +49,7 @@ impl NamespaceReads {
     pub(crate) async fn read_view(&self) -> Result<NamespaceReadView<'_>> {
         let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
         let view = namespace.read_view().await?;
-        view.require_subject()?;
+        view.ensure_subject()?;
         Ok(NamespaceReadView {
             namespace: &self.namespace,
             view,
@@ -158,11 +158,11 @@ impl NamespaceReadView<'_> {
     }
 
     /// Resolves visibility, revision, and path in input order.
-    pub(crate) async fn resolve_current_files(
+    pub(crate) async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
-        Ok(self.view.resolve_current_files(inode_ids).await?)
+        Ok(self.view.stat_current_files_by_inode(inode_ids).await?)
     }
 
     /// Resolves one path against the read view.
@@ -225,9 +225,9 @@ impl NamespaceReadView<'_> {
     }
 }
 
-/// Ids one [`NamespaceReads::resolve_current_files`] call answers.
-pub(crate) fn resolve_batch_size(wanted: usize) -> usize {
-    wanted.clamp(1, MAX_RESOLVE_CURRENT_FILES)
+/// Ids one [`NamespaceReads::stat_current_files_by_inode`] call answers.
+pub(crate) fn effective_batch_size(wanted: usize) -> usize {
+    wanted.clamp(1, MAX_CURRENT_FILES_PER_STAT)
 }
 
 /// The revision one change event published.
@@ -286,7 +286,7 @@ pub(crate) fn page_request<C>(cursor: Option<C>, limit: usize) -> Result<PageReq
 /// Validates an internal page request against the public pagination contract.
 fn page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
     let requested = u32::try_from(limit).unwrap_or(u32::MAX);
-    PaginationPolicy::default().resolve_limit(Some(requested))
+    PaginationPolicy::default().effective_limit(Some(requested))
 }
 
 fn invalid_page_limit(error: LimitError) -> GrepError {
@@ -295,8 +295,8 @@ fn invalid_page_limit(error: LimitError) -> GrepError {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_limit, resolve_batch_size};
-    use loonfs::MAX_RESOLVE_CURRENT_FILES;
+    use super::{effective_batch_size, page_limit};
+    use loonfs::MAX_CURRENT_FILES_PER_STAT;
     use loonfs_types::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
 
     #[test]
@@ -314,11 +314,11 @@ mod tests {
 
     #[test]
     fn resolve_batches_stay_within_the_core_batch_cap() {
-        assert_eq!(resolve_batch_size(0), 1);
-        assert_eq!(resolve_batch_size(9), 9);
+        assert_eq!(effective_batch_size(0), 1);
+        assert_eq!(effective_batch_size(9), 9);
         assert_eq!(
-            resolve_batch_size(MAX_RESOLVE_CURRENT_FILES * 2),
-            MAX_RESOLVE_CURRENT_FILES
+            effective_batch_size(MAX_CURRENT_FILES_PER_STAT * 2),
+            MAX_CURRENT_FILES_PER_STAT
         );
     }
 }

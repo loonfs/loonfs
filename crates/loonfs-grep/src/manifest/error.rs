@@ -1,6 +1,6 @@
 //! Typed failures for grep manifest state, encoding, loading, and publication.
 
-use loonfs::StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
 use thiserror::Error;
@@ -63,7 +63,7 @@ pub enum GrepManifestError {
     Store {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     #[error("grep state `{object_key}` is corrupt: {message}")]
     Corrupt { object_key: String, message: String },
@@ -79,5 +79,3 @@ pub enum GrepManifestError {
     #[error("grep manifest publication conflict for `{object_key}`")]
     Conflict { object_key: String },
 }
-
-pub(super) type Result<T> = std::result::Result<T, GrepManifestError>;

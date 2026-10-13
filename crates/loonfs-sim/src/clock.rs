@@ -59,11 +59,19 @@ impl DeterministicClock {
 
 impl SimClock for DeterministicClock {
     fn now(&self) -> SimInstant {
-        SimInstant::from_nanos(*self.nanos_since_epoch.lock().expect("clock lock poisoned"))
+        SimInstant::from_nanos(
+            *self
+                .nanos_since_epoch
+                .lock()
+                .expect("the sim clock lock should not be poisoned"),
+        )
     }
 
     fn advance(&self, delta: SimDuration) {
-        let mut now = self.nanos_since_epoch.lock().expect("clock lock poisoned");
+        let mut now = self
+            .nanos_since_epoch
+            .lock()
+            .expect("the sim clock lock should not be poisoned");
         *now = now.saturating_add(delta.as_nanos());
     }
 }

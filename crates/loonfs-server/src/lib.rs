@@ -12,14 +12,14 @@ mod sweep;
 mod trace;
 
 pub use config::{
-    load_server_config, parse_server_config, GrepConfig, GrepMode, LocalCacheConfig,
-    MaintenanceMode, MetadataCacheOverrides, PublicationLimitsOverrides, ServerConfig,
-    ServerConfigError, StoreConfig, TlsServerConfig,
+    load_server_config, parse_server_config, GrepConfig, JobMode, LocalCacheConfig,
+    MetadataCacheConfig, PublicationLimitsConfig, ServerConfig, ServerConfigError, StoreConfig,
+    TlsServerConfig,
 };
 pub use http::{
-    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState, ServeError,
     TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
-pub use sweep::Sweep;
+pub use sweep::{GarbageCollection, Sweep};
 pub use trace::{init_tracing_from_env, TraceInitError};

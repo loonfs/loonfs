@@ -2,7 +2,6 @@
 
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::PublisherRegistry;
-use crate::Result;
 use std::sync::Arc;
 
 /// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
@@ -83,7 +82,7 @@ impl Maintenance {
     }
 
     /// Reads the runtime's wall clock as unix milliseconds.
-    pub fn now_ms(&self) -> Result<u64> {
+    pub fn now_ms(&self) -> u64 {
         self.core.now_ms()
     }
 
@@ -92,7 +91,7 @@ impl Maintenance {
 
 /// Stops a maintenance call that takes it, such as
 /// [`Maintenance::maintain_metadata_while_due`] or
-/// [`Maintenance::compact_metadata_with_cancellation`]. Clones share one
+/// [`Maintenance::compact_metadata`]. Clones share one
 /// state.
 #[derive(Debug, Clone, Default)]
 pub struct MaintenanceCancellation(loonfs_core::MetadataCompactionCancellation);

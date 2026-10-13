@@ -278,7 +278,7 @@ impl StoreConfig {
     pub fn validate(&self) -> Result<(), StoreConfigError> {
         match self {
             StoreConfig::LocalFs { root, .. } => {
-                require_non_empty("store.root", root)?;
+                validate_non_empty("store.root", root)?;
             }
             StoreConfig::AwsS3 {
                 bucket,
@@ -287,12 +287,12 @@ impl StoreConfig {
                 credentials,
                 ..
             } => {
-                require_non_empty("store.bucket", bucket)?;
-                require_non_empty("store.region", region)?;
+                validate_non_empty("store.bucket", bucket)?;
+                validate_non_empty("store.region", region)?;
                 validate_aws_s3_credentials(credentials)?;
                 if let Some(url) = endpoint_url {
                     validate_absolute_http_url("store.endpoint_url", url)?;
-                    require_tls_on_proven_domains(
+                    validate_tls_on_proven_domains(
                         "store.endpoint_url",
                         url,
                         AWS_S3_PROVEN_DOMAINS,
@@ -306,11 +306,11 @@ impl StoreConfig {
                 credentials,
                 ..
             } => {
-                require_non_empty("store.bucket", bucket)?;
-                require_non_empty("store.account_id", account_id)?;
+                validate_non_empty("store.bucket", bucket)?;
+                validate_non_empty("store.account_id", account_id)?;
                 validate_r2_credentials(credentials)?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
-                require_tls_on_proven_domains(
+                validate_tls_on_proven_domains(
                     "store.endpoint_url",
                     endpoint_url,
                     CLOUDFLARE_R2_PROVEN_DOMAINS,
@@ -321,10 +321,10 @@ impl StoreConfig {
                 credentials,
                 ..
             } => {
-                require_non_empty("store.bucket", bucket)?;
+                validate_non_empty("store.bucket", bucket)?;
                 match credentials {
                     GcpGcsCredentials::ServiceAccountFile { path } => {
-                        require_non_empty("store.credentials.path", path)?;
+                        validate_non_empty("store.credentials.path", path)?;
                     }
                 }
             }
@@ -372,13 +372,13 @@ fn validate_aws_s3_credentials(credentials: &AwsS3Credentials) -> Result<(), Sto
         session_token,
     } = credentials
     {
-        require_non_empty("store.credentials.access_key_id", access_key_id.expose())?;
-        require_non_empty(
+        validate_non_empty("store.credentials.access_key_id", access_key_id.expose())?;
+        validate_non_empty(
             "store.credentials.secret_access_key",
             secret_access_key.expose(),
         )?;
         if let Some(session_token) = session_token {
-            require_non_empty("store.credentials.session_token", session_token.expose())?;
+            validate_non_empty("store.credentials.session_token", session_token.expose())?;
         }
     }
     Ok(())
@@ -390,8 +390,8 @@ fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), 
         secret_access_key,
     } = credentials
     {
-        require_non_empty("store.credentials.access_key_id", access_key_id.expose())?;
-        require_non_empty(
+        validate_non_empty("store.credentials.access_key_id", access_key_id.expose())?;
+        validate_non_empty(
             "store.credentials.secret_access_key",
             secret_access_key.expose(),
         )?;
@@ -430,7 +430,7 @@ fn missing_r2_ambient_credentials() -> ObjectStoreError {
     ))
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
+fn validate_non_empty(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
     if value.trim().is_empty() {
         Err(StoreConfigError::MissingField { field })
     } else {
@@ -449,7 +449,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
 /// presigned URLs — bearer capabilities to read or write one object — into
 /// cleartext. Any other host is left alone: a private gateway on `http` is a
 /// legitimate setup, and it simply earns no direct transfers.
-fn require_tls_on_proven_domains(
+fn validate_tls_on_proven_domains(
     field: &'static str,
     value: &str,
     domain_families: &[&str],

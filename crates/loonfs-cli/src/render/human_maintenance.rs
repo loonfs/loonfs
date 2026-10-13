@@ -1,3 +1,5 @@
+//! Human-readable text for namespace-level and maintenance command results.
+
 use super::summaries::*;
 use crate::commands::MaintenanceRan;
 use loonfs_types::api::v0::{

@@ -28,7 +28,9 @@ fn store_config(root: &Path) -> StoreConfig {
 
 async fn writer(root: &Path) -> LoonFs<Writable> {
     LoonFs::builder(store_config(root))
-        .writer_id("read-tracing-capture-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "read-tracing-capture-writer",
+        ))
         .build()
         .await
         .expect("build writer")

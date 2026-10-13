@@ -25,11 +25,11 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
                     KeyPredicate::any(),
                 ),
                 KeyPredicate::prefix(pin_prefix(&namespace_id)),
-                OperationClass::Delete,
+                OperationSelector::Delete,
                 InjectedError::Transport("cleanup unavailable".to_owned()),
             ),
             KeyPredicate::prefix(pin_prefix(&namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         );
         let setup = mutation_context("creator", 1_000);
         bootstrap_namespace(&store, &namespace_id, &setup)
@@ -102,7 +102,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
             &crate::gc::GcOptions::default(),
             &mutation_context(
                 "collector",
-                crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 2_001,
+                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
             ),
         )
         .await
@@ -120,7 +120,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
             &crate::gc::GcOptions::default(),
             &mutation_context(
                 "collector",
-                crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 2_002,
+                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
             ),
         )
         .await
@@ -154,11 +154,11 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
     let store = BlockingStore::new(
         base,
         KeyPredicate::exact(&old_manifest),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let aged = mutation_context(
         "collector",
-        crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+        crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
     let options = crate::gc::GcOptions::default();
     store.block_next();
@@ -193,7 +193,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(pin_prefix(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("pin unavailable".to_owned()),
     );
     let setup = mutation_context("creator", 1_000);
@@ -238,7 +238,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .expect("remove pinned manifest");
     let aged = mutation_context(
         "collector",
-        crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+        crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
     let options = crate::gc::GcOptions::default();
     let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)

@@ -5,6 +5,7 @@ mod discover;
 mod frame;
 mod projected_tail;
 mod publish;
+mod publish_error;
 mod reader;
 mod reclaim;
 mod replay;
@@ -21,6 +22,7 @@ pub(crate) use self::projected_tail::{
     inline_content_refs, ProjectedContent, ProjectedPiece, TailChunk,
 };
 pub(crate) use self::publish::publish_wal_object;
+pub use self::publish_error::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 pub(crate) use self::reader::{load_replayed_wal_tail, replay_discovered_tail, wal_object_exists};
 pub(crate) use self::reclaim::{live_folded_wal_no, object_is_required};
 pub(crate) use self::writer::prepare_wal_object;

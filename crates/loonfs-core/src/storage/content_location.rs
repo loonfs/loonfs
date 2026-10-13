@@ -61,9 +61,9 @@ impl ContentLocation {
                         content_ref.content_id
                     )));
                 }
-                let bytes = piece
-                    .bytes
-                    .slice(..(end - offset).min(piece.bytes.len() as u64) as usize);
+                let bytes = piece.bytes.slice(
+                    ..loonfs_types::usize_from_u64((end - offset).min(piece.bytes.len() as u64)),
+                );
                 offset += bytes.len() as u64;
                 pieces.push(bytes);
             }
@@ -190,9 +190,9 @@ impl ContentLocation {
         for piece in &self.pieces {
             let piece_end = offset + piece.len() as u64;
             if offset < end && piece_end > start {
-                parts.push(piece.slice(
-                    (start.max(offset) - offset) as usize..(end.min(piece_end) - offset) as usize,
-                ));
+                let first = loonfs_types::usize_from_u64(start.max(offset) - offset);
+                let last = loonfs_types::usize_from_u64(end.min(piece_end) - offset);
+                parts.push(piece.slice(first..last));
             }
             offset = piece_end;
         }
@@ -202,7 +202,7 @@ impl ContentLocation {
         })
     }
 
-    pub(crate) async fn get_bytes<S: ObjectStore + ?Sized>(
+    pub(crate) async fn read_bytes<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         content_ref: &ContentRef,

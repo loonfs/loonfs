@@ -309,7 +309,9 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs.publisher.sessions_open` | Gauge | Open writer sessions, and sessions whose admitted work is still finishing. A fenced session stops being counted once its work ends. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` if it listed every namespace, or `error` if the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run when the server starts and every `full_sweep_interval_ms`. |
-| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The sweep tries the call again after a backoff. |
+| `loonfs.maintenance.sweep_panics` | Counter | A sweep call or an idle-session close panicked. The sweep contains the panic, counts a panicked call as a `server_error` failure, and goes on. A nonzero count is a bug to report. |
+| `loonfs.maintenance.sweep_backoff_entries` | Gauge | The calls that failed on a namespace and are waiting for their next try. Each pair of a namespace and a call counts once, up to 10,000. |
 | `loonfs.maintenance.sweep_namespaces` | Gauge | The number of namespaces that the last finished full sweep pass listed, including deleted namespaces. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
@@ -453,7 +455,7 @@ max_concurrent_publications = 8
 
 These are the defaults without a memory limit. With sizing, `max_estimated_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
 
-An embedded host sets the per-namespace limits with `LoonFsBuilder::publication_limits`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
+An embedded host sets the per-namespace limits with `LoonFsBuilder::publication_policy`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
 
 A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
 
@@ -472,7 +474,7 @@ The tail limit uses the tail size that the session recorded at its last publish.
 
 The tail can exceed the limit by at most the WAL object budget, in two cases: a new session's first inline commit, and after a put whose outcome is unknown. Another writer can make the remembered size stale until this session's next publish. The `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the inline tail limit.
 
-Explicit metadata maintenance uses `MetadataMaintenanceOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
+Explicit metadata maintenance uses `MaintainMetadataOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
 
@@ -568,7 +570,11 @@ All the interval and idle-close settings must be positive.
 
 Grep queries stay correct while the index is behind. A query scans the commits after the index, and if it goes past its scan budget, it fails with `index_lagging` unless `allow_stale` is set.
 
-When a call fails on one namespace, the server logs the namespace ID and the call name, counts the failure in `loonfs.maintenance.sweep_visit_failures`, and tries the call again on the next eligible pass. The failure doesn't stop the visits to other namespaces.
+When a call fails on one namespace, the server counts the failure in `loonfs.maintenance.sweep_visit_failures` and waits before it tries that call on that namespace again. The other calls on the namespace and the visits to other namespaces continue. The first wait is one tick interval, and each failure in a row doubles it, up to one hour. For example, with the default 5-second tick interval, a call that keeps failing is tried again after 5 seconds, 10 seconds, 20 seconds, and so on, and then once an hour. A success ends the wait. A call that panics counts as a failure with the code `server_error`, so it waits and is tried again the same way, and the visits to other namespaces continue. `loonfs.maintenance.sweep_backoff_entries` counts the calls that are waiting. The server tracks at most 10,000 of them, and at that limit a new failure replaces the entry whose next try is soonest.
+
+The server logs the first failure at error level, each later failure at warning level, and the first success after a failure at info level. Each of these events has `namespace_id`, `call`, `code`, and `attempts` fields. Every panic is logged at error level with `namespace_id`, `call`, and a `panic` field that holds the panic message, and a panicked call also has `code` and `attempts`. While a call's wait is below one hour, an idle held session stays open, so the ticks keep trying the call. Once the wait reaches one hour, the session closes when it's idle, and the next full pass tries the call again.
+
+Why doesn't the server stop maintaining a corrupt or forbidden namespace? Some failures that look permanent clear without a restart. Expired credentials and clock skew both return a permission error, a rolling deploy fences the old writer for a while, and an operator can repair a namespace in place. The doubling wait keeps a failing namespace from filling the logs or costing many store requests, and the namespace is maintained again as soon as the cause is fixed.
 
 If listing the namespaces fails, the pass doesn't start any new visits. The visits already running finish, the pass ends with a warning, and the next full pass lists the namespaces again.
 
@@ -597,7 +603,7 @@ A namespace whose writes stop before its tail reaches the fold thresholds is fol
 
 Set `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata` maintenance request uses the same period as the sweep. An embedded CLI profile doesn't read the server config, and it always uses 15 minutes.
 
-Embedded hosts pass `MetadataMaintenanceOptions::idle_fold_after_ms` to `Maintenance::maintain_metadata_while_due_with_options`, where zero also turns the rule off. Both `maintain_metadata_while_due` forms return `Result<bool>`. `true` means that, under the options used, no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
+Embedded hosts pass `MaintainMetadataOptions::idle_fold_after_ms` to `Maintenance::maintain_metadata_while_due_with_options`, where zero also turns the rule off. Both `maintain_metadata_while_due` forms return `Result<bool>`. `true` means that, under the options used, no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
 
 ## Current limitations
 

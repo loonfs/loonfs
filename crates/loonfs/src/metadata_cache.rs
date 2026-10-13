@@ -17,6 +17,15 @@ pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 /// Default limit for namespace head anchors and WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Whether a cache lookup found its entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheLookup {
+    /// The cache held the entry.
+    Hit,
+    /// The lookup went to the store.
+    Miss,
+}
+
 /// Decoded metadata that one or more runtimes read through: segment blocks,
 /// manifests, namespace head anchors, and WAL-tail projections.
 ///
@@ -111,14 +120,17 @@ impl MetadataCache {
 
     /// Counts one head anchor lookup that a read used to start from the
     /// cache or that sent it to the store.
-    pub(crate) fn record_head_anchor_lookup(&self, hit: bool) {
+    pub(crate) fn record_head_anchor_lookup(&self, lookup: CacheLookup) {
         let inner = &self.inner;
-        if hit {
-            inner.head_anchor_hits.fetch_add(1, Ordering::SeqCst);
-            inner.instruments.namespace_head_cache_hit();
-        } else {
-            inner.head_anchor_misses.fetch_add(1, Ordering::SeqCst);
-            inner.instruments.namespace_head_cache_miss();
+        match lookup {
+            CacheLookup::Hit => {
+                inner.head_anchor_hits.fetch_add(1, Ordering::SeqCst);
+                inner.instruments.namespace_head_cache_hit();
+            }
+            CacheLookup::Miss => {
+                inner.head_anchor_misses.fetch_add(1, Ordering::SeqCst);
+                inner.instruments.namespace_head_cache_miss();
+            }
         }
     }
 }

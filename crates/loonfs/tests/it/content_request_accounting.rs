@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use loonfs::content_tokens::ContentTokenError;
 use loonfs::publish::{
-    parse_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
+    parse_mutation_path, CommitCandidate, CommitIntent, ContentPreparationError,
     FilesystemOperation, PreparedContent,
 };
 use loonfs::uploads::ResolvedUploadCompletion;
@@ -139,7 +139,7 @@ async fn build_initialized_writer(
     writer_id: &str,
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
@@ -174,8 +174,8 @@ async fn prepare_content(
         .expect("prepare existing content")
 }
 
-fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitRequest {
-    CommitRequest::single(
+fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -466,7 +466,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let bytes = vec![b'x'; CONTENT_READ_CHUNK_BYTES as usize + 17];
+    let bytes = vec![b'x'; loonfs_types::usize_from_u64(CONTENT_READ_CHUNK_BYTES) + 17];
     let content_ref = harness.stage_content(&bytes).await;
     harness.recording.reset();
 
@@ -661,7 +661,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
             let content_ref = harness.stage_content(b"unprepared content").await;
             harness.recording.reset();
 
-            let request = CommitRequest::single(
+            let request = CommitIntent::single(
                 CommitId::parse("unprepared-put").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -734,7 +734,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     };
     namespace
         .commit_prepared(
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -790,7 +790,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
     // Restore resolves content from retained namespace metadata, so
     // re-downloading the retained blob would prove nothing.
     namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::parse("restore-first-revision").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -892,7 +892,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     harness.recording.reset();
-    let intent = CommitRequest::single(
+    let intent = CommitIntent::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -1054,7 +1054,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         let namespace = namespace.clone();
         tokio::spawn(async move {
             namespace
-                .commit_candidate(CommitCandidate::new(CommitRequest::single(
+                .commit_candidate(CommitCandidate::new(CommitIntent::single(
                     CommitId::parse("mixed-blocker").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
                     None,

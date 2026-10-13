@@ -4,4 +4,4 @@
 pub(crate) const STORE_READ_WAVE: usize = 16;
 
 /// Bounds store requests kept in flight by one write operation.
-pub(crate) const STORE_WRITE_WAVE: usize = 16;
+pub(crate) const STORE_WRITES_IN_FLIGHT: usize = 16;

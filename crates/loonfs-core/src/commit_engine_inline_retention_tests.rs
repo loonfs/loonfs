@@ -5,7 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use crate::manifest::{
     advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
-    MetadataLsmPolicy, RetentionTarget,
+    MetadataRunPolicy, RetentionTarget,
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::pin::{create_pin, load_snapshot_read_basis};
@@ -15,7 +15,7 @@ use loonfs_types::format::control::PinOwner;
 fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate {
     let value = inline(namespace_id, Bytes::from_static(bytes));
     CommitCandidate::with_inline_content(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("reused").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -45,7 +45,7 @@ async fn compact_and_check_pair(
             store,
             namespace_id,
             loonfs_types::CompactorEpoch(0),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
         )
@@ -219,7 +219,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &namespace_id,
         &GcOptions::default(),
         &MutationContext {
-            now_ms: crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+            now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
             ..context.clone()
         },
     )

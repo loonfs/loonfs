@@ -1,6 +1,7 @@
 //! Runtime limits and read policy.
 
-use crate::trace::{TraceMode, TraceStoreKind};
+use crate::trace::TraceMode;
+use loonfs_objectstore::ConfiguredObjectStoreKind;
 
 /// Default minimum interval, in milliseconds, between checks for a successor
 /// to a cached manifest.
@@ -23,20 +24,20 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// that share an execution budget, are limits of the
 /// [`ExecutionBudget`](crate::ExecutionBudget).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicationLimits {
+pub struct PublicationPolicy {
     /// Maximum admitted requests for one namespace. Defaults to 1,024.
     pub max_requests_per_namespace: std::num::NonZeroUsize,
     /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
 }
 
-impl Default for PublicationLimits {
+impl Default for PublicationPolicy {
     fn default() -> Self {
         Self {
-            max_requests_per_namespace: std::num::NonZeroUsize::new(1024)
-                .expect("nonzero namespace request limit"),
-            max_estimated_bytes_per_namespace: std::num::NonZeroUsize::new(8 * 1024 * 1024)
-                .expect("nonzero namespace byte limit"),
+            max_requests_per_namespace: const { std::num::NonZeroUsize::new(1024).unwrap() },
+            max_estimated_bytes_per_namespace: const {
+                std::num::NonZeroUsize::new(8 * 1024 * 1024).unwrap()
+            },
         }
     }
 }
@@ -126,9 +127,10 @@ pub(crate) struct ReadConfig {
     /// manifest. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
     /// Layout and input limits for metadata compactions.
-    pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
+    pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
-    /// Object-store kind label used by tracing.
-    pub trace_store_kind: TraceStoreKind,
+    /// Object-store kind label used by tracing, or `None` when the caller
+    /// didn't identify the backend.
+    pub store_kind: Option<ConfiguredObjectStoreKind>,
 }

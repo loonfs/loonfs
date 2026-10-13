@@ -2,7 +2,7 @@
 
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
-use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -44,7 +44,7 @@ impl std::fmt::Debug for DecodedBlockCacheConfig {
 
 impl DecodedBlockCacheConfig {
     /// A byte-bounded cache with no observer.
-    pub fn with_max_decoded_bytes(max_decoded_bytes: usize) -> Self {
+    pub fn new(max_decoded_bytes: usize) -> Self {
         Self {
             max_decoded_bytes,
             observer: None,
@@ -141,12 +141,12 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     /// Loads a missing value once when callers request the same key concurrently.
-    pub async fn get_or_load<E, F, Fut>(&self, cache_key: &K, fetch: F) -> Result<V, E>
+    pub async fn get_or_load<E, F, Fut>(&self, cache_key: &K, load: F) -> Result<V, E>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<V, E>>,
     {
-        let load = {
+        let guard = {
             let mut in_flight = self
                 .in_flight
                 .lock()
@@ -162,14 +162,15 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
                 cell: Some(cell),
             }
         };
-        load.cell
+        guard
+            .cell
             .as_ref()
             .expect("in-flight load should hold its cell")
             .get_or_try_init(|| async {
                 if let Some(block) = self.get(cache_key) {
                     return Ok(block);
                 }
-                let block = fetch().await?;
+                let block = load().await?;
                 self.insert(cache_key.clone(), block.clone());
                 Ok(block)
             })
@@ -263,7 +264,7 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     /// Drops one entry without counting an eviction.
-    pub fn remove(&self, key: &K) {
+    pub fn invalidate(&self, key: &K) {
         let mut inner = self
             .inner
             .lock()
@@ -454,7 +455,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
@@ -471,15 +472,13 @@ mod tests {
     #[tokio::test]
     async fn cancelled_loads_release_entries_after_the_last_waiter_leaves() {
         for max_decoded_bytes in [0, 64] {
-            let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::with_max_decoded_bytes(
-                max_decoded_bytes,
-            ));
+            let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes));
             let directory = tempfile::tempdir().expect("temporary directory");
             let store = RecordingStore::new(
                 BlockingStore::new(
                     LocalFsStore::new(directory.path()).expect("local store"),
                     KeyPredicate::any(),
-                    OperationClass::Get,
+                    OperationSelector::Get,
                 ),
                 KeyPredicate::any(),
             );
@@ -541,7 +540,7 @@ mod tests {
 
     #[test]
     fn recency_queue_stays_bounded_under_repeated_hits() {
-        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::with_max_decoded_bytes(10_000));
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(10_000));
         for index in 0..8 {
             cache.insert(format!("k{index}"), Block(10));
         }

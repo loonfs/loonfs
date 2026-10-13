@@ -2,7 +2,7 @@
 
 use super::download::FileDownload;
 use crate::error::CliError;
-use loonfs_types::{Checksum, ContentRef, RevisionNo};
+use loonfs_types::{Checksum, ContentId, ContentRef, DestinationBehavior, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -17,12 +17,12 @@ const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 /// Identifies the content stored in a partial download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PartialMeta {
-    content_id: String,
+pub(super) struct PartialDownloadMetadata {
+    content_id: ContentId,
     size_bytes: u64,
     checksum: Checksum,
     #[serde(deserialize_with = "required_option")]
-    revision_no: Option<u64>,
+    revision_no: Option<RevisionNo>,
 }
 
 fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -33,20 +33,20 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-impl PartialMeta {
+impl PartialDownloadMetadata {
     /// Describes the content a download is about to fetch.
     pub(super) fn describe(content_ref: &ContentRef, revision_no: Option<RevisionNo>) -> Self {
         Self {
-            content_id: content_ref.content_id.to_string(),
+            content_id: content_ref.content_id.clone(),
             size_bytes: content_ref.size_bytes,
             checksum: content_ref.checksum.clone(),
-            revision_no: revision_no.map(|revision_no| revision_no.0),
+            revision_no,
         }
     }
 }
 
 /// Returns the number of reusable bytes when the partial file matches `meta`.
-pub(super) fn resumable_bytes(destination: &Path, meta: &PartialMeta) -> u64 {
+pub(super) fn resumable_bytes(destination: &Path, meta: &PartialDownloadMetadata) -> u64 {
     let (Some(partial_path), Some(meta_path)) = (
         sibling(destination, PARTIAL_SUFFIX),
         sibling(destination, META_SUFFIX),
@@ -56,7 +56,7 @@ pub(super) fn resumable_bytes(destination: &Path, meta: &PartialMeta) -> u64 {
     let Ok(recorded) = std::fs::read(&meta_path) else {
         return 0;
     };
-    if serde_json::from_slice::<PartialMeta>(&recorded)
+    if serde_json::from_slice::<PartialDownloadMetadata>(&recorded)
         .ok()
         .as_ref()
         != Some(meta)
@@ -93,7 +93,7 @@ impl PartialDownload {
     /// identity is not resumed.
     pub(super) fn open(
         destination: &Path,
-        meta: Option<&PartialMeta>,
+        meta: Option<&PartialDownloadMetadata>,
         resume_from: u64,
     ) -> std::io::Result<Self> {
         let (Some(path), Some(meta_path)) = (
@@ -146,7 +146,8 @@ impl PartialDownload {
         let mut buffer = vec![0u8; FOLD_CHUNK_BYTES];
         let mut remaining = self.resumed_from;
         while remaining > 0 {
-            let wanted = buffer.len().min(remaining as usize);
+            let wanted = usize::try_from(remaining)
+                .map_or(buffer.len(), |remaining| buffer.len().min(remaining));
             reader
                 .read_exact(&mut buffer[..wanted])
                 .map_err(&local_error)?;
@@ -161,12 +162,15 @@ impl PartialDownload {
     }
 
     /// Installs the completed download with an atomic rename.
-    pub(super) fn install(mut self, destination: &Path, force: bool) -> std::io::Result<()> {
+    pub(super) fn install(
+        mut self,
+        destination: &Path,
+        behavior: DestinationBehavior,
+    ) -> std::io::Result<()> {
         self.file.flush()?;
-        let persisted = if force {
-            self.file.persist(destination)
-        } else {
-            self.file.persist_noclobber(destination)
+        let persisted = match behavior {
+            DestinationBehavior::Replace => self.file.persist(destination),
+            DestinationBehavior::NoReplace => self.file.persist_noclobber(destination),
         };
         persisted.map(|_| ()).map_err(|error| error.error)
     }
@@ -194,8 +198,8 @@ mod tests {
     use super::*;
     use loonfs_types::{ContentId, ContentRef, ContentRefKind};
 
-    fn meta_for(bytes: &[u8]) -> PartialMeta {
-        PartialMeta::describe(
+    fn meta_for(bytes: &[u8]) -> PartialDownloadMetadata {
+        PartialDownloadMetadata::describe(
             &ContentRef::blob_v1(
                 loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
@@ -276,7 +280,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let destination = dir.path().join("file.bin");
         let content_ref = crc32c_content_ref(b"0123456789");
-        let meta = PartialMeta::describe(&content_ref, None);
+        let meta = PartialDownloadMetadata::describe(&content_ref, None);
 
         let encoded = serde_json::to_vec(&meta).expect("encode the note");
         let document: serde_json::Value =
@@ -298,7 +302,7 @@ mod tests {
 
         // The checksum is part of the match: the same id and length under a
         // different digest is not the content this run resolved.
-        let other = PartialMeta::describe(
+        let other = PartialDownloadMetadata::describe(
             &ContentRef {
                 checksum: Checksum::crc32c(b"9876543210"),
                 ..content_ref

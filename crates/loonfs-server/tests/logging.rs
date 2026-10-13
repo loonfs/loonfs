@@ -11,11 +11,11 @@ use axum::http::{Method, Request};
 use axum::Router;
 use bytes::Bytes;
 use common::http_split_support::test_config;
-use loonfs::{LoonFs, SharedObjectStore, TraceMode, TraceStoreKind};
+use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_server::{app, AppOptions, MaintenanceMode};
+use loonfs_server::{app, AppConfig, JobMode};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -215,8 +215,8 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
         "logging-missing-path",
         "logging-missing-path",
     );
-    config.maintenance = MaintenanceMode::ServeOnly;
-    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    config.maintenance = JobMode::ServeOnly;
+    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
     let writer = state.runtime;
     writer
         .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
@@ -258,9 +258,9 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         "logging-expected-errors",
         "logging-expected-errors",
     );
-    config.maintenance = MaintenanceMode::ServeOnly;
+    config.maintenance = JobMode::ServeOnly;
     config.max_concurrent_uploads = 1;
-    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
     let writer = state.runtime;
     let namespace = namespace_id("demo");
     writer
@@ -371,21 +371,23 @@ async fn store_fault_has_one_error_from_the_boundary() {
     let store_root = temp_dir.path().join("store");
     let key_prefix = "logging-store-fault";
     let mut config = test_config(store_root.clone(), "logging-store-fault", key_prefix);
-    config.maintenance = MaintenanceMode::ServeOnly;
+    config.maintenance = JobMode::ServeOnly;
 
     let failing = Arc::new(FailStore::new(
         LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
         KeyPredicate::hint(
             &loonfs_types::NamespaceId::parse("faulty").expect("valid namespace id"),
         ),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("injected WAL-head read failure".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();
     let bootstrap = LoonFs::builder_with_store(store.clone())
-        .writer_id("logging-store-fault-bootstrap")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "logging-store-fault-bootstrap",
+        ))
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build bootstrap writer");
@@ -401,7 +403,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
     failing.fail_all();
     let router = app(
         config,
-        AppOptions {
+        AppConfig {
             store: Some(store),
             direct_transfers: None,
         },

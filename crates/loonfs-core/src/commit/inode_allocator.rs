@@ -37,24 +37,27 @@ impl InodeAllocator {
         }
     }
 
-    pub(crate) fn commit_candidate(&mut self, candidate: CandidateAllocation) -> Result<InodeId> {
-        if candidate.start != self.next {
-            // A candidate belongs to the allocator position it forked from;
-            // accepting it later would rewind or skip IDs from another one.
-            return Err(CoreError::Internal(
-                "inode allocation candidate was committed out of order".to_owned(),
-            ));
-        }
+    pub(crate) fn commit_candidate(&mut self, candidate: CandidateAllocation) -> InodeId {
+        // A candidate belongs to the allocator position it forked from;
+        // accepting it later would rewind or skip IDs from another one.
+        assert_eq!(
+            candidate.start, self.next,
+            "an inode allocation candidate should commit at the position it forked from"
+        );
         self.next = candidate.next;
-        Ok(self.next)
+        self.next
     }
 }
 
 impl CandidateAllocation {
     pub(crate) fn allocate(&mut self) -> Result<InodeId> {
         let allocated = self.next;
-        self.next = next_inode_after(allocated)
-            .ok_or_else(|| CoreError::Internal("next inode id counter overflow".to_owned()))?;
+        self.next = next_inode_after(allocated).ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "the namespace's next inode ID is {allocated}, the largest inode ID, so no \
+                 inode can be created"
+            ))
+        })?;
         Ok(allocated)
     }
 
@@ -76,10 +79,7 @@ mod tests {
         assert_eq!(candidate.allocate().expect("first create"), InodeId(2));
         assert_eq!(candidate.allocate().expect("second create"), InodeId(3));
         assert_eq!(candidate.allocate().expect("third create"), InodeId(4));
-        assert_eq!(
-            allocator.commit_candidate(candidate).expect("commit"),
-            InodeId(5)
-        );
+        assert_eq!(allocator.commit_candidate(candidate), InodeId(5));
     }
 
     #[test]
@@ -87,9 +87,7 @@ mod tests {
         let mut allocator = InodeAllocator::new(InodeId(2));
         let mut accepted = allocator.begin_candidate();
         assert_eq!(accepted.allocate().expect("accepted create"), InodeId(2));
-        allocator
-            .commit_candidate(accepted)
-            .expect("commit accepted");
+        allocator.commit_candidate(accepted);
 
         let mut rejected = allocator.begin_candidate();
         assert_eq!(rejected.allocate().expect("rejected create"), InodeId(3));
@@ -106,12 +104,7 @@ mod tests {
 
         let mut accepted = allocator.begin_candidate();
         assert_eq!(accepted.allocate().expect("accepted create"), InodeId(2));
-        assert_eq!(
-            allocator
-                .commit_candidate(accepted)
-                .expect("commit accepted"),
-            InodeId(3)
-        );
+        assert_eq!(allocator.commit_candidate(accepted), InodeId(3));
     }
 
     #[test]
@@ -138,7 +131,10 @@ mod tests {
         let mut candidate = allocator.begin_candidate();
 
         let error = candidate.allocate().expect_err("counter must not wrap");
-        assert!(matches!(error, CoreError::Internal(message) if message.contains("overflow")));
+        assert!(matches!(
+            error,
+            CoreError::NamespaceCorrupt(message) if message.contains("largest inode ID")
+        ));
         assert_eq!(candidate.resulting_next_inode_id(), InodeId(u64::MAX));
     }
 }

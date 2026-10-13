@@ -10,7 +10,7 @@ use crate::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::EffectiveLimit;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -92,7 +92,7 @@ impl Fixture {
                 KeyPredicate::any(),
             ),
             keys,
-            OperationClass::Read,
+            OperationSelector::Read,
         ));
         let recorder = Arc::new(ReadRecorder::default());
         let budget = ExecutionBudget::builder()
@@ -100,7 +100,7 @@ impl Fixture {
             .metrics_recorder(recorder.clone())
             .build();
         let runtime = LoonFs::builder_with_store(store.clone())
-            .writer_id("read-budget")
+            .writer_id(loonfs_test_support::ids::writer_id("read-budget"))
             .execution_budget(budget)
             .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: None,
@@ -256,9 +256,12 @@ async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot()
     )
     .await
     .expect("snapshot fold");
-    finish(maintenance.compact_metadata(fixture.namespace.id()))
-        .await
-        .expect("compaction");
+    finish(maintenance.compact_metadata(
+        fixture.namespace.id(),
+        &crate::MaintenanceCancellation::new(),
+    ))
+    .await
+    .expect("compaction");
     fixture.assert_counts(1, 0);
     fixture.store.release();
     assert_eq!(
@@ -365,7 +368,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         .await
         .expect("snapshot");
     let stat = StatOptions {
-        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
         ..StatOptions::default()
     };
     let list = ListOptions {
@@ -402,7 +405,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         .one_read(
             fixture
                 .namespace
-                .read_view_at_snapshot(&snapshot.checkpoint_id),
+                .read_view_at_snapshot(&snapshot.snapshot_id),
         )
         .await;
     fixture.one_read(view.stat("/")).await;

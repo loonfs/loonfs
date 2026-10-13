@@ -47,7 +47,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                     store,
                     namespace_id,
                     deadline,
-                    crate::manifest::MetadataLsmPolicy::default(),
+                    crate::manifest::MetadataRunPolicy::default(),
                     pool,
                     content_writes,
                 )

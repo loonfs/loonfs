@@ -7,15 +7,15 @@ use super::error::ManifestLoadError;
 use super::load::{load_segment_filter, SessionBlockMemo};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
 use super::scan_load::{ScanDescriptor, ScanLoader};
+use crate::in_flight::STORE_READ_WAVE;
 #[cfg(test)]
 use crate::metadata::MetadataState;
-use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_types::format::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

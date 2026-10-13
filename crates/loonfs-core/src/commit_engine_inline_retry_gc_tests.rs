@@ -3,7 +3,7 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
-use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationClass};
+use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationSelector};
 use loonfs_types::ErrorCode;
 
 #[tokio::test]
@@ -14,7 +14,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     let failed = FailStore::new(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost WAL acknowledgment".into()),
     )
     .apply_then_fail();

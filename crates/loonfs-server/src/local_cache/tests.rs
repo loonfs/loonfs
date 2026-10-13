@@ -217,14 +217,14 @@ async fn the_disk_tier_claims_the_capacity_as_block_files() {
     );
     assert_eq!(
         block_files(temp_dir.path()),
-        (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize,
+        loonfs_types::usize_from_u64(TEST_DISK_BYTES) / DISK_BLOCK_BYTES,
         "the tier holds one file per block of the capacity it was given"
     );
     assert_eq!(
         geometry(temp_dir.path()),
         DiskGeometry {
             block_bytes: DISK_BLOCK_BYTES,
-            blocks: (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize,
+            blocks: loonfs_types::usize_from_u64(TEST_DISK_BYTES) / DISK_BLOCK_BYTES,
         },
         "the directory records the geometry it was built for"
     );
@@ -242,7 +242,7 @@ async fn a_shrunk_disk_tier_starts_over() {
     drop(cache);
     assert_eq!(block_files(temp_dir.path()), 8);
 
-    let shrunk_blocks = (MIN_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let shrunk_blocks = loonfs_types::usize_from_u64(MIN_DISK_BYTES) / DISK_BLOCK_BYTES;
     let reopened = open_sized(temp_dir.path(), MIN_DISK_BYTES).await;
     assert_eq!(
         block_files(temp_dir.path()),
@@ -275,7 +275,7 @@ async fn a_grown_disk_tier_keeps_what_it_had() {
     cache.close().await.expect("close local cache");
     drop(cache);
 
-    let grown_blocks = (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let grown_blocks = loonfs_types::usize_from_u64(TEST_DISK_BYTES) / DISK_BLOCK_BYTES;
     let reopened = open_sized(temp_dir.path(), TEST_DISK_BYTES).await;
     assert_eq!(
         reopened.get(&key(0)).await,
@@ -314,7 +314,7 @@ async fn an_unreadable_geometry_marker_starts_over() {
     )
     .expect("overwrite the geometry marker");
 
-    let blocks = (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let blocks = loonfs_types::usize_from_u64(TEST_DISK_BYTES) / DISK_BLOCK_BYTES;
     let reopened = open(temp_dir.path()).await;
     assert_eq!(
         reopened.get(&key(0)).await,

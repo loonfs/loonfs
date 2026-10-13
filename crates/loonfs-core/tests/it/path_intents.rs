@@ -7,14 +7,14 @@ use crate::common::commit_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{CreateNamespaceOptions, Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, CreateNamespaceOptions, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::OperationClass;
+use loonfs_test_support::stores::OperationSelector;
 use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
@@ -239,10 +239,10 @@ async fn list_file_revisions<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<loonfs_types::ListFileRevisionsResponse, CoreError> {
     let entry = resolve_path(store, namespace_id, absolute_path).await?;
-    list_file_revisions_for_inode(store, namespace_id, absolute_path, entry.inode_id).await
+    list_file_revisions_by_inode(store, namespace_id, absolute_path, entry.inode_id).await
 }
 
-async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
+async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _absolute_path: &str,
@@ -254,7 +254,7 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     let mut cursor = None;
     loop {
         let page = engine
-            .list_file_revisions_for_inode_page(
+            .list_file_revisions_by_inode_page(
                 inode_id,
                 PageRequest {
                     limit: page_limit(2),
@@ -285,11 +285,11 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .get_file_revision(absolute_path, revision_no, &context, None)
+        .read_file_revision(absolute_path, revision_no, &context, None)
         .await
 }
 
-async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+async fn read_file_revision_bytes_by_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -297,7 +297,7 @@ async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<u8>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .get_file_revision_for_inode(inode_id, revision_no, &context, None)
+        .read_file_revision_by_inode(inode_id, revision_no, &context, None)
         .await
 }
 
@@ -355,7 +355,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     assert_eq!(stat.inode_kind(), EntryInodeKind::File);
     assert_eq!(stat.size_bytes(), Some("file-1-bytes".len() as u64));
     assert!(stat.content_ref().is_some());
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let entries = list_path(&store, &namespace_id, "/docs")
@@ -367,14 +367,14 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
         assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
         assert!(entry.content_ref().is_some());
     }
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt")
         .await
         .expect("read file");
     assert_eq!(read.bytes, b"file-1-bytes");
-    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(store.count(OperationSelector::Read), 1);
 }
 
 #[tokio::test]
@@ -498,7 +498,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     assert_eq!(actual_casefold_stat, expected_stat);
     assert_eq!(actual_list, expected_list);
     assert_eq!(actual_file_list, expected_file_list);
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt")
         .await
@@ -993,7 +993,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         Some(replacement_context.now_ms)
     );
     let inode_historical =
-        read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
+        read_file_revision_bytes_by_inode(&store, &namespace_id, inode_id, RevisionNo(2))
             .await
             .expect("read inode revision");
     assert_eq!(inode_historical, b"two");
@@ -1016,7 +1016,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         ErrorCode::PathNotFound
     );
     let inode_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+        list_file_revisions_by_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
             .await
             .expect("inode revisions");
     assert_eq!(inode_revisions.revisions.len(), 2);
@@ -1036,7 +1036,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         .expect("read restored");
     assert_eq!(restored.bytes, b"one");
     let restored_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+        list_file_revisions_by_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
             .await
             .expect("restored revisions");
     assert_eq!(
@@ -1061,7 +1061,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     // A spelling whose canonical lookup key differs from it: planning must
     // derive the key from the path component and carry it typed all the way
     // into the durable binding.
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("typed-name-key").expect("valid commit id"),
         loonfs_test_support::test_actor(),
         Some("typed boundary".to_owned()),
@@ -1126,7 +1126,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
             prepared_candidate(
                 &store,
                 &namespace_id,
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::parse("put-batched-path").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -1141,7 +1141,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                 ),
             )
             .await,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("move-batched-path").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1574,7 +1574,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     .expect_err("the old identity must reject the recreated file");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");
@@ -1701,7 +1701,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     .expect_err("non-recursive delete should reject non-empty dir");
     assert!(matches!(
         &error,
-        CoreError::FailedOperation { operation_index: 0, source }
+        CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::CommitValidation(
                 CommitValidationError::DirectoryNotEmpty { inode_id: InodeId(2) }
             ))
@@ -1818,7 +1818,7 @@ async fn assert_corpus_admission_and_lookup<'a>(
         let stored_path = format!("/{display_name}");
         let lookup_path = format!("/{name_key}");
         for path in [&stored_path, &lookup_path] {
-            let candidate = CommitCandidate::new(CommitRequest::single(
+            let candidate = CommitCandidate::new(CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -2002,7 +2002,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     .await
     .expect_err("no-replace move onto an occupied name fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::DestinationExists { .. }))
     );
 
@@ -2079,7 +2079,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     .await
     .expect_err("replace move onto a directory fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::ExpectedFile { .. }))
     );
 
@@ -2102,7 +2102,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     .await
     .expect_err("replace move onto itself fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::DestinationExists { .. }))
     );
 }
@@ -2413,7 +2413,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     .expect_err("the old copy destination identity must reject the recreated file");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");

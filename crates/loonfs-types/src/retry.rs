@@ -73,7 +73,7 @@ pub struct TransportRetryPolicy {
 /// Elapsed-time state for one logical operation's retry loop.
 pub struct OperationDeadline<'timer> {
     timer: &'timer dyn MonotonicTimer,
-    started_ms: u64,
+    started_at_ms: u64,
     deadline: Duration,
 }
 
@@ -82,7 +82,7 @@ impl<'timer> OperationDeadline<'timer> {
     pub fn start(timer: &'timer dyn MonotonicTimer, deadline: Duration) -> Self {
         Self {
             timer,
-            started_ms: timer.monotonic_now_ms(),
+            started_at_ms: timer.monotonic_now_ms(),
             deadline,
         }
     }
@@ -92,7 +92,7 @@ impl<'timer> OperationDeadline<'timer> {
         let elapsed_ms = self
             .timer
             .monotonic_now_ms()
-            .saturating_sub(self.started_ms);
+            .saturating_sub(self.started_at_ms);
         let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
         if elapsed_ms >= deadline_ms {
             return None;
@@ -122,9 +122,9 @@ mod tests {
     #[test]
     fn standard_timers_created_at_different_times_read_on_one_scale() {
         let first = StdMonotonicTimer::default();
-        let started_ms = first.monotonic_now_ms();
-        let mut earlier_ms = started_ms;
-        while earlier_ms == started_ms {
+        let started_at_ms = first.monotonic_now_ms();
+        let mut earlier_ms = started_at_ms;
+        while earlier_ms == started_at_ms {
             earlier_ms = first.monotonic_now_ms();
         }
         let second = StdMonotonicTimer::default();

@@ -74,7 +74,7 @@ impl MetadataState {
     /// each child has at most one parent binding, each slot at most one
     /// child, the bound values current in slot order are the ones current in
     /// child order, and no inode is its own ancestor.
-    pub(crate) fn check_bindings(&self, seq: ChangeSeq) -> Result<()> {
+    pub(crate) fn verify_bindings(&self, seq: ChangeSeq) -> Result<()> {
         let mut by_slot = BTreeMap::new();
         let mut by_child = BTreeMap::new();
         for row in &self.direntry_binds {

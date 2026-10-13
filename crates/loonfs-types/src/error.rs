@@ -146,6 +146,7 @@ error_codes! {
     WriterSessionClosed => "writer_session_closed",
     ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
+    StoreContention => "store_contention",
     DeadlineExceeded => "deadline_exceeded",
     CheckpointUnavailable => "checkpoint_unavailable",
     ContentNotMaterialized => "content_not_materialized",
@@ -195,6 +196,7 @@ impl ErrorCode {
             | ErrorCode::WriterSessionClosed
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
+            | ErrorCode::StoreContention
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::IndexLagging
@@ -236,13 +238,16 @@ impl ErrorCode {
     /// Returns whether this condition can clear without caller or operator action.
     ///
     /// This predicate is deliberately narrower than [`ErrorKind::Unavailable`]:
-    /// it includes only admission pressure and shutdown handoff that settle on
-    /// their own. Transport failures are classified separately by clients.
+    /// it includes only admission pressure, store contention, and shutdown
+    /// handoff, which settle on their own. Transport failures are classified separately by clients.
     /// Reconciliation, request changes, and maintenance are caller or operator
     /// actions and therefore return `false` here.
     pub fn retryable_without_operator_action(self) -> bool {
         match self {
-            ErrorCode::CommitQueueFull | ErrorCode::ServerBusy | ErrorCode::ShuttingDown => true,
+            ErrorCode::CommitQueueFull
+            | ErrorCode::ServerBusy
+            | ErrorCode::ShuttingDown
+            | ErrorCode::StoreContention => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
             | ErrorCode::Forbidden
@@ -328,6 +333,7 @@ mod tests {
                 ErrorCode::CommitQueueFull,
                 ErrorCode::ServerBusy,
                 ErrorCode::ShuttingDown,
+                ErrorCode::StoreContention,
             ]
         );
     }

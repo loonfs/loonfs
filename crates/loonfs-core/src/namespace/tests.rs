@@ -13,7 +13,7 @@ use loonfs_objectstore::{
     ObjectStore,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ async fn two_creations_race_at_manifest_one() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     store.block_next();
     let context = context();
@@ -97,7 +97,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == source_key || key == target_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("response lost".to_owned()),
     )
     .apply_then_fail();
@@ -251,7 +251,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .await
         .expect("inherited path");
     }
-    assert_eq!(store.count(OperationClass::Any), 0);
+    assert_eq!(store.count(OperationSelector::Any), 0);
 }
 
 #[tokio::test]
@@ -275,14 +275,14 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 .is_some_and(|number| number >= ManifestNo(3))
         }),
         move |mut metadata| {
-            metadata.last_modified_ms = Some(grace + 1);
+            metadata.last_modified_at_ms = Some(grace + 1);
             metadata
         },
     );
     let store = BlockingStore::new(
         store,
         KeyPredicate::hint(&namespace_id),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     );
     create(&store, &namespace_id, &context())
         .await
@@ -407,7 +407,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         let store = BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::prefix(&pin_prefix),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         );
         let setup = context();
         let actor = loonfs_test_support::test_actor();

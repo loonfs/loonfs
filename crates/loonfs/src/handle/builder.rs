@@ -8,12 +8,14 @@ use crate::metrics::{
 };
 use crate::publisher::PublisherRegistry;
 use crate::{
-    Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationLimits, Result,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, Result,
+    SharedObjectStore, StoreConfig, TraceMode,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
-use loonfs_core::MetadataLsmPolicy;
+use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
+use loonfs_objectstore::ConfiguredObjectStoreKind;
+use loonfs_types::WriterId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -25,8 +27,8 @@ use std::sync::Arc;
 /// read-only one.
 #[must_use]
 pub struct LoonFsBuilder<M> {
-    core: CoreSettings,
-    writer: WriterSettings,
+    core: CoreConfig,
+    writer: WriterConfig,
     mode: PhantomData<M>,
 }
 
@@ -39,7 +41,7 @@ enum StoreSource {
 }
 
 /// What the runtime core opens from, in every mode.
-struct CoreSettings {
+struct CoreConfig {
     source: StoreSource,
     max_read_content_bytes: Option<u64>,
     /// `None` builds a private cache when the core opens.
@@ -50,16 +52,16 @@ struct CoreSettings {
     wall_clock: Arc<dyn crate::WallClock>,
     stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     trace_mode: TraceMode,
-    trace_store_kind: Option<TraceStoreKind>,
+    store_kind: Option<ConfiguredObjectStoreKind>,
     object_store_metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 /// What only a writable runtime reads. A read-only build ignores it.
-struct WriterSettings {
-    writer_id: Option<String>,
+struct WriterConfig {
+    writer_id: Option<WriterId>,
     min_publish_interval_ms: u64,
-    publication_limits: PublicationLimits,
+    publication_policy: PublicationPolicy,
     inline_content: InlineContentPolicy,
 }
 
@@ -74,7 +76,7 @@ impl<M> LoonFsBuilder<M> {
 
     fn new(source: StoreSource) -> Self {
         Self {
-            core: CoreSettings {
+            core: CoreConfig {
                 source,
                 max_read_content_bytes: None,
                 metadata_cache: None,
@@ -85,14 +87,14 @@ impl<M> LoonFsBuilder<M> {
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
                 stored_metadata_block_cache: None,
                 trace_mode: TraceMode::Embedded,
-                trace_store_kind: None,
+                store_kind: None,
                 object_store_metrics_recorder: None,
                 metrics_recorder: None,
             },
-            writer: WriterSettings {
+            writer: WriterConfig {
                 writer_id: None,
                 min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-                publication_limits: PublicationLimits::default(),
+                publication_policy: PublicationPolicy::default(),
                 inline_content: InlineContentPolicy::default(),
             },
             mode: PhantomData,
@@ -192,8 +194,8 @@ impl<M> LoonFsBuilder<M> {
     ///
     /// Config-built stores derive this automatically; setting it overrides
     /// the derived label.
-    pub fn trace_store_kind(mut self, trace_store_kind: TraceStoreKind) -> Self {
-        self.core.trace_store_kind = Some(trace_store_kind);
+    pub fn store_kind(mut self, store_kind: ConfiguredObjectStoreKind) -> Self {
+        self.core.store_kind = Some(store_kind);
         self
     }
 
@@ -244,7 +246,7 @@ impl LoonFsBuilder<ReadOnly> {
 
 impl LoonFsBuilder<Writable> {
     /// Sets the writer id used by namespace mutations. Required.
-    pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
+    pub fn writer_id(mut self, writer_id: impl Into<WriterId>) -> Self {
         self.writer.writer_id = Some(writer_id.into());
         self
     }
@@ -266,8 +268,8 @@ impl LoonFsBuilder<Writable> {
     /// publication requests. The totals across namespaces, and the
     /// publications running at once, are limits of the execution budget (see
     /// [`Self::execution_budget`]).
-    pub fn publication_limits(mut self, limits: PublicationLimits) -> Self {
-        self.writer.publication_limits = limits;
+    pub fn publication_policy(mut self, policy: PublicationPolicy) -> Self {
+        self.writer.publication_policy = policy;
         self
     }
 
@@ -302,8 +304,8 @@ impl LoonFsBuilder<Writable> {
         writer.inline_content.validate()?;
         let writer_id = writer
             .writer_id
-            .ok_or_else(|| Error::Config("writer_id is required".to_owned()))?;
-        let identity = WriterIdentity::new(writer_id)?;
+            .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
+        let identity = WriterIdentity { writer_id };
         let runtime = owning_runtime()?;
         let core = self.core.open()?;
         let execution_budget = core.inner.config.execution_budget.clone();
@@ -318,7 +320,7 @@ impl LoonFsBuilder<Writable> {
             Arc::downgrade(&bits),
             runtime,
             std::time::Duration::from_millis(writer.min_publish_interval_ms),
-            writer.publication_limits,
+            writer.publication_policy,
             execution_budget,
         );
         Ok(LoonFs {
@@ -328,7 +330,7 @@ impl LoonFsBuilder<Writable> {
     }
 }
 
-impl CoreSettings {
+impl CoreConfig {
     /// Resolves the object-store client, wraps it for metrics when the
     /// builder was given a recorder, and opens the runtime core.
     ///
@@ -336,17 +338,24 @@ impl CoreSettings {
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
     fn open(self) -> Result<RuntimeCore> {
+        if !loonfs_core::time::system_clock_reads_after_epoch() {
+            return Err(Error::Config(
+                "the system clock reads before the unix epoch; LoonFS stamps unix milliseconds \
+                 into durable state"
+                    .to_owned(),
+            ));
+        }
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
-                let kind = TraceStoreKind::from(config.kind());
+                let kind = config.kind();
                 let store = config
                     .configured_object_store()
                     .map_err(|error| Error::Config(error.public_message().into_owned()))?;
-                (store.into_shared(), kind)
+                (store.into_shared(), Some(kind))
             }
-            StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),
+            StoreSource::Shared(store) => (store, None),
         };
-        let trace_store_kind = self.trace_store_kind.unwrap_or(derived_kind);
+        let store_kind = self.store_kind.or(derived_kind);
         let metadata_cache = self.metadata_cache.unwrap_or_else(|| {
             let builder = MetadataCache::builder();
             match &self.metrics_recorder {
@@ -363,9 +372,9 @@ impl CoreSettings {
             }
             .build()
         });
-        let metadata_lsm_policy = MetadataLsmPolicy {
+        let metadata_run_policy = MetadataRunPolicy {
             max_decoded_input_bytes_per_step: execution_budget.max_merge_input_bytes(),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         };
         let instruments = RuntimeInstruments::new(self.metrics_recorder);
         let recorder = fan_out_object_store_recorder(
@@ -374,7 +383,8 @@ impl CoreSettings {
         );
         let store = match recorder {
             Some(recorder) => Arc::new(
-                InstrumentedObjectStore::new(store, recorder).store_kind(trace_store_kind.as_str()),
+                InstrumentedObjectStore::new(store, recorder)
+                    .store_kind(crate::trace::store_kind_label(store_kind)),
             ) as SharedObjectStore,
             None => store,
         };
@@ -383,10 +393,10 @@ impl CoreSettings {
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
-                metadata_lsm_policy,
+                metadata_run_policy,
                 execution_budget,
                 trace_mode: self.trace_mode,
-                trace_store_kind,
+                store_kind,
             },
             metadata_cache,
             self.stored_metadata_block_cache,

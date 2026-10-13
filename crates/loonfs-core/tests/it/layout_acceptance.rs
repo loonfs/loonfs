@@ -6,7 +6,7 @@ use crate::common::{mutation_context, namespace_engine, read_context};
 use bytes::Bytes;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcOptions};
@@ -15,7 +15,7 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::AbsolutePath;
 use loonfs_types::{ChangeSeq, NamespaceId};
 use std::sync::Arc;
@@ -45,7 +45,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
     .publish_batch(
         store,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 loonfs_types::CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -98,7 +98,7 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("write junk");
 
-    let baseline = store.count(OperationClass::List);
+    let baseline = store.count(OperationSelector::List);
     let staged = engine.begin_upload(None).await.expect("begin upload");
     engine
         .upload_content(&staged.upload_id, None, b"uploaded\n")
@@ -147,7 +147,7 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("list directory");
     let bytes = engine
-        .get_file("/docs/hello.txt", &ctx, None)
+        .read_file("/docs/hello.txt", &ctx, None)
         .await
         .expect("read");
     assert_eq!(bytes.bytes, b"hello\n");
@@ -162,7 +162,7 @@ async fn reads_commits_and_change_feed_never_list() {
     assert!(!changes.changes.is_empty());
 
     assert_eq!(
-        store.count(OperationClass::List),
+        store.count(OperationSelector::List),
         baseline,
         "read, commit, upload, and change-feed paths must not LIST"
     );

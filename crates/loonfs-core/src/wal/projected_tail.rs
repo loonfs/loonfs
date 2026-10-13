@@ -365,7 +365,7 @@ pub(crate) fn inline_content_refs<'r>(
                 _ => None,
             })
             .max_by_key(|content_ref| content_ref.size_bytes)
-            .expect("decoded inline content should have a same-commit reference");
+            .expect("`validate_wal_inline_content` should reject inline content without a same-commit reference");
         (content_ref, entry)
     })
 }

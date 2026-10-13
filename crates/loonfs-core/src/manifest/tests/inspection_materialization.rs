@@ -15,8 +15,8 @@ use super::super::validate::{
     validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
     validate_revision_rows_have_unique_keys,
 };
+use crate::in_flight::STORE_READ_WAVE;
 use crate::metadata::{MetadataState, MetadataStateBuilder};
-use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
@@ -96,7 +96,7 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
         .await?;
     }
 
-    Ok(metadata_state.finish())
+    Ok(metadata_state.build())
 }
 
 #[cfg(test)]

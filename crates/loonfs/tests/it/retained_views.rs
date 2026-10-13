@@ -1,13 +1,13 @@
 //! Retained namespace views across metadata maintenance and collection.
 
 use crate::common::*;
-use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
     current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionPolicy,
-    MetadataMaintenanceOptions, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
+    DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions,
+    MetadataCompactionPolicy, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
 };
 use loonfs_core::control::load_namespace_current_manifest;
 use loonfs_core::MutationContext;
@@ -18,7 +18,7 @@ use loonfs_test_support::ids::{
 };
 use loonfs_test_support::test_actor;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
-use loonfs_types::format::sst_blocks::{decode_data_block, decode_index_block};
+use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, AccessRights, Attributes, AttributesRevisionNo,
     ChangeSeq, ErrorCode, NamespaceAccess, PageRequest, PathEntry, PrincipalId, PrincipalScope,
@@ -249,7 +249,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                         .maintenance
                         .maintain_metadata_with_options(
                             &source,
-                            &MetadataMaintenanceOptions {
+                            &MaintainMetadataOptions {
                                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                                 ..Default::default()
                             },
@@ -286,8 +286,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 // Every object is fresh, so the pass runs at a clock past
                 // every age gate. The checkpoint and fork pins are the only
                 // roots for the pre-rebuild file set.
-                let now_ms = current_time_ms().expect("wall clock")
-                    + UNREFERENCED_SEGMENT_MIN_AGE_MS
+                let now_ms = current_time_ms()
+                    + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
                     + GC_DEFAULT_GRACE_WINDOW_MS
                     + 1;
                 let collected = loonfs_core::gc_namespace(

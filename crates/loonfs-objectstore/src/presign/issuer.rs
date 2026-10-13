@@ -15,7 +15,7 @@ pub struct PresignedPutRequest<'a> {
     pub object_key: &'a str,
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
-    pub expires_in: Duration,
+    pub ttl: Duration,
 }
 
 /// Describes one read of exactly `range` of an existing content object.
@@ -30,7 +30,7 @@ pub struct PresignedGetRequest<'a> {
     pub range: ByteRange,
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
-    pub expires_in: Duration,
+    pub ttl: Duration,
 }
 
 impl PresignedGetRequest<'_> {
@@ -67,7 +67,7 @@ pub struct PresignedPartRequest<'a> {
     pub checksum: &'a Checksum,
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
-    pub expires_in: Duration,
+    pub ttl: Duration,
 }
 
 /// Carries a short-lived HTTP capability and every request header covered by its signature.

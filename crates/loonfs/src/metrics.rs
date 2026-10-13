@@ -13,7 +13,7 @@ mod read_working_memory;
 
 pub use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample,
-    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreResultClass, PutModeClass,
+    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreResultKind, PutModeKind,
     RangeClass, VecObjectStoreMetricsRecorder,
 };
 
@@ -195,7 +195,10 @@ impl DefaultMetricsRecorder {
     /// Instruments are read independently, so a snapshot is not atomic across
     /// all values.
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let registry = self.lock_registry();
+        let registry = self
+            .registry
+            .lock()
+            .expect("the instrument registry lock should not be poisoned");
         MetricsSnapshot {
             entries: registry
                 .iter()
@@ -209,17 +212,6 @@ impl DefaultMetricsRecorder {
         }
     }
 
-    // A poisoned registry is recovered rather than propagated: every
-    // critical section here inserts one map entry, and one panicked
-    // registration must not take the runtime's metrics down with it.
-    fn lock_registry(
-        &self,
-    ) -> std::sync::MutexGuard<'_, BTreeMap<InstrumentKey, RegisteredInstrument>> {
-        self.registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Returns the instrument registered under `key`, installing `build`'s
     /// if there is none.
     fn register(
@@ -227,7 +219,9 @@ impl DefaultMetricsRecorder {
         key: InstrumentKey,
         build: impl FnOnce() -> RegisteredInstrument,
     ) -> RegisteredInstrument {
-        self.lock_registry()
+        self.registry
+            .lock()
+            .expect("the instrument registry lock should not be poisoned")
             .entry(key)
             .or_insert_with(build)
             .clone()
@@ -443,6 +437,10 @@ impl HistogramHandle for HistogramValue {
         self.bucket_counts[bucket].fetch_add(1, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
         if value > 0.0 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a float-to-integer `as` saturates, and no `try_from` exists for it"
+            )]
             let millionths = (value * 1_000_000.0).round().min(u64::MAX as f64) as u64;
             self.sum_millionths.fetch_add(millionths, Ordering::Relaxed);
         }

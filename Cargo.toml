@@ -135,6 +135,7 @@ unsafe_code = "deny"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
+cast_possible_truncation = "warn"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 unwrap_used = "warn"

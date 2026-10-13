@@ -10,12 +10,12 @@ use super::{ExecutionBudget, ExecutionBudgetStats};
 use crate::metrics::{DefaultMetricsRecorder, MetricValue};
 use crate::{
     CommitId, CreateDirectoryOptions, ErrorCode, LoonFs, LoonFsBuilder, Namespace, NamespaceId,
-    PublicationLimits, Writable,
+    PublicationPolicy, Writable,
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,12 +50,15 @@ async fn gated_runtime(
                 )
             })
         }),
-        OperationClass::Put,
+        OperationSelector::Put,
     ));
-    let runtime = configure(LoonFs::builder_with_store(store.clone()).writer_id("budget-writer"))
-        .build()
-        .await
-        .expect("build writer");
+    let runtime = configure(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id("budget-writer")),
+    )
+    .build()
+    .await
+    .expect("build writer");
     GatedRuntime {
         _root: root,
         store,
@@ -125,7 +128,7 @@ impl GatedRuntime {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
                 .await
                 .expect("merge the delta runs");
         })
@@ -603,20 +606,20 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     let budget = ExecutionBudget::builder()
         .metrics_recorder(recorder.clone())
         .build();
-    let one_request_per_namespace = || PublicationLimits {
+    let one_request_per_namespace = || PublicationPolicy {
         max_requests_per_namespace: NonZeroUsize::MIN,
-        ..PublicationLimits::default()
+        ..PublicationPolicy::default()
     };
     let first = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_limits(one_request_per_namespace())
+            .publication_policy(one_request_per_namespace())
     })
     .await;
     let second = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_limits(one_request_per_namespace())
+            .publication_policy(one_request_per_namespace())
     })
     .await;
     let first_documents = first.namespace("documents").await;
@@ -678,12 +681,12 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         BlockingStore::new(
             LocalFsStore::new(root.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::content_blob(),
     ));
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id("staging-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("staging-writer"))
         .execution_budget(budget.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_threshold_bytes: None,

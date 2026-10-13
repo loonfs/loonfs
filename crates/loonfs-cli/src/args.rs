@@ -1,13 +1,42 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
+use crate::render::OutputFormat;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
-use loonfs_types::InodeId;
+use loonfs_types::{
+    AccessRevisionNo, ActorId, AttributesRevisionNo, ChangeSeq, CommitId, InodeId, NamespaceId,
+    PinId, PrincipalId, PublicOrdinalRangeError, RevisionNo, SubjectId,
+};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
     loonfs_types::public_inode_id::decode(value).map_err(|error| error.to_string())
+}
+
+/// Parses a decimal ordinal and checks that it is a public integer.
+fn parse_public_ordinal<T>(
+    value: &str,
+    constructor: fn(u64) -> Result<T, PublicOrdinalRangeError>,
+) -> Result<T, String> {
+    let value: u64 = value.parse().map_err(|error| format!("{error}"))?;
+    constructor(value).map_err(|error| error.to_string())
+}
+
+fn parse_change_seq(value: &str) -> Result<ChangeSeq, String> {
+    parse_public_ordinal(value, ChangeSeq::parse)
+}
+
+fn parse_revision_no(value: &str) -> Result<RevisionNo, String> {
+    parse_public_ordinal(value, RevisionNo::parse)
+}
+
+fn parse_attributes_revision_no(value: &str) -> Result<AttributesRevisionNo, String> {
+    parse_public_ordinal(value, AttributesRevisionNo::parse)
+}
+
+fn parse_access_revision_no(value: &str) -> Result<AccessRevisionNo, String> {
+    parse_public_ordinal(value, AccessRevisionNo::parse)
 }
 
 const TOP_LEVEL_HELP_TEMPLATE: &str = "\
@@ -71,11 +100,11 @@ pub(crate) struct Cli {
     /// Namespace to run against. Precedence is `--namespace`,
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) namespace: Option<String>,
+    pub(crate) namespace: Option<NamespaceId>,
     /// Subject ID to act as. Precedence is `--subject-id`,
     /// `LOONFS_SUBJECT_ID`, the profile, then the actor ID.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) subject_id: Option<String>,
+    pub(crate) subject_id: Option<SubjectId>,
     /// Principal scope for an ACL namespace or a subject's principal IDs.
     /// Subject precedence is the flag, `LOONFS_PRINCIPAL_SCOPE`, then the profile.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
@@ -89,7 +118,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
     /// Disable bounded retry of `server_busy`, `commit_queue_full`,
-    /// `shutting_down`, and transport errors.
+    /// `store_contention`, `shutting_down`, and transport errors.
     #[arg(long, global = true)]
     pub(crate) no_retry: bool,
     /// Never prompt. Fail instead when input would be required.
@@ -99,7 +128,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: TopLevelCommand,
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
@@ -126,7 +155,7 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     if cli.json && pagination.all {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
-            "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results",
+            "`--all` cannot be used with `--json`; use `--json --limit <n>` for a bounded document or `--jsonl` to stream all results",
         );
         error.insert(
             clap::error::ContextKind::InvalidArg,
@@ -147,6 +176,43 @@ fn selector_not_accepted(selector: &str) -> clap::Error {
         clap::error::ContextValue::String(selector.to_owned()),
     );
     error
+}
+
+/// A top-level command, split by whether it runs before the config file's
+/// location is resolved.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TopLevelCommand {
+    #[command(flatten)]
+    Configured(Command),
+    /// Check the selected deployment without writing to it.
+    Doctor(DoctorArgs),
+    /// Print a shell completion script to stdout.
+    Completion(CompletionArgs),
+}
+
+impl TopLevelCommand {
+    fn accepts_profile_selector(&self) -> bool {
+        match self {
+            Self::Configured(command) => command.accepts_profile_selector(),
+            Self::Doctor(_) => true,
+            Self::Completion(_) => false,
+        }
+    }
+
+    fn accepts_namespace_selector(&self) -> bool {
+        match self {
+            Self::Configured(command) => command.accepts_namespace_selector(),
+            Self::Doctor(_) => true,
+            Self::Completion(_) => false,
+        }
+    }
+
+    fn pagination(&self) -> Option<&PageLimitArgs> {
+        match self {
+            Self::Configured(command) => command.pagination(),
+            Self::Doctor(_) | Self::Completion(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,8 +282,6 @@ pub(crate) enum Command {
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
     Capabilities(CapabilitiesArgs),
-    /// Check the selected deployment without writing to it.
-    Doctor(DoctorArgs),
     /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
@@ -228,8 +292,6 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Print a shell completion script to stdout.
-    Completion(CompletionArgs),
     /// Print version and build metadata.
     Version,
 }
@@ -238,11 +300,7 @@ impl Command {
     fn accepts_profile_selector(&self) -> bool {
         !matches!(
             self,
-            Self::Init
-                | Self::Profile { .. }
-                | Self::Config { .. }
-                | Self::Completion(_)
-                | Self::Version
+            Self::Init | Self::Profile { .. } | Self::Config { .. } | Self::Version
         )
     }
 
@@ -269,7 +327,6 @@ impl Command {
                 | Self::Cp(_)
                 | Self::Trash(_)
                 | Self::Changes(_)
-                | Self::Doctor(_)
                 | Self::Maintenance {
                     command: MaintenanceCommand::Checkpoint { .. }
                         | MaintenanceCommand::Index { .. }
@@ -361,9 +418,9 @@ pub(crate) enum ProfileCreateCommand {
 pub(crate) struct ProfileCreateActorArgs {
     /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -500,9 +557,9 @@ pub(crate) enum ProfileUpdateCommand {
 pub(crate) struct ProfileUpdateActorArgs {
     /// Actor ID to save in the profile.
     #[arg(long)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -636,7 +693,7 @@ pub(crate) struct RequestBehaviorArgs {
 #[derive(Debug, Args, Clone)]
 pub(crate) struct SubjectSelectorArgs {
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -650,7 +707,7 @@ pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[arg(from_global)]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
 }
@@ -660,7 +717,7 @@ pub(crate) struct ActorSelectorArgs {
     /// Actor ID for this mutation.
     /// Overrides the environment and profile. Defaults to loonfs-cli.
     #[arg(long)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
 }
 
 #[derive(Debug, Args)]
@@ -670,7 +727,7 @@ pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Args)]
@@ -718,7 +775,7 @@ pub(crate) struct NamespaceShowArgs {
     pub target: TargetSelectorArgs,
     /// Namespace to show. When omitted, the usual namespace selection applies.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
-    pub namespace_id: Option<String>,
+    pub namespace_id: Option<NamespaceId>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -743,7 +800,7 @@ pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
     /// Access mode. It can't be changed after the namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
@@ -753,7 +810,7 @@ pub(crate) struct NamespaceCreateArgs {
     /// A principal to grant `admin` on the root at creation. Repeat the flag
     /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
-    pub administrators: Vec<String>,
+    pub administrators: Vec<PrincipalId>,
     /// How sibling names are compared. It can't be changed after the
     /// namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
@@ -769,10 +826,10 @@ pub(crate) struct NamespaceDeleteArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
     /// Delete only if the namespace head is still at this sequence.
-    #[arg(long)]
-    pub expected_head_seq: Option<u64>,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub expected_head_seq: Option<ChangeSeq>,
     /// Skip the interactive confirmation.
     #[arg(long)]
     pub yes: bool,
@@ -789,12 +846,12 @@ pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub source_namespace_id: String,
+    pub source_namespace_id: NamespaceId,
     #[arg(value_hint = ValueHint::Other)]
-    pub new_namespace_id: String,
+    pub new_namespace_id: NamespaceId,
     /// Fork from a live snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -835,7 +892,7 @@ pub(crate) struct CommitArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit. One is generated when omitted.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Args)]
@@ -848,7 +905,7 @@ pub(crate) struct FilesystemLsArgs {
     pub pagination: PaginationArgs,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -872,7 +929,7 @@ pub(crate) struct FilesystemStatArgs {
     pub inode: Option<InodeId>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -904,8 +961,8 @@ pub(crate) struct AccessSetArgs {
     pub expected_inode_id: Option<InodeId>,
     /// Replace only while the row is still at this access revision. Needs
     /// --expected-inode-id, which identifies the row.
-    #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id", value_parser = parse_access_revision_no)]
+    pub expected_revision: Option<AccessRevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -939,8 +996,8 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub expected_inode_id: Option<InodeId>,
     /// Update only while the inode's attribute revision is still this one.
     /// Requires --expected-inode-id.
-    #[arg(long, requires = "expected_inode_id")]
-    pub expected_attributes_revision: Option<u64>,
+    #[arg(long, requires = "expected_inode_id", value_parser = parse_attributes_revision_no)]
+    pub expected_attributes_revision: Option<AttributesRevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -993,11 +1050,11 @@ pub(crate) struct FilesystemCatArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Print this revision instead of the current content.
-    #[arg(long)]
-    pub revision: Option<u64>,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Args)]
@@ -1043,11 +1100,11 @@ pub(crate) struct FilesystemGetArgs {
     #[arg(short, long)]
     pub recursive: bool,
     /// Download this revision instead of the current content.
-    #[arg(long)]
-    pub revision: Option<u64>,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
     /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
@@ -1080,8 +1137,8 @@ pub(crate) struct FilesystemPutArgs {
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
     pub expected_inode_id: Option<InodeId>,
     /// Replacement requires that the file still has this revision and inode. This precondition implies --force.
-    #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id", value_parser = parse_revision_no)]
+    pub expected_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1103,8 +1160,8 @@ pub(crate) struct FilesystemAppendArgs {
     #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_inode_id: Option<InodeId>,
     /// The append requires that the file still has this revision and inode.
-    #[arg(long, requires = "expected_inode_id")]
-    pub expected_revision: Option<u64>,
+    #[arg(long, requires = "expected_inode_id", value_parser = parse_revision_no)]
+    pub expected_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1133,9 +1190,10 @@ pub(crate) struct FilesystemTransferArgs {
     #[arg(
         long,
         conflicts_with = "recursive",
-        requires = "expected_destination_inode_id"
+        requires = "expected_destination_inode_id",
+        value_parser = parse_revision_no
     )]
-    pub expected_destination_revision: Option<u64>,
+    pub expected_destination_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1148,8 +1206,8 @@ pub(crate) struct FilesystemRestoreArgs {
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
-    #[arg(long)]
-    pub revision: u64,
+    #[arg(long, value_parser = parse_revision_no)]
+    pub revision: RevisionNo,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1173,8 +1231,8 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// Committed sequence of the delete being recovered, as reported by
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
     /// so a stale command can't cancel a later delete.
-    #[arg(long)]
-    pub deletion_seq: u64,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub deletion_seq: ChangeSeq,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -1193,13 +1251,13 @@ pub(crate) struct ChangesArgs {
     pub target: TargetSelectorArgs,
     /// Return committed changes after this sequence (defaults to 0, the
     /// start of retained history).
-    #[arg(long)]
-    pub after: Option<u64>,
+    #[arg(long, value_parser = parse_change_seq)]
+    pub after: Option<ChangeSeq>,
     #[command(flatten)]
     pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<String>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1224,7 +1282,7 @@ pub(crate) struct SnapshotTargetArgs {
     pub request: RequestBehaviorArgs,
     /// Namespace whose snapshots to manage.
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Args)]
@@ -1253,7 +1311,7 @@ pub(crate) struct SnapshotExtendArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: String,
+    pub snapshot_id: PinId,
     /// New lifetime from now, in milliseconds.
     #[arg(long)]
     pub ttl_ms: u64,
@@ -1265,7 +1323,7 @@ pub(crate) struct SnapshotDeleteArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to delete.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: String,
+    pub snapshot_id: PinId,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1315,7 +1373,7 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub principal_id: String,
+    pub principal_id: PrincipalId,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1390,8 +1448,8 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     pub target: TargetSelectorArgs,
     /// Advance the floor to this sequence, or to the folded manifest head
     /// when that's lower.
-    #[arg(long, conflicts_with = "before")]
-    pub to_seq: Option<u64>,
+    #[arg(long, conflicts_with = "before", value_parser = parse_change_seq)]
+    pub to_seq: Option<ChangeSeq>,
     /// Advance the floor to the last commit made at or before this Unix
     /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]
@@ -1425,7 +1483,7 @@ pub(crate) struct MaintenanceCheckpointDeleteArgs {
     pub target: TargetSelectorArgs,
     /// Checkpoint ID to delete.
     #[arg(value_hint = ValueHint::Other)]
-    pub checkpoint_id: String,
+    pub checkpoint_id: PinId,
 }
 
 #[derive(Debug, Args)]
@@ -1466,8 +1524,7 @@ pub(crate) enum ConfigCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeBehavior {
-    pub json: bool,
-    pub no_input: bool,
+    pub output: OutputFormat,
     pub interactive: bool,
     /// How a long-running transfer reports its progress.
     pub progress: ProgressMode,
@@ -1480,8 +1537,11 @@ impl RuntimeBehavior {
             && std::io::stdin().is_terminal()
             && std::io::stderr().is_terminal();
         Self {
-            json: cli.json,
-            no_input: cli.no_input,
+            output: if cli.json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Human
+            },
             interactive,
             // Progress asks standard error alone, not the terminal pair
             // `interactive` needs: a `put` fed by a pipe still has a
@@ -1582,7 +1642,16 @@ impl CommandKind {
 impl Cli {
     pub(crate) fn kind(&self) -> CommandKind {
         match &self.command {
-            Command::Completion(_) => CommandKind::Completion,
+            TopLevelCommand::Configured(command) => command.kind(),
+            TopLevelCommand::Doctor(_) => CommandKind::Doctor,
+            TopLevelCommand::Completion(_) => CommandKind::Completion,
+        }
+    }
+}
+
+impl Command {
+    fn kind(&self) -> CommandKind {
+        match self {
             Command::Init => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Create { .. } => CommandKind::ProfileCreate,
@@ -1627,7 +1696,6 @@ impl Cli {
             Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Changes(_) => CommandKind::Changes,
             Command::Capabilities(_) => CommandKind::Capabilities,
-            Command::Doctor(_) => CommandKind::Doctor,
             Command::Maintenance { command } => match command {
                 MaintenanceCommand::RecoverAdministrator(_) => {
                     CommandKind::MaintenanceRecoverAdministrator
@@ -1777,20 +1845,26 @@ mod tests {
 
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
         assert_eq!(cli.profile.as_deref(), Some(profile));
-        assert_eq!(cli.namespace.as_deref(), Some(namespace));
+        assert_eq!(
+            cli.namespace.as_ref().map(NamespaceId::as_str),
+            Some(namespace)
+        );
         let target = match &cli.command {
-            Command::Ls(args) => Some(&args.target),
-            Command::Maintenance {
+            TopLevelCommand::Configured(Command::Ls(args)) => Some(&args.target),
+            TopLevelCommand::Configured(Command::Maintenance {
                 command:
                     MaintenanceCommand::Checkpoint {
                         command: MaintenanceCheckpointCommand::List(args),
                     },
-            } => Some(&args.target),
+            }) => Some(&args.target),
             _ => None,
         }
         .expect("test command should accept profile and namespace selectors");
         assert_eq!(target.profile.profile.as_deref(), Some(profile));
-        assert_eq!(target.namespace.as_deref(), Some(namespace));
+        assert_eq!(
+            target.namespace.as_ref().map(NamespaceId::as_str),
+            Some(namespace)
+        );
     }
 
     #[test]
@@ -1929,7 +2003,7 @@ mod tests {
             let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
             let error = validate_cli(&cli).expect_err("--json --all must fail");
             assert!(error.to_string().contains(
-                "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results"
+                "`--all` cannot be used with `--json`; use `--json --limit <n>` for a bounded document or `--jsonl` to stream all results"
             ));
         }
     }

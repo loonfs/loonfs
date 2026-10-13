@@ -10,7 +10,7 @@ use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparati
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::CommitReceiptRecord;
-use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
+use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_objectstore::ObjectStore;
@@ -116,7 +116,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }
-    let mutation = candidate.request();
+    let mutation = candidate.intent();
     let semantic_identity = match candidate.semantic_identity(namespace_id) {
         Ok(semantic_identity) => semantic_identity,
         Err(error) => return CandidateAdmission::independent(Err(error)),
@@ -175,7 +175,7 @@ pub(super) fn validate_candidate_content_references(
 ) -> Result<()> {
     match candidate.content_preparation() {
         ContentPreparation::Ready(admissions) => validate_commit_content_references(
-            candidate.request(),
+            candidate.intent(),
             admissions,
             candidate.inline_content(),
             namespace_id,
@@ -216,16 +216,18 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     {
         Ok(Some(commit)) => commit,
         Ok(None) => {
-            return Err(CoreError::Internal(format!(
-            "commit receipt for `{}` names sequence `{}`, where the change feed reports no commit",
-            record.commit_id, record.committed_seq
-        )))
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "commit receipt for `{}` refers to sequence `{}`, where the change feed reports \
+                 no commit",
+                record.commit_id, record.committed_seq
+            )))
         }
         Err(error) => return Err(error),
     };
     if commit.commit_id != record.commit_id {
-        return Err(CoreError::Internal(format!(
-            "commit receipt for `{}` names sequence `{}`, where the change feed reports commit `{}`",
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "commit receipt for `{}` refers to sequence `{}`, where the change feed reports \
+             commit `{}`",
             record.commit_id, record.committed_seq, commit.commit_id
         )));
     }
@@ -240,7 +242,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn validate_inline_content_references<'a>(
-    request: &CommitRequest,
+    request: &CommitIntent,
     inline_content: &'a [InlineContent],
     namespace_id: &NamespaceId,
 ) -> Result<HashMap<&'a ContentId, &'a loonfs_types::ContentRef>> {
@@ -288,7 +290,7 @@ pub(crate) fn validate_inline_content_references<'a>(
 
 /// Checks that each put's content is covered by a staged proof or an equal inline value.
 fn validate_commit_content_references(
-    request: &CommitRequest,
+    request: &CommitIntent,
     admissions: &[PreparedContent],
     inline_content: &[InlineContent],
     namespace_id: &NamespaceId,

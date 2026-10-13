@@ -113,7 +113,7 @@ pub(crate) fn delete_profile_in_table(
     })
 }
 
-pub(crate) fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
+pub(crate) fn set_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
@@ -121,8 +121,8 @@ pub(crate) fn make_default_profile(config: &mut CliConfig, name: &str) -> Result
     Ok(())
 }
 
-/// [`make_default_profile`] over the loose table of a degraded config.
-pub(crate) fn make_default_profile_in_table(
+/// [`set_default_profile`] over the loose table of a degraded config.
+pub(crate) fn set_default_profile_in_table(
     table: &mut toml::Table,
     name: &str,
 ) -> Result<(), CliError> {

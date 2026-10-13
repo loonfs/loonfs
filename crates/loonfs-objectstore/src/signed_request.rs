@@ -105,7 +105,7 @@ pub(crate) fn metadata_from_signed_head(
             .and_then(|value| value.to_str().ok())
     };
     let checksum = stored_checksum(&response.headers);
-    let last_modified_ms = header("last-modified")
+    let last_modified_at_ms = header("last-modified")
         .and_then(|value| httpdate::parse_http_date(value).ok())
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|value| u64::try_from(value.as_millis()).ok());
@@ -113,7 +113,7 @@ pub(crate) fn metadata_from_signed_head(
         size_bytes,
         etag: Some(etag),
         version: header(version_header).map(str::to_owned),
-        last_modified_ms,
+        last_modified_at_ms,
         checksum,
     }))
 }
@@ -215,7 +215,7 @@ mod tests {
             .expect("head")
             .expect("object");
             assert_eq!(metadata.checksum, expected);
-            assert_eq!(metadata.last_modified_ms, Some(1000));
+            assert_eq!(metadata.last_modified_at_ms, Some(1000));
         }
     }
 

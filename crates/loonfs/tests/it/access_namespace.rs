@@ -1,6 +1,6 @@
 //! Namespace administration and recovery under ACL access.
 
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, LoonFs, SnapshotPolicy, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, namespace_id};
@@ -49,7 +49,7 @@ async fn create_namespace() -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let writer =
         LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-            .writer_id("access-namespace")
+            .writer_id(loonfs_test_support::ids::writer_id("access-namespace"))
             .min_publish_interval_ms(0)
             .build()
             .await
@@ -107,7 +107,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .stat("/")
         .await
         .expect("inherited member grant");
-    let now_ms = loonfs_core::time::current_time_ms().expect("clock");
+    let now_ms = loonfs_core::time::current_time_ms();
     assert_eq!(
         member_namespace_writer
             .create_snapshot("snapshot", now_ms + 60_000, &SnapshotPolicy::default())
@@ -122,7 +122,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .expect("root snapshot");
     assert_eq!(
         member_namespace_writer
-            .delete_snapshot(&snapshot.checkpoint_id)
+            .delete_snapshot(&snapshot.snapshot_id)
             .await
             .expect_err("member snapshot delete")
             .code(),
@@ -151,7 +151,7 @@ async fn commit_as(
     let namespace_writer = writer.open_namespace(namespace)?;
     namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -308,12 +308,12 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
     let (_temp_dir, writer, namespace) = create_namespace().await;
     let root = writer.with_subject(subject("root", "prn_root"));
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
-    let now_ms = loonfs_core::time::current_time_ms().expect("clock");
+    let now_ms = loonfs_core::time::current_time_ms();
     let snapshot = namespace_writer
         .create_snapshot("protected", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
-    let snapshot_id = snapshot.checkpoint_id;
+    let snapshot_id = snapshot.snapshot_id;
     let options = loonfs::PutFileOptions::default();
     namespace_writer
         .put_file_with_options(
@@ -325,7 +325,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .await
         .expect("publish after snapshot creation");
     let peer = LoonFs::builder_with_store(writer.object_store())
-        .writer_id("peer")
+        .writer_id(loonfs_test_support::ids::writer_id("peer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -436,7 +436,7 @@ async fn snapshot_after_administrator_change() -> (
     let snapshot = namespace_writer
         .create_snapshot(
             "old-admin",
-            loonfs_core::time::current_time_ms().expect("clock") + 60_000,
+            loonfs_core::time::current_time_ms() + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -467,13 +467,7 @@ async fn snapshot_after_administrator_change() -> (
         .await
         .expect("fresh reader");
     writer.shutdown().await.expect("shutdown writer");
-    (
-        directory,
-        reader,
-        namespace,
-        snapshot.checkpoint_id,
-        content,
-    )
+    (directory, reader, namespace, snapshot.snapshot_id, content)
 }
 
 #[tokio::test]

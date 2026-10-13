@@ -40,7 +40,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     let namespace_id = namespace_id("directory-page-reads");
     let actor = loonfs_test_support::test_actor();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("directory-page-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("directory-page-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await

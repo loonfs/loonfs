@@ -115,7 +115,7 @@ impl Client {
         // provider takes the last write, and the checksum rides the
         // signature either way.
         let response = self
-            .call(&request, Some(&bytes), SendPolicy::RetryUnbounded)
+            .call(&request, Some(&bytes), SendPolicy::RetryWithoutDeadline)
             .await?;
         let etag = response
             .get(http::header::ETAG)
@@ -154,7 +154,7 @@ impl Client {
     /// Like the buffered form this never retries: a create-only PUT that
     /// succeeded can come back as a provider precondition error on a second
     /// attempt, and a source is consumed by the attempt that reads it.
-    pub async fn upload_streamed_via_presigned_url(
+    pub async fn upload_stream_via_presigned_url(
         &self,
         access: &ObjectTransferAccess,
         source: PayloadSource,
@@ -180,7 +180,7 @@ impl Client {
             .call(
                 &request,
                 Some(&Bytes::copy_from_slice(bytes)),
-                SendPolicy::RetryUnbounded,
+                SendPolicy::RetryWithoutDeadline,
             )
             .await?;
         serde_json::from_slice(&response.bytes).map_err(|err| ClientError::Json(err.to_string()))

@@ -7,7 +7,7 @@ use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorClass, PutMode,
+    ObjectStoreError, ObjectStoreErrorKind, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// One object-store call sample delivered to an object-store metrics recorder.
@@ -41,7 +41,7 @@ pub struct ObjectStoreMetricSample {
     /// sample for the whole write.
     pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
-    pub result: ObjectStoreResultClass,
+    pub result: ObjectStoreResultKind,
     /// Request payload bytes for a put or an assembly, including failed
     /// attempts; otherwise `None`.
     pub bytes_in: Option<u64>,
@@ -54,7 +54,7 @@ pub struct ObjectStoreMetricSample {
     /// Read-range or listing shape when applicable; otherwise `None`.
     pub range_class: Option<RangeClass>,
     /// Requested conditional-write class for a put; otherwise `None`.
-    pub put_mode: Option<PutModeClass>,
+    pub put_mode: Option<PutModeKind>,
     /// Deployment-supplied provider label, or `None` when the wrapper was left unlabeled.
     pub store_kind: Option<String>,
 }
@@ -66,7 +66,7 @@ impl ObjectStoreMetricSample {
         key: &str,
         elapsed: Duration,
         attempts: u32,
-        result: ObjectStoreResultClass,
+        result: ObjectStoreResultKind,
         store_kind: Option<String>,
     ) -> Self {
         Self {
@@ -140,7 +140,7 @@ impl ObjectStoreOperation {
 /// Collapses object-store outcomes into a bounded metrics vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectStoreResultClass {
+pub enum ObjectStoreResultKind {
     /// Indicates the operation returned its requested value or mutation result.
     Ok,
     /// Indicates an optional read observed absence or an explicit lookup returned not found.
@@ -165,7 +165,7 @@ pub enum ObjectStoreResultClass {
     Other,
 }
 
-impl ObjectStoreResultClass {
+impl ObjectStoreResultKind {
     /// The label an aggregating recorder groups by. Identical to the serde
     /// name: one outcome has one spelling wherever it is reported.
     pub fn as_str(self) -> &'static str {
@@ -185,19 +185,19 @@ impl ObjectStoreResultClass {
     }
 }
 
-impl From<ObjectStoreErrorClass> for ObjectStoreResultClass {
-    fn from(class: ObjectStoreErrorClass) -> Self {
+impl From<ObjectStoreErrorKind> for ObjectStoreResultKind {
+    fn from(class: ObjectStoreErrorKind) -> Self {
         match class {
-            ObjectStoreErrorClass::NotFound => Self::NotFound,
-            ObjectStoreErrorClass::InvalidRequest => Self::InvalidRequest,
-            ObjectStoreErrorClass::InvalidKey => Self::InvalidKey,
-            ObjectStoreErrorClass::PreconditionFailed => Self::PreconditionFailed,
-            ObjectStoreErrorClass::PermissionDenied => Self::PermissionDenied,
-            ObjectStoreErrorClass::StoredChecksumMissing => Self::StoredChecksumMissing,
-            ObjectStoreErrorClass::Unsupported => Self::Unsupported,
-            ObjectStoreErrorClass::Configuration => Self::Configuration,
-            ObjectStoreErrorClass::RetryableTransport => Self::RetryableTransport,
-            ObjectStoreErrorClass::Other => Self::Other,
+            ObjectStoreErrorKind::NotFound => Self::NotFound,
+            ObjectStoreErrorKind::InvalidRequest => Self::InvalidRequest,
+            ObjectStoreErrorKind::InvalidKey => Self::InvalidKey,
+            ObjectStoreErrorKind::PreconditionFailed => Self::PreconditionFailed,
+            ObjectStoreErrorKind::PermissionDenied => Self::PermissionDenied,
+            ObjectStoreErrorKind::StoredChecksumMissing => Self::StoredChecksumMissing,
+            ObjectStoreErrorKind::Unsupported => Self::Unsupported,
+            ObjectStoreErrorKind::Configuration => Self::Configuration,
+            ObjectStoreErrorKind::RetryableTransport => Self::RetryableTransport,
+            ObjectStoreErrorKind::Other => Self::Other,
         }
     }
 }
@@ -257,7 +257,7 @@ pub enum RangeClass {
 /// Classifies the precondition semantics requested by a put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PutModeClass {
+pub enum PutModeKind {
     /// Indicates an unconditional replacement.
     Overwrite,
     /// Indicates creation only while the key is absent.
@@ -281,21 +281,21 @@ pub struct VecObjectStoreMetricsRecorder {
 }
 
 impl VecObjectStoreMetricsRecorder {
-    fn lock(&self) -> MutexGuard<'_, Vec<ObjectStoreMetricSample>> {
-        self.samples
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Returns a copy of all recorded samples.
     pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
-        self.lock().clone()
+        self.samples
+            .lock()
+            .expect("the metric sample lock should not be poisoned")
+            .clone()
     }
 }
 
 impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        self.lock().push(sample);
+        self.samples
+            .lock()
+            .expect("the metric sample lock should not be poisoned")
+            .push(sample);
     }
 }
 
@@ -308,12 +308,6 @@ pub struct JsonlObjectStoreMetricsRecorder {
 }
 
 impl JsonlObjectStoreMetricsRecorder {
-    fn lock(&self) -> MutexGuard<'_, BufWriter<File>> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Creates or truncates a JSONL output file, creating missing parent directories.
     ///
     /// The operation fails when directories or the output file cannot be created.
@@ -333,13 +327,19 @@ impl JsonlObjectStoreMetricsRecorder {
     ///
     /// The operation fails when the filesystem cannot accept pending bytes.
     pub fn flush(&self) -> io::Result<()> {
-        self.lock().flush()
+        self.writer
+            .lock()
+            .expect("the metric writer lock should not be poisoned")
+            .flush()
     }
 }
 
 impl ObjectStoreMetricsRecorder for JsonlObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        let mut writer = self.lock();
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("the metric writer lock should not be poisoned");
         let _ = serde_json::to_writer(&mut *writer, &sample);
         let _ = writer.write_all(b"\n");
     }
@@ -535,7 +535,7 @@ where
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
-        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        sample.put_mode = Some(PutModeKind::CreateIfAbsent);
         self.record(sample);
         result
     }
@@ -562,7 +562,7 @@ where
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(size_bytes);
-        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        sample.put_mode = Some(PutModeKind::CreateIfAbsent);
         self.record(sample);
         result
     }
@@ -587,7 +587,7 @@ where
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
-        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        sample.put_mode = Some(PutModeKind::CreateIfAbsent);
         self.record(sample);
         result
     }
@@ -780,8 +780,8 @@ impl<S> InstrumentedObjectStore<S> {
         listed: std::result::Result<usize, &ObjectStoreError>,
     ) {
         let result = match listed {
-            Ok(_) => ObjectStoreResultClass::Ok,
-            Err(error) => error.class().into(),
+            Ok(_) => ObjectStoreResultKind::Ok,
+            Err(error) => error.kind().into(),
         };
         let mut sample = ObjectStoreMetricSample::new(
             ObjectStoreOperation::ListPrefix,
@@ -808,7 +808,7 @@ struct RecordedListStream {
     prefix: String,
     started: Instant,
     items: u64,
-    first_error: Option<ObjectStoreResultClass>,
+    first_error: Option<ObjectStoreResultKind>,
 }
 
 impl futures::Stream for RecordedListStream {
@@ -824,7 +824,7 @@ impl futures::Stream for RecordedListStream {
                 Ok(_) => self.items += 1,
                 Err(error) => {
                     if self.first_error.is_none() {
-                        self.first_error = Some(error.class().into());
+                        self.first_error = Some(error.kind().into());
                     }
                 }
             }
@@ -840,7 +840,7 @@ impl Drop for RecordedListStream {
             &self.prefix,
             self.started.elapsed(),
             1,
-            self.first_error.unwrap_or(ObjectStoreResultClass::Ok),
+            self.first_error.unwrap_or(ObjectStoreResultKind::Ok),
             self.store_kind.clone(),
         );
         sample.item_count = Some(self.items);
@@ -867,28 +867,28 @@ fn classify_key(key: &str) -> KeyClass {
     }
 }
 
-fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreResultClass {
+fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreResultKind {
     match result {
-        Ok(Some(_)) => ObjectStoreResultClass::Ok,
-        Ok(None) => ObjectStoreResultClass::NotFound,
-        Err(error) => error.class().into(),
+        Ok(Some(_)) => ObjectStoreResultKind::Ok,
+        Ok(None) => ObjectStoreResultKind::NotFound,
+        Err(error) => error.kind().into(),
     }
 }
 
-fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultClass {
+fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultKind {
     match result {
-        Ok(_) => ObjectStoreResultClass::Ok,
-        Err(error) => error.class().into(),
+        Ok(_) => ObjectStoreResultKind::Ok,
+        Err(error) => error.kind().into(),
     }
 }
 
 fn classify_immutable_write(
     result: &std::result::Result<ObjectMetadata, crate::ImmutableWriteError>,
-) -> ObjectStoreResultClass {
+) -> ObjectStoreResultKind {
     match result {
-        Ok(_) => ObjectStoreResultClass::Ok,
-        Err(crate::ImmutableWriteError::Transport { source, .. }) => source.class().into(),
-        Err(_) => ObjectStoreResultClass::PreconditionFailed,
+        Ok(_) => ObjectStoreResultKind::Ok,
+        Err(crate::ImmutableWriteError::Transport { source, .. }) => source.kind().into(),
+        Err(_) => ObjectStoreResultKind::PreconditionFailed,
     }
 }
 
@@ -907,10 +907,10 @@ fn classify_range(range: Option<&ByteRange>) -> RangeClass {
     }
 }
 
-fn classify_put_mode(mode: &PutMode) -> PutModeClass {
+fn classify_put_mode(mode: &PutMode) -> PutModeKind {
     match mode {
-        PutMode::Overwrite => PutModeClass::Overwrite,
-        PutMode::CreateIfAbsent => PutModeClass::CreateIfAbsent,
-        PutMode::CompareAndSwap { .. } => PutModeClass::CompareAndSwap,
+        PutMode::Overwrite => PutModeKind::Overwrite,
+        PutMode::CreateIfAbsent => PutModeKind::CreateIfAbsent,
+        PutMode::CompareAndSwap { .. } => PutModeKind::CompareAndSwap,
     }
 }

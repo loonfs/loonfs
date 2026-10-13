@@ -26,7 +26,7 @@ use loonfs_grep::manifest::{
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder,
 };
@@ -250,11 +250,12 @@ fn sample_gram_postings_segment() -> BuiltSegmentBlocks {
             .push(&row.row_key(), &row.filter_key(), &row)
             .expect("push a gram postings row");
     }
-    builder.finish().expect("finish the gram index segment")
+    builder.build().expect("finish the gram index segment")
 }
 
 fn segment_section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+    let start = loonfs_types::usize_from_u64(handle.offset);
+    &bytes[start..start + handle.stored_bytes as usize]
 }
 
 /// Reads back the block a fixture pins. The fixture stores the decompressed
@@ -265,8 +266,8 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
     let stored = zstd::stream::encode_all(payload.as_slice(), 0).expect("compress the block");
     let handle = BlockHandle {
         offset: 0,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
+        decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block_rows::<IndexRow>(&stored, &handle).expect("decode golden data block")

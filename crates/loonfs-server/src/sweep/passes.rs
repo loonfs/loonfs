@@ -1,8 +1,9 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, RunningSweep, Sweep};
+use super::{lock, panic_message, GarbageCollection, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
+use std::panic::AssertUnwindSafe;
 use tokio::time::MissedTickBehavior;
 
 enum Due {
@@ -42,34 +43,49 @@ impl Sweep {
         let (seq, due) = {
             let held = lock(&entry);
             let seq = held.handle.last_published_seq();
-            if held.handle.last_published_ms().is_some_and(|published_ms| {
-                u128::from(now_ms.saturating_sub(published_ms)) < inner.tick_interval.as_millis()
-            }) {
+            if held
+                .handle
+                .last_published_at_ms()
+                .is_some_and(|published_at_ms| {
+                    u128::from(now_ms.saturating_sub(published_at_ms))
+                        < inner.tick_interval.as_millis()
+                })
+            {
                 return;
             }
             let metadata_caught_up = held.handle.metadata_caught_up();
             let idle_fold_due = inner.metadata.idle_fold_after_ms != 0
-                && held.handle.last_published_ms().is_some_and(|published_ms| {
-                    let fold_after_ms =
-                        published_ms.saturating_add(inner.metadata.idle_fold_after_ms);
-                    now_ms >= fold_after_ms
-                        && held
-                            .metadata_retry_after_ms
-                            .saturating_sub(inner.metadata_retry_ms)
-                            < fold_after_ms
-                });
+                && held
+                    .handle
+                    .last_published_at_ms()
+                    .is_some_and(|published_at_ms| {
+                        let fold_due_at_ms =
+                            published_at_ms.saturating_add(inner.metadata.idle_fold_after_ms);
+                        now_ms >= fold_due_at_ms
+                            && held
+                                .metadata_retry_at_ms
+                                .saturating_sub(inner.metadata_retry_interval_ms)
+                                < fold_due_at_ms
+                    });
             let due = if !metadata_caught_up
-                && (now_ms >= held.metadata_retry_after_ms || idle_fold_due)
+                && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
+                && !self.backed_off(&namespace_id, SweepCall::Metadata)
             {
                 Due::Metadata
-            } else if inner.grep.is_some() && (held.index_dirty || held.indexed_seq != seq) {
+            } else if inner.grep.is_some()
+                && (held.index_dirty || held.indexed_seq != seq)
+                && !self.backed_off(&namespace_id, SweepCall::GrepIndex)
+            {
                 Due::Index
             } else if seq.is_some()
                 && seq != held.collected_seq
-                && now_ms.saturating_sub(held.collected_ms) >= inner.collection_interval_ms
+                && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
+                && !self.backed_off(&namespace_id, SweepCall::Gc)
+                && !self.backed_off(&namespace_id, SweepCall::GrepGc)
             {
                 Due::Collection
-            } else if metadata_caught_up {
+            } else if metadata_caught_up || self.backoff_at_cap(&namespace_id, SweepCall::Metadata)
+            {
                 Due::Close
             } else {
                 return;
@@ -88,11 +104,22 @@ impl Sweep {
                 }
             }
             Due::Collection => {
-                if self.collect(&namespace_id).await {
+                if self.gc(&namespace_id).await {
                     self.record_collection(&entry, seq);
                 }
             }
-            Due::Close => self.close_idle_session(&namespace_id, seq).await,
+            Due::Close => {
+                let close = AssertUnwindSafe(self.close_idle_session(&namespace_id, seq));
+                if let Err(payload) = close.catch_unwind().await {
+                    inner.metrics.panics.increment(1);
+                    tracing::error!(
+                        namespace_id = %namespace_id,
+                        call = "close",
+                        panic = panic_message(payload.as_ref()),
+                        "closing an idle session panicked; the next tick tries again"
+                    );
+                }
+            }
         }
     }
 
@@ -108,11 +135,23 @@ impl Sweep {
                 seq,
                 inner.idle_session_close_after_ms,
                 |held| {
-                    held.handle.metadata_caught_up()
-                        && (inner.grep.is_none() || (!held.index_dirty && held.indexed_seq == seq))
+                    // A failing call keeps an idle session held, so ticks
+                    // retry it on its backoff, until its wait reaches the
+                    // cap. Then the session closes and the next full pass
+                    // retries the call.
+                    (held.handle.metadata_caught_up()
+                        || self.backoff_at_cap(namespace_id, SweepCall::Metadata))
+                        && (inner.grep.is_none()
+                            || (!held.index_dirty && held.indexed_seq == seq)
+                            || self.backoff_at_cap(namespace_id, SweepCall::GrepIndex))
                         && (held.collected_seq == seq
-                            || inner.namespaces.now_ms().saturating_sub(held.collected_ms)
-                                < inner.collection_interval_ms)
+                            || inner
+                                .namespaces
+                                .now_ms()
+                                .saturating_sub(held.collected_at_ms)
+                                < inner.collection_interval_ms
+                            || self.backoff_at_cap(namespace_id, SweepCall::Gc)
+                            || self.backoff_at_cap(namespace_id, SweepCall::GrepGc))
                 },
             )
             .await
@@ -125,7 +164,7 @@ impl Sweep {
         let inner = &self.inner;
         tracing::info!(
             tick_interval_ms = u64::try_from(inner.tick_interval.as_millis()).unwrap_or(u64::MAX),
-            maintenance_interval_ms = inner.metadata_retry_ms,
+            maintenance_interval_ms = inner.metadata_retry_interval_ms,
             gc_interval_ms = inner.collection_interval_ms,
             full_sweep_interval_ms =
                 u64::try_from(inner.full_interval.as_millis()).unwrap_or(u64::MAX),
@@ -152,7 +191,7 @@ impl Sweep {
                 () = inner.stop.cancelled() => return,
                 _ = ticks.tick() => {}
             }
-            let _ = self.run_pass(true).await;
+            let _ = self.run_pass(GarbageCollection::Collect).await;
         }
     }
 

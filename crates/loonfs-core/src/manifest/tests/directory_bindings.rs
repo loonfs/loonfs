@@ -2,12 +2,12 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::metadata::LeafRevisionPrefetch;
+use crate::in_flight::STORE_READ_WAVE;
+use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
-use crate::store_waves::STORE_READ_WAVE;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
-use loonfs_types::{AttributeInclusion, DirectoryPageCursor, PageRequest};
+use loonfs_types::{AttributeInclusion, DirectoryPageCursor, InodeKind, PageRequest};
 
 #[tokio::test]
 async fn a_cold_path_walk_reads_no_inode() {
@@ -32,9 +32,9 @@ async fn a_cold_path_walk_reads_no_inode() {
         &inner,
         &namespace_id,
         &context,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -59,7 +59,7 @@ async fn a_cold_path_walk_reads_no_inode() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(inode_segments.len(), 4);
     let store = RecordingStore::metadata_segments(inner);
-    for prefetch in [LeafRevisionPrefetch::Skip, LeafRevisionPrefetch::Prefetch] {
+    for preload in [LeafRevisionPreload::Skip, LeafRevisionPreload::Preload] {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("cold view");
@@ -69,7 +69,7 @@ async fn a_cold_path_walk_reads_no_inode() {
             .session()
             .resolve_visible_path(
                 &AbsolutePath::parse("/DOCS/REPORTS/SUMMARY.TXT").expect("path"),
-                prefetch,
+                preload,
             )
             .await
             .expect("resolve path");
@@ -113,9 +113,9 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         &inner,
         &namespace_id,
         &context,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -248,7 +248,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     crate::commit_engine::publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![CommitCandidate::new(CommitRequest {
+        vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("repeat-move").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -280,9 +280,9 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -388,9 +388,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -427,7 +427,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     crate::commit_engine::publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![CommitCandidate::new(CommitRequest {
+        vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("parents").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -497,9 +497,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -605,4 +605,84 @@ async fn a_listing_reads_only_the_slot_binding_family() {
             ApiMetadataRowFamily::DirentryChildBinds
         ]
     );
+}
+
+#[tokio::test]
+async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_current_paths() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("binding-cycle").expect("namespace id");
+    let commit_id = CommitId::parse("c_binding_cycle").expect("commit id");
+    let mut builder = MetadataStateBuilder::default();
+    for inode_id in [InodeId(2), InodeId(3)] {
+        builder.push_inode(crate::metadata::InodeRecord {
+            inode_id,
+            inode_kind: InodeKind::Directory,
+            committed_seq: ChangeSeq(1),
+            commit_id: commit_id.clone(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 1_000,
+        });
+    }
+    // Each directory is bound under the other, which no commit can produce.
+    for (parent_inode_id, child_inode_id, name) in [
+        (InodeId(2), InodeId(3), "three"),
+        (InodeId(3), InodeId(2), "two"),
+    ] {
+        let display_name = loonfs_types::DisplayName::parse(name).expect("display name");
+        builder.push_direntry_binding(crate::metadata::DirentryBindingRecord {
+            parent_inode_id,
+            name_key: loonfs_types::NameKey::for_display_name(
+                loonfs_types::NamespaceNaming::CaseInsensitive,
+                &display_name,
+            ),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+            child_inode_id,
+            child_kind: InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 1_000,
+            committed_seq: ChangeSeq(1),
+            delta_index: 0,
+        });
+    }
+    let segments = build_manifest_segments(
+        &store,
+        &namespace_id,
+        &builder.build(),
+        &HashMap::new(),
+        MetadataRunPolicy::default(),
+    )
+    .await
+    .expect("build segments");
+    let manifest = publish_manifest_with_segments(
+        &store,
+        &namespace_id,
+        ManifestNo(1),
+        ChangeSeq(1),
+        flatten_manifest_segments(segments),
+    )
+    .await;
+    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
+        .await
+        .expect("load manifest segments");
+    let view = crate::metadata::MetadataView::over_manifest_segments(&verified, ChangeSeq(1));
+
+    let covered = view
+        .covering_subtree_tombstone(InodeId(2))
+        .await
+        .expect_err("a cycle is not an uncovered inode");
+    let cycle = view
+        .would_create_directory_cycle(InodeId(4), InodeId(2))
+        .await
+        .expect_err("a stored cycle is not a rename without a cycle");
+    let path = crate::path::read::resolve_visible_inode(
+        &mut view.session(),
+        &mut HashMap::new(),
+        InodeId(2),
+    )
+    .await
+    .expect_err("a cycle has no current path");
+    for error in [covered, cycle, path] {
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
+    }
 }

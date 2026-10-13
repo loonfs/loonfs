@@ -4,6 +4,7 @@
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
 mod attribution;
+mod handler_panics;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
@@ -15,7 +16,7 @@ mod surface;
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
 use super::{request_log_severity, RequestLogSeverity};
-use crate::BindingState;
+use crate::{BindingState, JobMode};
 use loonfs::SharedObjectStore;
 mod fixtures;
 use async_trait::async_trait;
@@ -23,7 +24,9 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
-use loonfs::{DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind, Writable};
+use loonfs::{
+    ConfiguredObjectStoreKind, DeleteOptions, LoonFs, PutFileOptions, TraceMode, Writable,
+};
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
 use loonfs_grep::manifest::{encode_grep_hint, GrepHint};
@@ -488,7 +491,7 @@ use loonfs_test_support::http::{raw_agent, retry_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     delegate_object_store, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
-    OperationClass, OperationContext, OperationKind,
+    OperationContext, OperationKind, OperationSelector,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -535,7 +538,7 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         KeyPredicate::any(),
-        OperationClass::Any,
+        OperationSelector::Any,
         InjectedError::PermissionDenied(POISON_PROVIDER_DETAIL.to_owned()),
     );
     store.fail_all();
@@ -882,7 +885,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     let fault_store = Arc::new(FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         KeyPredicate::exact(grep_hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
+        OperationSelector::GetWithMetadata,
         InjectedError::Transport("injected grep manifest outage".to_owned()),
     ));
     let store = fault_store.clone() as SharedObjectStore;
@@ -1937,7 +1940,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.inline_content.inline_content_threshold_bytes = None;
-    config.binding.max_upload_bytes = 1024;
+    config.binding.max_upload_bytes = Some(1024);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -2013,14 +2016,15 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 /// A payload with a distinct byte at every offset, so bytes landing in the
 /// wrong order or twice cannot go unnoticed.
 fn distinct_bytes(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+    (0..251_u8).cycle().take(len).collect()
 }
 
 /// What the write path is allowed to hold at once, and what it is asked to
 /// carry: three internal parts' worth, so a path that materializes its
 /// payload is caught by more than a rounding error.
 const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
-const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
+const MEMORY_BOUND_PAYLOAD_BYTES: usize =
+    3 * loonfs_types::usize_from_u64(MEMORY_BOUND_PART_BYTES) + 4_096;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxied_upload_route_never_holds_the_whole_payload() {
@@ -2583,7 +2587,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         .expect("stat small file")
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.max_download_bytes = 16;
+    config.binding.max_download_bytes = Some(16);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -2685,7 +2689,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .await
         .expect("build reader");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(actor)
+        .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
         .expect("build maintenance")
@@ -2739,7 +2743,7 @@ async fn start_grep_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.maintains_grep_index = false;
+    config.binding.grep = JobMode::ServeOnly;
     start_server_with_config(store, config).await
 }
 
@@ -2750,7 +2754,7 @@ async fn start_grep_maintenance_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.maintains_grep_index = true;
+    config.binding.grep = JobMode::ServeAndMaintain;
     start_server_with_config(store, config).await
 }
 
@@ -2830,9 +2834,9 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -2959,7 +2963,7 @@ mod direct_download {
     #[tokio::test]
     async fn inline_download_grants_name_readable_objects_and_report_refused_writes() {
         use loonfs_test_support::stores::{
-            FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+            FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
         };
 
         let directory = tempdir().expect("directory");
@@ -2970,7 +2974,7 @@ mod direct_download {
         let failing = Arc::new(FailStore::new(
             recording.clone(),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::PermissionDenied("read-only credentials".to_owned()),
         ));
         let store: SharedObjectStore = failing.clone();
@@ -3064,7 +3068,7 @@ mod direct_download {
                     let error: loonfs_types::ApiError =
                         serde_json::from_slice(&bytes).expect("error");
                     assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
-                    assert_eq!(recording.count(OperationClass::Put), 0);
+                    assert_eq!(recording.count(OperationSelector::Put), 0);
                     assert_eq!(
                         namespace_reader
                             .read_file(path)
@@ -3110,7 +3114,7 @@ mod direct_download {
                     .await
                     .expect("object bytes");
                 assert_eq!(received, value.as_ref());
-                assert_eq!(recording.count(OperationClass::Put), 1);
+                assert_eq!(recording.count(OperationSelector::Put), 1);
             }
         }
     }
@@ -3177,7 +3181,7 @@ mod direct_download {
 
     /// The whole-object ceiling the loopback put issuer reports.
     ///
-    /// Above [`loonfs_client::STREAMING_PUT_MIN_BYTES`], because a payload
+    /// Above [`loonfs_client::MIN_STREAMING_PUT_BYTES`], because a payload
     /// below that never asks what transports are on offer at all — so a
     /// ceiling under it could never be the thing a put ran into.
     const LOOPBACK_DIRECT_PUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -3368,9 +3372,9 @@ mod direct_download {
         max_upload_bytes: Option<u64>,
     ) -> Client {
         let mut config = test_options(root, writer_id);
-        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
         if let Some(max_upload_bytes) = max_upload_bytes {
-            config.binding.max_upload_bytes = max_upload_bytes;
+            config.binding.max_upload_bytes = Some(max_upload_bytes);
         }
         let (router, _state) = test_app(
             config,
@@ -3447,8 +3451,9 @@ mod direct_download {
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
         // Past the cap by enough that a truncation would show, and cheap.
-        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 3)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(PROXY_CAP_BYTES * 3))
             .collect();
         client
             .put_file_with_options(
@@ -3538,8 +3543,8 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
-        let first = vec![b'a'; PROXY_CAP_BYTES as usize * 2];
-        let second = vec![b'b'; PROXY_CAP_BYTES as usize * 2];
+        let first = vec![b'a'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
+        let second = vec![b'b'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
         client
             .put_file_with_options(
                 &target,
@@ -3613,7 +3618,7 @@ mod direct_download {
         let store = object_store_at(temp_dir.path());
         let objects = object_router(store.clone());
         let mut config = test_options(temp_dir.path(), "grant-ranges");
-        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
         let (router, state) = test_app(
             config,
             TestAppOptions {
@@ -3726,12 +3731,14 @@ mod direct_download {
             .open_direct_download(&grant)
             .await
             .expect("open the grant");
-        download.fold_resumed_prefix(&payload[..held as usize]);
+        download
+            .fold_resumed_prefix(&payload[..loonfs_types::usize_from_u64(held)])
+            .expect("fold the held prefix");
         let mut received = Vec::new();
         while let Some(chunk) = download.next_chunk().await.expect("read the grant") {
             received.extend_from_slice(&chunk);
         }
-        assert_eq!(received, payload[held as usize..]);
+        assert_eq!(received, payload[loonfs_types::usize_from_u64(held)..]);
 
         for start_offset in [payload.len() as u64, payload.len() as u64 + 1] {
             let past = DownloadOptions {
@@ -4006,8 +4013,11 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(
+                loonfs_client::MIN_STREAMING_PUT_BYTES,
+            ))
             .collect();
 
         client
@@ -4066,8 +4076,11 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
-            .map(|index| (index % 251) as u8)
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(
+                loonfs_client::MIN_STREAMING_PUT_BYTES,
+            ))
             .collect();
 
         client
@@ -4120,7 +4133,8 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
-        let payload = vec![7u8; loonfs_client::STREAMING_PUT_MIN_BYTES as usize];
+        let payload =
+            vec![7u8; loonfs_types::usize_from_u64(loonfs_client::MIN_STREAMING_PUT_BYTES)];
 
         let error = client
             .put_file_with_options(
@@ -4153,7 +4167,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
     let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let ns = namespace_id("demo");
     let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
-    let payload = vec![42; loonfs::CONTENT_READ_CHUNK_BYTES as usize * 3 + 17];
+    let payload = vec![42; loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES) * 3 + 17];
     write_file_bytes(
         &seed_writer,
         &ns,
@@ -4219,7 +4233,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();
-            changed[loonfs::CONTENT_READ_CHUNK_BYTES as usize] ^= 1;
+            changed[loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES)] ^= 1;
             plain
                 .put_overwrite(&key, changed.into())
                 .await

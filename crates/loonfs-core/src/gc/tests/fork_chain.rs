@@ -71,7 +71,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             now_after_newest_object(
                 &store,
                 namespace_id,
-                UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1,
+                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1,
             )
             .await,
         );

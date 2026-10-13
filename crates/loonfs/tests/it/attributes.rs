@@ -5,7 +5,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::AttributeChanges;
 use loonfs::{
     AttributesRevisionNo, CommitId, ListOptions, PageRequest, StatOptions, UpdateAttributesOptions,
@@ -40,7 +40,7 @@ fn annotate_owner(namespace: &loonfs::Namespace<loonfs::Writable>) {
 
 #[test]
 fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
-    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::{Attributes, MAX_ATTRIBUTES_TOTAL_BYTES};
     use std::sync::Arc;
 
@@ -89,7 +89,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     let response = fs
         .mutate_blocking(
             &namespace_id,
-            CommitRequest {
+            CommitIntent {
                 commit_id: CommitId::parse("maximum-attribute-updates").expect("commit"),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
@@ -110,7 +110,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
             },
         )
         .expect("maximum updates fit one WAL object");
-    assert_eq!(counted.count(OperationClass::PutCreateIfAbsent), 1);
+    assert_eq!(counted.count(OperationSelector::PutCreateIfAbsent), 1);
     block_on(fs.writer.shutdown()).expect("shutdown");
     drop(fs);
     counted.reset();
@@ -132,8 +132,8 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
         MAX_ATTRIBUTES_TOTAL_BYTES
     );
     assert!(response.committed_seq.0 > 0);
-    assert!(counted.count(OperationClass::Read) > 0);
-    assert_eq!(counted.count(OperationClass::Put), 0);
+    assert!(counted.count(OperationSelector::Read) > 0);
+    assert_eq!(counted.count(OperationSelector::Put), 0);
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let actor = loonfs_test_support::test_actor();
     let changes = owner_changes();
     let options = owner_update_options();
-    let explicit = CommitRequest::single(
+    let explicit = CommitIntent::single(
         options.commit.commit_id.clone().expect("commit id"),
         actor.clone(),
         options.commit.message.clone(),
@@ -201,7 +201,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     // The negative control: reusing that id over a different update
     // conflicts, so the replay above was decided on the request and not on
     // the id alone.
-    let different = CommitRequest::single(
+    let different = CommitIntent::single(
         CommitId::parse("annotate-report").expect("commit id"),
         loonfs_test_support::test_actor(),
         None,

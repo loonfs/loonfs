@@ -2,7 +2,7 @@
 //! with their concurrency checks.
 //!
 //! This vocabulary is internal. Callers speak
-//! [`CommitRequest`](crate::path::write::CommitRequest), whose
+//! [`CommitIntent`](crate::path::write::CommitIntent), whose
 //! path-oriented operations the planner compiles into the ops below; nothing
 //! outside this crate constructs them.
 
@@ -15,7 +15,7 @@ use super::ResolvedBinding;
 
 /// Semantic operation inside a planned commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitOp {
+pub(crate) enum CommitOperation {
     /// Create a directory under a parent inode.
     CreateDirectory {
         /// Inode identity assigned once by the candidate allocator during

@@ -31,18 +31,23 @@ use tokio::runtime::Handle;
 #[derive(Debug, Error)]
 pub(crate) enum TransferTimeoutError {
     #[error(
-        "request phase exceeded its transfer bound of {bound_secs}s \
-         (request body {request_body_bytes} bytes)"
+        "request phase exceeded its transfer bound of {}s \
+         (request body {request_body_bytes} bytes)",
+        .bound.as_secs_f64()
     )]
     RequestPhase {
         request_body_bytes: u64,
-        bound_secs: u64,
+        bound: Duration,
     },
     #[error(
-        "response body stalled for {idle_secs}s after {received_bytes} received bytes; \
-         aborting the transfer"
+        "response body stalled for {}s after {received_bytes} received bytes; \
+         aborting the transfer",
+        .idle_bound.as_secs_f64()
     )]
-    ResponseBodyIdle { received_bytes: u64, idle_secs: u64 },
+    ResponseBodyIdle {
+        received_bytes: u64,
+        idle_bound: Duration,
+    },
 }
 
 /// [`HttpConnector`] for provider clients: routes IO onto the store's own
@@ -88,7 +93,7 @@ impl HttpService for TransferTimeoutService {
                     HttpErrorKind::Timeout,
                     TransferTimeoutError::RequestPhase {
                         request_body_bytes,
-                        bound_secs: bound.as_secs(),
+                        bound,
                     },
                 ))
             })?;
@@ -164,7 +169,7 @@ impl Body for IdleDeadlineBody {
                         HttpErrorKind::Timeout,
                         TransferTimeoutError::ResponseBodyIdle {
                             received_bytes: this.received_bytes,
-                            idle_secs: this.idle_bound.as_secs(),
+                            idle_bound: this.idle_bound,
                         },
                     ))));
                 }
@@ -186,7 +191,7 @@ impl Body for IdleDeadlineBody {
 mod tests {
     use super::*;
     use crate::provider_object_store::{
-        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT, PROVIDER_TRANSFER_BODY_MIN_BYTES,
+        PROVIDER_MIN_TRANSFER_BODY_BYTES, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
     };
     use http::Response;
     use std::collections::VecDeque;
@@ -297,7 +302,7 @@ mod tests {
         async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
             assert_eq!(req.method(), http::Method::PUT);
             assert_eq!(req.headers()[http::header::IF_NONE_MATCH], "*");
-            assert!(req.body().content_length() as u64 >= PROVIDER_TRANSFER_BODY_MIN_BYTES);
+            assert!(req.body().content_length() as u64 >= PROVIDER_MIN_TRANSFER_BODY_BYTES);
             let status = self
                 .statuses
                 .lock()
@@ -344,7 +349,7 @@ mod tests {
         store
             .put_opts(
                 &object_store::path::Path::from("wal/0000000001"),
-                vec![0u8; PROVIDER_TRANSFER_BODY_MIN_BYTES as usize].into(),
+                vec![0u8; loonfs_types::usize_from_u64(PROVIDER_MIN_TRANSFER_BODY_BYTES)].into(),
                 object_store::PutOptions {
                     mode: object_store::PutMode::Create,
                     ..Default::default()
@@ -413,8 +418,9 @@ mod tests {
         let error = service
             .call(request_with_body(vec![
                 0u8;
-                (PROVIDER_TRANSFER_BODY_MIN_BYTES - 1)
-                    as usize
+                loonfs_types::usize_from_u64(
+                    PROVIDER_MIN_TRANSFER_BODY_BYTES - 1
+                )
             ]))
             .await
             .expect_err("bodies below the payload cutoff keep the base bound");

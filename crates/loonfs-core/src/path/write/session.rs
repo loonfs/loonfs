@@ -93,7 +93,7 @@ impl<'a> PublishPlanningSession<'a> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
-            &candidate.request().preconditions,
+            &candidate.intent().preconditions,
             candidate.authority(),
             &self.head,
             &pre_state,
@@ -117,7 +117,7 @@ impl<'a> PublishPlanningSession<'a> {
     pub(crate) fn commit_candidate(
         &mut self,
         allocation: CandidateAllocation,
-    ) -> Result<loonfs_types::InodeId> {
+    ) -> loonfs_types::InodeId {
         self.inode_allocator.commit_candidate(allocation)
     }
 
@@ -140,7 +140,7 @@ impl<'a> PublishPlanningSession<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::intent::CommitRequest;
+    use super::super::intent::CommitIntent;
     use super::super::intent::FilesystemOperation;
     use super::*;
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
@@ -185,7 +185,7 @@ mod tests {
     ) -> CommitCandidate {
         let admission = PreparedContent::for_durable_content_write(content_ref.clone());
         CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::parse(commit_id).expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn create_directory_candidate(commit_id: &str, absolute_path: &str) -> CommitCandidate {
-        CommitCandidate::new(CommitRequest::single(
+        CommitCandidate::new(CommitIntent::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
-        CommitCandidate::new(CommitRequest {
+        CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -266,7 +266,7 @@ mod tests {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("view");
-        let request = create_directory_candidate("wal", "/docs").request().clone();
+        let request = create_directory_candidate("wal", "/docs").intent().clone();
         let mut payloads = Vec::new();
         for preconditions in [
             Vec::new(),
@@ -290,7 +290,7 @@ mod tests {
                 )
                 .await
                 .expect("plan");
-            let next_inode_id = session.commit_candidate(allocation).expect("allocation");
+            let next_inode_id = session.commit_candidate(allocation);
             payloads.push(wal_payload_from_prepared_commit(&PreparedCommit {
                 commit: plan.finish(next_inode_id),
                 committed_at_ms: 1,
@@ -332,7 +332,7 @@ mod tests {
             .expect("load metadata view");
         let session = PublishPlanningSession::new(view.head(), view.wal_tail());
 
-        let first_request = CommitRequest::single(
+        let first_request = CommitIntent::single(
             CommitId::parse("plan-a").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -360,7 +360,7 @@ mod tests {
             .expect("first plan");
         let after_first = session.durable_cache().stats();
 
-        let second_request = CommitRequest::single(
+        let second_request = CommitIntent::single(
             CommitId::parse("plan-b").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -526,7 +526,7 @@ mod tests {
         let error = results[1].as_ref().expect_err("duplicate create rejected");
         assert_eq!(error.code(), ErrorCode::PathConflict);
         assert!(
-            matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+            matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::DestinationExists { .. }))
         );
     }
@@ -547,7 +547,7 @@ mod tests {
                     "/docs/doomed.txt",
                     staged.content_ref().clone(),
                 ),
-                CommitCandidate::new(CommitRequest::single(
+                CommitCandidate::new(CommitIntent::single(
                     CommitId::parse("delete-doomed").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
                     None,

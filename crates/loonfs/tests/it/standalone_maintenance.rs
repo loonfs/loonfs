@@ -3,7 +3,7 @@
 
 use crate::common::SettableWallClock;
 use loonfs::{
-    CreateCheckpointOptions, LoonFs, MetadataMaintenanceOptions, SharedObjectStore,
+    CreateCheckpointOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore,
     WalFoldStepOutcome, WallClock,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -17,8 +17,8 @@ use std::sync::Arc;
 struct FixedWallClock(u64);
 
 impl WallClock for FixedWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 
@@ -31,7 +31,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     let clock = Arc::new(SettableWallClock(AtomicU64::new(COMMITTED_AT_MS)));
     let namespace_id = namespace_id("idle-tail");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("departed-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(clock.clone())
         .build()
         .await
@@ -51,17 +51,17 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     drop(writer);
 
     let maintenance = LoonFs::builder_with_store(store)
-        .writer_id("fresh-worker")
+        .writer_id(loonfs_test_support::ids::writer_id("fresh-worker"))
         .wall_clock(clock.clone())
         .build()
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let disabled = MetadataMaintenanceOptions {
+    let disabled = MaintainMetadataOptions {
         idle_fold_after_ms: 0,
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     };
-    let idle_ms = MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let idle_ms = MaintainMetadataOptions::default().idle_fold_after_ms;
 
     clock
         .0
@@ -118,7 +118,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
     let clock = Arc::new(FixedWallClock(u64::MAX / 2));
     let namespace_id = namespace_id("wall-clock");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .wall_clock(clock.clone())
         .build()
         .await
@@ -139,13 +139,13 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         clock.0
     );
     let system = LoonFs::builder_with_store(store.clone())
-        .writer_id("system")
+        .writer_id(loonfs_test_support::ids::writer_id("system"))
         .build()
         .await
         .expect("system maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("system"));
     let future = LoonFs::builder_with_store(store.clone())
-        .writer_id("future")
+        .writer_id(loonfs_test_support::ids::writer_id("future"))
         .wall_clock(clock.clone())
         .build()
         .await
@@ -209,7 +209,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = namespace_id("standalone-maintenance");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("departing-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("departing-writer"))
         .build()
         .await
         .expect("writer");
@@ -220,7 +220,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let threshold = MetadataMaintenanceOptions::default()
+    let threshold = MaintainMetadataOptions::default()
         .max_wal_tail_objects
         .get();
     for index in 0..threshold {
@@ -237,7 +237,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
     drop(writer);
 
     let maintenance = LoonFs::builder_with_store(store)
-        .writer_id("standalone-worker")
+        .writer_id(loonfs_test_support::ids::writer_id("standalone-worker"))
         .build()
         .await
         .expect("maintenance")
@@ -247,7 +247,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
         .await
         .expect("metadata maintenance");
     maintenance
-        .compact_metadata(&namespace_id)
+        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("metadata compaction");
     maintenance

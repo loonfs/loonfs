@@ -57,7 +57,7 @@ pub enum EnvelopeCodecError {
     },
     /// Reports inline content that violates the WAL format rules.
     #[error(
-        "invalid wal inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+        "invalid WAL inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
     )]
     InvalidWalInlineContent {
         /// Commit containing the rejected entry.
@@ -69,7 +69,7 @@ pub enum EnvelopeCodecError {
     },
     /// Reports a layout that does not cover its revision's reference.
     #[error(
-        "invalid wal revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+        "invalid WAL revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
     )]
     InvalidWalRevisionLayout {
         /// Commit containing the rejected delta.
@@ -203,13 +203,13 @@ impl<T> VerifiedEnvelope<T> {
 pub struct EncodedEnvelope<T> {
     pub(crate) envelope: VerifiedEnvelope<T>,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) document_len: usize,
+    pub(crate) document_bytes: usize,
 }
 
 impl<T> EncodedEnvelope<T> {
     /// Returns the document length before any compression.
-    pub fn document_len(&self) -> usize {
-        self.document_len
+    pub fn document_bytes(&self) -> usize {
+        self.document_bytes
     }
 
     /// Envelope derived while encoding, without decoding or serializing again.
@@ -257,7 +257,7 @@ pub fn encode_json_envelope<T: Serialize>(
             payload_checksum,
             payload,
         },
-        document_len: bytes.len(),
+        document_bytes: bytes.len(),
         bytes,
     })
 }

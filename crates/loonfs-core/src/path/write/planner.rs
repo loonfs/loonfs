@@ -1,7 +1,7 @@
 //! Commit fingerprinting and sequential resolution of a request's
 //! operations into one commit's operations.
 
-use super::intent::{CommitRequest, FilesystemOperation};
+use super::intent::{CommitIntent, FilesystemOperation};
 use super::plan_access::{plan_update_access, plan_update_access_by_inode};
 use super::plan_append::{plan_append_file, plan_append_file_by_inode};
 use super::plan_attributes::{plan_update_attributes, plan_update_attributes_by_inode};
@@ -20,8 +20,8 @@ use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlann
 use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
 use crate::commit::{
-    validate_ops, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
-    PublishValidationView, ValidatedCommitPlan,
+    validate_operations, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
+    PublishValidationSession, ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
@@ -30,7 +30,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
     next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, InlineContentIdentity,
-    NamespaceId, PreconditionFields, MAX_PUBLIC_INTEGER,
+    NamespaceId, PreconditionFields,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,10 +41,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// record, while the fingerprint identifies the requested mutation.
 pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
-    request: &CommitRequest,
+    request: &CommitIntent,
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<CommitFingerprint> {
-    loonfs_types::semantic_commit_fingerprint(
+    match loonfs_types::semantic_commit_fingerprint(
         namespace_id,
         &request.actor_id,
         request.subject.as_ref().map(|subject| &subject.subject_id),
@@ -52,13 +52,12 @@ pub(crate) fn commit_fingerprint(
         &request.operations,
         &request.preconditions,
         inline_content_identities,
-    )
-    .map_err(|error| match error {
-        loonfs_types::SemanticFingerprintError::InvalidContentSource => {
-            CoreError::InvalidCommitRequest(error.to_string())
+    ) {
+        Err(error @ loonfs_types::SemanticFingerprintError::InvalidContentSource) => {
+            Err(CoreError::InvalidCommitRequest(error.to_string()))
         }
-        error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
-    })
+        fingerprint => Ok(fingerprint.expect("a mutation fingerprint preimage should encode")),
+    }
 }
 
 /// Compiles and validates a mutation request into one commit in a single
@@ -88,19 +87,21 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
     let head = session.head();
-    let request = candidate.request();
+    let request = candidate.intent();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
         .ok_or_else(|| {
-            CoreError::Internal(format!(
-                "namespace sequence cannot exceed {MAX_PUBLIC_INTEGER}"
+            CoreError::NamespaceCorrupt(format!(
+                "the namespace head is at sequence {}, the largest sequence number, so no \
+                 commit can follow it",
+                head.seq
             ))
         })?;
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
     let mut resolved =
-        PublishValidationView::new(base_view, session.accepted_rows(), committed_seq);
+        PublishValidationSession::new(base_view, session.accepted_rows(), committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut deltas = Vec::new();
     let mut appended: Vec<AppendedContent> = Vec::new();
@@ -135,7 +136,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             }
         }
         appended.extend(unit.appended);
-        let unit_deltas = validate_ops(
+        let unit_deltas = validate_operations(
             &unit.ops,
             &mut resolved,
             &mut numbering,
@@ -234,13 +235,13 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
             .filter(|layout| layout.size_bytes() >= prefix.size_bytes)
         {
             crate::storage::tail_content::cut_layout(layout, prefix.size_bytes);
-        } else if first_offset.is_some() {
-            return Err(CoreError::Internal(format!(
-                "fresh content `{}` requires a layout covering {} bytes",
-                content_ref.content_id, prefix.size_bytes
-            ))
-            .at_operation(delta.semantic_operation_index as usize));
         } else {
+            assert!(
+                first_offset.is_none(),
+                "append planning should give fresh content `{}` a layout covering {} bytes",
+                content_ref.content_id,
+                prefix.size_bytes
+            );
             let content = pieces.content(&prefix);
             *layout = Some(
                 crate::storage::tail_content::materialize_content_layout(
@@ -578,8 +579,8 @@ mod tests {
         }
     }
 
-    fn request(operation: FilesystemOperation) -> CommitRequest {
-        CommitRequest::single(
+    fn request(operation: FilesystemOperation) -> CommitIntent {
+        CommitIntent::single(
             CommitId::parse("plan-request").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -643,7 +644,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let left = commit_fingerprint(
             &namespace_id,
-            &CommitRequest::single(
+            &CommitIntent::single(
                 CommitId::parse("mkdir-docs-a").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -654,7 +655,7 @@ mod tests {
         .expect("left fingerprint");
         let right = commit_fingerprint(
             &namespace_id,
-            &CommitRequest::single(
+            &CommitIntent::single(
                 CommitId::parse("mkdir-docs-b").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -671,13 +672,13 @@ mod tests {
     fn one_operation_request_and_one_element_batch_share_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id = CommitId::parse("mkdir-docs").expect("valid commit id");
-        let convenience = CommitRequest::single(
+        let convenience = CommitIntent::single(
             commit_id.clone(),
             loonfs_test_support::test_actor(),
             None,
             create_dir("/docs"),
         );
-        let batch = CommitRequest {
+        let batch = CommitIntent {
             preconditions: Vec::new(),
             commit_id,
             actor_id: loonfs_test_support::test_actor(),
@@ -712,7 +713,7 @@ mod tests {
     async fn try_plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        request: &CommitRequest,
+        request: &CommitIntent,
     ) -> Result<TestPreparedCommit> {
         let view = load_current_metadata_view(store, namespace_id)
             .await
@@ -754,7 +755,7 @@ mod tests {
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        request: &CommitRequest,
+        request: &CommitIntent,
     ) -> TestPreparedCommit {
         try_plan_against_current_state(store, namespace_id, request)
             .await
@@ -882,7 +883,7 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &CommitRequest {
+            &CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -963,7 +964,7 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &CommitRequest {
+            &CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -1012,7 +1013,7 @@ mod tests {
         let error = try_plan_against_current_state(
             &store,
             &namespace_id,
-            &CommitRequest {
+            &CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -1065,7 +1066,7 @@ mod tests {
         crate::commit_engine::publish_namespace_commits_batch(
             &store,
             &namespace_id,
-            vec![CommitCandidate::new(CommitRequest::single(
+            vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("seed-owner").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1151,7 +1152,7 @@ mod tests {
             principals: PrincipalSet::new(BTreeSet::from([administrator])).expect("principals"),
         });
 
-        let rows: Vec<(&str, &NamespaceId, CommitRequest, &[&str])> = vec![
+        let rows: Vec<(&str, &NamespaceId, CommitIntent, &[&str])> = vec![
             (
                 "create a directory",
                 &namespace_id,

@@ -5,15 +5,16 @@ use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
     ChangeSeq, CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace,
-    NamespaceSessionState, SharedObjectStore, SnapshotPolicy, Writable,
+    NamespaceSessionStatus, SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, StdMonotonicTimer};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
@@ -26,14 +27,52 @@ pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
 pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
+/// Which of two jobs a host does for one subsystem: serve its requests, do
+/// its background work, both, or neither.
+///
+/// The two jobs are independent. For grep, a read replica can serve searches
+/// over an index another process maintains, and a write node can maintain
+/// the index for namespaces it never answers searches about. Every
+/// combination is named here, so none has to be validated away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobMode {
+    /// Neither serve requests nor do the background work.
+    Disabled,
+    /// Serve requests without doing the background work.
+    ServeOnly,
+    /// Do the background work without serving requests. Grep is the one
+    /// exception: a grep maintainer also serves the routes that enable,
+    /// disable, and report the index it maintains.
+    MaintainOnly,
+    /// Serve requests and do the background work.
+    ServeAndMaintain,
+}
+
+impl JobMode {
+    /// Whether the host serves the subsystem's requests.
+    pub fn serves(self) -> bool {
+        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
+    }
+
+    /// Whether the host does the subsystem's background work.
+    pub fn maintains(self) -> bool {
+        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
+    }
+}
+
 #[derive(Clone, Debug)]
-pub struct BindingOptions {
-    pub serves_grep: bool,
-    pub maintains_grep_index: bool,
+pub struct BindingConfig {
+    /// Whether this binding answers grep queries and maintains the grep index.
+    pub grep: JobMode,
+    /// Whether this binding serves the maintenance API group. The host runs
+    /// any background maintenance itself.
     pub serves_maintenance: bool,
     pub snapshot_policy: SnapshotPolicy,
-    pub max_download_bytes: u64,
-    pub max_upload_bytes: u64,
+    /// Largest content a service-proxied read returns, or `None` for no limit.
+    pub max_download_bytes: Option<u64>,
+    /// Largest body a service-proxied upload accepts, or `None` for no limit.
+    pub max_upload_bytes: Option<u64>,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
     pub inline_content: InlineContentPolicy,
@@ -47,7 +86,7 @@ pub struct BindingOptions {
 /// Hosts supply one runtime over one store, with grep services and permit limits matching `options`.
 #[derive(Clone)]
 pub struct BindingState {
-    pub options: Arc<BindingOptions>,
+    pub options: Arc<BindingConfig>,
     pub runtime: LoonFs<Writable>,
     pub namespaces: Arc<Namespaces>,
     pub maintenance: Maintenance,
@@ -62,16 +101,11 @@ pub struct BindingState {
 }
 
 impl BindingState {
-    pub(crate) fn grep_worker(&self) -> &GrepWorker<SharedObjectStore> {
+    /// The grep worker, where this binding maintains the grep index.
+    pub(crate) fn grep_index_worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
         self.grep_worker
             .as_ref()
-            .expect("grep routes should carry a grep worker")
-    }
-
-    pub(crate) fn grep_service(&self) -> &GrepService {
-        self.grep_service
-            .as_deref()
-            .expect("grep routes should carry a grep service")
+            .filter(|_| self.options.grep.maintains())
     }
 }
 
@@ -98,13 +132,13 @@ pub struct Namespaces {
 
 pub struct HeldNamespace {
     pub handle: Namespace<Writable>,
-    last_opened_ms: u64,
+    last_opened_at_ms: u64,
     closing: Option<NamespaceClose>,
     pub indexed_seq: Option<ChangeSeq>,
     pub index_dirty: bool,
     pub collected_seq: Option<ChangeSeq>,
-    pub collected_ms: u64,
-    pub metadata_retry_after_ms: u64,
+    pub collected_at_ms: u64,
+    pub metadata_retry_at_ms: u64,
 }
 
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
@@ -139,11 +173,13 @@ impl Namespaces {
             let closing = {
                 let mut handles = self.lock();
                 if let Some(entry) = handles.get(namespace_id) {
-                    let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut held = entry
+                        .lock()
+                        .expect("a held namespace lock should not be poisoned");
                     if held.closing.is_none()
-                        && held.handle.session_state() != NamespaceSessionState::Closed
+                        && held.handle.session_status() != NamespaceSessionStatus::Closed
                     {
-                        held.last_opened_ms = self.now_ms();
+                        held.last_opened_at_ms = self.now_ms();
                         return Ok(held.handle.clone());
                     }
                     Some((entry.clone(), held.begin_close()))
@@ -154,13 +190,13 @@ impl Namespaces {
                         namespace_id.clone(),
                         Arc::new(Mutex::new(HeldNamespace {
                             handle: handle.clone(),
-                            last_opened_ms: now_ms,
+                            last_opened_at_ms: now_ms,
                             closing: None,
                             indexed_seq: None,
                             index_dirty: false,
                             collected_seq: None,
-                            collected_ms: now_ms,
-                            metadata_retry_after_ms: 0,
+                            collected_at_ms: now_ms,
+                            metadata_retry_at_ms: 0,
                         })),
                     );
                     return Ok(handle);
@@ -190,11 +226,13 @@ impl Namespaces {
             let Some(entry) = handles.get(namespace_id) else {
                 return Ok(None);
             };
-            let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut held = entry
+                .lock()
+                .expect("a held namespace lock should not be poisoned");
             if !held.handle.is_exclusively_held()
                 || held.handle.last_published_seq() != expected_seq
                 || !is_quiet(&held)
-                || self.now_ms().saturating_sub(held.last_opened_ms) <= idle_after_ms
+                || self.now_ms().saturating_sub(held.last_opened_at_ms) <= idle_after_ms
             {
                 return Ok(None);
             }
@@ -215,7 +253,9 @@ impl Namespaces {
             let Some(entry) = handles.get(namespace_id) else {
                 return Ok(None);
             };
-            let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut held = entry
+                .lock()
+                .expect("a held namespace lock should not be poisoned");
             (entry.clone(), held.begin_close())
         };
         self.finish_close(namespace_id, &entry, closing)
@@ -259,14 +299,18 @@ impl Namespaces {
     }
 
     /// Reads or updates one held entry without cloning its handle.
-    pub fn with_held<T>(
+    pub fn visit_held<T>(
         &self,
         namespace_id: &NamespaceId,
         visit: impl FnOnce(&mut HeldNamespace) -> T,
     ) -> Option<T> {
-        self.lock()
-            .get(namespace_id)
-            .map(|entry| visit(&mut entry.lock().unwrap_or_else(PoisonError::into_inner)))
+        self.lock().get(namespace_id).map(|entry| {
+            visit(
+                &mut entry
+                    .lock()
+                    .expect("a held namespace lock should not be poisoned"),
+            )
+        })
     }
 
     /// Keeps a visit's facts attached to its original entry through a concurrent close.
@@ -279,7 +323,7 @@ impl Namespaces {
     }
 
     pub fn mark_index_dirty(&self, namespace_id: &NamespaceId) {
-        self.with_held(namespace_id, |held| held.index_dirty = true);
+        self.visit_held(namespace_id, |held| held.index_dirty = true);
     }
 
     /// Checks the held session under the table lock, so a late error cannot
@@ -290,10 +334,10 @@ impl Namespaces {
         if !handles.get(namespace_id).is_some_and(|entry| {
             entry
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .expect("a held namespace lock should not be poisoned")
                 .handle
-                .session_state()
-                == NamespaceSessionState::Fenced
+                .session_status()
+                == NamespaceSessionStatus::Fenced
         }) {
             return false;
         }
@@ -335,6 +379,8 @@ impl Namespaces {
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace>>>> {
-        self.handles.lock().unwrap_or_else(PoisonError::into_inner)
+        self.handles
+            .lock()
+            .expect("the held namespace table lock should not be poisoned")
     }
 }

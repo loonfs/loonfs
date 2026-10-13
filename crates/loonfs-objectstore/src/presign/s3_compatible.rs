@@ -127,10 +127,10 @@ impl S3CompatiblePresigner {
         &self,
         key: &str,
         checksum: &Checksum,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign(
             &credentials,
             "PUT",
@@ -142,7 +142,7 @@ impl S3CompatiblePresigner {
                     base64_crc64nvme(checksum)?,
                 ),
             ]),
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -150,16 +150,16 @@ impl S3CompatiblePresigner {
     pub(crate) async fn presign_head(
         &self,
         object_key: &str,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign(
             &credentials,
             "HEAD",
             object_key,
             BTreeMap::from([(S3_CHECKSUM_MODE_HEADER.to_owned(), "ENABLED".to_owned())]),
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -169,10 +169,10 @@ impl S3CompatiblePresigner {
     pub(crate) async fn presign_create_multipart(
         &self,
         object_key: &str,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         let required_headers = BTreeMap::from([
             (
                 S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
@@ -192,7 +192,7 @@ impl S3CompatiblePresigner {
                 operation_query: BTreeMap::from([("uploads".to_owned(), String::new())]),
                 required_headers,
             },
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -212,7 +212,7 @@ impl S3CompatiblePresigner {
         source_key: &str,
         source: &ByteRange,
         source_etag: Option<&str>,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), source_key)?;
@@ -237,7 +237,7 @@ impl S3CompatiblePresigner {
         if let Some(etag) = source_etag {
             required_headers.insert(S3_COPY_SOURCE_IF_MATCH_HEADER.to_owned(), etag.to_owned());
         }
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign_with_query(
             &credentials,
             "PUT",
@@ -249,7 +249,7 @@ impl S3CompatiblePresigner {
                 ]),
                 required_headers,
             },
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -259,10 +259,10 @@ impl S3CompatiblePresigner {
         &self,
         object_key: &str,
         provider_upload_id: &str,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign_with_query(
             &credentials,
             "DELETE",
@@ -274,7 +274,7 @@ impl S3CompatiblePresigner {
                 )]),
                 ..SigningRequestParts::default()
             },
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -292,7 +292,7 @@ impl S3CompatiblePresigner {
         provider_upload_id: &str,
         checksum: Option<&Checksum>,
         mode: &PutMode,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let mut required_headers = BTreeMap::new();
@@ -311,7 +311,7 @@ impl S3CompatiblePresigner {
                 required_headers.insert(S3_IF_MATCH_HEADER.to_owned(), expected_etag.clone());
             }
         }
-        let credentials = self.signing_credentials(expires_in, now).await?;
+        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign_with_query(
             &credentials,
             "POST",
@@ -323,17 +323,17 @@ impl S3CompatiblePresigner {
                 )]),
                 required_headers,
             },
-            expires_in,
+            ttl,
             now,
         )
     }
 
     async fn signing_credentials(
         &self,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<AwsSigningCredentials> {
-        let valid_until = now.checked_add(expires_in).ok_or_else(|| {
+        let valid_until = now.checked_add(ttl).ok_or_else(|| {
             ObjectStoreError::Configuration(
                 "presigned URL lifetime exceeds AWS credential expiry".to_owned(),
             )
@@ -347,7 +347,7 @@ impl S3CompatiblePresigner {
         method: &str,
         object_key: &str,
         required_headers: BTreeMap<String, String>,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         self.presign_with_query(
@@ -358,7 +358,7 @@ impl S3CompatiblePresigner {
                 required_headers,
                 ..SigningRequestParts::default()
             },
-            expires_in,
+            ttl,
             now,
         )
     }
@@ -375,7 +375,7 @@ impl S3CompatiblePresigner {
         method: &str,
         object_key: &str,
         request_parts: SigningRequestParts,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         if credentials.expires_at.is_some_and(|expiry| expiry <= now) {
@@ -419,7 +419,7 @@ impl S3CompatiblePresigner {
                 operation_query: request_parts.operation_query,
                 required_headers: request_parts.required_headers,
             },
-            expires_in,
+            ttl,
             now,
             |message| Ok(hex_lower(&hmac_sha256(&signing_key, message))),
         )?;
@@ -501,13 +501,13 @@ impl DirectPutIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(request.expires_in, now).await?;
+        let credentials = self.signing_credentials(request.ttl, now).await?;
         self.presign(
             &credentials,
             "PUT",
             request.object_key,
             BTreeMap::from([(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned())]),
-            request.expires_in,
+            request.ttl,
             now,
         )
     }
@@ -526,7 +526,7 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
         // No create-only header here, deliberately. A part is not the object:
         // re-uploading one is how a client retries a failed transfer, and both
         // providers take the last write and follow it with the checksum.
-        let credentials = self.signing_credentials(request.expires_in, now).await?;
+        let credentials = self.signing_credentials(request.ttl, now).await?;
         self.presign_with_query(
             &credentials,
             "PUT",
@@ -541,7 +541,7 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
                     base64_crc64nvme(request.checksum)?,
                 )]),
             },
-            request.expires_in,
+            request.ttl,
             now,
         )
     }
@@ -554,13 +554,13 @@ impl DirectGetIssuer for S3CompatiblePresigner {
         request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(request.expires_in, now).await?;
+        let credentials = self.signing_credentials(request.ttl, now).await?;
         self.presign(
             &credentials,
             "GET",
             request.object_key,
             request.signed_headers(),
-            request.expires_in,
+            request.ttl,
             now,
         )
     }
@@ -576,8 +576,8 @@ pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     checksum
         .validate()
         .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    let raw = hex_decode_bytes(&checksum.value)
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
+    let raw = hex_decode_bytes(checksum.value.as_str())
+        .expect("a checksum spelled in lowercase hex should decode");
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
@@ -688,7 +688,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 now,
             )
@@ -711,7 +711,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(300),
+                    ttl: Duration::from_secs(300),
                 },
                 now,
             )
@@ -724,7 +724,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 now,
             )
@@ -736,7 +736,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 now,
             )
@@ -757,7 +757,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::ZERO,
+                    ttl: Duration::ZERO,
                 },
                 now
             )
@@ -768,7 +768,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::MAX,
+                    ttl: Duration::MAX,
                 },
                 now
             )
@@ -842,7 +842,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
@@ -882,7 +882,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
@@ -919,7 +919,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
@@ -1039,7 +1039,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
@@ -1065,7 +1065,7 @@ mod tests {
                         start_inclusive: 0,
                         end_exclusive: 0,
                     },
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
@@ -1086,7 +1086,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 now,
             )
@@ -1097,7 +1097,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: Duration::from_secs(900),
+                    ttl: Duration::from_secs(900),
                 },
                 now,
             )
@@ -1116,7 +1116,7 @@ mod tests {
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
                         range: GRANT,
-                        expires_in: Duration::from_secs(900),
+                        ttl: Duration::from_secs(900),
                     },
                     UNIX_EPOCH + Duration::from_secs(1_700_000_000),
                 )
@@ -1174,7 +1174,7 @@ mod tests {
         .presign_put(
             PresignedPutRequest {
                 object_key: CONTENT_KEY,
-                expires_in: Duration::from_secs(900),
+                ttl: Duration::from_secs(900),
             },
             UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         )

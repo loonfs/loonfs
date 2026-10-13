@@ -21,4 +21,4 @@ pub use fault_store::FaultInjectingObjectStore;
 pub use object_operation::{ObjectOperation, ObjectOperationKind};
 pub use rng::{DeterministicRng, SimRng, SimSeed};
 pub use scenario::SimConfig;
-pub use trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
+pub use trace::{RunId, SharedSimTrace, SimEventOutcome, SimTrace, SimTraceEvent};

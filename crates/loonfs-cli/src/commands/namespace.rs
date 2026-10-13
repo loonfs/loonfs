@@ -1,8 +1,7 @@
 //! `loonfs namespace` commands: create, show, fork, and delete.
 
 use super::context::{
-    fail, fail_for, parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_profile_context,
-    resolve_profile_context_from_config,
+    fail, fail_for, resolve_profile_context, resolve_profile_context_from_config,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
@@ -14,11 +13,9 @@ use crate::config::mutate_config;
 use crate::error::CliError;
 use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
-use crate::resolve::{load_cli_config, parse_namespace_id, resolve_actor, resolve_namespace};
+use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace};
 use loonfs_client::CreateNamespaceOptions;
-use loonfs_types::{
-    AccessGrants, AccessRights, NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope,
-};
+use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, NamespaceNaming, PrincipalScope};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -58,8 +55,8 @@ async fn run_namespace_show(
     .await?;
     let explicit_namespace = args
         .namespace_id
-        .as_deref()
-        .or(args.target.namespace.as_deref());
+        .as_ref()
+        .or(args.target.namespace.as_ref());
     let namespace_id = resolve_namespace(&context.profile_name, profile, explicit_namespace)
         .map_err(|error| context.fail(kind, error))?
         .namespace;
@@ -90,11 +87,9 @@ async fn run_namespace_create(
         None,
     )
     .await?;
-    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_ref())
         .map_err(|error| context.fail(kind, error))?;
-    let namespace_id = parse_namespace_id(&args.namespace_id)
-        .map_err(|error| error.with_param("namespace_id"))
-        .map_err(|error| context.fail(kind, error))?;
+    let namespace_id = args.namespace_id.clone();
     let access = namespace_access(&args).map_err(|error| context.fail(kind, error))?;
     let naming = match args.naming {
         NamespaceNamingArg::CaseInsensitive => NamespaceNaming::CaseInsensitive,
@@ -120,7 +115,7 @@ fn namespace_access(args: &NamespaceCreateArgs) -> Result<NamespaceAccess, CliEr
         NamespaceAccessArg::Acl => {
             let principal_scope =
                 PrincipalScope::parse(args.principal_scope.as_deref().ok_or_else(|| {
-                    CliError::invalid_request("--principal-scope is required with --access acl")
+                    CliError::invalid_request("`--principal-scope` is required with `--access acl`")
                         .with_param("--principal-scope")
                 })?)
                 .map_err(|error| {
@@ -129,15 +124,8 @@ fn namespace_access(args: &NamespaceCreateArgs) -> Result<NamespaceAccess, CliEr
             let root_grants = args
                 .administrators
                 .iter()
-                .map(|principal| {
-                    PrincipalId::parse(principal)
-                        .map(|principal| (principal, AccessRights::ADMIN))
-                        .map_err(|error| {
-                            CliError::invalid_request(error.to_string())
-                                .with_param("--administrator")
-                        })
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
+                .map(|principal| (principal.clone(), AccessRights::ADMIN))
+                .collect::<BTreeMap<_, _>>();
             let root_grants = AccessGrants::new(root_grants).map_err(|error| {
                 CliError::invalid_request(error.to_string()).with_param("--administrator")
             })?;
@@ -164,16 +152,8 @@ async fn run_namespace_delete(
         Some(&args.subject),
     )
     .await?;
-    let namespace_id = parse_namespace_id(&args.namespace_id)
-        .map_err(|error| error.with_param("namespace_id"))
-        .map_err(|error| context.fail(kind, error))?;
-    let expected_head_seq = args
-        .expected_head_seq
-        .map(|value| {
-            parse_public_ordinal_arg("--expected-head-seq", value, loonfs_types::ChangeSeq::parse)
-        })
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let namespace_id = args.namespace_id.clone();
+    let expected_head_seq = args.expected_head_seq;
 
     if !args.yes {
         // Without a terminal (or under --no-input / --json) there is no
@@ -183,7 +163,7 @@ async fn run_namespace_delete(
             return Err(context.fail(
                 kind,
                 CliError::non_interactive_input_required(
-                    "deleting a namespace requires confirmation: pass --yes, or run \
+                    "deleting a namespace requires confirmation: pass `--yes`, or run \
                      interactively to confirm at the prompt",
                 ),
             ));
@@ -195,7 +175,7 @@ async fn run_namespace_delete(
             args.namespace_id
         ))
         .map_err(|error| context.fail(kind, error))?;
-        if typed.trim() != args.namespace_id {
+        if typed.trim() != args.namespace_id.as_str() {
             return Err(context.fail(
                 kind,
                 CliError::invalid_request(format!(
@@ -232,20 +212,11 @@ async fn run_namespace_fork(
         Some(&args.subject),
     )
     .await?;
-    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_ref())
         .map_err(|error| context.fail(kind, error))?;
-    let source_namespace_id = parse_namespace_id(&args.source_namespace_id)
-        .map_err(|error| error.with_param("source_namespace_id"))
-        .map_err(|error| context.fail(kind, error))?;
-    let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
-        .map_err(|error| error.with_param("new_namespace_id"))
-        .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let source_namespace_id = args.source_namespace_id.clone();
+    let new_namespace_id = args.new_namespace_id.clone();
+    let snapshot_id = args.snapshot_id.clone();
     let namespace = context
         .target
         .client
@@ -277,9 +248,7 @@ pub(crate) async fn run_namespace_use(
         None,
     )
     .await?;
-    let namespace_id = parse_namespace_id(&args.namespace_id)
-        .map_err(|error| error.with_param("namespace"))
-        .map_err(|error| context.fail(kind, error))?;
+    let namespace_id = args.namespace_id.clone();
 
     context
         .target
@@ -289,7 +258,7 @@ pub(crate) async fn run_namespace_use(
         .map_err(|error| context.fail(kind, error))?;
 
     mutate_config(&loaded.path, |config| {
-        set_default_namespace(config, &context.profile_name, &args.namespace_id)
+        set_default_namespace(config, &context.profile_name, args.namespace_id.as_str())
     })
     .map_err(|error| context.fail(kind, error))?;
 
@@ -297,7 +266,7 @@ pub(crate) async fn run_namespace_use(
         kind,
         CommandData::DefaultNamespace {
             profile: context.profile_name.clone(),
-            namespace: args.namespace_id,
+            namespace: args.namespace_id.to_string(),
         },
     ))
 }

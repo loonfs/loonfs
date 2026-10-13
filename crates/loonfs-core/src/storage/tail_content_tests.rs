@@ -4,7 +4,7 @@ use super::*;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationClass,
+    BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationSelector,
     RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
@@ -61,8 +61,8 @@ async fn fixture<S: ObjectStore>(
     let mut extents = Vec::new();
     let mut offset = 0;
     let mut crc = Checksum::crc64nvme(&[]);
-    for (index, &length) in lengths.iter().enumerate() {
-        let bytes = Bytes::from(vec![b'a' + index as u8; length]);
+    for (index, &length) in (0_u8..).zip(lengths) {
+        let bytes = Bytes::from(vec![b'a' + index; length]);
         let extent = ContentExtent {
             owner_namespace_id: owner.clone(),
             content_id: if shared && index == 0 {
@@ -295,7 +295,13 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         };
         extent.length = layout_size;
         let key = extent_object_key(extent);
-        let bytes = Bytes::from([b"aaaaaa".as_slice(), &b"zzzz"[..size as usize - 6]].concat());
+        let bytes = Bytes::from(
+            [
+                b"aaaaaa".as_slice(),
+                &b"zzzz"[..loonfs_types::usize_from_u64(size) - 6],
+            ]
+            .concat(),
+        );
         store
             .put_immutable_verified(&key, bytes)
             .await
@@ -317,7 +323,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let operations = store.snapshot();
         assert!(
             matches!(operations.last(), Some(RecordedOperation::Assemble { sources, bytes, .. })
-            if *bytes == 10 - size as usize && sources.len() == usize::from(size == 10))
+            if *bytes == 10 - loonfs_types::usize_from_u64(size) && sources.len() == usize::from(size == 10))
         );
     }
 }
@@ -328,7 +334,7 @@ async fn validation_materialization_holds_a_write_permit() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-        OperationClass::Head,
+        OperationSelector::Head,
     );
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
     let pool = Semaphore::new(1);

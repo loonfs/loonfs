@@ -8,7 +8,7 @@ use super::reap::GraceAge;
 use super::uploads::protect_session_content;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::NAMESPACE_RETIREMENT_GRACE_MS;
+use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::cache::read_working_memory;
 use crate::manifest::{load_namespace_manifest_envelope_if_present, MetadataSegmentCache};
 use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
@@ -28,14 +28,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetirementState {
+pub(super) enum RetirementStatus {
     Active,
-    Retained { until_ms: Option<u64> },
+    Retained { reclaimable_at_ms: Option<u64> },
     Eligible,
 }
 
 pub(super) struct LiveSet {
-    pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
@@ -76,7 +75,6 @@ impl LiveSet {
             load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await?;
         let head = anchor.manifest.state.envelope.payload();
         let mut live = Self {
-            namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: BTreeSet::new(),
@@ -90,14 +88,14 @@ impl LiveSet {
                 .sum(),
             manifests: Vec::new(),
             has_pins: false,
-            grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
+            grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: context.now_ms,
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
         live.protect_manifest(&anchor.manifest);
-        if !live.namespace_deleted {
+        if live.current_tombstone.is_none() {
             let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
             for revision in tail.revisions() {
                 live.content_ids
@@ -159,7 +157,7 @@ impl LiveSet {
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
             if let Some(manifest_no) = manifest_no_of(&entry.key) {
-                listed_manifests.insert(manifest_no, entry.last_modified_ms);
+                listed_manifests.insert(manifest_no, entry.last_modified_at_ms);
             }
         }
         for manifest_no in listed_manifests.keys().copied() {
@@ -220,7 +218,7 @@ impl LiveSet {
                 .flat_map(|run| &run.segments)
                 .map(metadata_segment_object_key),
         );
-        if !self.namespace_deleted {
+        if self.current_tombstone.is_none() {
             self.manifests.push(manifest.clone());
         }
     }
@@ -238,19 +236,21 @@ impl LiveSet {
             .saturating_add(self.grace_window_ms)
     }
 
-    pub(super) fn retirement_state(&self) -> RetirementState {
+    pub(super) fn retirement_status(&self) -> RetirementStatus {
         let Some(tombstone) = &self.current_tombstone else {
-            return RetirementState::Active;
+            return RetirementStatus::Active;
         };
         let deadline_ms = self.deadline(tombstone);
         if self.now_ms < deadline_ms {
-            RetirementState::Retained {
-                until_ms: Some(deadline_ms),
+            RetirementStatus::Retained {
+                reclaimable_at_ms: Some(deadline_ms),
             }
         } else if self.has_pins {
-            RetirementState::Retained { until_ms: None }
+            RetirementStatus::Retained {
+                reclaimable_at_ms: None,
+            }
         } else {
-            RetirementState::Eligible
+            RetirementStatus::Eligible
         }
     }
 }

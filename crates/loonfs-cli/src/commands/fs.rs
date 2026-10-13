@@ -3,9 +3,9 @@
 
 use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
-    destination_user_path, directory_intent, fail, namespace_path, parse_public_ordinal_arg,
-    parse_snapshot_id_arg, parse_user_path_arg, render_target, resolve_command_context,
-    resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, UndeleteHint,
+    destination_user_path, directory_intent, fail, namespace_path, parse_user_path_arg,
+    render_target, resolve_command_context, resolve_mutation_context, CommandContext,
+    RemoteDirectoryOutcome, RootPath, UndeleteHint,
 };
 use super::download::FileDownload;
 use super::output::{
@@ -15,7 +15,7 @@ use super::output::{
 use super::pagination::{
     collect_or_stream_pages, page_request, visit_pages, write_jsonl_page, PagePlan, PagedListing,
 };
-use super::partial::{self, PartialDownload, PartialMeta};
+use super::partial::{self, PartialDownload, PartialDownloadMetadata};
 use super::recursive;
 use crate::args::{
     CommandKind, CommitArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
@@ -28,6 +28,7 @@ use crate::config::ConfigLocation;
 use crate::error::CliError;
 use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
+use crate::render::OutputFormat;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_client::{
     AppendFileOptions, AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -37,9 +38,8 @@ use loonfs_types::api::v0::UploadSessionStatus;
 use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_types::PinId;
 use loonfs_types::{
-    AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
-    DeleteDirectoryBehavior, DestinationBehavior, EntryInodeKind, ListPathEntriesResponse,
-    NamespaceId, RevisionNo,
+    AbsolutePath, AttributeKey, AttributeValue, ChangeSeq, Commit, DeleteDirectoryBehavior,
+    DestinationBehavior, EntryInodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,23 +49,12 @@ use std::sync::Arc;
 
 // --- filesystem ---
 
-fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliError> {
-    commit_id
-        .map(|value| {
-            CommitId::parse(value).map_err(|error| {
-                CliError::invalid_request(format!("invalid --commit-id: {error}"))
-                    .with_param("--commit-id")
-            })
-        })
-        .transpose()
-}
-
-pub(crate) fn commit_options(args: &CommitArgs) -> Result<CommitOptions, CliError> {
-    Ok(CommitOptions {
+pub(crate) fn commit_options(args: &CommitArgs) -> CommitOptions {
+    CommitOptions {
         preconditions: Vec::new(),
-        commit_id: parse_commit_id_arg(args.commit_id.as_deref())?,
+        commit_id: args.commit_id.clone(),
         message: args.message.clone(),
-    })
+    }
 }
 
 struct FollowedPathEntryPages {
@@ -121,22 +110,17 @@ pub(crate) async fn run_filesystem_ls(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = true;
+    let root = RootPath::Allowed;
     let spec = namespace_path(
         context.namespace(),
         "path",
         args.path.as_deref().unwrap_or("/"),
-        allow_root,
+        root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
-    let streams_pages =
-        args.pagination.page_limits.jsonl || (args.pagination.page_limits.all && !runtime.json);
+    let snapshot_id = args.snapshot_id.clone();
+    let streams_pages = args.pagination.page_limits.jsonl
+        || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
     if streams_pages {
         let stdout = io::stdout();
         let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
@@ -175,7 +159,7 @@ pub(crate) async fn run_filesystem_ls(
         },
     )
     .await?;
-    if !runtime.json {
+    if runtime.output == OutputFormat::Human {
         if let Some(drift) = followed.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
         }
@@ -199,12 +183,7 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args.snapshot_id.clone();
     let entry = match args.inode {
         Some(inode_id) => {
             context
@@ -216,9 +195,9 @@ pub(crate) async fn run_filesystem_stat(
             let path = args
                 .path
                 .as_deref()
-                .expect("clap requires either path or --inode");
-            let allow_root = true;
-            let spec = namespace_path(context.namespace(), "path", path, allow_root)
+                .expect("clap should require either a path or `--inode`");
+            let root = RootPath::Allowed;
+            let spec = namespace_path(context.namespace(), "path", path, root)
                 .map_err(|error| context.fail(kind, error))?;
             context
                 .target
@@ -237,21 +216,21 @@ pub(crate) async fn run_filesystem_stat(
 fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue), CliError> {
     let Some((key, value)) = argument.split_once('=') else {
         return Err(CliError::invalid_request(format!(
-            "invalid --set `{argument}`: expected key=value"
+            "invalid `--set` {argument:?}: expected `key=value`"
         ))
         .with_param("--set"));
     };
     Ok((
         parse_attribute_key_arg("--set", key)?,
         AttributeValue::parse(value).map_err(|error| {
-            CliError::invalid_request(format!("invalid --set value: {error}")).with_param("--set")
+            CliError::invalid_request(format!("invalid `--set` value: {error}")).with_param("--set")
         })?,
     ))
 }
 
 fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
     AttributeKey::parse(key).map_err(|error| {
-        CliError::invalid_request(format!("invalid {flag} key: {error}")).with_param(flag)
+        CliError::invalid_request(format!("invalid `{flag}` key: {error}")).with_param(flag)
     })
 }
 
@@ -273,7 +252,7 @@ fn attribute_update(
         Some(document) => {
             let update: AttributeUpdateJson = serde_json::from_str(document).map_err(|error| {
                 CliError::invalid_request(format!(
-                    "invalid --attributes-json attribute update: {error}"
+                    "invalid `--attributes-json` attribute update: {error}"
                 ))
                 .with_param("--attributes-json")
             })?;
@@ -291,18 +270,9 @@ fn attribute_update(
         ),
     };
     let options = UpdateAttributesOptions {
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_attributes_revision_no: args
-            .expected_attributes_revision
-            .map(|value| {
-                parse_public_ordinal_arg(
-                    "--expected-attributes-revision",
-                    value,
-                    AttributesRevisionNo::parse,
-                )
-            })
-            .transpose()?,
+        expected_attributes_revision_no: args.expected_attributes_revision,
     };
     Ok((AttributeChanges { set, remove }, options))
 }
@@ -313,8 +283,8 @@ pub(crate) async fn run_filesystem_annotate(
     args: FilesystemAnnotateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = true;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Allowed;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let (changes, options) = attribute_update(&args).map_err(|error| context.fail(kind, error))?;
     let result = context
@@ -346,7 +316,7 @@ pub(crate) async fn run_filesystem_grep(
     let path_prefix = args
         .path_prefix
         .as_deref()
-        .map(|path| parse_user_path_arg("--path-prefix", path, true))
+        .map(|path| parse_user_path_arg("--path-prefix", path, RootPath::Allowed))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_types::GrepRequest {
@@ -421,20 +391,11 @@ pub(crate) async fn run_filesystem_cat(
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args
-        .revision
-        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let revision_no = args.revision;
+    let snapshot_id = args.snapshot_id.clone();
     let mut download = context
         .target
         .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
@@ -453,7 +414,7 @@ pub(crate) async fn run_filesystem_get(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    if runtime.json && args.local_destination.as_deref() == Some("-") {
+    if runtime.output == OutputFormat::Json && args.local_destination.as_deref() == Some("-") {
         return Err(fail(
             kind,
             Some(context.profile_name),
@@ -462,25 +423,15 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
-    let allow_root = args.recursive;
-    let spec = namespace_path(
-        context.namespace(),
-        "remote_path",
-        &args.remote_path,
-        allow_root,
-    )
-    .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args
-        .revision
-        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
-        .transpose()
+    let root = if args.recursive {
+        RootPath::Allowed
+    } else {
+        RootPath::Refused
+    };
+    let spec = namespace_path(context.namespace(), "remote_path", &args.remote_path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args
-        .snapshot_id
-        .as_deref()
-        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let revision_no = args.revision;
+    let snapshot_id = args.snapshot_id.clone();
     let entry = context
         .target
         .stat_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
@@ -500,7 +451,7 @@ pub(crate) async fn run_filesystem_get(
         if args.revision.is_some() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_request("--revision applies to one file, not a tree")
+                CliError::invalid_request("`--revision` applies to one file, not a tree")
                     .with_param("--revision"),
             ));
         }
@@ -521,7 +472,7 @@ pub(crate) async fn run_filesystem_get(
             &context,
             spec.absolute_path().as_str(),
             &local_root,
-            args.force,
+            destination_behavior(args.force),
             runtime,
             snapshot_id.as_ref(),
         )
@@ -552,7 +503,11 @@ pub(crate) async fn run_filesystem_get(
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     }
 
-    let derived_name = args.local_destination.is_none();
+    let name = if args.local_destination.is_none() {
+        DestinationName::Derived
+    } else {
+        DestinationName::Given
+    };
     let destination = destination_path_for_get(
         spec.absolute_path().as_str(),
         args.local_destination.as_deref(),
@@ -586,8 +541,8 @@ pub(crate) async fn run_filesystem_get(
         &mut download,
         &destination,
         meta.as_ref(),
-        args.force,
-        derived_name,
+        destination_behavior(args.force),
+        name,
         &progress,
     )
     .await;
@@ -612,14 +567,14 @@ pub(super) async fn open_resumable_download(
     revision_no: Option<RevisionNo>,
     snapshot_id: Option<&PinId>,
     destination: &Path,
-) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
+) -> Result<(FileDownload, Option<PartialDownloadMetadata>), CliError> {
     let mut download = context
         .target
         .open_file_download(spec, revision_no, snapshot_id, 0)
         .await?;
     let identity = download.resume_identity();
     let resolved_revision = identity.map(|(_, revision)| revision);
-    let meta = identity.map(|(claim, _)| PartialMeta::describe(claim, revision_no));
+    let meta = identity.map(|(claim, _)| PartialDownloadMetadata::describe(claim, revision_no));
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
@@ -660,16 +615,16 @@ pub(super) async fn open_resumable_download(
 pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: &Path,
-    meta: Option<&PartialMeta>,
-    force: bool,
-    derived_name: bool,
+    meta: Option<&PartialDownloadMetadata>,
+    behavior: DestinationBehavior,
+    name: DestinationName,
     progress: &ProgressReporter,
 ) -> Result<u64, CliError> {
     let resumed_from = download.resumed_from();
     let mut partial = PartialDownload::open(destination, meta, resumed_from)
-        .map_err(|error| local_open_error(destination, error, force, derived_name))?;
+        .map_err(|error| local_open_error(destination, error, behavior, name))?;
     partial.fold_into(download, |error| {
-        local_destination_error(destination, error, force, derived_name)
+        local_destination_error(destination, error, behavior, name)
     })?;
     progress.already_done(resumed_from);
     if resumed_from > 0 {
@@ -682,14 +637,33 @@ pub(super) async fn stream_download_to_file(
     while let Some(chunk) = download.next_chunk().await? {
         partial
             .write_all(&chunk)
-            .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+            .map_err(|error| local_destination_error(destination, error, behavior, name))?;
         bytes_written += chunk.len() as u64;
         progress.advance(chunk.len() as u64);
     }
     partial
-        .install(destination, force)
-        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+        .install(destination, behavior)
+        .map_err(|error| local_destination_error(destination, error, behavior, name))?;
     Ok(bytes_written)
+}
+
+/// Whether a local destination's name came from the caller or from the
+/// remote path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DestinationName {
+    /// The caller named the destination.
+    Given,
+    /// The name is the remote file's name.
+    Derived,
+}
+
+/// The destination behavior `--force` asks for.
+fn destination_behavior(force: bool) -> DestinationBehavior {
+    if force {
+        DestinationBehavior::Replace
+    } else {
+        DestinationBehavior::NoReplace
+    }
 }
 
 /// Writes one listing page and makes it visible before the next fetch.
@@ -736,8 +710,8 @@ async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), Cl
 fn local_open_error(
     destination: &Path,
     error: std::io::Error,
-    force: bool,
-    derived_name: bool,
+    behavior: DestinationBehavior,
+    name: DestinationName,
 ) -> CliError {
     if error.kind() == std::io::ErrorKind::NotFound {
         let parent_error = std::io::Error::new(
@@ -749,21 +723,23 @@ fn local_open_error(
         );
         return CliError::io_for_path(destination, parent_error);
     }
-    local_destination_error(destination, error, force, derived_name)
+    local_destination_error(destination, error, behavior, name)
 }
 
 /// Shapes a local write failure the way `get` has always reported one.
 fn local_destination_error(
     destination: &Path,
     error: std::io::Error,
-    force: bool,
-    derived_name: bool,
+    behavior: DestinationBehavior,
+    name: DestinationName,
 ) -> CliError {
-    if !force && error.kind() == std::io::ErrorKind::AlreadyExists {
+    if behavior == DestinationBehavior::NoReplace
+        && error.kind() == std::io::ErrorKind::AlreadyExists
+    {
         return CliError::destination_exists(destination);
     }
     let mut error = CliError::io_for_path(destination, error);
-    if derived_name {
+    if name == DestinationName::Derived {
         error.message.push_str(
             "; if the remote name exceeds local filesystem limits, pass an \
              explicit destination or `-` for stdout",
@@ -818,8 +794,8 @@ pub(crate) async fn run_filesystem_revisions(
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let listing = collect_or_stream_pages(
         PagePlan::new(&args.pagination.page_limits),
@@ -880,13 +856,13 @@ pub(crate) async fn run_filesystem_put(
             return Err(context.fail(
                 kind,
                 CliError::invalid_request(
-                    "--commit-id names one commit; a recursive upload makes one commit per file",
+                    "`--commit-id` names one commit; a recursive upload makes one commit per file",
                 )
                 .with_param("--commit-id"),
             ));
         }
         let remote_root = match args.remote_path {
-            Some(path) => parse_user_path_arg("remote_path", &path, true),
+            Some(path) => parse_user_path_arg("remote_path", &path, RootPath::Allowed),
             None => default_remote_put_path(&local_path),
         }
         .map_err(|error| context.fail(kind, error))?;
@@ -895,7 +871,7 @@ pub(crate) async fn run_filesystem_put(
             &context,
             &local_path,
             remote_root.as_str(),
-            args.force,
+            destination_behavior(args.force),
             args.commit.message.clone(),
             runtime,
         )
@@ -927,7 +903,13 @@ pub(crate) async fn run_filesystem_put(
     let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
-        Some(path) => destination_user_path("remote_path", "local_path", path, local_leaf, true),
+        Some(path) => destination_user_path(
+            "remote_path",
+            "local_path",
+            path,
+            local_leaf,
+            RootPath::Allowed,
+        ),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -974,7 +956,7 @@ async fn run_filesystem_put_stdin(
             .with_param("remote_path"),
         ));
     };
-    let remote_path = parse_user_path_arg("remote_path", remote_path, false)
+    let remote_path = parse_user_path_arg("remote_path", remote_path, RootPath::Refused)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
@@ -1147,10 +1129,7 @@ async fn commit_a_finished_upload(
 }
 
 fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
-    let expected_revision_no = args
-        .expected_revision
-        .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
-        .transpose()?;
+    let expected_revision_no = args.expected_revision;
     let behavior =
         if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
             DestinationBehavior::Replace
@@ -1159,7 +1138,7 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
         };
     Ok(PutFileOptions {
         behavior,
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
@@ -1171,7 +1150,7 @@ pub(crate) async fn run_filesystem_append(
     args: FilesystemAppendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let remote_path = parse_user_path_arg("remote_path", &args.remote_path, false)
+    let remote_path = parse_user_path_arg("remote_path", &args.remote_path, RootPath::Refused)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let options = append_file_options(&args).map_err(|error| context.fail(kind, error))?;
@@ -1219,12 +1198,9 @@ async fn read_append_content(local_path: &str) -> Result<Vec<u8>, CliError> {
 
 fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions, CliError> {
     Ok(AppendFileOptions {
-        commit: commit_options(&args.commit)?,
+        commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_revision_no: args
-            .expected_revision
-            .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
-            .transpose()?,
+        expected_revision_no: args.expected_revision,
     })
 }
 
@@ -1234,10 +1210,10 @@ pub(crate) async fn run_filesystem_rm(
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, &location.path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
@@ -1298,12 +1274,11 @@ pub(crate) async fn run_filesystem_restore(
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let revision_no = args.revision;
     let result = context
         .target
         .client
@@ -1330,19 +1305,17 @@ pub(crate) async fn run_filesystem_undelete(
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
+    let root = RootPath::Refused;
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
     let spec = args
         .destination_path
         .as_deref()
-        .map(|path| namespace_path(context.namespace(), "destination_path", path, allow_root))
+        .map(|path| namespace_path(context.namespace(), "destination_path", path, root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let deletion_seq =
-        parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
-            .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let deletion_seq = args.deletion_seq;
     let destination = spec.as_ref().map_or(UndeleteDestination::Recorded, |spec| {
         UndeleteDestination::Path(spec.absolute_path().clone())
     });
@@ -1387,10 +1360,10 @@ pub(crate) async fn run_filesystem_mkdir(
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
     let options = CreateDirectoryOptions {
         parents: args.parents,
         commit,
@@ -1507,14 +1480,9 @@ async fn run_filesystem_transfer(
                 .with_param("-r"),
         ));
     }
-    let allow_root = false;
-    let from = namespace_path(
-        context.namespace(),
-        "source_path",
-        &args.source_path,
-        allow_root,
-    )
-    .map_err(|error| context.fail(kind, error))?;
+    let root = RootPath::Refused;
+    let from = namespace_path(context.namespace(), "source_path", &args.source_path, root)
+        .map_err(|error| context.fail(kind, error))?;
     let source_leaf = from
         .absolute_path()
         .final_component()
@@ -1531,7 +1499,7 @@ async fn run_filesystem_transfer(
         "source_path",
         &args.destination_path,
         &source_leaf,
-        true,
+        RootPath::Allowed,
     )
     .map(|path| NamespacePath::new(context.namespace().clone(), path))
     .map_err(|error| context.fail(kind, error))?;
@@ -1546,14 +1514,8 @@ async fn run_filesystem_transfer(
             .map_err(|error| context.fail(kind, error))?
     };
 
-    let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
-    let expected_destination_revision_no = args
-        .expected_destination_revision
-        .map(|value| {
-            parse_public_ordinal_arg("--expected-destination-revision", value, RevisionNo::parse)
-        })
-        .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(&args.commit);
+    let expected_destination_revision_no = args.expected_destination_revision;
     let behavior = if args.force
         || args.expected_destination_inode_id.is_some()
         || expected_destination_revision_no.is_some()
@@ -1583,7 +1545,7 @@ async fn run_filesystem_transfer(
                 return Err(context.fail(
                     kind,
                     CliError::invalid_request(
-                        "--commit-id names one commit; a recursive copy makes one commit per item",
+                        "`--commit-id` names one commit; a recursive copy makes one commit per item",
                     )
                     .with_param("--commit-id"),
                 ));
@@ -1593,7 +1555,7 @@ async fn run_filesystem_transfer(
                 &context,
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
-                args.force,
+                destination_behavior(args.force),
                 args.commit.message.clone(),
                 runtime,
             )

@@ -13,7 +13,6 @@ use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey, NamespaceNaming,
 };
-use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 
@@ -29,10 +28,16 @@ pub struct ResolvedVisiblePath {
     pub binding_version: Option<DeltaPosition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum VisiblePathError {
     #[error("canonical root inode is missing")]
     RootMissing,
+    /// Following current parent bindings upward came back to an inode it
+    /// had already passed. Stored bindings form a tree, so a cycle means the
+    /// stored metadata is corrupt.
+    #[error("current parent bindings form a cycle through inode `{inode_id}`")]
+    ParentBindingCycle { inode_id: InodeId },
     #[error("visible path not found: `{absolute_path}`")]
     PathNotFound { absolute_path: String },
     #[error(
@@ -48,7 +53,7 @@ pub enum VisiblePathError {
 impl VisiblePathError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::RootMissing => ErrorCode::NamespaceCorrupt,
+            Self::RootMissing | Self::ParentBindingCycle { .. } => ErrorCode::NamespaceCorrupt,
             Self::PathNotFound { .. } => ErrorCode::PathNotFound,
             Self::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
         }
@@ -227,9 +232,12 @@ impl MetadataState {
     }
 }
 
-/// Drives an in-memory visibility read and unwraps its uninhabited error
-/// arm: of the [`super::visibility`] rules only `resolve_visible_path`
-/// constructs a [`VisiblePathError`], and it is not routed through here.
+/// Drives an in-memory visibility read and unwraps its error arm. Besides
+/// `resolve_visible_path`, which is not routed through here, the
+/// [`super::visibility`] rules fail only on a parent-binding cycle, and the
+/// production read paths use [`super::MetadataView`] instead, which returns
+/// that error. These helpers serve states that tests and models build.
 fn read_now<T>(future: impl Future<Output = Result<T, VisiblePathError>>) -> T {
-    resolve_in_memory_read(future).expect("seq-scoped metadata state reads should be infallible")
+    resolve_in_memory_read(future)
+        .expect("an in-memory metadata state should have no parent-binding cycle")
 }

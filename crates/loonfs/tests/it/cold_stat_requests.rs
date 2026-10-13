@@ -9,7 +9,7 @@
 //! lookups was the scale term, and dependent per-section GETs were the
 //! wave count.
 
-use loonfs::{LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, Writable};
+use loonfs::{LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
@@ -45,13 +45,13 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("coldstat-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("coldstat-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("coldstat-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("coldstat-maintenance"))
         .build()
         .await
         .expect("build maintenance")
@@ -110,7 +110,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
             candidates.push(loonfs::publish::CommitCandidate::prepared(
-                loonfs::publish::CommitRequest::single(
+                loonfs::publish::CommitIntent::single(
                     loonfs::CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -131,7 +131,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         maintenance
             .maintain_metadata_with_options(
                 &namespace_id,
-                &MetadataMaintenanceOptions {
+                &MaintainMetadataOptions {
                     max_wal_tail_objects: std::num::NonZeroU64::MIN,
                     ..Default::default()
                 },

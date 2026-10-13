@@ -26,7 +26,7 @@ pub struct ListedObject {
     /// Object key relative to the store's configured prefix.
     pub key: String,
     /// Provider modification time, when the listing reports one.
-    pub last_modified_ms: Option<u64>,
+    pub last_modified_at_ms: Option<u64>,
 }
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
@@ -45,7 +45,7 @@ pub struct ObjectMetadata {
     ///
     /// Advisory: garbage collection uses it for grace/reap age checks and
     /// treats an absent value as "young" (retain). Never a validity input.
-    pub last_modified_ms: Option<u64>,
+    pub last_modified_at_ms: Option<u64>,
     /// The provider's stored full-object checksum in its declared algorithm.
     pub checksum: Option<Checksum>,
 }
@@ -205,7 +205,7 @@ pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
 
 /// A provider-independent category for an object-store error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ObjectStoreErrorClass {
+pub enum ObjectStoreErrorKind {
     /// A required object was absent.
     NotFound,
     /// A content reference or byte range was invalid.
@@ -228,10 +228,10 @@ pub enum ObjectStoreErrorClass {
     Other,
 }
 
-impl ObjectStoreErrorClass {
+impl ObjectStoreErrorKind {
     /// Returns the category for an object-store error.
     pub fn of(error: &ObjectStoreError) -> Self {
-        error.class()
+        error.kind()
     }
 
     /// Returns a safe message for users.
@@ -289,31 +289,31 @@ impl ObjectStoreError {
     }
 
     /// Returns this error's provider-independent category.
-    pub fn class(&self) -> ObjectStoreErrorClass {
+    pub fn kind(&self) -> ObjectStoreErrorKind {
         match self {
-            Self::NotFound { .. } => ObjectStoreErrorClass::NotFound,
-            Self::InvalidKey { .. } => ObjectStoreErrorClass::InvalidKey,
+            Self::NotFound { .. } => ObjectStoreErrorKind::NotFound,
+            Self::InvalidKey { .. } => ObjectStoreErrorKind::InvalidKey,
             Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
-                ObjectStoreErrorClass::InvalidRequest
+                ObjectStoreErrorKind::InvalidRequest
             }
-            Self::PreconditionFailed { .. } => ObjectStoreErrorClass::PreconditionFailed,
-            Self::PermissionDenied { .. } => ObjectStoreErrorClass::PermissionDenied,
-            Self::StoredChecksumMissing { .. } => ObjectStoreErrorClass::StoredChecksumMissing,
-            Self::Unsupported(_) => ObjectStoreErrorClass::Unsupported,
-            Self::Configuration(_) => ObjectStoreErrorClass::Configuration,
+            Self::PreconditionFailed { .. } => ObjectStoreErrorKind::PreconditionFailed,
+            Self::PermissionDenied { .. } => ObjectStoreErrorKind::PermissionDenied,
+            Self::StoredChecksumMissing { .. } => ObjectStoreErrorKind::StoredChecksumMissing,
+            Self::Unsupported(_) => ObjectStoreErrorKind::Unsupported,
+            Self::Configuration(_) => ObjectStoreErrorKind::Configuration,
             Self::Transport {
                 retryable: true, ..
-            } => ObjectStoreErrorClass::RetryableTransport,
+            } => ObjectStoreErrorKind::RetryableTransport,
             Self::Transport {
                 retryable: false, ..
             }
-            | Self::ChecksumMismatch { .. } => ObjectStoreErrorClass::Other,
+            | Self::ChecksumMismatch { .. } => ObjectStoreErrorKind::Other,
         }
     }
 
     /// Returns a safe message for users.
     pub fn public_message(&self) -> Cow<'static, str> {
-        self.class().public_message()
+        self.kind().public_message()
     }
 
     /// Key of the object (or listed prefix) the failing operation targeted,
@@ -936,8 +936,8 @@ mod tests {
         let retryable = ObjectStoreError::retryable_transport("private-key", "provider timeout");
         let protocol = ObjectStoreError::transport("private-key", "malformed response");
 
-        assert_eq!(retryable.class(), ObjectStoreErrorClass::RetryableTransport);
-        assert_eq!(protocol.class(), ObjectStoreErrorClass::Other);
+        assert_eq!(retryable.kind(), ObjectStoreErrorKind::RetryableTransport);
+        assert_eq!(protocol.kind(), ObjectStoreErrorKind::Other);
         assert_ne!(retryable.public_message(), protocol.public_message());
     }
 
@@ -983,7 +983,7 @@ mod tests {
             self.resume_reached.store(true, Ordering::SeqCst);
             Box::pin(stream::iter([Ok(ListedObject {
                 key: "resumed".to_owned(),
-                last_modified_ms: None,
+                last_modified_at_ms: None,
             })]))
         }
 

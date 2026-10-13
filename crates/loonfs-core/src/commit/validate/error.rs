@@ -42,7 +42,8 @@ impl fmt::Display for CommitOperand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum CommitValidationError {
     #[error("{operand} inode `{inode_id}` is missing")]
     InodeMissing {
@@ -180,7 +181,7 @@ pub enum CommitValidationError {
         base_access_revision_no: AccessRevisionNo,
     },
     #[error("op index overflow")]
-    OpIndexOverflow,
+    OperationIndexOverflow,
     #[error("delta index overflow")]
     DeltaIndexOverflow,
 }
@@ -207,7 +208,7 @@ impl CommitValidationError {
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
             Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
-            | Self::OpIndexOverflow
+            | Self::OperationIndexOverflow
             | Self::DeltaIndexOverflow => ErrorCode::ServerError,
         }
     }

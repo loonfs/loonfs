@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 /// This matches the provider multipart part size. Smaller payloads would use
 /// one part and gain nothing from multipart overhead. Payloads of unknown size
 /// also use the streaming path.
-pub const STREAMING_PUT_MIN_BYTES: u64 = 8 * 1024 * 1024;
+pub const MIN_STREAMING_PUT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum number of multipart payloads held in memory at once.
 const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
@@ -81,6 +81,9 @@ pub struct PreparedContent {
     pub(crate) kind: PreparedContentKind,
 }
 
+/// The core's `PreparedContentKind` holds a content reference for inline bytes
+/// and a staged expiry, while this one holds raw inline bytes and the content
+/// token, because the server assigns the reference and checks the expiry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedContentKind {
     Inline(Vec<u8>),
@@ -159,7 +162,7 @@ impl DirectPutObservation {
         self.size_bytes += bytes.len() as u64;
         self.checksum
             .as_mut()
-            .expect("direct PUT checksum is unfinished")
+            .expect("the direct PUT checksum should be unfinished")
             .update(bytes);
     }
 
@@ -169,7 +172,7 @@ impl DirectPutObservation {
             checksum: self
                 .checksum
                 .take()
-                .expect("direct PUT checksum is finished once")
+                .expect("the direct PUT checksum should be finished only once")
                 .finish(),
         }
     }
@@ -187,7 +190,7 @@ fn observed_direct_put_source(
                 if let Ok(bytes) = &chunk {
                     stream_observation
                         .lock()
-                        .expect("direct PUT observation lock")
+                        .expect("the direct PUT observation lock should not be poisoned")
                         .update(bytes);
                 }
                 chunk
@@ -406,7 +409,7 @@ impl Client {
     ) -> std::result::Result<UploadTransport, NoTransportFits> {
         // Small known payloads do not benefit from multipart. Unknown sizes
         // remain eligible because they may exceed one part.
-        let worth_cutting = size_bytes.is_none_or(|size| size >= STREAMING_PUT_MIN_BYTES);
+        let worth_cutting = size_bytes.is_none_or(|size| size >= MIN_STREAMING_PUT_BYTES);
         if worth_cutting && capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART) {
             return Ok(UploadTransport::Multipart);
         }
@@ -478,7 +481,7 @@ impl Client {
             } = begin.status
             else {
                 return Err(ClientError::Protocol(
-                    "direct_put session is not open or lacks `checksum_algorithm` or `access`"
+                    "`direct_put` session is not open or lacks `checksum_algorithm` or `access`"
                         .to_owned(),
                 ));
             };
@@ -493,11 +496,11 @@ impl Client {
                 DirectPutBody::Streamed(source) => {
                     let (source, observation) =
                         observed_direct_put_source(source, checksum_algorithm);
-                    self.upload_streamed_via_presigned_url(&access, source)
+                    self.upload_stream_via_presigned_url(&access, source)
                         .await?;
                     let content = observation
                         .lock()
-                        .expect("direct PUT observation lock")
+                        .expect("the direct PUT observation lock should not be poisoned")
                         .finish();
                     content
                 }
@@ -549,7 +552,7 @@ impl Client {
                     ..
                 } = begin.status
                 else {
-                    return Err(ClientError::Protocol("direct_multipart session is not open or lacks `part_size_bytes` or `checksum_algorithm`".to_owned()));
+                    return Err(ClientError::Protocol("`direct_multipart` session is not open or lacks `part_size_bytes` or `checksum_algorithm`".to_owned()));
                 };
                 let upload_id = begin.upload_id;
                 if let Some(journal) = continuity.journal {

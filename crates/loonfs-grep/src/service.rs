@@ -1,10 +1,9 @@
 //! [`GrepService`]: query planning and execution over grep index state.
 
 use crate::cache::{
-    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
+use crate::codec::{lookup, Gram, IndexRow, MAX_INDEX_GRAMS_FILE_BYTES};
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
@@ -14,15 +13,15 @@ use crate::manifest::{
     GrepSegmentRef,
 };
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{published_revision, resolve_batch_size, NamespaceReadView, NamespaceReads};
+use crate::reads::{effective_batch_size, published_revision, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::engine::Observation;
-use loonfs::{CoreError, CurrentFileState};
+use loonfs::engine::{Observation, SegmentBlockKind};
+use loonfs::{CoreError, CurrentFile, CurrentFileState};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
     string_prefix_upper_bound,
 };
@@ -131,17 +130,13 @@ impl GrepService {
                     .ok_or(GrepError::NotEnabled)?;
                 let state = Arc::new(current.manifest_state().clone());
                 let decoded_bytes = serde_json::to_vec(current.manifest_state())
-                    .map_err(|error| {
-                        CoreError::Internal(format!(
-                            "failed to size decoded grep manifest: {error}"
-                        ))
-                    })?
+                    .expect("a decoded grep manifest state should encode")
                     .len()
                     .saturating_mul(2);
                 self.block_cache.insert(
                     GrepBlockCacheKey {
                         identity: manifest_key(namespace_id, &state.manifest_no()),
-                        block_kind: GrepBlockKind::Manifest,
+                        block_kind: SegmentBlockKind::Manifest,
                         block_offset: 0,
                     },
                     DecodedGrepBlock::Manifest {
@@ -217,7 +212,7 @@ impl GrepService {
                     ))
                     .into());
                 }
-                Some((cursor.last_inode_id, cursor.last_byte_offset))
+                Some(GrepResume::from_cursor(&cursor))
             }
             None => None,
         };
@@ -249,7 +244,7 @@ impl GrepService {
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
                     return Err(GrepError::QueryUnindexable(
-                        "the pattern has no run of at least 3 literal bytes for the trigram index; set allow_scan to search without it"
+                        "the pattern has no run of at least 3 literal bytes for the trigram index; set `allow_scan` to search without it"
                             .to_owned(),
                     ));
                 }
@@ -320,7 +315,7 @@ impl GrepService {
                 break;
             }
         }
-        let next_cursor = walk.next_cursor()?;
+        let next_cursor = walk.next_cursor();
         Ok(GrepResponse {
             namespace_id: plan.reads.namespace_id().clone(),
             head_seq: plan.head_seq,
@@ -351,9 +346,7 @@ fn materialized_snapshot_from_state(
 impl Default for GrepService {
     fn default() -> Self {
         Self::new(Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(
-                DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-            ),
+            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         )))
     }
 }
@@ -503,7 +496,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     let admitted = match &descriptor.filter_inline {
         Some(inline) => {
             let filter_bytes =
-                hex_decode_bytes(inline).map_err(|error| GrepError::CorruptIndex {
+                hex_decode_bytes(inline).map_err(|error| GrepError::IndexCorrupt {
                     message: format!(
                         "index segment `{}` carries undecodable inline filter hex: {error}",
                         object_key
@@ -577,16 +570,11 @@ async fn tail_revisions(
             .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
             .await?;
         for change in &feed.changes {
-            let start_event_index =
-                resume
-                    .start_event_index(change.committed_seq)
-                    .map_err(|_| {
-                        CoreError::Internal("grep event cursor does not fit in memory".to_owned())
-                    })?;
+            let start_event_index = resume.start_event_index(change.committed_seq);
             let events = &change.events;
             if start_event_index > events.len() {
                 let next_event_index = resume.next_event_index();
-                return Err(GrepError::CorruptIndex {
+                return Err(GrepError::IndexCorrupt {
                     message: format!(
                         "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
                         change.committed_seq,
@@ -692,16 +680,67 @@ fn path_within_scope(path: &AbsolutePath, scope: &AbsolutePath) -> bool {
 /// later batch members were examined but their fetched contents discarded,
 /// and the cursor must stay at the last emitted match.
 fn fold_rejected_frontier(
-    resume_cursor: &mut Option<(InodeId, u64)>,
+    resume_cursor: &mut Option<GrepResume>,
     rejected_frontier: Option<InodeId>,
 ) {
     let Some(frontier) = rejected_frontier else {
         return;
     };
-    let folded = (frontier, u64::MAX);
-    if resume_cursor.is_none_or(|cursor| cursor < folded) {
-        *resume_cursor = Some(folded);
+    let behind = resume_cursor.is_none_or(|cursor| match cursor {
+        GrepResume::InFile { inode_id, .. } => inode_id <= frontier,
+        GrepResume::AfterFile { inode_id } => inode_id < frontier,
+    });
+    if behind {
+        *resume_cursor = Some(GrepResume::AfterFile { inode_id: frontier });
     }
+}
+
+/// Where a grep page resumes in candidate order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrepResume {
+    /// After the match at `after_offset` in this file.
+    InFile {
+        inode_id: InodeId,
+        after_offset: u64,
+    },
+    /// After the whole file.
+    AfterFile { inode_id: InodeId },
+}
+
+impl GrepResume {
+    /// The encoded cursor spells a fully scanned file as offset `u64::MAX`.
+    fn from_cursor(cursor: &GrepPageCursor) -> Self {
+        match cursor.last_byte_offset {
+            u64::MAX => Self::AfterFile {
+                inode_id: cursor.last_inode_id,
+            },
+            after_offset => Self::InFile {
+                inode_id: cursor.last_inode_id,
+                after_offset,
+            },
+        }
+    }
+
+    /// The position as the encoded cursor spells it: the inode and the last
+    /// match offset, or `u64::MAX` for a fully scanned file.
+    fn cursor_position(self) -> (InodeId, u64) {
+        match self {
+            Self::InFile {
+                inode_id,
+                after_offset,
+            } => (inode_id, after_offset),
+            Self::AfterFile { inode_id } => (inode_id, u64::MAX),
+        }
+    }
+}
+
+/// How far a page walk has got.
+enum PageProgress {
+    /// The walk is still scanning, and has got past this position, if any.
+    Scanning(Option<GrepResume>),
+    /// The page stopped before the last candidate, and the next page resumes
+    /// after this position.
+    Truncated(GrepResume),
 }
 
 /// One grep candidate that survived the current-state checks and awaits its
@@ -751,7 +790,7 @@ async fn candidate_content(
     let Some(content_ref) = entry.content_ref() else {
         return CandidateContent::Superseded;
     };
-    if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+    if content_ref.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
         return CandidateContent::Oversized;
     }
     CandidateContent::Fetched(
@@ -759,7 +798,7 @@ async fn candidate_content(
             .read_file_revision_by_inode(
                 candidate.inode_id,
                 candidate.revision_no,
-                INDEX_GRAMS_MAX_FILE_BYTES,
+                MAX_INDEX_GRAMS_FILE_BYTES,
             )
             .await,
     )
@@ -770,7 +809,7 @@ struct QueryPlan<'a> {
     head_seq: ChangeSeq,
     built_through_seq: ChangeSeq,
     fingerprint: u64,
-    resume: Option<(InodeId, u64)>,
+    resume: Option<GrepResume>,
     pattern: regex::bytes::Regex,
     scope: Option<PathEntry>,
     candidates: GrepCandidates,
@@ -788,8 +827,7 @@ struct PageWalk<'plan, 'reads> {
     matches: Vec<GrepMatch>,
     verified_files: usize,
     examined_candidates: usize,
-    has_more: bool,
-    resume_cursor: Option<(InodeId, u64)>,
+    progress: PageProgress,
     rejected_frontier: Option<InodeId>,
     ordered_candidates: Vec<InodeId>,
     next_candidate: usize,
@@ -802,9 +840,13 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
             .candidates
             .inodes()
             .filter(|inode_id| match plan.resume {
-                Some((last_inode, last_offset)) => {
-                    *inode_id > last_inode || (*inode_id == last_inode && last_offset != u64::MAX)
-                }
+                Some(GrepResume::InFile {
+                    inode_id: last_inode,
+                    ..
+                }) => *inode_id >= last_inode,
+                Some(GrepResume::AfterFile {
+                    inode_id: last_inode,
+                }) => *inode_id > last_inode,
                 None => true,
             })
             .collect();
@@ -814,8 +856,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
             matches: Vec::new(),
             verified_files: 0,
             examined_candidates: 0,
-            has_more: false,
-            resume_cursor: None,
+            progress: PageProgress::Scanning(plan.resume),
             rejected_frontier: None,
             ordered_candidates,
             next_candidate: 0,
@@ -837,13 +878,13 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                     budget_exhausted = true;
                     break;
                 }
-                let wanted = resolve_batch_size(
+                let wanted = effective_batch_size(
                     examinable.min(self.ordered_candidates.len() - self.next_candidate),
                 );
                 let chunk =
                     &self.ordered_candidates[self.next_candidate..self.next_candidate + wanted];
                 self.resolved
-                    .extend(self.plan.reads.resolve_current_files(chunk).await?);
+                    .extend(self.plan.reads.stat_current_files_by_inode(chunk).await?);
                 self.next_candidate += wanted;
             }
             let Some(state) = self.resolved.pop_front() else {
@@ -851,11 +892,10 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
             };
             let inode_id = state.inode_id;
             self.examined_candidates += 1;
-            if !state.visible {
-                self.rejected_frontier = Some(inode_id);
-                continue;
-            }
-            let (Some(revision_no), Some(path)) = (state.current_revision_no, state.current_path)
+            let CurrentFile::Visible {
+                path,
+                revision_no: Some(revision_no),
+            } = state.file
             else {
                 self.rejected_frontier = Some(inode_id);
                 continue;
@@ -878,10 +918,6 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                 break;
             }
             self.verified_files += 1;
-            if !state.readable {
-                self.rejected_frontier = Some(inode_id);
-                continue;
-            }
             candidates.push(GrepContentCandidate {
                 inode_id,
                 revision_no,
@@ -890,8 +926,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
         }
         if candidates.is_empty() {
             if budget_exhausted {
-                self.has_more = true;
-                fold_rejected_frontier(&mut self.resume_cursor, self.rejected_frontier);
+                self.truncate_after_rejected_frontier();
             }
             return Ok(None);
         }
@@ -909,26 +944,31 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
         let inode_id = candidate.inode_id;
         let content = match content {
             CandidateContent::Oversized | CandidateContent::Superseded => {
-                self.resume_cursor = Some((inode_id, u64::MAX));
+                self.advance(GrepResume::AfterFile { inode_id });
                 return Ok(false);
             }
             CandidateContent::Fetched(content) => content?,
         };
         if !is_indexable_text_content(&content) {
-            self.resume_cursor = Some((inode_id, u64::MAX));
+            self.advance(GrepResume::AfterFile { inode_id });
             return Ok(false);
         }
         for found in line_matches(&content, &self.plan.pattern) {
-            if self.plan.resume.is_some_and(|(last_inode, last_offset)| {
-                inode_id == last_inode && found.byte_offset <= last_offset
-            }) {
+            if matches!(
+                self.plan.resume,
+                Some(GrepResume::InFile { inode_id: last_inode, after_offset })
+                    if inode_id == last_inode && found.byte_offset <= after_offset
+            ) {
                 continue;
             }
             if self.matches.len() == self.limit {
-                self.has_more = true;
+                self.truncate();
                 return Ok(true);
             }
-            self.resume_cursor = Some((inode_id, found.byte_offset));
+            self.advance(GrepResume::InFile {
+                inode_id,
+                after_offset: found.byte_offset,
+            });
             self.matches.push(GrepMatch {
                 path: candidate.path.clone(),
                 inode_id,
@@ -939,7 +979,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                 line_truncated: found.line_truncated,
             });
         }
-        self.resume_cursor = Some((inode_id, u64::MAX));
+        self.advance(GrepResume::AfterFile { inode_id });
         Ok(false)
     }
 
@@ -947,30 +987,46 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
         if !exhausts_page {
             return false;
         }
-        self.has_more = true;
-        fold_rejected_frontier(&mut self.resume_cursor, self.rejected_frontier);
+        self.truncate_after_rejected_frontier();
         true
     }
 
-    fn next_cursor(&self) -> Result<Option<String>> {
-        if !self.has_more {
-            return Ok(None);
+    fn advance(&mut self, position: GrepResume) {
+        self.progress = PageProgress::Scanning(Some(position));
+    }
+
+    /// Stops the page on a budget exit, past every candidate it rejected.
+    fn truncate_after_rejected_frontier(&mut self) {
+        if let PageProgress::Scanning(position) = &mut self.progress {
+            fold_rejected_frontier(position, self.rejected_frontier);
         }
-        let (last_inode_id, last_byte_offset) =
-            self.resume_cursor.or(self.plan.resume).ok_or_else(|| {
-                CoreError::Internal(
-                    "a truncated page must have scanned at least one candidate".to_owned(),
-                )
-            })?;
-        Ok(Some(
+        self.truncate();
+    }
+
+    fn truncate(&mut self) {
+        let position = match self.progress {
+            PageProgress::Scanning(position) => {
+                position.expect("a truncated page should have scanned at least one candidate")
+            }
+            PageProgress::Truncated(position) => position,
+        };
+        self.progress = PageProgress::Truncated(position);
+    }
+
+    fn next_cursor(&self) -> Option<String> {
+        let PageProgress::Truncated(position) = self.progress else {
+            return None;
+        };
+        let (last_inode_id, last_byte_offset) = position.cursor_position();
+        Some(
             encode_cursor(&GrepPageCursor {
                 head_seq: self.plan.head_seq,
                 last_inode_id,
                 last_byte_offset,
                 fingerprint: self.plan.fingerprint,
             })
-            .map_err(|error| CoreError::Internal(error.to_string()))?,
-        ))
+            .expect("a grep page cursor should encode"),
+        )
     }
 }
 
@@ -1049,7 +1105,7 @@ async fn scan_candidate_inodes(
 pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
     const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
 
-    if content.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES {
+    if content.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES {
         return false;
     }
     let sample = &content[..content.len().min(ELIGIBILITY_SAMPLE_BYTES)];
@@ -1086,10 +1142,19 @@ mod tests {
     fn rejected_frontier_folds_forward_only() {
         let mut cursor = None;
         fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
-        assert_eq!(cursor, Some((InodeId(9), u64::MAX)));
-        cursor = Some((InodeId(12), 40));
+        assert_eq!(
+            cursor,
+            Some(GrepResume::AfterFile {
+                inode_id: InodeId(9)
+            })
+        );
+        let ahead = GrepResume::InFile {
+            inode_id: InodeId(12),
+            after_offset: 40,
+        };
+        cursor = Some(ahead);
         fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
-        assert_eq!(cursor, Some((InodeId(12), 40)));
+        assert_eq!(cursor, Some(ahead));
     }
 
     #[test]

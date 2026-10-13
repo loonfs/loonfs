@@ -4,7 +4,7 @@
 #![allow(clippy::panic)]
 
 use crate::common::{data_wal_put_for, expect_code, writer, writer_epoch};
-use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionState, SharedObjectStore, Writable};
+use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
 use std::sync::{Arc, Barrier};
@@ -133,8 +133,7 @@ async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone()
         .expect("first mutation lands");
     second.await.expect("second mutation lands");
     let report = close.await.expect("close namespace session");
-    assert!(report.was_open);
-    assert_eq!(report.drained_commits, 2);
+    assert_eq!(report.drained_commits, Some(2));
     assert!(!report.fenced);
 }
 
@@ -200,7 +199,7 @@ async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
             ErrorCode::WriterFenced,
         );
     }
-    assert_eq!(handle_a.session_state(), NamespaceSessionState::Fenced);
+    assert_eq!(handle_a.session_status(), NamespaceSessionStatus::Fenced);
     let report = handle_a.close().await.expect("close fenced session");
     assert!(report.fenced);
 
@@ -256,7 +255,7 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
     let reopened = writer
         .open_namespace(&namespace_id)
         .expect("reopen namespace");
-    assert_eq!(reopened.session_state(), NamespaceSessionState::Open);
+    assert_eq!(reopened.session_status(), NamespaceSessionStatus::Open);
     reopened
         .create_directory("/reopened", &loonfs_test_support::test_actor())
         .await
@@ -414,5 +413,5 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
     );
     assert!(namespaces
         .iter()
-        .all(|namespace| namespace.session_state() == NamespaceSessionState::Open));
+        .all(|namespace| namespace.session_status() == NamespaceSessionStatus::Open));
 }

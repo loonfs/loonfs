@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 const TEST_PART_BYTES: u64 = 1024 * 1024;
 /// Payload just above the streaming threshold, split into eight full parts
 /// and one partial part.
-const TEST_PAYLOAD_BYTES: usize = STREAMING_PUT_MIN_BYTES as usize + 1_000;
+const TEST_PAYLOAD_BYTES: usize = loonfs_types::usize_from_u64(MIN_STREAMING_PUT_BYTES) + 1_000;
 /// Parts [`TEST_PAYLOAD_BYTES`] is cut into at [`TEST_PART_BYTES`].
 const TEST_PAYLOAD_PARTS: u32 = 9;
 
@@ -105,7 +105,7 @@ fn watched_source(payload: &[u8], chunk_bytes: usize) -> (PayloadSource, Arc<Ret
 }
 
 fn payload(len: usize) -> Vec<u8> {
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+    (0..251_u8).cycle().take(len).collect()
 }
 
 fn namespace_id() -> NamespaceId {
@@ -324,7 +324,8 @@ fn commit_landed() -> Outcome {
 /// completion and the commit.
 fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true), begin_multipart()];
-    let window = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32;
+    let window =
+        u32::try_from(DIRECT_MULTIPART_PARTS_IN_FLIGHT).expect("the window should fit u32");
     let mut next = 1;
     while next <= parts {
         let wave = window.min(parts + 1 - next);
@@ -419,7 +420,10 @@ fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true)];
     let window = DIRECT_MULTIPART_PARTS_IN_FLIGHT;
     for wave in missing.chunks(window) {
-        script.push(signed_parts(wave[0], wave.len() as u32));
+        script.push(signed_parts(
+            wave[0],
+            u32::try_from(wave.len()).expect("a wave should fit u32"),
+        ));
         for part_number in wave {
             script.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
         }
@@ -437,15 +441,14 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
 
     // The first run gets through two waves and is cut off before the third
     // is signed: the script runs out where the interruption did.
-    let landed = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 * 2;
+    let window =
+        u32::try_from(DIRECT_MULTIPART_PARTS_IN_FLIGHT).expect("the window should fit u32");
+    let landed = window * 2;
     let mut first = vec![capabilities(true), begin_multipart()];
     for wave in 0..2u32 {
-        let first_part = wave * DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 + 1;
-        first.push(signed_parts(
-            first_part,
-            DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32,
-        ));
-        for part_number in first_part..first_part + DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 {
+        let first_part = wave * window + 1;
+        first.push(signed_parts(first_part, window));
+        for part_number in first_part..first_part + window {
             first.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
         }
     }
@@ -479,7 +482,8 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
 
     // The rerun sends only parts 9 onward.
     let missing: Vec<u32> = (landed + 1..=TEST_PAYLOAD_PARTS).collect();
-    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let (source, retention) =
+        watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
     let transport = scripted_transport::script(resumed_script(&missing, uploaded));
     let resumed_journal = RecordingJournal::default();
     client(&transport)
@@ -527,7 +531,8 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
         checksum_algorithm: ChecksumAlgorithm::Crc32c,
         parts: Vec::new(),
     };
-    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let (source, retention) =
+        watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
     let journal = RecordingJournal::default();
 
     client(&transport)
@@ -558,7 +563,8 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
 #[tokio::test]
 async fn a_direct_multipart_put_holds_only_its_window() {
     let payload = payload(TEST_PAYLOAD_BYTES);
-    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let (source, retention) =
+        watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
     let transport =
         scripted_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
 
@@ -779,7 +785,8 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
 async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
     let uploaded = content_ref(&payload);
-    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let (source, retention) =
+        watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
     let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             direct_put: true,
@@ -816,7 +823,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         "a payload sent in one piece was assembled whole somewhere"
     );
     assert!(
-        object_write.largest_body_chunk() <= TEST_PART_BYTES as usize,
+        object_write.largest_body_chunk() <= loonfs_types::usize_from_u64(TEST_PART_BYTES),
         "one body piece was larger than a source read: {} bytes",
         object_write.largest_body_chunk()
     );
@@ -972,7 +979,7 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
         }
         let expected_attempts = script.len();
         let transport = scripted_transport::script(script);
-        let bytes = vec![0; TEST_PART_BYTES as usize * 5];
+        let bytes = vec![0; loonfs_types::usize_from_u64(TEST_PART_BYTES) * 5];
         let error = client_without_retry(&transport)
             .put_file_stream_resumable(
                 &spec(),

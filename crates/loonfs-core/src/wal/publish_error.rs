@@ -1,11 +1,12 @@
 //! Failures while publishing a numbered WAL object, and how a retry treats them.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use loonfs_types::api::v0::Commit;
 use loonfs_types::ErrorCode;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum WalPublishError {
     #[error("WAL number was taken by another publication")]
     NumberTaken,
@@ -27,7 +28,7 @@ impl WalPublishError {
 /// Returns whether a candidate with this result is published again: a taken
 /// WAL number, an expired budget, or an unknown outcome. The retry keeps the
 /// commit ID, so a candidate that already committed replays its receipt.
-pub fn is_retryable_wal_publish(result: &Result<Commit, CoreError>) -> bool {
+pub fn is_retryable_wal_publish(result: &Result<Commit>) -> bool {
     matches!(
         result,
         Err(CoreError::WalPublish(
@@ -45,9 +46,9 @@ pub fn is_retryable_wal_publish(result: &Result<Commit, CoreError>) -> bool {
 /// it. A later failure also does not prove that an earlier put with an unknown
 /// outcome failed; only a success or a receipt replay settles that.
 pub fn settle_publish_attempt<C>(
-    results: &mut [Option<Result<Commit, CoreError>>],
+    results: &mut [Option<Result<Commit>>],
     attempted: impl IntoIterator<Item = (usize, C)>,
-    observed: Vec<Result<Commit, CoreError>>,
+    observed: Vec<Result<Commit>>,
 ) -> Vec<(usize, C)> {
     let mut pending = Vec::new();
     for ((index, candidate), current) in attempted.into_iter().zip(observed) {

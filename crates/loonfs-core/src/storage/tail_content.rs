@@ -148,7 +148,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         candidate = candidate
             .into_iter()
             .filter_map(|piece| {
-                let skipped = skip.min(piece.len() as u64) as usize;
+                let skipped = loonfs_types::usize_from_u64(skip.min(piece.len() as u64));
                 skip -= skipped as u64;
                 (skipped < piece.len()).then(|| piece.slice(skipped..))
             })
@@ -190,7 +190,12 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         .assemble(&object_key, &sources, candidate, &expected)
         .await;
     if let Err(error) = written {
-        tracing::error!(object_key, %error, "content write failed");
+        tracing::error!(
+            namespace_id = %newest.owner_namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "content write failed"
+        );
         return Err(match error {
             ImmutableWriteError::DifferentObject { .. }
             | ImmutableWriteError::StoredChecksumMissing { .. } => CoreError::NamespaceCorrupt(

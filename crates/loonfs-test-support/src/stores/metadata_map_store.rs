@@ -48,7 +48,7 @@ impl<S> MetadataMapStore<S> {
     /// Reports matching objects as last modified at unix epoch zero.
     pub fn aged(inner: S, keys: KeyPredicate) -> Self {
         Self::new(inner, keys, |mut metadata| {
-            metadata.last_modified_ms = Some(0);
+            metadata.last_modified_at_ms = Some(0);
             metadata
         })
     }
@@ -56,7 +56,7 @@ impl<S> MetadataMapStore<S> {
     /// Removes last-modified timestamps from matching metadata.
     pub fn without_last_modified(inner: S, keys: KeyPredicate) -> Self {
         Self::new(inner, keys, |mut metadata| {
-            metadata.last_modified_ms = None;
+            metadata.last_modified_at_ms = None;
             metadata
         })
     }
@@ -198,14 +198,14 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
             .map(move |result| {
                 result.map(|mut entry| {
                     if keys.matches(&entry.key) {
-                        entry.last_modified_ms = transform(ObjectMetadata {
-                            last_modified_ms: entry.last_modified_ms,
+                        entry.last_modified_at_ms = transform(ObjectMetadata {
+                            last_modified_at_ms: entry.last_modified_at_ms,
                             etag: None,
                             version: None,
                             size_bytes: 0,
                             checksum: None,
                         })
-                        .last_modified_ms;
+                        .last_modified_at_ms;
                     }
                     entry
                 })

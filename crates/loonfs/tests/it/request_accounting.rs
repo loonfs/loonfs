@@ -8,7 +8,7 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
+    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
     PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_types::AbsolutePath;
@@ -132,13 +132,13 @@ async fn warm_phase_request_accounting() {
     // steps a few times so the manifest ends with a seed base plus a few delta
     // runs and a WAL tail, like the 10k benchmark build.
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-maintenance"))
         .build()
         .await
         .expect("build maintenance")
@@ -178,7 +178,7 @@ async fn warm_phase_request_accounting() {
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
             candidates.push(loonfs::publish::CommitCandidate::prepared(
-                loonfs::publish::CommitRequest::single(
+                loonfs::publish::CommitIntent::single(
                     loonfs::CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -201,7 +201,7 @@ async fn warm_phase_request_accounting() {
             maintenance
                 .maintain_metadata_with_options(
                     &namespace_id,
-                    &MetadataMaintenanceOptions {
+                    &MaintainMetadataOptions {
                         max_wal_tail_objects: std::num::NonZeroU64::MIN,
                         ..Default::default()
                     },
@@ -230,7 +230,7 @@ async fn warm_phase_request_accounting() {
         .expect("build reader");
     let namespace = reader.namespace(&namespace_id);
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(1_000))
+        .effective_limit(Some(1_000))
         .expect("valid limit");
     let mut listed = 0usize;
     let mut cursor = None;
@@ -259,7 +259,7 @@ async fn warm_phase_request_accounting() {
     report("warm read", &log.take_gets(), &segments);
 
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("acct-writer-2")
+        .writer_id(loonfs_test_support::ids::writer_id("acct-writer-2"))
         .min_publish_interval_ms(0)
         .build()
         .await

@@ -17,13 +17,13 @@
 //!
 //! ```no_run
 //! # async fn run(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
-//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions};
+//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, WriterId};
 //!
 //! let actor_id = ActorId::parse("usr_8f3c").expect("valid actor id");
 //! let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 //!
 //! let runtime = LoonFs::builder(store_config)
-//!     .writer_id("server-a")
+//!     .writer_id(WriterId::parse("server-a").expect("valid writer id"))
 //!     .build()
 //!     .await?;
 //! runtime
@@ -75,11 +75,12 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
-    ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, RetentionTarget,
-    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
+    CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileContentStream, GcOptions,
+    ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
+    MetadataViewError, RetentionTarget, WriterFence, CONTENT_READ_CHUNK_BYTES,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
@@ -116,7 +117,8 @@ pub mod engine {
         DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
     pub use loonfs_core::limits::{
-        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS,
+        UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
     pub use loonfs_core::time::{Deadline, Observation};
     pub use loonfs_core::{
@@ -137,7 +139,7 @@ pub mod requests {
 /// Commit types used by integrations that submit classified mutations to
 /// the runtime publisher.
 ///
-/// Server handlers build [`publish::CommitRequest`] values, and lower-level
+/// Server handlers build [`publish::CommitIntent`] values, and lower-level
 /// integrations may submit [`publish::CommitCandidate`] values directly.
 /// Most embedded applications do not need this module.
 pub mod publish {
@@ -147,8 +149,8 @@ pub mod publish {
     };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
-        CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
-        InlineContent, PreparedContent,
+        CommitCandidate, CommitIntent, ContentPreparationError, FilesystemOperation, InlineContent,
+        PreparedContent,
     };
 }
 
@@ -198,10 +200,11 @@ pub mod control {
 }
 
 pub use loonfs_objectstore::{
-    ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
+    ByteStream, ConfiguredObjectStoreKind, ObjectStore, ObjectStoreError, ObjectStoreErrorKind,
+    SharedObjectStore, StoreConfig,
 };
 
-pub use config::{InlineContentPolicy, PublicationLimits};
+pub use config::{InlineContentPolicy, PublicationPolicy};
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,
@@ -209,26 +212,28 @@ pub use execution_budget::{
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
+    MetadataMaintenanceOutcome, PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager,
+    TrashPager,
 };
 pub use handle::{
-    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Namespace, ReadOnly, Writable,
+    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,
+    Writable,
 };
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_HEAD_STATE_BYTES,
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
-    AccessState, AdvanceRetentionOptions, AppendFileByInodeOptions, AppendFileOptions,
+    AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
     AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, DownloadOptions,
-    ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ForkNamespaceOptions, ListOptions, MaintainMetadataOptions, MoveOptions, PutFileOptions,
     ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
     UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
-pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
-pub use trace::{payload_class, TraceMode, TraceStoreKind};
+pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
+pub use trace::{payload_class, TraceMode};
 
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -313,8 +318,8 @@ impl Error {
             Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {
                 operation_index,
-                source,
-            }) => match source.as_ref() {
+                error,
+            }) => match error.as_ref() {
                 CoreError::InvalidCommitField { field, .. } => {
                     Some(format!("/operations/{operation_index}/{field}"))
                 }

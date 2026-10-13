@@ -134,7 +134,9 @@ impl<S> FakeMultipartStore<S> {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, OpenUpload>> {
-        self.open.lock().unwrap_or_else(|err| err.into_inner())
+        self.open
+            .lock()
+            .expect("the open upload lock should not be poisoned")
     }
 }
 

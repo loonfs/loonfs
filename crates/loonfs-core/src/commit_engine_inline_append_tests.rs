@@ -19,7 +19,7 @@ fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
 }
 
 fn request(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitCandidate {
-    CommitCandidate::new(CommitRequest {
+    CommitCandidate::new(CommitIntent {
         commit_id: CommitId::parse(commit_id).expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -58,7 +58,7 @@ async fn revision_bytes(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("view")
-        .get_file_revision_bytes(
+        .read_file_revision_bytes(
             store,
             path,
             RevisionNo(revision_no),
@@ -438,7 +438,7 @@ async fn empty_and_oversized_appends_are_refused_before_planning() {
     match publish(&mut engine, &store, &context, empty).await {
         Err(CoreError::FailedOperation {
             operation_index: 0,
-            source,
+            error: source,
         }) if matches!(
             *source,
             CoreError::InvalidCommitField {
@@ -783,7 +783,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
             "base",
             vec![inline(&namespace_id, Bytes::copy_from_slice(&bytes))],
         );
-        base.request
+        base.intent
             .operations
             .extend((1..count).map(|_| append("/base-0", &bytes)));
         publish(&mut engine, &store, &context, base)
@@ -826,7 +826,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
         sizes.push(
             loonfs_types::format::wal::encode_wal_object_envelope_zstd(wal.into_payload())
                 .expect("encode WAL")
-                .document_len(),
+                .document_bytes(),
         );
     }
     assert_eq!(sizes[0], sizes[1]);
@@ -890,8 +890,10 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     )
     .await
     .expect_err("missing base bytes");
-    assert!(matches!(error, CoreError::FailedOperation { source, .. }
+    assert!(
+        matches!(error, CoreError::FailedOperation { error: source, .. }
         if matches!(*source, CoreError::NamespaceCorrupt(ref message)
-            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3"))));
+            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3")))
+    );
     assert_no_writes(&store);
 }

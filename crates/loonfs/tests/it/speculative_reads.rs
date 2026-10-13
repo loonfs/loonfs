@@ -9,7 +9,7 @@ use loonfs::{
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_test_support::stores::{OperationClass, RecordingStore};
+use loonfs_test_support::stores::{OperationSelector, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -20,7 +20,7 @@ async fn writer_with_file(
     namespace_id: &NamespaceId,
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("speculative-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("speculative-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -66,7 +66,9 @@ async fn an_unchanged_view_resolves_the_path_once() {
     let namespace_id = NamespaceId::parse("speculative").expect("valid namespace id");
     let _writer = writer_with_file(&store, &namespace_id).await;
     LoonFs::builder_with_store(store.clone())
-        .writer_id("speculative-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "speculative-maintenance",
+        ))
         .build()
         .await
         .expect("build maintenance")
@@ -85,7 +87,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         .read_file(PATH)
         .await
         .expect("ordinary read");
-    let one_resolution = log.count(OperationClass::Get);
+    let one_resolution = log.count(OperationSelector::Get);
     assert!(
         one_resolution > 0,
         "resolution should read metadata segments"
@@ -104,7 +106,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         .expect("speculative read");
     assert_eq!(read.bytes, b"first");
     assert_eq!(
-        log.count(OperationClass::Get),
+        log.count(OperationSelector::Get),
         one_resolution,
         "an unchanged view must not resolve the path a second time"
     );
@@ -157,7 +159,7 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
 async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     use bytes::Bytes;
     use loonfs_core::publish::{
-        CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+        CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
     };
     use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
     use loonfs_test_support::stores::KeyPredicate;
@@ -199,7 +201,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     })
     .collect();
     let candidate = CommitCandidate::with_inline_content(
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse("inline").expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,

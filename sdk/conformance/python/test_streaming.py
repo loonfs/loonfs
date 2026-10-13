@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from loonfs.server import AsyncLoonFS, LoonFS
-from loonfs._transfer_runtime import _RANGE_WINDOW, _checksum
+from loonfs._transfer_runtime import _RANGE_RESPONSES_IN_FLIGHT, _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/streaming_downloads.json").read_text()
@@ -267,11 +267,11 @@ def test_streaming_download_requests_a_window_of_ranges_while_one_is_read():
             "demo", path="/file", request_options={"timeout": 7}
         ) as stream:
             assert next(stream) == b"12"
-            assert all(event.wait(5) for event in requested[:_RANGE_WINDOW])
-            assert len(object_requests(requests)) == _RANGE_WINDOW
-            assert not requested[_RANGE_WINDOW].is_set()
+            assert all(event.wait(5) for event in requested[:_RANGE_RESPONSES_IN_FLIGHT])
+            assert len(object_requests(requests)) == _RANGE_RESPONSES_IN_FLIGHT
+            assert not requested[_RANGE_RESPONSES_IN_FLIGHT].is_set()
             assert next(stream) == b"34"
-            assert requested[_RANGE_WINDOW].wait(5)
+            assert requested[_RANGE_RESPONSES_IN_FLIGHT].wait(5)
             assert b"".join(stream) == b"56789"
     assert sorted(object_requests(requests)) == [f"/object/{i}" for i in range(5)]
     assert all(body.closed for body in bodies)
@@ -295,12 +295,12 @@ def test_async_streaming_download_requests_a_window_of_ranges_while_one_is_read(
                 "demo", path="/file", request_options={"timeout": 7}
             ) as stream:
                 assert await stream.__anext__() == b"12"
-                for event in requested[:_RANGE_WINDOW]:
+                for event in requested[:_RANGE_RESPONSES_IN_FLIGHT]:
                     await asyncio.wait_for(event.wait(), 5)
-                assert len(object_requests(requests)) == _RANGE_WINDOW
-                assert not requested[_RANGE_WINDOW].is_set()
+                assert len(object_requests(requests)) == _RANGE_RESPONSES_IN_FLIGHT
+                assert not requested[_RANGE_RESPONSES_IN_FLIGHT].is_set()
                 assert await stream.__anext__() == b"34"
-                await asyncio.wait_for(requested[_RANGE_WINDOW].wait(), 5)
+                await asyncio.wait_for(requested[_RANGE_RESPONSES_IN_FLIGHT].wait(), 5)
                 assert b"".join([chunk async for chunk in stream]) == b"56789"
         return requests
 

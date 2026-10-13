@@ -4,7 +4,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::{DestinationBehavior, NamespaceId, PutFileOptions, TraceStoreKind};
+use loonfs::{ConfiguredObjectStoreKind, DestinationBehavior, NamespaceId, PutFileOptions};
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let fs = open_runtime_with(store(temp_dir.path()), "metrics-test", |builder| {
         builder
-            .trace_store_kind(TraceStoreKind::LocalFs)
+            .store_kind(ConfiguredObjectStoreKind::LocalFs)
             .object_store_metrics_recorder(recorder.clone())
     });
 
@@ -30,7 +30,7 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
         .any(|sample| sample.operation == ObjectStoreOperation::Put));
     assert!(samples
         .iter()
-        .all(|sample| sample.store_kind.as_deref() == Some("local_fs")));
+        .all(|sample| sample.store_kind.as_deref() == Some("local-fs")));
 }
 
 #[test]

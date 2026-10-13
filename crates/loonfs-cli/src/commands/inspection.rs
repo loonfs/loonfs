@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::resolve_profile;
-use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
+use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
 use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
@@ -233,7 +233,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .remote_connectivity()
             .await;
         checks.push(check_from_backend_result(
@@ -252,7 +252,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .client
             .get_capabilities()
             .await
@@ -275,7 +275,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .remote_health()
             .await;
         checks.push(check_from_backend_result(
@@ -300,7 +300,7 @@ pub(crate) async fn run_doctor(
     }
 
     let capability_result = if remote {
-        remote_capabilities.expect("remote auth check records its capability result")
+        remote_capabilities.expect("the remote auth check should record its capability result")
     } else if let Some(target) = &target {
         target
             .client
@@ -390,8 +390,7 @@ async fn namespace_check(
     args: &DoctorArgs,
     target: Option<&ResolvedTarget>,
 ) {
-    let namespace = match resolve_namespace(profile_name, profile, args.target.namespace.as_deref())
-    {
+    let namespace = match resolve_namespace(profile_name, profile, args.target.namespace.as_ref()) {
         Ok(resolved) => resolved.namespace,
         Err(error) if error.is_no_default_namespace() => {
             checks.push(skipped(
@@ -472,10 +471,10 @@ fn capability_document_check(result: Result<CapabilityDocument, CliError>) -> Do
 }
 
 fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
-    let status = match store_probe_verdict(&response) {
-        StoreProbeVerdict::Failed { .. } => DoctorStatus::Failed,
-        StoreProbeVerdict::Unsupported { .. } => DoctorStatus::Warning,
-        StoreProbeVerdict::Passed => DoctorStatus::Ok,
+    let status = match store_probe_run_outcome(&response) {
+        StoreProbeRunOutcome::Failed { .. } => DoctorStatus::Failed,
+        StoreProbeRunOutcome::Unsupported { .. } => DoctorStatus::Warning,
+        StoreProbeRunOutcome::Passed => DoctorStatus::Ok,
     };
     DoctorCheck {
         name: DoctorCheckName::StoreProbe.as_str().to_owned(),
@@ -603,7 +602,8 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+        FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+        RecordingStore,
     };
     use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
     use std::collections::BTreeMap;
@@ -624,7 +624,7 @@ mod tests {
                 LocalFsStore::with_key_prefix(directory.path(), Some("tenant"))
                     .expect("open scoped store"),
                 KeyPredicate::any(),
-                OperationClass::List,
+                OperationSelector::List,
                 InjectedError::PermissionDenied("private provider detail".to_owned()),
             );
             if denied {

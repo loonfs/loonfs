@@ -11,13 +11,11 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         let directory = tempdir().expect("temporary store");
         let mut config = test_config(directory.path(), "composed-writer");
         config.maintenance = if serves_maintenance {
-            crate::MaintenanceMode::ServeAndMaintain
+            crate::JobMode::ServeAndMaintain
         } else {
-            crate::MaintenanceMode::MaintainOnly
+            crate::JobMode::MaintainOnly
         };
-        let (router, state) = app(config, AppOptions::default())
-            .await
-            .expect("server app");
+        let (router, state) = app(config, AppConfig::default()).await.expect("server app");
         let router = if serves_maintenance {
             router
         } else {

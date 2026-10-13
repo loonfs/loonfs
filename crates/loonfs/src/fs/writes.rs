@@ -2,7 +2,7 @@
 //! publication pipeline they go through.
 
 use super::core::RuntimeCore;
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::Result;
@@ -20,8 +20,8 @@ fn single_operation(
     actor: &ActorId,
     commit: &CommitOptions,
     operation: FilesystemOperation,
-) -> CommitRequest {
-    CommitRequest::single(
+) -> CommitIntent {
+    CommitIntent::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
         actor.clone(),
         commit.message.clone(),
@@ -265,7 +265,7 @@ impl Namespace<Writable> {
                 let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
                     object_key: "upload body".to_owned(),
                     message: error.public_message().into_owned(),
-                    class: loonfs_objectstore::ObjectStoreErrorClass::of(&error),
+                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })?;
                 let take = chunk.len().min(threshold + 1 - buffered.len());
                 buffered.extend_from_slice(&chunk.split_to(take));
@@ -467,7 +467,7 @@ impl Namespace<Writable> {
             .core
             .pinned_metadata_read(&content_ref.owner_namespace_id)
             .await?;
-        owner.require_administrator(&context).await?;
+        owner.ensure_administrator(&context).await?;
         let owner_location = Some(
             owner
                 .resolve_content_location(&content_ref, &context)
@@ -922,7 +922,7 @@ impl Namespace<Writable> {
             &options.commit,
             FilesystemOperation::UpdateAccess {
                 path: loonfs_types::AbsolutePath::parse(absolute_path)
-                    .map_err(|error| loonfs_core::Error::InvalidPath(error.to_string()))?,
+                    .map_err(|error| loonfs_core::CoreError::InvalidPath(error.to_string()))?,
                 boundary: access.boundary,
                 grants: access.grants,
                 expected_inode_id: options.expected_inode_id,
@@ -994,7 +994,7 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn commit(&self, request: CommitRequest) -> Result<Commit> {
+    pub async fn commit(&self, request: CommitIntent) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(CommitCandidate::new(request))
             .await
@@ -1018,7 +1018,7 @@ impl Namespace<Writable> {
     )]
     pub async fn commit_prepared(
         &self,
-        request: CommitRequest,
+        request: CommitIntent,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
@@ -1085,14 +1085,6 @@ impl Namespace<Writable> {
     }
 }
 
-pub(crate) struct EnginePublishResult {
-    pub(crate) results: Vec<std::result::Result<Commit, crate::CoreError>>,
-    pub(crate) wal_tail_objects: u64,
-    pub(crate) wal_tail_inline_bytes: usize,
-    pub(crate) wal_tail_observed: bool,
-    pub(crate) wal_tail_discovered: bool,
-}
-
 /// Publishes already-classified candidates as one batch — one WAL
 /// object, one numbered WAL put — through the namespace
 /// publisher's own commit engine, and seeds the read cache with the
@@ -1108,7 +1100,7 @@ pub(crate) async fn publish_batch_with_engine(
     candidates: &[CommitCandidate],
     context: &loonfs_core::MutationContext,
     batch: &loonfs_core::time::Deadline,
-) -> EnginePublishResult {
+) -> loonfs_core::publish::NamespaceCommitEnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
     // Boxing erases the engine's deeply nested publish future; without
@@ -1121,11 +1113,5 @@ pub(crate) async fn publish_batch_with_engine(
             core.seed_namespace_read_cache(namespace_id, state);
         }
     }
-    EnginePublishResult {
-        results: publish.results,
-        wal_tail_objects: publish.wal_tail_objects,
-        wal_tail_inline_bytes: publish.wal_tail_inline_bytes,
-        wal_tail_observed: publish.wal_tail_observed,
-        wal_tail_discovered: publish.wal_tail_discovered,
-    }
+    publish
 }

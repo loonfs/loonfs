@@ -12,10 +12,10 @@ use crate::content_tokens::ContentTokenError;
 use crate::execution_budget::BudgetPermit;
 use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
-use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
+use crate::publish::{CommitIntent, ContentPreparationError, FilesystemOperation};
 use crate::{
-    ErrorCode, ExecutionBudget, MetadataCache, SharedObjectStore as SharedStore, TraceMode,
-    TraceStoreKind,
+    ConfiguredObjectStoreKind, ErrorCode, ExecutionBudget, MetadataCache,
+    SharedObjectStore as SharedStore, TraceMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,8 +26,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    OperationContext, OperationKind, RecordingStore,
+    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext,
+    OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
@@ -207,9 +207,9 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
             execution_budget: ExecutionBudget::default(),
             max_read_content_bytes: None,
             manifest_revalidation_interval_ms: 1000,
-            metadata_lsm_policy: loonfs_core::MetadataLsmPolicy::default(),
+            metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
             trace_mode: TraceMode::Remote,
-            trace_store_kind: TraceStoreKind::LocalFs,
+            store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
         },
         MetadataCache::default(),
         None,
@@ -222,7 +222,9 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentPolicy::default(),
-        identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
+        identity: WriterIdentity {
+            writer_id: loonfs_test_support::ids::writer_id("writer-a"),
+        },
         execution_budget: ExecutionBudget::default(),
         compactor_epochs: tokio::sync::Mutex::default(),
     })
@@ -251,10 +253,10 @@ async fn test_writer_with_interval(
     min_publish_interval_ms: u64,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(min_publish_interval_ms)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -266,12 +268,12 @@ async fn test_writer_with_cache(
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -493,7 +495,7 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         Arc::downgrade(&runtime.bits),
         tokio::runtime::Handle::current(),
         TEST_STANDALONE_PACING,
-        crate::PublicationLimits::default(),
+        crate::PublicationPolicy::default(),
         runtime.bits.execution_budget.clone(),
     );
     NamespacePublisher::new(namespace_id.clone(), &registry)
@@ -514,8 +516,8 @@ async fn wait_past_publish_pacing() {
 pub(super) fn create_directory_request(
     commit_id: impl Into<String>,
     directory_name: impl AsRef<str>,
-) -> CommitRequest {
-    CommitRequest::single(
+) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id.into()).expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -530,7 +532,7 @@ pub(super) fn create_directory_request(
 fn admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
-    request: CommitRequest,
+    request: CommitIntent,
 ) -> oneshot::Receiver<CommitResult> {
     try_admit_commit(publisher, namespace_id, request).expect("admit mutation")
 }
@@ -538,7 +540,7 @@ fn admit_commit(
 fn try_admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
-    request: CommitRequest,
+    request: CommitIntent,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let candidate = CommitCandidate::new(request);
     try_admit_candidate(publisher, namespace_id, candidate)
@@ -558,7 +560,7 @@ fn try_admit_prepared_candidate(
     candidate: PreparedCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.candidate.commit_id().clone();
-    drop(publisher.check_admission(&publisher.lock_state())?);
+    drop(publisher.admitted_session(&publisher.lock_state())?);
     let permit = publisher
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
@@ -642,7 +644,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             );
         }
         assert_eq!(
-            store.count(OperationClass::PutCreateIfAbsent),
+            store.count(OperationSelector::PutCreateIfAbsent),
             expected_batches.len()
         );
         publisher.wait_for_worker().await;
@@ -693,7 +695,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                     )
                 })
                 .collect();
-            let request = CommitRequest {
+            let request = CommitIntent {
                 commit_id: CommitId::parse(name).expect("commit"),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
@@ -730,7 +732,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
             );
         }
         assert_eq!(
-            store.count(OperationClass::PutCreateIfAbsent),
+            store.count(OperationSelector::PutCreateIfAbsent),
             expected_batches
         );
         publisher.wait_for_worker().await;
@@ -984,7 +986,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
     create_namespace(&runtime, &namespace_id).await;
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.admission = Arc::new(PublicationAdmission::new(
-        crate::PublicationLimits::default(),
+        crate::PublicationPolicy::default(),
         ExecutionBudget::builder()
             .max_admitted_requests(NonZeroUsize::MIN)
             .build(),
@@ -1061,7 +1063,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
                 .await
         })
     };
-    for _ in 0..CONTENTION_RETRY_LIMIT {
+    for _ in 0..MAX_CONTENTION_ATTEMPTS {
         wait_for_commit_waiters(&publisher, &commit_id, 1).await;
         let waiter = publisher_state(&publisher)
             .in_flight
@@ -1106,7 +1108,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
     store.wait_until_blocked().await;
 
     let mut pending = Vec::new();
-    for index in 0..crate::PublicationLimits::default()
+    for index in 0..crate::PublicationPolicy::default()
         .max_requests_per_namespace
         .get()
         - 3
@@ -1192,7 +1194,7 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
 
     store.block_next();
     let mut receivers = Vec::new();
-    for index in 0..crate::PublicationLimits::default()
+    for index in 0..crate::PublicationPolicy::default()
         .max_requests_per_namespace
         .get()
     {
@@ -1932,7 +1934,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     store.wait_until_blocked().await;
 
     let plain = create_directory_request("plain-mutation", "alpha");
-    let prepared = CommitRequest::single(
+    let prepared = CommitIntent::single(
         CommitId::parse("prepared-put").expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -2137,8 +2139,10 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .await
         .expect_err("drain surfaces the contained panic");
     assert!(
-        drain_error.to_string().contains("panicked"),
-        "drain reports panicked publisher tasks: {drain_error}"
+        drain_error
+            .to_string()
+            .contains("1 publisher task(s) panicked"),
+        "drain reports the count of panicked publisher tasks: {drain_error}"
     );
     assert_eq!(
         registry.shared.admission.used_requests(),
@@ -2158,7 +2162,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
@@ -2220,7 +2224,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     ));
     let namespace_id = NamespaceId::parse("inline-fold").expect("namespace");
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -2249,7 +2253,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let candidate = CommitCandidate::with_inline_content(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("inline").expect("commit"),
             loonfs_test_support::test_actor(),
             None,
@@ -2278,7 +2282,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         value.bytes().len() as u64
     );
     assert_eq!(folded.activity.file_revisions.get(), 1);
-    assert_eq!(store.count(OperationClass::Put), 1);
+    assert_eq!(store.count(OperationSelector::Put), 1);
     let reader = crate::LoonFs::builder_with_store(store.clone())
         .read_only()
         .build()
@@ -2293,7 +2297,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
             .bytes,
         value.bytes().as_ref()
     );
-    assert!(store.count(OperationClass::Read) > 0);
+    assert!(store.count(OperationSelector::Read) > 0);
     let input = namespace_writer
         .session()
         .publisher
@@ -2315,7 +2319,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .commit_candidate(candidate)
         .await
         .expect("folded receipt");
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
         loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
             .await
@@ -2336,7 +2340,7 @@ async fn a_failed_fold_reloads_the_tail() {
     ));
     let namespace_id = NamespaceId::parse("failed-fold").expect("valid namespace id");
     let writer = crate::LoonFs::builder_with_store(failing.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .build()
         .await
         .expect("build writer");
@@ -2429,7 +2433,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         metadata_manifest_prefix(&namespaces[0]),
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(one_fold_at_a_time())
         .build()
         .await
@@ -2475,7 +2479,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     }
     assert_eq!(writer.execution_budget().stats().folds_running, 1);
     let closing = tokio::spawn(namespace_writers[2].clone().close());
-    while namespace_writers[2].session_state() != NamespaceSessionState::Closed {
+    while namespace_writers[2].session_status() != NamespaceSessionStatus::Closed {
         tokio::task::yield_now().await;
     }
 
@@ -2516,7 +2520,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_b)),
     ));
     let writer = crate::LoonFs::builder_with_store(recording.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(one_fold_at_a_time())
         .build()
         .await
@@ -2583,7 +2587,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .await
         .expect("late fold settles");
     assert_eq!(
-        recording.count(OperationClass::Put),
+        recording.count(OperationSelector::Put),
         1,
         "the late fold must not write a second manifest"
     );
@@ -2647,7 +2651,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
 
     assert!(!matches!(
         publisher_state(&publisher).admission,
-        PublisherAdmissionState::Deleted
+        PublisherAdmissionStatus::Deleted
     ));
     let manifest =
         loonfs_core::control::load_namespace_current_manifest(blocking.inner(), &namespace_id)
@@ -2698,7 +2702,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
         metadata_manifest_prefix(&folding),
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(
             ExecutionBudget::builder()
                 .max_concurrent_folds(NonZeroUsize::MIN)
@@ -2835,7 +2839,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
 
     assert!(matches!(
         publisher_state(&publisher).admission,
-        PublisherAdmissionState::Deleted
+        PublisherAdmissionStatus::Deleted
     ));
     let late = try_admit_commit(
         &publisher,
@@ -2917,7 +2921,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let (deleted_while_blocked, delete_queued_while_blocked) = {
         let state = publisher_state(&publisher);
         (
-            matches!(state.admission, PublisherAdmissionState::Deleted),
+            matches!(state.admission, PublisherAdmissionStatus::Deleted),
             matches!(state.queue.back(), Some(WorkItem::Delete(_))),
         )
     };
@@ -3197,16 +3201,16 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     let b = NamespaceId::parse("b").expect("namespace");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &a));
     let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id("bounded-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("bounded-writer"))
         .execution_budget(
             ExecutionBudget::builder()
                 .max_admitted_requests(NonZeroUsize::new(2).expect("two requests"))
                 .max_concurrent_publications(NonZeroUsize::MIN)
                 .build(),
         )
-        .publication_limits(crate::PublicationLimits {
+        .publication_policy(crate::PublicationPolicy {
             max_requests_per_namespace: NonZeroUsize::new(1).expect("one request per namespace"),
-            ..crate::PublicationLimits::default()
+            ..crate::PublicationPolicy::default()
         })
         .build()
         .await
@@ -3348,7 +3352,7 @@ mod pin_folds;
 mod session_compaction;
 
 impl loonfs_core::time::WallClock for ManualMonotonicTimer {
-    fn now_ms(&self) -> Result<u64, crate::CoreError> {
-        Ok(self.0.load(AtomicOrdering::SeqCst))
+    fn now_ms(&self) -> u64 {
+        self.0.load(AtomicOrdering::SeqCst)
     }
 }

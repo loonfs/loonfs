@@ -47,7 +47,7 @@ pub(super) async fn classify_read_result<T>(
             load_checkpoint_read_basis(store, None, &context.head, checkpoint_id).await?;
         }
         ReadSource::Snapshot(snapshot_id) => {
-            let now_ms = core.now_ms()?;
+            let now_ms = core.now_ms();
             load_snapshot_read_basis(store, None, &context.head, snapshot_id, now_ms).await?;
         }
     }

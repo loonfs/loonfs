@@ -29,7 +29,7 @@ impl Client {
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
         query.pagination(limit, request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }

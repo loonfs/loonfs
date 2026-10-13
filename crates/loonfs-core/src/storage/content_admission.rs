@@ -91,7 +91,7 @@ impl PreparedContent {
                 .as_str()
                 .len()
                 .saturating_add(content_ref.content_id.as_str().len())
-                .saturating_add(content_ref.checksum.value.len()),
+                .saturating_add(content_ref.checksum.value.as_str().len()),
         }
     }
 
@@ -104,7 +104,7 @@ impl PreparedContent {
             .as_str()
             .len()
             .saturating_add(content_ref.content_id.as_str().len())
-            .saturating_add(content_ref.checksum.value.len())
+            .saturating_add(content_ref.checksum.value.as_str().len())
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {
@@ -176,6 +176,7 @@ struct ContentTokenPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ContentTokenError {
     #[error("content token is malformed")]
     Malformed,

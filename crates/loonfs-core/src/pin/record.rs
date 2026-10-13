@@ -16,14 +16,10 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::{NamespaceId, PinId};
 
-pub(crate) fn encode_pin(record: &PinPayload) -> crate::error::Result<Bytes> {
-    let object_key = pin(&record.namespace_id, &record.pin_id);
+pub(crate) fn encode_pin(record: &PinPayload) -> Bytes {
     encode_control_state(ControlObjectKind::Pin, record)
         .map(Bytes::from)
-        .map_err(|error| CoreError::Codec {
-            object_key,
-            message: error.to_string(),
-        })
+        .expect("a pin record should encode")
 }
 
 /// Writes a record under its freshly generated [`PinId`].
@@ -31,9 +27,18 @@ pub(crate) async fn write_pin<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
 ) -> Result<()> {
-    let encoded = encode_pin(record)?;
+    let encoded = encode_pin(record);
     let object_key = pin(&record.namespace_id, &record.pin_id);
-    create_control_object_under_generated_id(store, &object_key, encoded).await?;
+    if let Err(error) = create_control_object_under_generated_id(store, &object_key, encoded).await
+    {
+        tracing::error!(
+            namespace_id = %record.namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "pin write failed"
+        );
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -81,7 +86,7 @@ pub(crate) fn pin_key_ids(
     let namespace = parsed.owner_namespace_id();
     let identifier = parsed
         .identifier()
-        .expect("pin keys carry a pin identifier");
+        .expect("`parse_object_key` should give every pin key its pin ID");
     let namespace_id =
         NamespaceId::parse(namespace).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
@@ -295,7 +300,7 @@ mod tests {
         ];
 
         for (label, forged, expected) in cases {
-            let bytes = encode_pin(&forged).expect("record bytes");
+            let bytes = encode_pin(&forged);
             store
                 .put_overwrite(&object_key, bytes)
                 .await

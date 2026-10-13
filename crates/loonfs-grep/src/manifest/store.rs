@@ -4,12 +4,13 @@ use super::codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
     GrepManifestEnvelope,
 };
-use super::error::{GrepManifestError, Result};
+use super::error::GrepManifestError;
 use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
 use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
-use loonfs::{CoreError, StoreFailureClass};
+use loonfs::CoreError;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::{ManifestNo, NamespaceId};
 
@@ -38,7 +39,7 @@ impl LoadedGrepManifest {
 pub(crate) async fn load_grep_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<Option<LoadedGrepHint>> {
+) -> Result<Option<LoadedGrepHint>, GrepManifestError> {
     let object_key = hint_key(namespace_id);
     let Some(body) = store
         .get_with_metadata(&object_key)
@@ -70,7 +71,7 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-) -> Result<Option<GrepManifestEnvelope>> {
+) -> Result<Option<GrepManifestEnvelope>, GrepManifestError> {
     let object_key = manifest_key(namespace_id, &manifest_no);
     let Some(bytes) = store
         .get(&object_key, None)
@@ -105,7 +106,7 @@ pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     mut observed: Observation,
-) -> Result<Option<LoadedGrepManifest>> {
+) -> Result<Option<LoadedGrepManifest>, GrepManifestError> {
     let Some(mut hint) = load_grep_hint(store, namespace_id).await? else {
         return Ok(None);
     };
@@ -254,7 +255,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
 async fn create_grep_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<LoadedGrepHint> {
+) -> Result<LoadedGrepHint, GrepManifestError> {
     let object_key = hint_key(namespace_id);
     let state = GrepHint {
         namespace_id: namespace_id.clone(),
@@ -283,7 +284,7 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
     manifest_no: ManifestNo,
     mut current: LoadedGrepHint,
     deadline: &Deadline,
-) -> Result<LoadedGrepHint> {
+) -> Result<LoadedGrepHint, GrepManifestError> {
     let object_key = hint_key(namespace_id);
     while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
         let raised = GrepHint {
@@ -330,6 +331,6 @@ fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepManifestError 
     GrepManifestError::Store {
         object_key: object_key.to_owned(),
         message: error.public_message().into_owned(),
-        class: StoreFailureClass::of(error),
+        kind: ObjectStoreErrorKind::of(error),
     }
 }

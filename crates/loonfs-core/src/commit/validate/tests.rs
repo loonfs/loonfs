@@ -5,12 +5,12 @@
 
 #![allow(clippy::panic)]
 
-use super::super::{CommitOp, ResolvedBinding, ValidatedCommitPlan};
-use super::checks::{validate_ops, CommitNumbering};
+use super::super::{CommitOperation, ResolvedBinding, ValidatedCommitPlan};
+use super::checks::{validate_operations, CommitNumbering};
 use super::error::CommitOperand;
-use super::view::PublishValidationView;
+use super::session::PublishValidationSession;
 use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator};
-use crate::error::{CoreError, ErrorCode};
+use crate::error::{CoreError, ErrorCode, Result};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
@@ -65,7 +65,7 @@ fn wal_append_attributes(
     }]
 }
 
-fn planned(ops: Vec<CommitOp>) -> Vec<CommitOp> {
+fn planned(ops: Vec<CommitOperation>) -> Vec<CommitOperation> {
     ops
 }
 
@@ -239,18 +239,18 @@ fn validated_commit_id() -> CommitId {
 }
 
 async fn validate_planned_ops(
-    ops: &[CommitOp],
+    ops: &[CommitOperation],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
-) -> Result<Vec<WalCommitDelta>, CoreError> {
+) -> Result<Vec<WalCommitDelta>> {
     let accepted_rows = MetadataState::default();
     let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
-    let mut metadata_state = PublishValidationView::new(
+    let mut metadata_state = PublishValidationSession::new(
         InMemoryMetadataView::in_memory(&base, None, context.head.seq),
         &accepted_rows,
         committed_seq(context),
     );
-    validate_ops(
+    validate_operations(
         ops,
         &mut metadata_state,
         &mut CommitNumbering::default(),
@@ -263,16 +263,16 @@ async fn validate_planned_ops(
 }
 
 async fn build_commit_plan(
-    ops: &[CommitOp],
+    ops: &[CommitOperation],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
-) -> Result<CommitPlan, CommitValidationError> {
+) -> std::result::Result<CommitPlan, CommitValidationError> {
     let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
     for op in ops {
         let assigned = match op {
-            CommitOp::CreateDirectory { child_inode_id, .. }
-            | CommitOp::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
+            CommitOperation::CreateDirectory { child_inode_id, .. }
+            | CommitOperation::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
             _ => None,
         };
         if let Some(assigned) = assigned {
@@ -289,9 +289,7 @@ async fn build_commit_plan(
             CoreError::CommitValidation(error) => error,
             error => panic!("unexpected validation dependency error: {error}"),
         })?;
-    let resulting_next_inode_id = allocator
-        .commit_candidate(allocation)
-        .expect("commit test allocation");
+    let resulting_next_inode_id = allocator.commit_candidate(allocation);
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: validated_commit_id(),
@@ -315,7 +313,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
         wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(3));
-    let request = planned(vec![CommitOp::UpdateAttributes {
+    let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(2),
         base_attributes_revision_no: AttributesRevisionNo(1),
         attributes: test_attributes(&[("owner", "hopper")]),
@@ -353,7 +351,7 @@ async fn a_first_attribute_write_states_revision_zero() {
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = |base: u64| {
-        planned(vec![CommitOp::UpdateAttributes {
+        planned(vec![CommitOperation::UpdateAttributes {
             inode_id: InodeId(2),
             base_attributes_revision_no: AttributesRevisionNo(base),
             attributes: test_attributes(&[("owner", "ada")]),
@@ -383,7 +381,7 @@ async fn a_first_attribute_write_states_revision_zero() {
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = planned(vec![CommitOp::UpdateAttributes {
+    let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(9),
         base_attributes_revision_no: AttributesRevisionNo(0),
         attributes: test_attributes(&[("owner", "ada")]),
@@ -418,7 +416,7 @@ async fn stale_revision_precondition_is_rejected() {
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-    let request = planned(vec![CommitOp::ReplaceFile {
+    let request = planned(vec![CommitOperation::ReplaceFile {
         inode_id: InodeId(3),
         base_revision_no: RevisionNo(1),
         content_ref: content_ref("content-3"),
@@ -447,7 +445,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = planned(vec![CommitOp::CreateDirectory {
+    let request = planned(vec![CommitOperation::CreateDirectory {
         child_inode_id: InodeId(3),
         parent_inode_id: InodeId(1),
         display_name: test_display_name("docs"),
@@ -490,13 +488,13 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             delta_index: 1,
         },
     };
-    let reused_inode = CommitOp::CreateFile {
+    let reused_inode = CommitOperation::CreateFile {
         child_inode_id: InodeId(3),
         parent_inode_id: InodeId(1),
         display_name: test_display_name("copy.txt"),
         content_ref: content_ref("content-2"),
     };
-    let unbinds_another_child = CommitOp::Rename {
+    let unbinds_another_child = CommitOperation::Rename {
         inode_id: InodeId(3),
         source_binding: docs_binding,
         new_parent_inode_id: InodeId(1),
@@ -525,7 +523,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = vec![CommitOp::Rename {
+    let request = vec![CommitOperation::Rename {
         source_binding: ResolvedBinding {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
@@ -558,18 +556,18 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
     let request = planned(vec![
-        CommitOp::CreateDirectory {
+        CommitOperation::CreateDirectory {
             child_inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: test_display_name("docs"),
         },
-        CommitOp::CreateFile {
+        CommitOperation::CreateFile {
             child_inode_id: InodeId(3),
             parent_inode_id: InodeId(2),
             display_name: test_display_name("readme.txt"),
             content_ref: content_ref("content-1"),
         },
-        CommitOp::ReplaceFile {
+        CommitOperation::ReplaceFile {
             inode_id: InodeId(99),
             base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
@@ -611,7 +609,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let create_error = build_commit_plan(
-        &planned(vec![CommitOp::CreateFile {
+        &planned(vec![CommitOperation::CreateFile {
             child_inode_id: InodeId(4),
             parent_inode_id: InodeId(2),
             display_name: test_display_name("new.txt"),
@@ -636,7 +634,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     );
 
     let replace_error = build_commit_plan(
-        &planned(vec![CommitOp::ReplaceFile {
+        &planned(vec![CommitOperation::ReplaceFile {
             inode_id: InodeId(3),
             base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
@@ -669,7 +667,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = planned(vec![CommitOp::RestoreRevision {
+    let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(99),
         source_revision_no: RevisionNo(1),
         base_revision_no: RevisionNo(1),
@@ -696,7 +694,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = planned(vec![CommitOp::RestoreRevision {
+    let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(1),
         base_revision_no: RevisionNo(1),
@@ -732,7 +730,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let stale_base = build_commit_plan(
-        &planned(vec![CommitOp::RestoreRevision {
+        &planned(vec![CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
             base_revision_no: RevisionNo(1),
@@ -757,7 +755,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     );
 
     let missing_source = build_commit_plan(
-        &planned(vec![CommitOp::RestoreRevision {
+        &planned(vec![CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(99),
             base_revision_no: RevisionNo(2),
@@ -794,12 +792,12 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     // the expectation is that reference itself.
     let expected = content_ref("content-2");
     let request = planned(vec![
-        CommitOp::ReplaceFile {
+        CommitOperation::ReplaceFile {
             inode_id: InodeId(3),
             base_revision_no: RevisionNo(1),
             content_ref: expected.clone(),
         },
-        CommitOp::RestoreRevision {
+        CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(2),
             base_revision_no: RevisionNo(2),
@@ -836,12 +834,12 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let request = planned(vec![
-        CommitOp::RestoreRevision {
+        CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
             base_revision_no: RevisionNo(2),
         },
-        CommitOp::RestoreRevision {
+        CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(3),
             base_revision_no: RevisionNo(3),
@@ -882,7 +880,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let error = build_commit_plan(
-        &planned(vec![CommitOp::RestoreRevision {
+        &planned(vec![CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
             base_revision_no: RevisionNo(1),
@@ -939,7 +937,7 @@ async fn restore_revision_overflow_is_rejected() {
             &deltas,
         );
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = planned(vec![CommitOp::RestoreRevision {
+    let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),

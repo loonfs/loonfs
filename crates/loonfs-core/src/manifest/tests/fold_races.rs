@@ -2,7 +2,7 @@
 
 use super::fold::{fold_wal_tail, FoldedWalTail};
 use super::*;
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::claim_compactor;
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
@@ -38,7 +38,7 @@ impl Rival {
                         store,
                         namespace_id,
                         CompactorEpoch(0),
-                        MetadataLsmPolicy::default(),
+                        MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
                         Arc::default(),
                     )
@@ -141,7 +141,7 @@ impl Writer {
             values.push(value);
         }
         let candidate = CommitCandidate::with_inline_content(
-            CommitRequest {
+            CommitIntent {
                 commit_id: CommitId::parse(commit_id).expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
@@ -183,7 +183,7 @@ impl Writer {
                     &self.namespace_id,
                     &ManifestNo(basis.0 + number),
                 )),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
             ));
             gate.block_next();
             gates.push(Arc::clone(&gate));
@@ -374,8 +374,8 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
 async fn a_fold_survives_repeated_compaction_publications() {
     // The first attempt and every retry each lose to one claim.
     for (rivals, cold) in [
-        (CONTENTION_RETRY_LIMIT, false),
-        (CONTENTION_RETRY_LIMIT + 1, true),
+        (MAX_CONTENTION_ATTEMPTS, false),
+        (MAX_CONTENTION_ATTEMPTS + 1, true),
     ] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
@@ -452,7 +452,7 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
     let gate = BlockingStore::new(
         writer.store.clone(),
         KeyPredicate::manifest(&writer.namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     gate.block_next();
     let (checkpoint, ()) = futures::join!(

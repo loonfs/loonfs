@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use bytes::Bytes;
-use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, MetadataCache, NamespaceId,
@@ -26,7 +26,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ fn fail_content_blob_puts_store(root: &Path) -> FailStore<LocalFsStore> {
     FailStore::new(
         LocalFsStore::new(root).expect("create local-fs store"),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::Transport("injected content write failure".to_owned()),
     )
 }
@@ -55,7 +55,7 @@ fn fail_content_blob_heads_store(root: &Path) -> FailStore<LocalFsStore> {
     FailStore::new(
         LocalFsStore::new(root).expect("create local-fs store"),
         KeyPredicate::content_blob(),
-        OperationClass::Head,
+        OperationSelector::Head,
         InjectedError::Transport("injected checksum head failure".to_owned()),
     )
 }
@@ -175,7 +175,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         Checksum::crc64nvme(bytes)
     );
     assert_eq!(
-        raw_store.count(OperationClass::Read),
+        raw_store.count(OperationSelector::Read),
         0,
         "completion verifies the object from its stored checksum, not its bytes"
     );
@@ -333,8 +333,8 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
     // The put writes the blob exactly once and never reads it back: the
     // write's own ack is the durability proof the WAL put-if-absent waits on, so
     // validation issues no probe for content the put itself is writing.
-    assert_eq!(raw_store.count(OperationClass::Put), 1);
-    assert_eq!(raw_store.count(OperationClass::Read), 0);
+    assert_eq!(raw_store.count(OperationSelector::Put), 1);
+    assert_eq!(raw_store.count(OperationSelector::Read), 0);
 
     // A replace put rides the same overlapped path: new blob, no probe.
     raw_store.reset();
@@ -356,8 +356,8 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
     )
     .expect("replace file bytes");
 
-    assert_eq!(raw_store.count(OperationClass::Put), 1);
-    assert_eq!(raw_store.count(OperationClass::Read), 0);
+    assert_eq!(raw_store.count(OperationSelector::Put), 1);
+    assert_eq!(raw_store.count(OperationSelector::Read), 0);
 }
 
 #[test]
@@ -506,7 +506,7 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
             |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
                 let content_ref = prepared.content_ref().clone();
                 (
-                    CommitRequest::single(
+                    CommitIntent::single(
                         CommitId::parse(commit_id).expect("valid commit id"),
                         loonfs_test_support::test_actor(),
                         None,
@@ -751,7 +751,7 @@ fn a_mutation_request_appears_in_change_feed() {
     let response = fs
         .mutate_blocking(
             &namespace_id,
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id.clone(),
                 loonfs_test_support::test_actor(),
                 Some("create docs".to_owned()),

@@ -17,18 +17,18 @@ struct BloomLevel {
 
 impl BloomFilter {
     pub(crate) fn new(expected_entries: u64, seed: u64) -> Option<Self> {
-        Self::with_byte_limit(expected_entries, seed, MAX_BLOOM_FILTER_BYTES)
+        Self::with_max_bytes(expected_entries, seed, MAX_BLOOM_FILTER_BYTES)
     }
 
-    pub(crate) fn with_byte_limit(
+    pub(crate) fn with_max_bytes(
         expected_entries: u64,
         seed: u64,
-        byte_limit: usize,
+        max_bytes: usize,
     ) -> Option<Self> {
         let expected_entries = expected_entries.max(1);
-        let level = BloomLevel::new(expected_entries, seed, byte_limit)?;
+        let level = BloomLevel::new(expected_entries, seed, max_bytes)?;
         Some(Self {
-            remaining_bytes: byte_limit - level.bits.len(),
+            remaining_bytes: max_bytes - level.bits.len(),
             levels: vec![level],
             expected_entries,
             entries: 0,
@@ -62,13 +62,13 @@ impl BloomFilter {
 }
 
 impl BloomLevel {
-    fn new(expected_entries: u64, seed: u64, byte_limit: usize) -> Option<Self> {
+    fn new(expected_entries: u64, seed: u64, max_bytes: usize) -> Option<Self> {
         let bytes = expected_entries.checked_mul(10)?.div_ceil(8).max(1);
-        if bytes > byte_limit as u64 {
-            return None;
-        }
+        let bytes = usize::try_from(bytes)
+            .ok()
+            .filter(|bytes| *bytes <= max_bytes)?;
         Some(Self {
-            bits: vec![0; bytes as usize],
+            bits: vec![0; bytes],
             seed,
         })
     }
@@ -77,8 +77,9 @@ impl BloomLevel {
         let first = xxh64(bytes, self.seed);
         let step = xxh64(bytes, self.seed.wrapping_add(1));
         std::array::from_fn(|index| {
-            (first.wrapping_add((index as u64).wrapping_mul(step)) % (self.bits.len() as u64 * 8))
-                as usize
+            let position = first.wrapping_add((index as u64).wrapping_mul(step))
+                % (self.bits.len() as u64 * 8);
+            loonfs_types::usize_from_u64(position)
         })
     }
 
@@ -120,7 +121,7 @@ mod tests {
 
     #[test]
     fn the_byte_limit_counts_all_levels_and_refuses_growth_without_losing_keys() {
-        let mut filter = BloomFilter::with_byte_limit(2, 42, 30).expect("filter");
+        let mut filter = BloomFilter::with_max_bytes(2, 42, 30).expect("filter");
         for key in 0_u64..14 {
             filter.insert(&key.to_le_bytes()).expect("insert");
         }

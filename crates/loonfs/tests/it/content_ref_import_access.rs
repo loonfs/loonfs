@@ -4,7 +4,7 @@ use loonfs::AccessState;
 use loonfs::{CreateNamespaceOptions, Error, LoonFs, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -41,8 +41,8 @@ fn administrator_grants(administrator: &str) -> AccessGrants {
 /// Runs one collection pass on `namespace_id` at a clock far enough ahead
 /// that every unreferenced segment is past its age gate.
 async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    let now_ms = loonfs::current_time_ms().expect("wall clock")
-        + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS
+    let now_ms = loonfs::current_time_ms()
+        + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
         + 2 * loonfs::GcOptions::default().grace_window_ms;
     loonfs_core::gc_namespace(
         store,
@@ -70,7 +70,9 @@ async fn open_writer() -> (
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store)
-        .writer_id("content-ref-import-access")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "content-ref-import-access",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -124,7 +126,7 @@ async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -
 
 fn assert_forbidden_without_writes(recording: &RecordingStore<LocalFsStore>, error: Error) {
     assert_eq!(error.code(), ErrorCode::Forbidden);
-    assert_eq!(recording.count(OperationClass::Put), 0);
+    assert_eq!(recording.count(OperationSelector::Put), 0);
 }
 
 #[tokio::test]
@@ -136,7 +138,9 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let private_ref = publish_inline(&writer, &source).await;
     loonfs::LoonFs::builder_with_store(recording.clone())
-        .writer_id(loonfs_test_support::test_actor().as_str())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            loonfs_test_support::test_actor().as_str(),
+        ))
         .build()
         .await
         .expect("maintenance")
@@ -190,9 +194,9 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         loonfs_objectstore::layout::parse_object_key(operation.key()),
         Some(key) if key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
     )));
-    assert_eq!(recording.count(OperationClass::Put), 0);
-    assert_eq!(recording.count(OperationClass::CompareAndSwap), 0);
-    assert_eq!(recording.count(OperationClass::Delete), 0);
+    assert_eq!(recording.count(OperationSelector::Put), 0);
+    assert_eq!(recording.count(OperationSelector::CompareAndSwap), 0);
+    assert_eq!(recording.count(OperationSelector::Delete), 0);
 }
 
 #[tokio::test]
@@ -329,8 +333,8 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
         },
         &loonfs_core::MutationContext {
             writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
-            now_ms: loonfs::current_time_ms().expect("clock")
-                + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_MS
+            now_ms: loonfs::current_time_ms()
+                + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
                 + 1,
         },
     )
@@ -346,9 +350,9 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
         .expect_err("reclaimed owner");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
     assert_eq!(error.details().expect("details").namespace_id, Some(source));
-    assert_eq!(recording.count(OperationClass::Put), 0);
-    assert_eq!(recording.count(OperationClass::CompareAndSwap), 0);
-    assert_eq!(recording.count(OperationClass::Delete), 0);
+    assert_eq!(recording.count(OperationSelector::Put), 0);
+    assert_eq!(recording.count(OperationSelector::CompareAndSwap), 0);
+    assert_eq!(recording.count(OperationSelector::Delete), 0);
 }
 
 #[tokio::test]
@@ -399,7 +403,9 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     collect_aged_segments(recording.as_ref(), &source).await;
     let store: SharedObjectStore = recording.clone();
     let importer = LoonFs::builder_with_store(store)
-        .writer_id("content-ref-import-access-cold")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "content-ref-import-access-cold",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await

@@ -8,13 +8,13 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_segment,
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
-    ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
+    ObjectStoreOperation, ObjectStoreResultKind, PutModeKind, RangeClass,
     VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     AssemblySource, ByteRange, ImmutableWriteError, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorClass, PutMode,
+    ObjectStoreError, ObjectStoreErrorKind, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
@@ -35,46 +35,46 @@ fn secret_key() -> String {
 fn metric_result_classes_preserve_every_error_class() {
     let cases = [
         (
-            ObjectStoreErrorClass::NotFound,
-            ObjectStoreResultClass::NotFound,
+            ObjectStoreErrorKind::NotFound,
+            ObjectStoreResultKind::NotFound,
         ),
         (
-            ObjectStoreErrorClass::InvalidRequest,
-            ObjectStoreResultClass::InvalidRequest,
+            ObjectStoreErrorKind::InvalidRequest,
+            ObjectStoreResultKind::InvalidRequest,
         ),
         (
-            ObjectStoreErrorClass::InvalidKey,
-            ObjectStoreResultClass::InvalidKey,
+            ObjectStoreErrorKind::InvalidKey,
+            ObjectStoreResultKind::InvalidKey,
         ),
         (
-            ObjectStoreErrorClass::PreconditionFailed,
-            ObjectStoreResultClass::PreconditionFailed,
+            ObjectStoreErrorKind::PreconditionFailed,
+            ObjectStoreResultKind::PreconditionFailed,
         ),
         (
-            ObjectStoreErrorClass::PermissionDenied,
-            ObjectStoreResultClass::PermissionDenied,
+            ObjectStoreErrorKind::PermissionDenied,
+            ObjectStoreResultKind::PermissionDenied,
         ),
         (
-            ObjectStoreErrorClass::StoredChecksumMissing,
-            ObjectStoreResultClass::StoredChecksumMissing,
+            ObjectStoreErrorKind::StoredChecksumMissing,
+            ObjectStoreResultKind::StoredChecksumMissing,
         ),
         (
-            ObjectStoreErrorClass::Unsupported,
-            ObjectStoreResultClass::Unsupported,
+            ObjectStoreErrorKind::Unsupported,
+            ObjectStoreResultKind::Unsupported,
         ),
         (
-            ObjectStoreErrorClass::Configuration,
-            ObjectStoreResultClass::Configuration,
+            ObjectStoreErrorKind::Configuration,
+            ObjectStoreResultKind::Configuration,
         ),
         (
-            ObjectStoreErrorClass::RetryableTransport,
-            ObjectStoreResultClass::RetryableTransport,
+            ObjectStoreErrorKind::RetryableTransport,
+            ObjectStoreResultKind::RetryableTransport,
         ),
-        (ObjectStoreErrorClass::Other, ObjectStoreResultClass::Other),
+        (ObjectStoreErrorKind::Other, ObjectStoreResultKind::Other),
     ];
 
     for (error_class, result_class) in cases {
-        assert_eq!(ObjectStoreResultClass::from(error_class), result_class);
+        assert_eq!(ObjectStoreResultKind::from(error_class), result_class);
     }
 }
 
@@ -97,10 +97,10 @@ async fn records_put_success() {
     assert_eq!(samples.len(), 1);
     let sample = &samples[0];
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_in, Some(4));
     assert_eq!(sample.bytes_out, None);
-    assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
     assert_eq!(sample.key_class, KeyClass::NamespaceManifest);
     assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
     assert_eq!(sample.attempts, 1);
@@ -132,7 +132,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let samples = recorder.samples();
     let sample = samples.last().expect("assembly sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Assemble);
-    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_in, Some(5));
     assert_eq!(sample.key_class, KeyClass::Content);
 }
@@ -173,9 +173,9 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
 
     let samples = recorder.samples();
     assert_eq!(samples.len(), 3);
-    assert_eq!(samples[0].put_mode, Some(PutModeClass::Overwrite));
-    assert_eq!(samples[1].put_mode, Some(PutModeClass::CreateIfAbsent));
-    assert_eq!(samples[2].put_mode, Some(PutModeClass::CompareAndSwap));
+    assert_eq!(samples[0].put_mode, Some(PutModeKind::Overwrite));
+    assert_eq!(samples[1].put_mode, Some(PutModeKind::CreateIfAbsent));
+    assert_eq!(samples[2].put_mode, Some(PutModeKind::CompareAndSwap));
 }
 
 #[tokio::test]
@@ -196,9 +196,9 @@ async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
     assert_eq!(samples.len(), 1);
     let sample = &samples[0];
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_in, Some(7));
-    assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
     assert_eq!(sample.key_class, KeyClass::Content);
     assert_eq!(sample.attempts, 1);
 }
@@ -232,7 +232,7 @@ async fn records_get_success_bytes_out() {
     let samples = recorder.samples();
     let sample = samples.last().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
-    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_out, Some(3));
     assert_eq!(sample.key_class, KeyClass::Content);
     assert_eq!(sample.range_class, Some(RangeClass::Bounded));
@@ -253,7 +253,7 @@ async fn records_not_found_without_key_leak() {
 
     let sample = recorder.samples().pop().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
-    assert_eq!(sample.result, ObjectStoreResultClass::NotFound);
+    assert_eq!(sample.result, ObjectStoreResultKind::NotFound);
     let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(&raw_key));
     assert!(!encoded.contains(SECRET_KEY_SEGMENT));
@@ -273,7 +273,7 @@ async fn records_invalid_key_without_error_text() {
 
     let sample = recorder.samples().pop().expect("put sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultClass::InvalidKey);
+    assert_eq!(sample.result, ObjectStoreResultKind::InvalidKey);
     let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(raw_key));
     assert!(!encoded.contains("escape"));
@@ -304,7 +304,7 @@ async fn records_list_count() {
     assert_eq!(keys.len(), 2);
     let sample = recorder.samples().pop().expect("list sample");
     assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
-    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.item_count, Some(2));
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
 
@@ -473,7 +473,7 @@ impl DelegatingWriteStore {
             etag: Some(format!("{call}-etag")),
             version: None,
             size_bytes: 0,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: None,
         }
     }

@@ -7,7 +7,7 @@ use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::manifest::{load_namespace_manifest_envelope, MetadataLsmPolicy};
+use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy};
 use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
 use crate::pin::{classify_live_snapshot, create_pin};
 use crate::time::{Deadline, MonotonicTimer};
@@ -29,7 +29,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     snapshot_id: Option<&PinId>,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-    fold_policy: MetadataLsmPolicy,
+    fold_policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<NamespaceMetadata> {

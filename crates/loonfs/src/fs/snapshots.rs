@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
-    SnapshotSummary, Writable,
+    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, SnapshotSummary,
+    Writable,
 };
 use loonfs_core::CheckpointPageCursor;
 use loonfs_types::PageRequest;
@@ -57,7 +57,7 @@ impl SnapshotPolicy {
 /// A pager over live snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
-impl<M> Namespace<M> {
+impl<M: crate::Mode> Namespace<M> {
     /// Lists live snapshots.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         let reader = self.read_only();
@@ -91,24 +91,23 @@ impl<M> Namespace<M> {
         if self.core.subject.is_some() {
             self.core
                 .read(&self.namespace_id, |engine, context| async move {
-                    Ok(engine.require_administrator(&context).await?)
+                    Ok(engine.ensure_administrator(&context).await?)
                 })
                 .await?;
         }
         self.core.record_trace_context(&tracing::Span::current());
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let requested = request.limit.as_usize();
         let mut cursor = request.cursor;
         let mut snapshots = Vec::with_capacity(requested);
         let engine = self.core.reader_engine(&self.namespace_id);
         loop {
             let remaining = requested - snapshots.len();
-            let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
-                Error::Core(loonfs_core::Error::Internal(format!(
-                    "snapshot page limit does not fit u32: {error}"
-                )))
-            })?)
-            .expect("a snapshot page with room remaining has a nonzero limit");
+            let limit =
+                NonZeroU32::new(u32::try_from(remaining).expect(
+                    "a snapshot page limit within the pagination maximum should fit in `u32`",
+                ))
+                .expect("a snapshot page with room remaining should have a nonzero limit");
             let page = engine
                 .list_checkpoints_page(PageRequest {
                     limit: loonfs_types::EffectiveLimit::new(limit),
@@ -165,9 +164,9 @@ impl Namespace<Writable> {
         name: &str,
         expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<Checkpoint> {
+    ) -> Result<SnapshotSummary> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.ensure_live_snapshot_limit(policy.max_live_per_namespace, 1)
             .await?;
         let engine = self
@@ -178,15 +177,15 @@ impl Namespace<Writable> {
             engine.create_snapshot(name.to_owned(), expires_at_ms).await
         }
         .map_err(Error::from);
-        let checkpoint = self.finish_namespace_mutation(result)?;
+        let snapshot = self.finish_namespace_mutation(result)?;
         if let Err(error) = self
             .ensure_live_snapshot_limit(policy.max_live_per_namespace, 0)
             .await
         {
-            if let Err(cleanup_error) = engine.delete_snapshot(&checkpoint.checkpoint_id).await {
+            if let Err(cleanup_error) = engine.delete_snapshot(&snapshot.snapshot_id).await {
                 tracing::warn!(
                     namespace_id = %self.namespace_id,
-                    snapshot_id = %checkpoint.checkpoint_id,
+                    snapshot_id = %snapshot.snapshot_id,
                     error = %error,
                     cleanup_error = %cleanup_error,
                     "failed to delete a refused snapshot; it stays until it expires"
@@ -194,7 +193,7 @@ impl Namespace<Writable> {
             }
             return Err(error);
         }
-        Ok(checkpoint)
+        Ok(snapshot)
     }
 
     async fn ensure_live_snapshot_limit(
@@ -202,7 +201,7 @@ impl Namespace<Writable> {
         max_live: usize,
         additional_live: usize,
     ) -> Result<()> {
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let engine = self
             .core
@@ -224,7 +223,7 @@ impl Namespace<Writable> {
                 .filter(|snapshot| snapshot.is_live(now_ms))
                 .count();
             if live > max_live {
-                return Err(Error::Core(loonfs_core::Error::SnapshotQuotaExceeded {
+                return Err(Error::Core(loonfs_core::CoreError::SnapshotQuotaExceeded {
                     namespace_id: self.namespace_id.clone(),
                     max_live,
                 }));
@@ -257,21 +256,14 @@ impl Namespace<Writable> {
         requested_expires_at_ms: u64,
         policy: &SnapshotPolicy,
     ) -> Result<SnapshotSummary> {
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id)
             .extend_snapshot(snapshot_id, requested_expires_at_ms, policy.max_lifetime_ms)
             .await
-            .map_err(Error::from)
-            .and_then(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-                    Error::Core(loonfs_core::Error::Internal(
-                        "snapshot extension returned a non-snapshot checkpoint".to_owned(),
-                    ))
-                })
-            });
+            .map_err(Error::from);
         self.finish_namespace_mutation(result)
     }
 
@@ -290,7 +282,7 @@ impl Namespace<Writable> {
         )
     )]
     pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core

@@ -21,7 +21,7 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
     let mut payload = current.state.envelope.payload().clone();
     payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
     let object_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
-    let manifest = encode_manifest(payload).expect("manifest");
+    let manifest = encode_manifest(payload);
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let deadline = Deadline::start(timer.clone());
     store.reset();
@@ -78,11 +78,11 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
     let store = FailStore::new(
         store,
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost request".to_owned()),
     );
     store.fail_next(1);
-    let error = publish_manifest(&store, encode_manifest(payload).expect("manifest"))
+    let error = publish_manifest(&store, encode_manifest(payload))
         .await
         .expect_err("a put nobody can confirm has no answer");
     assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
@@ -145,7 +145,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 payload.manifest_no = ManifestNo(2);
             }
             let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-            let manifest = encode_manifest(payload).expect("manifest");
+            let manifest = encode_manifest(payload);
             let timer = Arc::new(ManualClock::new(0));
             let deadline = Deadline::start(timer.clone());
             store.reset();
@@ -157,7 +157,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let store = FailStore::new(
                 store,
                 KeyPredicate::exact(&object_key),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
                 InjectedError::Transport("lost acknowledgement".to_owned()),
             )
             .apply_then_fail();
@@ -210,11 +210,11 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
         payload.compactor_epoch.0 += 1;
-        let claim = encode_manifest(payload).expect("claim");
+        let claim = encode_manifest(payload);
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         let (losing, winning) = if race_at_put {
             blocked.block_next();
@@ -263,10 +263,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let predecessor = current.state.manifest().manifest_no;
         let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = predecessor.successor().expect("next number");
-        let first = encode_manifest(payload.clone()).expect("candidate");
+        let first = encode_manifest(payload.clone());
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
-                crate::commit_engine::WriterSessionState::Acquired(
+                crate::commit_engine::WriterSessionStatus::Acquired(
                     loonfs_types::format::control::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.state.envelope.payload().writer_epoch,
@@ -282,7 +282,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 .publish_batch(
                     &store,
                     vec![crate::commit_engine::CommitCandidate::new(
-                        crate::path::write::CommitRequest {
+                        crate::path::write::CommitIntent {
                             commit_id: loonfs_types::CommitId::generate(),
                             actor_id: loonfs_test_support::ids::test_actor(),
                             subject: None,
@@ -315,7 +315,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     retention_floor_seq: ChangeSeq(0),
                     metadata_state: &projection.metadata_state,
                 },
-                MetadataLsmPolicy::default(),
+                MetadataRunPolicy::default(),
                 payload.manifest_no,
             )
             .await
@@ -324,12 +324,12 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         } else {
             payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
         }
-        let second = encode_manifest(payload).expect("candidate");
+        let second = encode_manifest(payload);
         store.reset();
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         blocked.block_next();
         let losing = publish_manifest(&blocked, second.clone());
@@ -363,7 +363,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             let mut retry = second.into_parts().0.into_payload();
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert!(matches!(
-                publish_manifest(&store, encode_manifest(retry).expect("retry"))
+                publish_manifest(&store, encode_manifest(retry))
                     .await
                     .expect("publish retry"),
                 ManifestPublicationOutcome::Published(_)
@@ -415,10 +415,10 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
             .expect("discover");
         assert_eq!(actual.state, expected.state);
         assert_eq!(
-            store.counts().gets,
-            (expected.state.manifest().manifest_no.0 - manifest_no.0
+            store.counts().gets as u64,
+            expected.state.manifest().manifest_no.0 - manifest_no.0
                 + 1
-                + u64::from(manifest_no.0 > 0)) as usize
+                + u64::from(manifest_no.0 > 0)
         );
         assert_eq!(store.counts().lists, 0);
         assert_eq!(store.counts().puts, 0);
@@ -496,7 +496,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
             .expect("current");
         let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next");
-        let candidate = encode_manifest(payload).expect("candidate");
+        let candidate = encode_manifest(payload);
         let candidate_manifest_no = candidate.envelope().payload().manifest_no;
         let keys = if fail_hint {
             KeyPredicate::hint(&namespace_id)
@@ -506,7 +506,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let store = FailStore::new(
             store,
             keys,
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::Transport("lost acknowledgment".to_owned()),
         )
         .apply_then_fail();
@@ -577,7 +577,7 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost acknowledgement".to_owned()),
     )
     .apply_then_fail();
@@ -619,7 +619,7 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     let losing = create_checkpoint(&blocked, &namespace_id, &context);
@@ -840,7 +840,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == claim_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("response lost".to_owned()),
     )
     .apply_then_fail();
@@ -882,7 +882,7 @@ async fn a_successor_manifest_that_changes_naming_is_rejected_at_load() {
     store
         .put_if_absent(
             &object_key,
-            Bytes::from(encode_manifest(payload).expect("manifest").into_bytes()),
+            Bytes::from(encode_manifest(payload).into_bytes()),
         )
         .await
         .expect("write the successor around publication");

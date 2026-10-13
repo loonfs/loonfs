@@ -7,7 +7,7 @@ use thiserror::Error;
 ///
 /// Foreign causes (I/O, JSON, and HTTP transport) are captured as message
 /// strings rather than `#[source]` chains.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum ClientError {
     /// The client configuration could not be read.

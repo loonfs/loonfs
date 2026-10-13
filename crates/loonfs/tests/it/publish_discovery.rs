@@ -6,7 +6,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         KeyPredicate::any(),
     ));
     let creator = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .build()
         .await
         .expect("creator");
@@ -30,7 +30,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -118,12 +118,12 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::any(),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("discovery-test")
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .min_publish_interval_ms(0)
         .build()
         .await

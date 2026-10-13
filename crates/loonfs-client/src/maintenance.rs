@@ -64,7 +64,7 @@ impl Client {
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }

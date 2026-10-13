@@ -72,7 +72,7 @@ fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
 
 fn candidate(commit_id: &str, values: Vec<InlineContent>) -> CommitCandidate {
     CommitCandidate::with_inline_content(
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse(commit_id).expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -210,7 +210,7 @@ async fn read_file(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("view")
-        .get_file_revision_bytes(
+        .read_file_revision_bytes(
             store,
             "/file-0",
             revision_no,
@@ -347,7 +347,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let inline_candidate = candidate("forms", vec![inline]);
-    let staged_candidate = CommitCandidate::prepared(inline_candidate.request.clone(), vec![proof]);
+    let staged_candidate = CommitCandidate::prepared(inline_candidate.intent.clone(), vec![proof]);
     publish(&mut engine, &store, &context, inline_candidate)
         .await
         .expect("inline publish");
@@ -404,7 +404,7 @@ async fn invalid_inline_candidates_write_nothing() {
     );
     let mut mismatched = candidate("mismatched", vec![different]);
     mismatched
-        .request
+        .intent
         .operations
         .push(put("/staged", staged.content_ref()));
     mismatched.content =
@@ -415,7 +415,7 @@ async fn invalid_inline_candidates_write_nothing() {
     if let FilesystemOperation::PutFile {
         content_ref: Some(content_ref),
         ..
-    } = &mut wrong_checksum.request.operations[0]
+    } = &mut wrong_checksum.intent.operations[0]
     {
         content_ref.checksum = loonfs_types::Checksum::crc32c(b"inline bytes");
     }
@@ -440,7 +440,7 @@ async fn invalid_inline_candidates_write_nothing() {
 #[tokio::test]
 async fn inline_tail_replay_matches_publication_and_materializes_before_metadata() {
     let (_directory, store, mut engine, context) = setup().await;
-    let directory = CommitCandidate::new(CommitRequest::single(
+    let directory = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("directory").expect("commit"),
         loonfs_test_support::test_actor(),
         None,

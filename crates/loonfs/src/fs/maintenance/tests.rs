@@ -9,8 +9,8 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, LoonFs, Maintenance, MetadataCompactionOutcome,
-    MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore, Writable,
+    CompactionStepOutcome, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCompactionOutcome,
+    MetadataCompactionPolicy, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -47,12 +47,14 @@ async fn manual_deployment(
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(Arc::clone(&store))
-        .writer_id("manual-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("manual-writer"))
         .build()
         .await
         .expect("build the writer");
     let standalone = LoonFs::builder_with_store(Arc::clone(&store))
-        .writer_id("standalone-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "standalone-maintenance",
+        ))
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -81,8 +83,8 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     value
 }
 
-fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MetadataMaintenanceOptions {
-    MetadataMaintenanceOptions {
+fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MaintainMetadataOptions {
+    MaintainMetadataOptions {
         max_wal_tail_objects: NonZeroU64::MIN,
         compaction_policy,
         ..Default::default()
@@ -381,7 +383,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     let fresh_store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let fresh_writer = LoonFs::builder_with_store(Arc::clone(&fresh_store))
-        .writer_id("fresh-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("fresh-writer"))
         .build()
         .await
         .expect("build a fresh writer");
@@ -414,7 +416,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     );
 
     let outcome = standalone
-        .compact_metadata(&explicit)
+        .compact_metadata(&explicit, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
     assert!(
@@ -481,7 +483,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     let response = standalone
         .maintain_metadata_with_options(
             &namespace,
-            &crate::MetadataMaintenanceOptions {
+            &crate::MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                 ..Default::default()
@@ -496,7 +498,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     );
 
     let outcome = standalone
-        .compact_metadata(&namespace)
+        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
     assert!(
@@ -510,9 +512,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
 
 #[tokio::test]
 async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once() {
-    use crate::publish::{
-        parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
-    };
+    use crate::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
     use crate::{AttributeChanges, CommitId};
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
@@ -523,7 +523,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         LocalFsStore::new(directory.path()).expect("store"),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -568,7 +568,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             })
             .collect();
         namespace_writer
-            .commit_candidate(CommitCandidate::new(CommitRequest {
+            .commit_candidate(CommitCandidate::new(CommitIntent {
                 commit_id: CommitId::generate(),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
@@ -637,7 +637,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .collect();
         store.reset();
         let compaction = maintenance
-            .compact_metadata(&namespace)
+            .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact one unit")
             .compaction;
@@ -668,7 +668,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                 let response = maintenance
                     .maintain_metadata_with_options(
                         &namespace,
-                        &crate::MetadataMaintenanceOptions {
+                        &crate::MaintainMetadataOptions {
                             compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                             ..Default::default()
                         },
@@ -707,7 +707,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     ));
     let shared: SharedObjectStore = store.clone();
     let writer = LoonFs::builder_with_store(shared.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -716,7 +716,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .await
         .expect("namespace");
     let maintenance = LoonFs::builder_with_store(shared.clone())
-        .writer_id("maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .build()
         .await
         .expect("maintenance")
@@ -732,7 +732,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered, None)
             .await
             .expect("no work"),
-        super::CompactionStep::Concluded(CompactionStepOutcome::NotNeeded {})
+        super::CompactionUnitOutcome::Concluded(CompactionStepOutcome::NotNeeded {})
     ));
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
@@ -751,7 +751,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         expected
     );
     let other = LoonFs::builder_with_store(shared)
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("other process")
@@ -849,7 +849,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         races_run: 0.into(),
     });
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -858,7 +858,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
-    for index in 0..loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS + 2 {
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS + 2 {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
@@ -867,10 +867,13 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .expect("claim the namespace before the races start");
 
     store.races_left.store(5, SeqCst);
-    assert!(!maintenance
-        .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
-        .await
-        .expect("a lost race is an outcome, not an error"));
+    assert_eq!(
+        maintenance
+            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("a lost race is an outcome, not an error"),
+        crate::MetadataMaintenanceOutcome::Due
+    );
     assert_eq!(
         store.races_run.load(SeqCst),
         3,
@@ -879,7 +882,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
 
     store.races_left.store(0, SeqCst);
     LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("another process")
@@ -888,10 +891,13 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .await
         .expect("another process claims the namespace");
     let fenced = current_manifest_payload(store.as_ref(), &namespace).await;
-    assert!(!maintenance
-        .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
-        .await
-        .expect("a fenced step is an outcome, not an error"));
+    assert_eq!(
+        maintenance
+            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("a fenced step is an outcome, not an error"),
+        crate::MetadataMaintenanceOutcome::Due
+    );
     assert_eq!(
         current_manifest_payload(store.as_ref(), &namespace).await,
         fenced,
@@ -904,7 +910,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -917,7 +923,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         .expect("create the namespace");
     // One unit merges at most eight runs of one family group, and each
     // folded write adds a run to several groups.
-    for index in 0..3 * loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..3 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
@@ -930,12 +936,16 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         let before = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
-        let caught_up = maintenance
+        let outcome = maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("run the metadata loop");
         if published.is_empty() {
-            assert!(!caught_up, "the unit cap cannot establish completion");
+            assert_eq!(
+                outcome,
+                crate::MetadataMaintenanceOutcome::Due,
+                "the unit cap cannot establish completion"
+            );
         }
         let after = current_manifest_payload(store.as_ref(), &namespace)
             .await
@@ -960,8 +970,8 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
 struct WeekAheadClock(u64);
 
 impl crate::WallClock for WeekAheadClock {
-    fn now_ms(&self) -> std::result::Result<u64, crate::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 
@@ -989,7 +999,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     let [idle, claimed, retired, missing] =
         ["idle", "claimed", "retired", "missing"].map(namespace_id);
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer")
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
@@ -1013,12 +1023,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("delete the namespace");
     writer.shutdown().await.expect("shut down the writer");
 
-    let week_ahead_ms = loonfs_core::time::SystemWallClock
-        .now_ms()
-        .expect("system clock")
-        + 7 * 24 * 60 * 60 * 1000;
+    let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .wall_clock(Arc::new(WeekAheadClock(week_ahead_ms)))
         .build()
         .await
@@ -1044,10 +1051,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     store.reset();
     let cancelled = crate::MaintenanceCancellation::new();
     cancelled.cancel();
-    assert!(!maintenance
-        .maintain_metadata_while_due(&idle, &cancelled)
-        .await
-        .expect("cancellation is not completion"));
+    assert_eq!(
+        maintenance
+            .maintain_metadata_while_due(&idle, &cancelled)
+            .await
+            .expect("cancellation is not completion"),
+        crate::MetadataMaintenanceOutcome::Due
+    );
     assert_eq!(requests(store.counts()), [0; 4]);
 
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
@@ -1073,7 +1083,10 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .maintain_metadata_while_due(namespace, &crate::MaintenanceCancellation::new())
             .await;
         if metadata_error.is_none() {
-            assert!(metadata.as_ref().expect("idle metadata is caught up"));
+            assert_eq!(
+                *metadata.as_ref().expect("idle metadata is caught up"),
+                crate::MetadataMaintenanceOutcome::CaughtUp
+            );
         }
         assert_eq!(metadata.err().map(|error| error.code()), metadata_error);
         assert_eq!(
@@ -1095,7 +1108,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     }
 
     LoonFs::builder_with_store(store.clone())
-        .writer_id("other")
+        .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
         .expect("another process")
@@ -1118,7 +1131,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
 #[tokio::test]
 async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
-    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS};
+    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     let directory = tempdir().expect("directory");
@@ -1128,7 +1141,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     ));
     let namespace_id = namespace_id("retired");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("retirement-test")
+        .writer_id(loonfs_test_support::ids::writer_id("retirement-test"))
         .build()
         .await
         .expect("writer");
@@ -1159,7 +1172,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     .expect("delete");
     context.now_ms += crate::GcOptions::default()
         .grace_window_ms
-        .max(NAMESPACE_RETIREMENT_GRACE_MS)
+        .max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
         + GC_SAFETY_MARGIN_MS;
     store.reset();
     let first = loonfs_core::gc_namespace(

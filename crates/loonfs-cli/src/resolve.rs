@@ -9,7 +9,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::engine::DecodedBlockCacheConfig;
-use loonfs::{LoonFs, SharedObjectStore, TraceStoreKind, WriterId};
+use loonfs::{LoonFs, SharedObjectStore, WriterId};
 use loonfs_client::Client;
 use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -42,12 +42,11 @@ pub(crate) fn load_cli_config(config_path: &std::path::Path) -> Result<LoadedCon
 pub(crate) fn resolve_namespace(
     profile_name: &str,
     profile: &ProfileConfig,
-    explicit_namespace: Option<&str>,
+    explicit_namespace: Option<&NamespaceId>,
 ) -> Result<ResolvedNamespace, CliError> {
     if let Some(namespace) = explicit_namespace {
         return Ok(ResolvedNamespace {
-            namespace: parse_namespace_id(namespace)
-                .map_err(|error| error.with_param("--namespace"))?,
+            namespace: namespace.clone(),
         });
     }
     if let Some(namespace) = non_empty_env(NAMESPACE_ENV) {
@@ -64,13 +63,15 @@ pub(crate) fn resolve_namespace(
 
 pub(crate) fn resolve_actor(
     profile: &ProfileConfig,
-    explicit_id: Option<&str>,
+    explicit_id: Option<&ActorId>,
 ) -> Result<ActorId, CliError> {
     if let Some(id) = explicit_id {
-        return parse_actor_id("--actor-id", id);
+        return Ok(id.clone());
     }
     if let Some(id) = non_empty_env(ACTOR_ID_ENV) {
-        return parse_actor_id(ACTOR_ID_ENV, &id);
+        return ActorId::parse(&id).map_err(|error| {
+            named_cli_input_error(ACTOR_ID_ENV, format!("invalid `{ACTOR_ID_ENV}`: {error}"))
+        });
     }
     Ok(profile
         .actor_id()
@@ -84,7 +85,7 @@ pub(crate) fn resolve_actor(
 pub(crate) fn resolve_subject(
     profile: &ProfileConfig,
     actor_id: &ActorId,
-    explicit_subject_id: Option<&str>,
+    explicit_subject_id: Option<&SubjectId>,
     explicit_principal_scope: Option<&str>,
     explicit_principals: Option<&str>,
 ) -> Result<Option<Subject>, CliError> {
@@ -101,7 +102,7 @@ pub(crate) fn resolve_subject(
                 .split(',')
                 .map(|value| {
                     PrincipalId::parse(value).map_err(|error| {
-                        named_cli_input_error(name, format!("invalid {name}: {error}"))
+                        named_cli_input_error(name, format!("invalid `{name}`: {error}"))
                     })
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?,
@@ -116,7 +117,7 @@ pub(crate) fn resolve_subject(
         ),
     };
     let principals = PrincipalSet::new(principals)
-        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?;
+        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?;
     let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
     let (scope_name, principal_scope) = if let Some(value) = explicit_principal_scope {
         ("--principal-scope", Some(value))
@@ -127,7 +128,7 @@ pub(crate) fn resolve_subject(
     };
     let principal_scope = match principal_scope {
         Some(value) => Some(PrincipalScope::parse(value).map_err(|error| {
-            named_cli_input_error(scope_name, format!("invalid {scope_name}: {error}"))
+            named_cli_input_error(scope_name, format!("invalid `{scope_name}`: {error}"))
         })?),
         None => profile.principal_scope(),
     };
@@ -140,7 +141,7 @@ pub(crate) fn resolve_subject(
             };
             return Err(named_cli_input_error(
                 required,
-                format!("{required} is required with {scope_name}"),
+                format!("`{required}` is required with `{scope_name}`"),
             ));
         }
         (None, false) => {
@@ -151,38 +152,34 @@ pub(crate) fn resolve_subject(
             };
             return Err(named_cli_input_error(
                 required,
-                format!("{required} is required with {name}"),
+                format!("`{required}` is required with `{name}`"),
             ));
         }
         (Some(principal_scope), false) => principal_scope,
         (None, true) => return Ok(None),
     };
-    let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
-    let (name, subject_id) = if let Some(value) = explicit_subject_id {
-        ("--subject-id", Some(value))
+    let subject_id = if let Some(subject_id) = explicit_subject_id {
+        subject_id.clone()
+    } else if let Some(value) = non_empty_env(SUBJECT_ID_ENV) {
+        SubjectId::parse(&value).map_err(|error| {
+            named_cli_input_error(
+                SUBJECT_ID_ENV,
+                format!("invalid `{SUBJECT_ID_ENV}`: {error}"),
+            )
+        })?
     } else {
-        (SUBJECT_ID_ENV, environment_subject_id.as_deref())
-    };
-    let subject_id = match subject_id {
-        Some(value) => SubjectId::parse(value)
-            .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?,
-        None => match profile.subject_id() {
+        match profile.subject_id() {
             Some(subject_id) => subject_id,
             None => SubjectId::parse(actor_id.as_str()).map_err(|error| {
                 named_cli_input_error("subject_id", format!("invalid subject_id: {error}"))
             })?,
-        },
+        }
     };
     Ok(Some(Subject {
         principal_scope,
         subject_id,
         principals,
     }))
-}
-
-fn parse_actor_id(name: &str, value: &str) -> Result<ActorId, CliError> {
-    ActorId::parse(value)
-        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {
@@ -317,13 +314,15 @@ impl ResolvedTarget {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
+        let writer = WriterId::parse(writer_id.as_str())
+            .map_err(|error| CliError::invalid_config(error.to_string()))?;
         let runtime = LoonFs::builder_with_store(store.clone())
-            .writer_id(writer_id.clone())
+            .writer_id(writer)
             .inline_content(inline_content.clone())
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
-            .trace_store_kind(TraceStoreKind::from(store_kind))
+            .store_kind(store_kind)
             .build()
             .await
             .map_err(CliError::from)?;
@@ -331,9 +330,9 @@ impl ResolvedTarget {
             WriterId::parse(format!("{writer_id}-maintenance"))
                 .map_err(|error| CliError::invalid_config(error.to_string()))?,
         );
-        let grep_block_cache = Arc::new(GrepBlockCache::new(
-            DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
-        ));
+        let grep_block_cache = Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        )));
         let grep_worker = GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),

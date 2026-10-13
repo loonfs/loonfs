@@ -37,7 +37,7 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
+    ChecksumHex, CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
     MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
     RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
@@ -142,7 +142,7 @@ fn sample_crc_content_ref() -> ContentRef {
         size_bytes: 11_534_336,
         checksum: Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "bbb7305bdf118bcb".to_owned(),
+            value: ChecksumHex::parse("bbb7305bdf118bcb").expect("a lowercase hex checksum"),
         },
     }
 }
@@ -159,7 +159,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
             size_bytes: 4_096,
             checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
-                value: "1a2b3c4d".to_owned(),
+                value: ChecksumHex::parse("1a2b3c4d").expect("a lowercase hex checksum"),
             },
         },
     ];
@@ -477,13 +477,13 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 row_count: 6,
                 min_row_key: "commit-receipt".to_owned(),
                 max_row_key: "tombstone".to_owned(),
-                index_block: loonfs_types::format::sst_blocks::BlockHandle {
+                index_block: loonfs_types::format::segment_blocks::BlockHandle {
                     offset: 4_000,
                     stored_bytes: 200,
                     decoded_bytes: 400,
                     crc32c: 0x1234_5678,
                 },
-                filter_block: loonfs_types::format::sst_blocks::BlockHandle {
+                filter_block: loonfs_types::format::segment_blocks::BlockHandle {
                     offset: 3_900,
                     stored_bytes: 100,
                     decoded_bytes: 100,
@@ -2059,8 +2059,8 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
     ]
 }
 
-fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBlocks {
-    use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
+fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegmentBlocks {
+    use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
     // pins block splitting, restart points, and the index shape at once.
     let mut builder = SegmentBlocksBuilder::new(
@@ -2130,20 +2130,21 @@ fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBloc
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push sample row");
     }
-    builder.finish().expect("finish sample segment")
+    builder.build().expect("finish sample segment")
 }
 
 fn segment_section<'a>(
     bytes: &'a [u8],
-    handle: &loonfs_types::format::sst_blocks::BlockHandle,
+    handle: &loonfs_types::format::segment_blocks::BlockHandle,
 ) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
+    let start = loonfs_types::usize_from_u64(handle.offset);
+    &bytes[start..start + handle.stored_bytes as usize]
 }
 
 fn sample_segment_index(
-    built: &loonfs_types::format::sst_blocks::BuiltSegmentBlocks,
-) -> Vec<loonfs_types::format::sst_blocks::SegmentIndexEntry> {
-    loonfs_types::format::sst_blocks::decode_index_block(
+    built: &loonfs_types::format::segment_blocks::BuiltSegmentBlocks,
+) -> Vec<loonfs_types::format::segment_blocks::SegmentIndexEntry> {
+    loonfs_types::format::segment_blocks::decode_index_block(
         segment_section(&built.bytes, &built.index),
         &built.index,
     )
@@ -2156,11 +2157,11 @@ fn sample_segment_index(
 /// families after it into other blocks. A guard that named a position would
 /// then read a block its family never reaches and assert nothing.
 fn family_block_position(
-    built: &loonfs_types::format::sst_blocks::BuiltSegmentBlocks,
-    index: &[loonfs_types::format::sst_blocks::SegmentIndexEntry],
+    built: &loonfs_types::format::segment_blocks::BuiltSegmentBlocks,
+    index: &[loonfs_types::format::segment_blocks::SegmentIndexEntry],
     prefix: &str,
 ) -> usize {
-    use loonfs_types::format::sst_blocks::decode_data_block;
+    use loonfs_types::format::segment_blocks::decode_data_block;
     for (position, entry) in index.iter().enumerate() {
         let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
             .expect("decode data block");
@@ -2174,7 +2175,7 @@ fn family_block_position(
 /// Counts the rows one block holds for the family `prefix` names, so a guard
 /// can state that every row of the family landed in the block a fixture pins.
 fn rows_under_prefix(
-    block: &loonfs_types::format::sst_blocks::DecodedDataBlock,
+    block: &loonfs_types::format::segment_blocks::DecodedDataBlock,
     prefix: &str,
 ) -> usize {
     block
@@ -2186,21 +2187,21 @@ fn rows_under_prefix(
 
 /// Reads back the block a fixture pins, so a decode test can state the rows it
 /// expects to find there.
-fn decode_golden_data_block(name: &str) -> loonfs_types::format::sst_blocks::DecodedDataBlock {
-    use loonfs_types::format::sst_blocks::{decode_data_block, BlockHandle};
+fn decode_golden_data_block(name: &str) -> loonfs_types::format::segment_blocks::DecodedDataBlock {
+    use loonfs_types::format::segment_blocks::{decode_data_block, BlockHandle};
     let payload = read_golden(name);
     let stored = rezstd(&payload);
     let handle = BlockHandle {
         offset: 0,
-        stored_bytes: stored.len() as u32,
-        decoded_bytes: payload.len() as u32,
+        stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
+        decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block(&stored, &handle).expect("decode golden data block")
 }
 
 fn assert_rows_match_single_block_golden(name: &str, rows: &[MetadataRow]) {
-    use loonfs_types::format::sst_blocks::{decode_data_block, SegmentBlocksBuilder};
+    use loonfs_types::format::segment_blocks::{decode_data_block, SegmentBlocksBuilder};
 
     let mut builder = SegmentBlocksBuilder::new(
         std::num::NonZeroUsize::new(4096).expect("target block size should be non-zero"),
@@ -2209,7 +2210,7 @@ fn assert_rows_match_single_block_golden(name: &str, rows: &[MetadataRow]) {
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push golden row");
     }
-    let built = builder.finish().expect("finish golden segment");
+    let built = builder.build().expect("finish golden segment");
     let index = sample_segment_index(&built);
     assert_eq!(index.len(), 1, "the row fixture should be one block");
     let entry = &index[0];
@@ -2238,7 +2239,7 @@ fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
     let index = sample_segment_index(&built);
     let position = family_block_position(&built, &index, "active-deletion-");
     assert_eq!(position, 0, "the active-deletion family opens the segment");
-    let block = loonfs_types::format::sst_blocks::decode_data_block(
+    let block = loonfs_types::format::segment_blocks::decode_data_block(
         segment_section(&built.bytes, &index[0].block),
         &index[0].block,
     )
@@ -2608,7 +2609,7 @@ fn with_flat_binding(mut row: ciborium::Value) -> ciborium::Value {
 
 #[test]
 fn sst_block_filter_matches_golden_bytes_and_answers() {
-    use loonfs_types::format::sst_blocks::decode_filter_block;
+    use loonfs_types::format::segment_blocks::decode_filter_block;
     let built = sample_segment_blocks();
     // The filter section is stored raw, so its bytes are pinned directly.
     let stored = segment_section(&built.bytes, &built.filter);
@@ -2630,7 +2631,7 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
 
 #[test]
 fn sst_block_index_entry_schema_matches_golden_bytes() {
-    use loonfs_types::format::sst_blocks::{BlockHandle, SegmentIndexEntry};
+    use loonfs_types::format::segment_blocks::{BlockHandle, SegmentIndexEntry};
     // Fixed handle values: this fixture pins the index entry schema (field
     // names, order, integer widths) without coupling to zstd output.
     let entries = vec![SegmentIndexEntry {
@@ -2652,7 +2653,7 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
 
 #[test]
 fn every_metadata_row_rejects_unknown_fields() {
-    use loonfs_types::format::sst_blocks::decode_data_block;
+    use loonfs_types::format::segment_blocks::decode_data_block;
     let built = sample_segment_blocks();
     for entry in sample_segment_index(&built) {
         let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
@@ -3007,7 +3008,7 @@ fn sample_binding_rows() -> Vec<MetadataRow> {
 
 #[test]
 fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
-    use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
+    use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
     for (family, fixture) in [
         (
             MetadataRowFamily::DirentryBinds,
@@ -3030,7 +3031,7 @@ fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
                 )
                 .expect("push row");
         }
-        let built = builder.finish().expect("finish block");
+        let built = builder.build().expect("finish block");
         let index = sample_segment_index(&built);
         assert_eq!(index.len(), 1);
         assert_matches_golden(

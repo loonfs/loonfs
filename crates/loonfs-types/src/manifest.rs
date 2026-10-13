@@ -4,7 +4,7 @@
 
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
-use crate::sst_blocks::BlockHandle;
+use crate::segment_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
 use crate::CompactorEpoch;
 use crate::{
@@ -632,7 +632,7 @@ impl MetadataRow {
             Self::DirentryBinding(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
-                    record.name_key.as_str(),
+                    &record.name_key,
                     record.child_inode_id,
                     record.committed_seq,
                     record.delta_index,
@@ -674,7 +674,7 @@ impl MetadataRow {
                 record.action.sort_rank(),
             ),
             Self::CommitReceipt(record) => {
-                lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
+                lookup_keys::commit_receipt_row_key(&record.commit_id, record.committed_seq)
             }
             Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
             Self::ContentLayout(record) => lookup_keys::content_layout_row_key(
@@ -704,7 +704,7 @@ impl MetadataRow {
             Self::DirentryBinding(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_probe(
                     record.parent_inode_id,
-                    record.name_key.as_str(),
+                    &record.name_key,
                 )),
                 MetadataRowFamily::DirentryChildBinds => {
                     Some(lookup_keys::direntry_child_probe(record.child_inode_id))
@@ -725,9 +725,7 @@ impl MetadataRow {
             // The family is only ever range-scanned in key order, never
             // probed for one deletion, so the filter key is the row key.
             Self::ActiveDeletion(_) => self.row_key_for_family(family),
-            Self::CommitReceipt(record) => {
-                lookup_keys::commit_receipt_probe(record.commit_id.as_str())
-            }
+            Self::CommitReceipt(record) => lookup_keys::commit_receipt_probe(&record.commit_id),
             Self::Commit(_) => self.row_key_for_family(family),
             Self::ContentLayout(record) => lookup_keys::content_layout_probe(&record.content_id),
             Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
@@ -749,7 +747,8 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{
-        AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo,
+        AccessRevisionNo, AttributesRevisionNo, ChangeSeq, CommitId, ContentId, InodeId, NameKey,
+        RevisionNo,
     };
 
     /// Prefix for inode row keys.
@@ -795,23 +794,23 @@ pub mod lookup_keys {
     }
 
     /// Builds the Bloom filter probe for a parent/name binding.
-    pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
+    pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &NameKey) -> String {
         format!(
             "{}{}",
             direntry_parent_prefix(parent_inode_id),
-            hex_encode_row_key_component(name_key)
+            hex_encode_row_key_component(name_key.as_str())
         )
     }
 
     /// Builds the prefix for every version of a parent/name slot.
-    pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
+    pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &NameKey) -> String {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
     /// Builds a row key for one version of a child's binding in a parent/name slot.
     pub fn direntry_bind_row_key(
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
         child_inode_id: InodeId,
         committed_seq: ChangeSeq,
         delta_index: u32,
@@ -937,20 +936,20 @@ pub mod lookup_keys {
     }
 
     /// Builds the Bloom filter probe for one commit ID.
-    pub fn commit_receipt_probe(commit_id: &str) -> String {
+    pub fn commit_receipt_probe(commit_id: &CommitId) -> String {
         format!(
             "{COMMIT_RECEIPT_ROW_PREFIX}{}",
-            hex_encode_row_key_component(commit_id)
+            hex_encode_row_key_component(commit_id.as_str())
         )
     }
 
     /// Builds the prefix for receipts with one commit ID.
-    pub fn commit_receipt_prefix(commit_id: &str) -> String {
+    pub fn commit_receipt_prefix(commit_id: &CommitId) -> String {
         format!("{}-", commit_receipt_probe(commit_id))
     }
 
     /// Builds a commit receipt row key.
-    pub(super) fn commit_receipt_row_key(commit_id: &str, committed_seq: ChangeSeq) -> String {
+    pub(super) fn commit_receipt_row_key(commit_id: &CommitId, committed_seq: ChangeSeq) -> String {
         format!(
             "{}{:020}",
             commit_receipt_prefix(commit_id),
@@ -969,7 +968,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a prefix for one revision number within an inode.
-    pub fn revision_number_prefix(inode_id: InodeId, revision_no: RevisionNo) -> String {
+    pub fn revision_no_prefix(inode_id: InodeId, revision_no: RevisionNo) -> String {
         format!(
             "{}{:020}-",
             revision_prefix(inode_id),
@@ -986,7 +985,7 @@ pub mod lookup_keys {
     ) -> String {
         format!(
             "{}{:020}-{:010}",
-            revision_number_prefix(inode_id, revision_no),
+            revision_no_prefix(inode_id, revision_no),
             u64::MAX - committed_seq.0,
             u32::MAX - delta_index
         )

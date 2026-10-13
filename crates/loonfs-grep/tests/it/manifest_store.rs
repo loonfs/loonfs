@@ -17,7 +17,7 @@ use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use std::sync::Arc;
@@ -228,7 +228,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     let failing = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
         InjectedError::Transport("unavailable".to_owned()),
     );
     failing.fail_all();
@@ -373,7 +373,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         let store = FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::prefix(manifests_prefix(&namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost acknowledgement".to_owned()),
         );
         let store = if apply {
@@ -458,7 +458,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
         store.reset();
         assert!(matches!(
             publish_grep_manifest(&store, Some(&first), &next, &deadline).await,
-            Err(GrepError::CorruptIndex { .. })
+            Err(GrepError::IndexCorrupt { .. })
         ));
         assert_eq!(store.counts().puts, 0);
         store
@@ -488,7 +488,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         KeyPredicate::prefix(manifests_prefix(&namespace_id)),
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("late-manifest")
+        .writer_id(loonfs_test_support::ids::writer_id("late-manifest"))
         .build()
         .await
         .expect("writer");
@@ -512,7 +512,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     let failing = FailStore::new(
         recorded.clone(),
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost acknowledgement".to_owned()),
     )
     .apply_then_fail();
@@ -520,7 +520,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     let blocked = BlockingStore::new(
         failing,
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     let timer = Arc::new(ManualClock::new(0));
     let late_deadline = Deadline::start(timer.clone());
@@ -543,7 +543,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             timer.advance_ms(loonfs_grep::GREP_GC_GRACE_WINDOW_MS + 1);
             let report = host
                 .worker
-                .garbage_collect_namespace(&namespace_id, timer.now_ms())
+                .gc_namespace(&namespace_id, timer.now_ms())
                 .await
                 .expect("collect old manifests");
             assert_eq!(report.deleted_other_objects, 2);

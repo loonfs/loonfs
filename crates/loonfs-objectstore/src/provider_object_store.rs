@@ -79,7 +79,7 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Concurrent in-flight parts of one multipart overwrite or verified
 /// immutable write. A `put_streamed` write sends one part at a time.
-pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
+pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
 /// so the shortest base prefix a provider copies instead of receiving it
@@ -115,13 +115,13 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEAD
 /// smaller bodies are control-plane traffic bounded by
 /// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
 /// tail parts classify with their siblings.
-pub(crate) const PROVIDER_TRANSFER_BODY_MIN_BYTES: u64 = 1024 * 1024;
+pub(crate) const PROVIDER_MIN_TRANSFER_BODY_BYTES: u64 = 1024 * 1024;
 
 /// Bound for one HTTP attempt's request phase (connect, request-body
 /// upload, response headers), by request body size: flat and small for
 /// control-plane requests, flat and generous for payload transfers.
 pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
-    if request_body_bytes >= PROVIDER_TRANSFER_BODY_MIN_BYTES {
+    if request_body_bytes >= PROVIDER_MIN_TRANSFER_BODY_BYTES {
         PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
     } else {
         PROVIDER_ATTEMPT_TIMEOUT
@@ -349,12 +349,12 @@ impl ProviderObjectStore {
         }
     }
 
-    fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
+    fn metadata_from_provider(&self, meta: ObjectMeta) -> ObjectMetadata {
         self.with_compare_token(ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
-            last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+            last_modified_at_ms: last_modified_at_ms(meta.last_modified.timestamp_millis()),
             checksum: None,
         })
     }
@@ -364,7 +364,7 @@ impl ProviderObjectStore {
             etag: result.e_tag,
             version: result.version,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: None,
         })
     }
@@ -674,14 +674,14 @@ impl MultipartWrite<'_> {
         upload_id: &provider_store::MultipartId,
         bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
-        let part_size = self.store.multipart_geometry.part_bytes as usize;
+        let part_size = loonfs_types::usize_from_u64(self.store.multipart_geometry.part_bytes);
         let part_count = bytes.len().div_ceil(part_size);
         let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
         let mut in_flight = FuturesUnordered::new();
         let mut next_part = 0usize;
 
         loop {
-            while in_flight.len() < PROVIDER_MULTIPART_PART_WINDOW && next_part < part_count {
+            while in_flight.len() < PROVIDER_MULTIPART_PARTS_IN_FLIGHT && next_part < part_count {
                 let part_index = next_part;
                 let start = part_index * part_size;
                 let end = (start + part_size).min(bytes.len());
@@ -703,7 +703,7 @@ impl MultipartWrite<'_> {
 
         let parts = part_ids
             .into_iter()
-            .map(|part_id| part_id.expect("every part completed before the window drained"))
+            .map(|part_id| part_id.expect("every part should complete before the window drains"))
             .collect();
         self.multipart
             .complete_multipart(self.path, upload_id, parts)
@@ -825,7 +825,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = self.metadata_from_meta(result.meta.clone());
+                let metadata = self.metadata_from_provider(result.meta.clone());
                 let bytes = result
                     .bytes()
                     .await
@@ -944,11 +944,11 @@ impl ObjectStore for ProviderObjectStore {
             async move {
                 let mut parts = PartReader::new(
                     stream::once(async { Ok(bytes) }).boxed(),
-                    self.multipart_geometry.part_bytes as usize,
+                    loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
-                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PART_WINDOW)
+                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PARTS_IN_FLIGHT)
                     .await
             }
         })
@@ -972,7 +972,10 @@ impl ObjectStore for ProviderObjectStore {
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
-        let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+        let mut reader = PartReader::new(
+            body,
+            loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
+        );
         let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
         if reader.exhausted() {
             let size_bytes = head.len() as u64;
@@ -1006,14 +1009,17 @@ impl ObjectStore for ProviderObjectStore {
                     .put(key, collect_stream(body).await?, PutMode::CreateIfAbsent)
                     .await;
             }
-            let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+            let mut reader = PartReader::new(
+                body,
+                loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
+            );
             let head = reader.next_part().await?.unwrap_or_default();
             self.put_parts(
                 key,
                 head,
                 reader,
                 PutMode::CreateIfAbsent,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
             )
             .await
         }
@@ -1056,7 +1062,7 @@ impl ObjectStore for ProviderObjectStore {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::assembly::check_algorithms(self.checksum_algorithm(), key, sources, expected)
+        crate::assembly::validate_algorithms(self.checksum_algorithm(), key, sources, expected)
             .map_err(|source| crate::ImmutableWriteError::Transport {
                 object_key: key.to_owned(),
                 source,
@@ -1066,7 +1072,7 @@ impl ObjectStore for ProviderObjectStore {
         };
         match self.head(key).await {
             Ok(Some(existing)) => {
-                return crate::immutable_write::check_stored_checksum(key, expected, existing)
+                return crate::immutable_write::verify_stored_checksum(key, expected, existing)
             }
             Err(source) => {
                 return Err(crate::ImmutableWriteError::Transport {
@@ -1152,7 +1158,7 @@ impl ObjectStore for ProviderObjectStore {
                         }
                         Some(Ok(ListedObject {
                             key,
-                            last_modified_ms: last_modified_ms(
+                            last_modified_at_ms: last_modified_at_ms(
                                 meta.last_modified.timestamp_millis(),
                             ),
                         }))
@@ -1336,9 +1342,9 @@ impl ProviderObjectStore {
 /// Unix epoch zero. Returning that value would make garbage collection treat
 /// the object as extremely old. Non-positive timestamps are therefore
 /// returned as `None`, which causes unknown-age objects to be retained.
-fn last_modified_ms(timestamp_millis: i64) -> Option<u64> {
-    match timestamp_millis > 0 {
-        true => u64::try_from(timestamp_millis).ok(),
+fn last_modified_at_ms(timestamp_ms: i64) -> Option<u64> {
+    match timestamp_ms > 0 {
+        true => u64::try_from(timestamp_ms).ok(),
         false => None,
     }
 }
@@ -1349,12 +1355,15 @@ enum RangedGet {
     Refused(provider_store::Error),
 }
 
-fn provider_not_found(err: &provider_store::Error) -> bool {
-    matches!(err, provider_store::Error::NotFound { .. })
+fn provider_not_found(error: &provider_store::Error) -> bool {
+    matches!(error, provider_store::Error::NotFound { .. })
 }
 
-pub(crate) fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
-    match err {
+pub(crate) fn map_provider_error(
+    object_key: &str,
+    error: provider_store::Error,
+) -> ObjectStoreError {
+    match error {
         provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
             object_key: object_key.to_owned(),
         },
@@ -1528,7 +1537,9 @@ mod tests {
                         etag: meta.e_tag,
                         version: meta.version,
                         size_bytes: meta.size,
-                        last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+                        last_modified_at_ms: last_modified_at_ms(
+                            meta.last_modified.timestamp_millis(),
+                        ),
                         checksum: Some(Checksum::crc64nvme(&bytes)),
                     }))
                 }
@@ -1612,23 +1623,26 @@ mod tests {
 
     #[test]
     fn a_synthesized_epoch_stamp_reads_as_no_timestamp_at_all() {
-        assert_eq!(last_modified_ms(0), None);
-        assert_eq!(last_modified_ms(-1), None);
-        assert_eq!(last_modified_ms(i64::MIN), None);
-        assert_eq!(last_modified_ms(1), Some(1));
-        assert_eq!(last_modified_ms(1_754_000_000_000), Some(1_754_000_000_000));
+        assert_eq!(last_modified_at_ms(0), None);
+        assert_eq!(last_modified_at_ms(-1), None);
+        assert_eq!(last_modified_at_ms(i64::MIN), None);
+        assert_eq!(last_modified_at_ms(1), Some(1));
+        assert_eq!(
+            last_modified_at_ms(1_754_000_000_000),
+            Some(1_754_000_000_000)
+        );
     }
 
     #[test]
     fn provider_client_failures_are_classified_at_the_adapter_boundary() {
         let path = Path::from("private-key");
         assert_eq!(
-            map_provider_error("private-key", transport_glitch()).class(),
-            crate::ObjectStoreErrorClass::RetryableTransport
+            map_provider_error("private-key", transport_glitch()).kind(),
+            crate::ObjectStoreErrorKind::RetryableTransport
         );
         assert_eq!(
-            map_provider_error("private-key", auth_rejection(&path)).class(),
-            crate::ObjectStoreErrorClass::PermissionDenied
+            map_provider_error("private-key", auth_rejection(&path)).kind(),
+            crate::ObjectStoreErrorKind::PermissionDenied
         );
     }
 
@@ -1648,7 +1662,7 @@ mod tests {
 
         let error = map_provider_error("private-key", error);
 
-        assert_eq!(error.class(), crate::ObjectStoreErrorClass::Configuration);
+        assert_eq!(error.kind(), crate::ObjectStoreErrorKind::Configuration);
         assert_eq!(
             error.to_string(),
             "invalid object store configuration: could not resolve `store.credentials` through the standard AWS credential chain"
@@ -1792,7 +1806,7 @@ mod tests {
         );
         for entry in entries {
             let head = store.head(&entry.key).await.expect("head").expect("exists");
-            assert_eq!(entry.last_modified_ms, head.last_modified_ms);
+            assert_eq!(entry.last_modified_at_ms, head.last_modified_at_ms);
         }
         let remaining: Vec<_> = store
             .list_prefix_from_stream(prefix, Some(&keys[999]))
@@ -2415,7 +2429,7 @@ mod tests {
             ("namespaces/demo/uploads/upl_2.json", multipart_payload(15)),
             (
                 MULTIPART_KEY,
-                multipart_payload(MULTIPART_TEST_THRESHOLD as usize + 1),
+                multipart_payload(MULTIPART_TEST_THRESHOLD + 1),
             ),
         ] {
             let written = store
@@ -2731,11 +2745,11 @@ mod tests {
     fn request_phase_bound_has_two_flat_tiers() {
         assert_eq!(request_phase_bound(0), PROVIDER_ATTEMPT_TIMEOUT);
         assert_eq!(
-            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES - 1),
+            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES - 1),
             PROVIDER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
-            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES),
+            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES),
             PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
@@ -2744,18 +2758,19 @@ mod tests {
         );
     }
 
-    const MULTIPART_TEST_THRESHOLD: u64 = 1024;
-    const MULTIPART_TEST_PART: u64 = 512;
+    const MULTIPART_TEST_THRESHOLD: usize = 1024;
+    const MULTIPART_TEST_PART: usize = 512;
     const MULTIPART_KEY: &str = "namespaces/demo/content/con_abcdef0123456789abcdef0123456789";
 
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.
     fn multipart_test_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
-        retrying_store(flaky).multipart_geometry(MULTIPART_TEST_THRESHOLD, MULTIPART_TEST_PART)
+        retrying_store(flaky)
+            .multipart_geometry(MULTIPART_TEST_THRESHOLD as u64, MULTIPART_TEST_PART as u64)
     }
 
     fn multipart_payload(len: usize) -> Vec<u8> {
-        (0..len).map(|index| (index % 251) as u8).collect()
+        (0..251_u8).cycle().take(len).collect()
     }
 
     fn script_part(
@@ -2871,7 +2886,7 @@ mod tests {
         store
             .put_overwrite(
                 "namespaces/demo/uploads/upl_small.bin",
-                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize - 1)),
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD - 1)),
             )
             .await
             .expect("below-threshold put");
@@ -2881,7 +2896,7 @@ mod tests {
         store
             .put_overwrite(
                 MULTIPART_KEY,
-                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize)),
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD)),
             )
             .await
             .expect("at-threshold put");
@@ -2925,7 +2940,7 @@ mod tests {
                 etag: Some("\"controller\"".to_owned()),
                 version: None,
                 size_bytes,
-                last_modified_ms: None,
+                last_modified_at_ms: None,
                 checksum: Some(checksum.finish()),
             })
         }
@@ -2964,7 +2979,10 @@ mod tests {
             .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("a large verified write creates through the controller");
-        assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
+        assert_eq!(
+            controller.part_windows(),
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT]
+        );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
@@ -2979,7 +2997,7 @@ mod tests {
             .expect("a large streamed verified write creates through the controller");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
@@ -2991,7 +3009,7 @@ mod tests {
             .expect("a small streamed verified write is one request");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
@@ -3009,8 +3027,8 @@ mod tests {
         assert_eq!(
             controller.part_windows(),
             [
-                PROVIDER_MULTIPART_PART_WINDOW,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
                 1
             ],
             "a client's upload keeps one part in flight"
@@ -3091,7 +3109,7 @@ mod tests {
     async fn a_short_streamed_put_is_one_request_that_keeps_its_precondition() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        let payload = multipart_payload(MULTIPART_TEST_PART as usize - 1);
+        let payload = multipart_payload(MULTIPART_TEST_PART - 1);
 
         store
             .put_streamed(
@@ -3200,7 +3218,7 @@ mod tests {
     async fn a_streamed_put_that_fails_mid_stream_abandons_its_upload() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        let head = multipart_payload(MULTIPART_TEST_PART as usize);
+        let head = multipart_payload(MULTIPART_TEST_PART);
         let body = stream::iter([
             Ok(Bytes::from(head)),
             Ok(Bytes::from(multipart_payload(64))),

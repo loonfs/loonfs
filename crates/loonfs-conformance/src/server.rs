@@ -124,7 +124,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let provider_task = tokio::spawn(async move {
         axum::serve(provider_listener, provider_router)
             .await
-            .expect("serve conformance transfers");
+            .expect("the conformance transfer server should serve until it is aborted");
     });
     let issuer = Arc::new(LoopbackIssuer {
         base_url: format!("http://{provider_address}"),
@@ -143,7 +143,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let config = loonfs_server::load_server_config(&config_path).map_err(config_error)?;
     let (api_router, _state) = loonfs_server::app(
         config,
-        loonfs_server::AppOptions {
+        loonfs_server::AppConfig {
             store: Some(shared_store),
             direct_transfers: Some(transfers),
         },
@@ -153,7 +153,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let server_task = tokio::spawn(async move {
         axum::serve(api_listener, api_router)
             .await
-            .expect("serve conformance API");
+            .expect("the conformance API server should serve until it is aborted");
     });
 
     health_check(api_address)
@@ -204,7 +204,7 @@ struct LoopbackIssuer {
     base_url: String,
 }
 
-fn presigned_expiry_ms(now: SystemTime) -> u64 {
+fn presigned_expires_at_ms(now: SystemTime) -> u64 {
     let expiry = now + Duration::from_secs(3600);
     expiry
         .duration_since(UNIX_EPOCH)
@@ -233,7 +233,7 @@ impl DirectGetIssuer for LoopbackIssuer {
                 .map(|range| ("range".to_owned(), range))
                 .into_iter()
                 .collect(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }
@@ -253,7 +253,7 @@ impl DirectPutIssuer for LoopbackIssuer {
             method: "PUT".to_owned(),
             url: format!("{}/objects/{}", self.base_url, request.object_key),
             headers: BTreeMap::new(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }
@@ -272,7 +272,7 @@ impl DirectMultipartIssuer for LoopbackIssuer {
                 self.base_url, request.provider_upload_id, request.part_number
             ),
             headers: BTreeMap::new(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }

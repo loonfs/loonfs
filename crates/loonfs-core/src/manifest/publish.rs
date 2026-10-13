@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
-    load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_number,
+    load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
     raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
 };
 use crate::time::Deadline;
@@ -24,19 +24,15 @@ pub(crate) enum ManifestPublicationOutcome {
     PredecessorChanged(CurrentManifest),
 }
 
-enum ManifestClassification {
+enum ManifestKind {
     Installable,
     Settled(ManifestPublicationOutcome),
 }
 
 pub(crate) fn encode_manifest(
     payload: NamespaceManifestPayload,
-) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
-    let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-    encode_namespace_manifest_json(payload).map_err(|error| CoreError::Codec {
-        object_key,
-        message: error.to_string(),
-    })
+) -> EncodedEnvelope<NamespaceManifestPayload> {
+    encode_namespace_manifest_json(payload).expect("a namespace manifest should encode")
 }
 
 pub(crate) enum ManifestChange<T> {
@@ -65,7 +61,7 @@ where
             ManifestChange::Again => continue,
         };
         payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
-        let manifest = encode_manifest(payload)?;
+        let manifest = encode_manifest(payload);
         let manifest_bytes = manifest.as_bytes().len() as u64;
         let (outcome, raised) =
             publish_manifest_from(store, manifest, deadline, Some(current), Some(hint.clone()))
@@ -158,8 +154,8 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             ));
         }
         match classify_current(&current.state, &candidate, expected_predecessor, false) {
-            ManifestClassification::Installable => {}
-            ManifestClassification::Settled(outcome) => return Ok((outcome, hint)),
+            ManifestKind::Installable => {}
+            ManifestKind::Settled(outcome) => return Ok((outcome, hint)),
         }
     }
     let payload = manifest.envelope().payload();
@@ -175,12 +171,7 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             .map_err(|error| error.to_string()),
         None => Err("has no predecessor".to_owned()),
     };
-    if let Err(reason) = legal {
-        return Err(CoreError::Internal(format!(
-            "manifest `{}` of namespace `{namespace_id}` {reason}",
-            payload.manifest_no
-        )));
-    }
+    legal.expect("a candidate manifest should be a legal successor of the current manifest");
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest().manifest_no);
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let outcome = match store
@@ -199,10 +190,9 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         Err(error @ ObjectStoreError::Transport { .. }) => {
             // Only the exact manifest at this number confirms the put;
             // a later manifest may already cover it.
-            let landed =
-                load_manifest_by_number(store, namespace_id, candidate.manifest().manifest_no)
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?;
+            let landed = load_manifest_by_no(store, namespace_id, candidate.manifest().manifest_no)
+                .await
+                .map_err(CoreError::ControlObjectLoad)?;
             let outcome = match landed {
                 Some(landed) => classify_current(
                     &landed.state,
@@ -221,7 +211,13 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                     .await?
                 }
             };
-            let ManifestClassification::Settled(outcome) = outcome else {
+            let ManifestKind::Settled(outcome) = outcome else {
+                tracing::error!(
+                    namespace_id = %namespace_id,
+                    object_key = %object_key,
+                    error = %error,
+                    "the outcome of a manifest publication is unknown"
+                );
                 return Err(CoreError::OutcomeUnknown {
                     object_key,
                     message: error.public_message().into_owned(),
@@ -236,7 +232,15 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             }
             outcome
         }
-        Err(error) => return Err(CoreError::store(&object_key, &error)),
+        Err(error) => {
+            tracing::error!(
+                namespace_id = %namespace_id,
+                object_key = %object_key,
+                error = %error,
+                "manifest publication failed"
+            );
+            return Err(CoreError::store(&object_key, &error));
+        }
     };
     if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
         // Publication is already durable; a failed hint update cannot undo it.
@@ -278,7 +282,7 @@ fn classify_current(
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
-) -> ManifestClassification {
+) -> ManifestKind {
     let outcome = if current.manifest() == candidate.manifest() {
         if confirm_authorship {
             ManifestPublicationOutcome::Published(current.clone())
@@ -296,14 +300,14 @@ fn classify_current(
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest().manifest_no) == expected_predecessor {
-        return ManifestClassification::Installable;
+        return ManifestKind::Installable;
     } else {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
     };
-    ManifestClassification::Settled(outcome)
+    ManifestKind::Settled(outcome)
 }
 
-impl ManifestClassification {
+impl ManifestKind {
     fn settled_after_conflict(
         self,
         namespace_id: &NamespaceId,
@@ -323,11 +327,11 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
-) -> Result<ManifestClassification> {
+) -> Result<ManifestKind> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
-        .map_or(ManifestClassification::Installable, |loaded| {
+        .map_or(ManifestKind::Installable, |loaded| {
             classify_current(
                 &loaded.state,
                 candidate,

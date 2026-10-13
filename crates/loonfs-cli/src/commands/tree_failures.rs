@@ -27,7 +27,7 @@ impl TreeTransferFailures {
         if self.spool.is_none() {
             self.spool = Some(NamedTempFile::new()?);
         }
-        let file = self.spool.as_mut().expect("a report file was opened");
+        let file = self.spool.as_mut().expect("the report file should be open");
         serde_json::to_writer(file.as_file_mut(), &failure)?;
         file.write_all(b"\n")?;
         self.len += 1;

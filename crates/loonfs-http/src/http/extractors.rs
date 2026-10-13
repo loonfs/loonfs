@@ -286,7 +286,7 @@ pub(super) struct AppJson<T>(pub(super) T);
 pub(super) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 async fn extract_json<S, T>(
-    req: axum::extract::Request,
+    request: axum::extract::Request,
     state: &S,
     body_too_large: ApiResponseError,
 ) -> Result<T, ApiResponseError>
@@ -294,7 +294,7 @@ where
     T: serde::de::DeserializeOwned,
     S: Send + Sync,
 {
-    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(req, state).await {
+    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(request, state).await {
         Ok(Json(body)) => body,
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
             return Err(body_too_large);
@@ -459,7 +459,7 @@ where
 }
 
 async fn extract_body_bytes<S>(
-    mut req: axum::extract::Request,
+    mut request: axum::extract::Request,
     state: &S,
     max_bytes: usize,
     body_too_large: ApiResponseError,
@@ -467,8 +467,8 @@ async fn extract_body_bytes<S>(
 where
     S: Send + Sync,
 {
-    DefaultBodyLimit::max(max_bytes).apply(&mut req);
-    match Bytes::from_request(req, state).await {
+    DefaultBodyLimit::max(max_bytes).apply(&mut request);
+    match Bytes::from_request(request, state).await {
         Ok(body) => Ok(body),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
             Err(body_too_large)
@@ -509,7 +509,7 @@ impl<const MAX_BYTES: usize> FromRequest<BindingState> for UploadBodyBytes<MAX_B
 /// oversized body (`413 content_too_large`) from an unreadable body (`400`).
 pub(super) struct UploadBodyStream {
     body: axum::body::Body,
-    max_bytes: u64,
+    max_bytes: Option<u64>,
     abort: Arc<Mutex<Option<UploadStreamAbort>>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -542,7 +542,7 @@ impl UploadBodyStream {
             .map(move |chunk| match chunk {
                 Ok(chunk) => {
                     read_bytes += chunk.len() as u64;
-                    if read_bytes > max_bytes {
+                    if max_bytes.is_some_and(|max_bytes| read_bytes > max_bytes) {
                         return Err(record_abort(&abort, UploadStreamAbort::TooLarge));
                     }
                     Ok(chunk)
@@ -567,7 +567,9 @@ fn record_abort(
         UploadStreamAbort::TooLarge => "upload body exceeded this deployment's limit".to_owned(),
         UploadStreamAbort::Unreadable(error) => format!("upload body unreadable: {error}"),
     };
-    *abort.lock().unwrap_or_else(|err| err.into_inner()) = Some(reason);
+    *abort
+        .lock()
+        .expect("the upload abort lock should not be poisoned") = Some(reason);
     loonfs::ObjectStoreError::transport("upload body", message)
 }
 
@@ -585,7 +587,7 @@ impl UploadStreamOutcome {
         match self
             .abort
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .expect("the upload abort lock should not be poisoned")
             .take()
         {
             Some(UploadStreamAbort::TooLarge) => Some(upload_body_too_large_error()),
@@ -617,7 +619,10 @@ impl FromRequest<BindingState> for UploadBodyStream {
         // A declared length past the limit is refused before a byte moves.
         // The incremental count still runs: a chunked body declares nothing,
         // and a declared length is a claim rather than a measurement.
-        if declared_content_length(req.headers()).is_some_and(|length| length > max_bytes) {
+        if declared_content_length(req.headers())
+            .zip(max_bytes)
+            .is_some_and(|(length, max_bytes)| length > max_bytes)
+        {
             return Err(upload_body_too_large_error());
         }
         Ok(UploadBodyStream {

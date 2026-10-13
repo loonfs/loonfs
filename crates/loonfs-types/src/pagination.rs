@@ -36,27 +36,27 @@ enum PagerState<C> {
 }
 
 type PageFuture<P, E> = Pin<Box<dyn Future<Output = Result<P, E>> + Send>>;
-type PageFetcher<P, E> =
+type PageLoader<P, E> =
     Box<dyn FnMut(PageRequest<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
 
 /// Fetches pages and retains unused items between bounded collections.
 #[must_use]
 pub struct Pager<P: PagedResponse, E> {
-    fetch: PageFetcher<P, E>,
+    load_page: PageLoader<P, E>,
     state: PagerState<P::Cursor>,
     pending: Option<P>,
 }
 
 impl<P: PagedResponse, E> Pager<P, E> {
-    /// Creates a pager over the pages `fetch` returns. A request without a
-    /// cursor asks `fetch` for the first page.
-    pub fn new<F, Fut>(mut fetch: F) -> Self
+    /// Creates a pager over the pages `load_page` returns. A request without a
+    /// cursor asks `load_page` for the first page.
+    pub fn new<F, Fut>(mut load_page: F) -> Self
     where
         F: FnMut(PageRequest<P::Cursor>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<P, E>> + Send + 'static,
     {
         Self {
-            fetch: Box::new(move |request| Box::pin(fetch(request))),
+            load_page: Box::new(move |request| Box::pin(load_page(request))),
             state: PagerState::NotStarted,
             pending: None,
         }
@@ -74,7 +74,7 @@ impl<P: PagedResponse, E> Pager<P, E> {
             PagerState::Done => return None,
         };
         let limit = EffectiveLimit(PaginationPolicy::default().default_limit());
-        let page = (self.fetch)(PageRequest { limit, cursor }).await;
+        let page = (self.load_page)(PageRequest { limit, cursor }).await;
         if let Ok(page) = &page {
             self.state = match page.next_cursor() {
                 Some(cursor) => PagerState::More(cursor),
@@ -88,7 +88,7 @@ impl<P: PagedResponse, E> Pager<P, E> {
     /// page when it has none, with at most `request.limit` items. The pager's
     /// own position does not move.
     pub async fn page(&mut self, request: PageRequest<P::Cursor>) -> Result<P, E> {
-        (self.fetch)(request).await
+        (self.load_page)(request).await
     }
 
     /// Returns at most `max_items` items.
@@ -265,7 +265,7 @@ impl PaginationPolicy {
     }
 
     /// Resolves a caller-supplied limit into the enforced page size.
-    pub fn resolve_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
+    pub fn effective_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
         match requested {
             None => Ok(EffectiveLimit(self.default_limit)),
             Some(value) if value > self.max_limit.get() => Err(LimitError::ExceedsMax {
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn default_policy_resolves_omitted_limit_to_default() {
         let policy = PaginationPolicy::default();
-        let limit = policy.resolve_limit(None).expect("default limit");
+        let limit = policy.effective_limit(None).expect("default limit");
 
         assert_eq!(limit.get(), DEFAULT_PAGE_LIMIT);
         assert_eq!(limit.limit_plus_one(), 1_001);
@@ -680,9 +680,9 @@ mod tests {
     fn policy_rejects_invalid_limits() {
         let policy = PaginationPolicy::default();
 
-        assert_eq!(policy.resolve_limit(Some(0)), Err(LimitError::Zero));
+        assert_eq!(policy.effective_limit(Some(0)), Err(LimitError::Zero));
         assert_eq!(
-            policy.resolve_limit(Some(DEFAULT_MAX_PAGE_LIMIT + 1)),
+            policy.effective_limit(Some(DEFAULT_MAX_PAGE_LIMIT + 1)),
             Err(LimitError::ExceedsMax {
                 requested: DEFAULT_MAX_PAGE_LIMIT + 1,
                 max_limit: DEFAULT_MAX_PAGE_LIMIT,

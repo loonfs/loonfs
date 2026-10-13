@@ -120,13 +120,13 @@ pub(crate) async fn decide_occupied<S: ObjectStore + ?Sized>(
     conflict: ObjectStoreError,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     match store.head(key).await {
-        Ok(Some(existing)) => check_stored_checksum(key, expected, existing),
+        Ok(Some(existing)) => verify_stored_checksum(key, expected, existing),
         Ok(None) => Err(transport(key, conflict)),
         Err(error) => Err(transport(key, error)),
     }
 }
 
-pub(crate) fn check_stored_checksum(
+pub(crate) fn verify_stored_checksum(
     key: &str,
     expected: &Checksum,
     existing: ObjectMetadata,
@@ -162,18 +162,18 @@ mod tests {
             etag: None,
             version: None,
             size_bytes: 5,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum,
         };
-        assert!(check_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());
+        assert!(verify_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());
         for actual in [Checksum::crc64nvme(b"other"), Checksum::crc32c(b"bytes")] {
             assert!(matches!(
-                check_stored_checksum("key", &expected, metadata(Some(actual))),
+                verify_stored_checksum("key", &expected, metadata(Some(actual))),
                 Err(ImmutableWriteError::DifferentObject { .. })
             ));
         }
         assert!(matches!(
-            check_stored_checksum("key", &expected, metadata(None)),
+            verify_stored_checksum("key", &expected, metadata(None)),
             Err(ImmutableWriteError::StoredChecksumMissing { .. })
         ));
     }

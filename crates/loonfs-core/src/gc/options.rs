@@ -41,13 +41,13 @@ impl GcOptions {
         // delete, so the configuration is rejected outright.
         if self.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
             return Err(CoreError::InvalidGcOptions(format!(
-                "grace_window_ms {} is below the derived safety minimum {}",
+                "`grace_window_ms` {} is below the derived safety minimum {}",
                 self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
             )));
         }
         if self.content_shard_rows == 0 {
             return Err(CoreError::InvalidGcOptions(
-                "content_shard_rows must be at least 1".to_owned(),
+                "`content_shard_rows` must be at least 1".to_owned(),
             ));
         }
         Ok(())

@@ -54,21 +54,21 @@ pub enum PathError {
     EmptyPath,
     /// Reports a path that does not begin at the namespace root.
     #[error(
-        "path `{}` is not absolute; namespace paths start with `/`, for example `/{}`",
-        path.escape_debug(), path.escape_debug()
+        "path {path:?} is not absolute; namespace paths start with `/`, for example {:?}",
+        format!("/{path}")
     )]
     RelativePath {
         /// Rejected path, preserved for an escaped diagnostic.
         path: String,
     },
     /// Reports an explicit current-directory component, which normalization never accepts.
-    #[error("path `{path:?}` contains `.` component")]
+    #[error("path {path:?} contains `.` component")]
     DotComponent {
         /// Rejected path, preserved for an escaped diagnostic.
         path: String,
     },
     /// Reports a parent-directory component, which could otherwise escape the requested path.
-    #[error("path `{path:?}` contains `..` component")]
+    #[error("path {path:?} contains `..` component")]
     ParentComponent {
         /// Rejected path, preserved for an escaped diagnostic.
         path: String,
@@ -77,13 +77,13 @@ pub enum PathError {
     #[error("display name must not be empty")]
     EmptyDisplayName,
     /// Reports a display name containing the path-component separator.
-    #[error("display name `{display_name:?}` contains `/`")]
+    #[error("display name {display_name:?} contains `/`")]
     DisplayNameContainsSeparator {
         /// Rejected component spelling, preserved for an escaped diagnostic.
         display_name: String,
     },
     /// Reports `.` or `..`, whose navigation meaning prevents storing them as names.
-    #[error("display name `{display_name:?}` is reserved")]
+    #[error("display name {display_name:?} is reserved")]
     ReservedDisplayName {
         /// Reserved spelling supplied by the caller.
         display_name: String,
@@ -113,7 +113,7 @@ pub enum PathError {
         depth: usize,
     },
     /// Reports a display name no portable target filesystem can hold.
-    #[error("display name `{display_name}` {reason}")]
+    #[error("display name {display_name:?} {reason}")]
     UnportableDisplayName {
         /// The rejected spelling.
         display_name: String,
@@ -122,7 +122,7 @@ pub enum PathError {
     },
     /// Reports a display name holding a character Windows reserves.
     #[error(
-        "display name `{display_name}` contains `{character}`, which Windows cannot store; \
+        "display name {display_name:?} contains `{character}`, which Windows cannot store; \
          the reserved characters are `:` `?` `*` `|` `\"` `<` `>` `\\`"
     )]
     UnportableDisplayNameCharacter {
@@ -542,7 +542,7 @@ mod tests {
             );
             let message = error.to_string();
             assert!(
-                message.contains(name) && message.contains(character),
+                message.contains(&format!("{name:?}")) && message.contains(character),
                 "the diagnostic must name the name and the character, got: {message}"
             );
 
@@ -650,7 +650,7 @@ mod tests {
         for (path, escaped) in [("b.txt", "b.txt"), ("b\n\t\x1b.txt", r"b\n\t\u{1b}.txt")] {
             assert_eq!(
                 AbsolutePath::parse(path).expect_err("relative path").to_string(),
-                format!("path `{escaped}` is not absolute; namespace paths start with `/`, for example `/{escaped}`")
+                format!("path \"{escaped}\" is not absolute; namespace paths start with `/`, for example \"/{escaped}\"")
             );
         }
     }

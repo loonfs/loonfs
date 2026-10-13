@@ -3,7 +3,6 @@
 use crate::metrics::{
     AdmissionInstruments, ExecutionBudgetInstruments, MetricsRecorder, PermitPoolGauges,
 };
-use crate::CoreError;
 use loonfs_core::cache::ReadWorkingMemory;
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -44,7 +43,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 /// runtime has a reserved share, so an idle runtime holds nothing back. A
 /// host that wants to isolate runtimes from each other gives them separate
 /// budgets. The per-namespace admission limits stay with each runtime (see
-/// [`PublicationLimits`](crate::PublicationLimits)). Clones share the budget.
+/// [`PublicationPolicy`](crate::PublicationPolicy)). Clones share the budget.
 /// A runtime built without one creates a private budget with the
 /// default limits.
 #[derive(Clone)]
@@ -96,7 +95,7 @@ impl ExecutionBudget {
             },
             max_merge_input_bytes: const {
                 NonZeroUsize::new(
-                    loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+                    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
                 )
                 .unwrap()
             },
@@ -137,16 +136,28 @@ impl ExecutionBudget {
     }
 
     /// Charges one admitted publication request of `estimated_bytes` to the
-    /// totals. A request past either total is refused with
-    /// `commit_queue_full` and charges nothing.
-    pub(crate) fn charge_admission(&self, estimated_bytes: usize) -> Result<(), CoreError> {
+    /// totals. A request past either total is refused, and the change says so
+    /// and charges nothing. Pass the change to [`Self::report_admission`]
+    /// once the caller holds no lock.
+    pub(crate) fn charge_admission(&self, estimated_bytes: usize) -> AdmissionChange {
         self.inner.admission.charge(estimated_bytes)
     }
 
     /// Returns what [`Self::charge_admission`] charged, once the request's
-    /// work settles.
-    pub(crate) fn refund_admission(&self, estimated_bytes: usize) {
-        self.inner.admission.refund(estimated_bytes);
+    /// work settles. Pass the change to [`Self::report_admission`] once the
+    /// caller holds no lock.
+    pub(crate) fn refund_admission(&self, estimated_bytes: usize) -> AdmissionChange {
+        self.inner.admission.refund(estimated_bytes)
+    }
+
+    /// Reports a charge or a refund to the metrics recorder. The recorder is
+    /// caller code, so it never runs under a lock.
+    pub(crate) fn report_admission(&self, change: AdmissionChange) {
+        let instruments = &self.inner.admission.instruments;
+        match change {
+            AdmissionChange::Admitted(totals) => instruments.report(totals.requests, totals.bytes),
+            AdmissionChange::Rejected => instruments.rejection(),
+        }
     }
 
     pub(crate) async fn read_permit(&self) -> BudgetPermit<'_> {
@@ -363,35 +374,49 @@ struct AdmittedTotals {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Admitted {
+pub(crate) struct Admitted {
     requests: usize,
     bytes: usize,
 }
 
+/// What a charge or a refund did to the admission totals.
+#[derive(Debug, Clone, Copy)]
+#[must_use = "report the change with `ExecutionBudget::report_admission`"]
+pub(crate) enum AdmissionChange {
+    /// The totals after the charge or the refund.
+    Admitted(Admitted),
+    /// The charge would pass a total, so nothing was charged.
+    Rejected,
+}
+
 impl AdmittedTotals {
     fn lock(&self) -> MutexGuard<'_, Admitted> {
-        self.admitted.lock().unwrap_or_else(PoisonError::into_inner)
+        self.admitted
+            .lock()
+            .expect("the admission totals lock should not be poisoned")
     }
 
-    fn charge(&self, estimated_bytes: usize) -> Result<(), CoreError> {
+    fn charge(&self, estimated_bytes: usize) -> AdmissionChange {
         let mut admitted = self.lock();
         if admitted.requests >= self.max_requests.get()
             || estimated_bytes > self.max_bytes.get().saturating_sub(admitted.bytes)
         {
-            self.instruments.rejection();
-            return Err(CoreError::CommitQueueFull);
+            return AdmissionChange::Rejected;
         }
         admitted.requests += 1;
         admitted.bytes += estimated_bytes;
-        self.instruments.report(admitted.requests, admitted.bytes);
-        Ok(())
+        AdmissionChange::Admitted(*admitted)
     }
 
-    fn refund(&self, estimated_bytes: usize) {
-        let mut admitted = self.lock();
+    fn refund(&self, estimated_bytes: usize) -> AdmissionChange {
+        // A refund runs in a drop, which can run while a panic unwinds, and a
+        // second panic then aborts the process, so this recovers a poisoned
+        // lock instead of panicking. The critical section only updates two
+        // counts.
+        let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
         admitted.requests -= 1;
         admitted.bytes -= estimated_bytes;
-        self.instruments.report(admitted.requests, admitted.bytes);
+        AdmissionChange::Admitted(*admitted)
     }
 }
 
@@ -438,12 +463,23 @@ impl PermitPool {
     }
 
     fn counts(&self) -> PoolCounts {
-        *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
+        *self
+            .counts
+            .lock()
+            .expect("the pool counts lock should not be poisoned")
     }
 
+    /// Changes the counts, then reports them after the lock is released,
+    /// because the gauges call the caller's recorder.
     fn update(&self, change: impl FnOnce(&mut PoolCounts)) {
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
-        change(&mut counts);
+        let counts = {
+            let mut counts = self
+                .counts
+                .lock()
+                .expect("the pool counts lock should not be poisoned");
+            change(&mut counts);
+            *counts
+        };
         self.gauges.report(counts.running, counts.waiting);
     }
 }
@@ -459,13 +495,23 @@ impl Drop for BudgetPermit<'_> {
     fn drop(&mut self) {
         let permit = self.permit.take();
         let running = permit.is_some();
-        self.pool.update(|counts| {
+        // A drop can run while a panic unwinds, and a second panic then
+        // aborts the process, so this recovers a poisoned lock instead of
+        // panicking. The critical section only updates two counts.
+        let counts = {
+            let mut counts = self
+                .pool
+                .counts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             if running {
                 counts.running -= 1;
             } else {
                 counts.waiting -= 1;
             }
-        });
+            *counts
+        };
+        self.pool.gauges.report(counts.running, counts.waiting);
         // The count falls before the permit returns, so the running count
         // never passes the limit.
         drop(permit);

@@ -46,8 +46,11 @@ pub(super) fn events_of_kind(output: &Output, kind: &str) -> Vec<Value> {
 
 /// A payload large enough to require several download chunks.
 pub(super) fn multi_chunk_payload() -> Vec<u8> {
-    let len = 3 * loonfs::CONTENT_READ_CHUNK_BYTES as usize + 1_024;
-    (0..len).map(|offset| (offset % 251) as u8).collect()
+    let len = 3 * loonfs::CONTENT_READ_CHUNK_BYTES + 1_024;
+    (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(len))
+        .collect()
 }
 
 /// Returns the partial-data and metadata paths for an interrupted download.

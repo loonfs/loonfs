@@ -1,11 +1,12 @@
-use super::context::{parse_snapshot_id_arg, resolve_profile_context, CommandContext};
+//! `loonfs snapshot` commands: create, list, extend, and delete.
+
+use super::context::{resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
     CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
     SnapshotListArgs, SnapshotTargetArgs,
 };
-use crate::resolve::parse_namespace_id;
 use std::path::Path;
 
 async fn resolve_snapshot_context(
@@ -22,10 +23,7 @@ async fn resolve_snapshot_context(
         Some(&target.subject),
     )
     .await?;
-    let namespace_id = parse_namespace_id(&target.namespace_id)
-        .map_err(|error| error.with_param("namespace_id"))
-        .map_err(|error| context.fail(kind, error))?;
-    context.namespace = Some(namespace_id);
+    context.namespace = Some(target.namespace_id.clone());
     Ok(context)
 }
 
@@ -91,8 +89,7 @@ async fn run_snapshot_extend(
     args: SnapshotExtendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id = parse_snapshot_id_arg("snapshot_id", &args.snapshot_id)
-        .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args.snapshot_id.clone();
     let response = context
         .target
         .client
@@ -108,8 +105,7 @@ async fn run_snapshot_delete(
     args: SnapshotDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id = parse_snapshot_id_arg("snapshot_id", &args.snapshot_id)
-        .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args.snapshot_id.clone();
     let response = context
         .target
         .client

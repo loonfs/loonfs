@@ -5,14 +5,14 @@ use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
 use super::query_params::{
-    checked_cursor, parse_path_id, parse_public_ordinal, resolve_page_limit,
+    checked_cursor, effective_page_limit, parse_path_id, parse_public_ordinal,
 };
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
-    AdvanceRetentionOptions, CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions,
-    GcOptions, MetadataMaintenanceOptions,
+    AdvanceRetentionFloorOptions, CheckpointPageCursor, CreateNamespaceOptions,
+    DeleteNamespaceOptions, GcOptions, MaintainMetadataOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
@@ -59,6 +59,12 @@ pub(super) struct DeleteNamespaceQuery {
 pub(super) struct CheckpointPageQuery {
     limit: Option<String>,
     cursor: Option<String>,
+}
+
+/// The capability value for a transfer limit. The API lists these limits on
+/// every deployment, so no limit is advertised as `u64::MAX`.
+fn advertised_limit(limit: Option<u64>) -> u64 {
+    limit.unwrap_or(u64::MAX)
 }
 
 #[cfg_attr(
@@ -126,7 +132,7 @@ pub(super) async fn get_capabilities(
     }
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.options.max_upload_bytes,
+        advertised_limit(state.options.max_upload_bytes),
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES.to_owned(),
@@ -138,7 +144,7 @@ pub(super) async fn get_capabilities(
     );
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.options.max_download_bytes,
+        advertised_limit(state.options.max_download_bytes),
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),
@@ -172,9 +178,9 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.options.serves_maintenance && state.options.maintains_grep_index,
+        state.options.serves_maintenance && state.options.grep.maintains(),
     );
-    if state.options.serves_grep {
+    if state.options.grep.serves() {
         let pagination = PaginationPolicy::default();
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
@@ -473,7 +479,7 @@ pub(super) async fn create_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms();
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let namespace = state
         .namespaces
@@ -482,16 +488,14 @@ pub(super) async fn create_snapshot(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
-    let checkpoint = namespace
+    let snapshot = namespace
         .create_snapshot(&request.name, expires_at_ms, &state.options.snapshot_policy)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
                 .with_invalid_request_param("/name")
         })?;
-    Ok(Json(SnapshotSummary::from_checkpoint(checkpoint).expect(
-        "snapshot creation returns a snapshot-owned checkpoint",
-    )))
+    Ok(Json(snapshot))
 }
 
 #[cfg_attr(
@@ -538,7 +542,7 @@ pub(super) async fn list_snapshots(
     let response = namespace
         .list_snapshots()
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor,
         })
         .await
@@ -582,7 +586,7 @@ pub(super) async fn extend_snapshot(
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms();
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let namespace = state
         .namespaces
@@ -759,7 +763,7 @@ pub(super) async fn list_checkpoints(
         .maintenance
         .list_checkpoints(&namespace_id)
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor,
         })
         .await
@@ -851,9 +855,9 @@ pub(super) async fn run_maintenance(
     let maintenance = &state.maintenance;
     let response = match request {
         RunMaintenanceRequest::Metadata(request) => {
-            let options = MetadataMaintenanceOptions {
+            let options = MaintainMetadataOptions {
                 idle_fold_after_ms: state.options.idle_fold_after_ms,
-                ..MetadataMaintenanceOptions::from_request(request)
+                ..MaintainMetadataOptions::from_request(request)
                     .map_err(ApiResponseError::for_namespace(&namespace_id))?
             };
             maintenance
@@ -862,7 +866,7 @@ pub(super) async fn run_maintenance(
                 .map(RunMaintenanceResponse::Metadata)
         }
         RunMaintenanceRequest::MetadataCompaction(_) => maintenance
-            .compact_metadata(&namespace_id)
+            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .map(RunMaintenanceResponse::MetadataCompaction),
         RunMaintenanceRequest::Gc(request) => maintenance
@@ -870,7 +874,7 @@ pub(super) async fn run_maintenance(
             .await
             .map(RunMaintenanceResponse::Gc),
         RunMaintenanceRequest::Retention(request) => {
-            let options = AdvanceRetentionOptions::from_request(request)
+            let options = AdvanceRetentionFloorOptions::from_request(request)
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             maintenance
                 .advance_retention_floor_with_options(&namespace_id, &options)
@@ -878,11 +882,11 @@ pub(super) async fn run_maintenance(
                 .map(RunMaintenanceResponse::Retention)
         }
         RunMaintenanceRequest::GrepGc {} => {
-            if !state.options.maintains_grep_index {
+            let Some(worker) = state.grep_index_worker() else {
                 return Err(grep_index_not_maintained().await);
-            }
-            let now_ms = maintenance.now_ms().map_err(ApiResponseError::runtime)?;
-            return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, now_ms)
+            };
+            let now_ms = maintenance.now_ms();
+            return loonfs_grep::gc_grep(worker, &namespace_id, now_ms)
                 .await
                 .map(Json)
                 .map_err(|error| map_grep_error(&namespace_id, error));

@@ -958,7 +958,7 @@ A chain whose pieces start at offset 0 writes the whole object at its own key, w
 
 The resulting layout is the remaining extents, followed by the new extent. Its `committed_seq` is the newest commit whose bytes it covers. When segments are built, the layout's row replaces any tail layout row for the same content ID, and it's included in the fold's delta run. Revision digests are copied from the deltas, and a fold never recomputes them. A manifest at `folded_wal_no` `n` includes layouts for all pieces through WAL object `n`, and garbage collection relies on that before it deletes a WAL object.
 
-Folds, validation (when it writes pending pieces to content objects), direct-download writes, and proxied staging all share the execution budget's content-write permits. `max_content_writes` defaults to 32 and is configurable. Each write uses one permit until it finishes, and runtimes that share a budget share the limit. `STORE_WRITE_WAVE` also limits how many writes one fold starts at a time. The adapter chooses how to write by the result's size (see [Immutable writes and retries](#32-immutable-writes-and-retries)), and an assembly buffers at most one part window (or one read chunk on the local store).
+Folds, validation (when it writes pending pieces to content objects), direct-download writes, and proxied staging all share the execution budget's content-write permits. `max_content_writes` defaults to 32 and is configurable. Each write uses one permit until it finishes, and runtimes that share a budget share the limit. `STORE_WRITES_IN_FLIGHT` also limits how many writes one fold starts at a time. The adapter chooses how to write by the result's size (see [Immutable writes and retries](#32-immutable-writes-and-retries)), and an assembly buffers at most one part window (or one read chunk on the local store).
 
 Every successor manifest MUST:
 
@@ -1138,7 +1138,7 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ```text
 deadline(T) = T.deleted_at_ms
-              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
+              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 ```
 
 A tombstone is eligible for retirement when the pass clock reaches its deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same pass still count, and any unrecognized key under the pin prefix also blocks reclamation.
@@ -1339,7 +1339,7 @@ For example, suppose a collector observes hint 8 and current manifest 10. It kee
 
 ### 11.4 Clock and operation assumptions
 
-Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
+Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_at_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
 The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
@@ -1401,7 +1401,7 @@ completion
 In milliseconds:
 
 ```text
-CONTENT_RECLAMATION_GRACE_MS
+CONTENT_RECLAMATION_GRACE_WINDOW_MS
     = COMPLETED_UPLOAD_RECEIPT_WINDOW_MS
       + CONTENT_RECEIPT_TTL_MS
       + GC_MIN_GRACE_WINDOW_MS
@@ -2074,10 +2074,10 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | The derived minimum ordinary garbage collection grace. |
 | `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a view's previous basis confirmation and the answer to its next successor check. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
-| `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
+| `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a streaming compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
+| `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 
@@ -2093,9 +2093,9 @@ READ_REVALIDATION_BOUND_MS
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
 
 METADATA_COMPACTION_BUDGET_MS
-    = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
+    = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS
 
-NAMESPACE_RETIREMENT_GRACE_MS
+NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
     = METADATA_PUBLICATION_BUDGET_MS
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_MIN_GRACE_WINDOW_MS
@@ -2111,7 +2111,7 @@ The configured grace `T` can't be lower than the minimum, and retirement uses th
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_MS` | 610,890,000 | The admission window plus the minimum garbage collection grace. |
+| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 610,890,000 | The admission window plus the minimum garbage collection grace. |
 
 The completed-content interval is seven days, one hour, forty-one minutes, and thirty seconds. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 

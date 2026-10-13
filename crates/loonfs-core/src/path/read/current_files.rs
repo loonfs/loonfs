@@ -1,41 +1,56 @@
 //! Resolves the current state and path of a batch of inode IDs.
 //!
-//! Missing or unreadable inodes return `visible: false` with no path or revision.
+//! Missing or unreadable inodes return [`CurrentFile::Hidden`], with no path or
+//! revision.
 
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
-use crate::metadata::{DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath};
+use crate::metadata::{
+    DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath, VisiblePathError,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum number of inode IDs accepted by a batch resolution.
-pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
+pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
 
 /// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentFileState {
     /// Requested inode ID.
     pub inode_id: InodeId,
-    /// Whether the inode has a visible path and the subject can read it.
-    pub visible: bool,
-    /// Whether the subject can read this inode.
-    pub readable: bool,
-    /// Current revision number for a visible file.
-    pub current_revision_no: Option<RevisionNo>,
-    /// Current path when `visible` is true.
-    pub current_path: Option<AbsolutePath>,
+    /// Whether the inode has a visible path that the subject can read.
+    pub file: CurrentFile,
+}
+
+/// Whether an inode has a visible path that the subject can read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentFile {
+    /// The inode has a visible path, and the subject can read it.
+    Visible {
+        /// Current path.
+        path: AbsolutePath,
+        /// Current revision number, for a file.
+        revision_no: Option<RevisionNo>,
+    },
+    /// The inode is missing, has no visible path, or the subject can't read
+    /// it.
+    Hidden {
+        /// Whether the subject can read this inode.
+        readable: bool,
+    },
 }
 
 /// Rejects an oversized batch before reading metadata.
 ///
 /// Called at the API boundary to enforce the batch limit.
-pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
-    if requested > MAX_RESOLVE_CURRENT_FILES {
+pub(crate) fn ensure_stat_batch_within_cap(requested: usize) -> Result<()> {
+    if requested > MAX_CURRENT_FILES_PER_STAT {
         return Err(CoreError::BatchTooLarge {
             requested,
-            max: MAX_RESOLVE_CURRENT_FILES,
+            max: MAX_CURRENT_FILES_PER_STAT,
         });
     }
     Ok(())
@@ -44,12 +59,12 @@ pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
 /// Resolves inode IDs against one loaded view in input order.
 ///
 /// The batch shares one namespace state and caches paths for common ancestors.
-pub(crate) async fn resolve_current_files<S: ObjectStore + ?Sized>(
+pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
     access: &ReadAccess<'_, S>,
 ) -> Result<Vec<CurrentFileState>> {
-    ensure_resolve_batch_within_cap(inode_ids.len())?;
+    ensure_stat_batch_within_cap(inode_ids.len())?;
     let mut session = view.metadata_view().session();
     let mut ancestor_paths = HashMap::new();
     let mut states = Vec::with_capacity(inode_ids.len());
@@ -71,7 +86,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
         return Ok(missing(inode_id, access.is_unrestricted()));
     };
-    let current_revision_no = if resolved.inode_kind == InodeKind::File {
+    let revision_no = if resolved.inode_kind == InodeKind::File {
         session
             .latest_revision_head_of_visible(inode_id)
             .await?
@@ -81,10 +96,10 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     };
     Ok(CurrentFileState {
         inode_id,
-        visible: true,
-        readable: true,
-        current_revision_no,
-        current_path: Some(resolved.absolute_path),
+        file: CurrentFile::Visible {
+            path: resolved.absolute_path,
+            revision_no,
+        },
     })
 }
 
@@ -135,16 +150,14 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
 fn missing(inode_id: InodeId, readable: bool) -> CurrentFileState {
     CurrentFileState {
         inode_id,
-        visible: false,
-        readable,
-        current_revision_no: None,
-        current_path: None,
+        file: CurrentFile::Hidden { readable },
     }
 }
 
 /// Derives an inode's path by following parent bindings to the root.
 ///
-/// Returns `None` for a cycle or a chain that does not reach the root.
+/// Returns `None` for a chain that does not reach the root, and
+/// `namespace_corrupt` for a parent-binding cycle.
 async fn current_path<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
@@ -161,7 +174,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
             break known.clone();
         }
         if !visited.insert(current) {
-            return Ok(None);
+            return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
         }
         let Some(binding) = session.current_parent_binding_for_child(current).await? else {
             return Ok(None);
@@ -185,13 +198,13 @@ async fn current_path<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_resolve_batch_within_cap, MAX_RESOLVE_CURRENT_FILES};
+    use super::{ensure_stat_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
     use loonfs_types::{ErrorCode, PaginationPolicy};
 
     #[test]
     fn the_batch_cap_is_the_pagination_maximum() {
         assert_eq!(
-            MAX_RESOLVE_CURRENT_FILES,
+            MAX_CURRENT_FILES_PER_STAT,
             PaginationPolicy::default().max_limit().get() as usize,
             "the batch cap is the page limit, not a second number"
         );
@@ -199,14 +212,14 @@ mod tests {
 
     #[test]
     fn a_batch_at_the_cap_is_accepted_and_one_past_it_names_the_cap() {
-        assert!(ensure_resolve_batch_within_cap(MAX_RESOLVE_CURRENT_FILES).is_ok());
-        let error = ensure_resolve_batch_within_cap(MAX_RESOLVE_CURRENT_FILES + 1)
+        assert!(ensure_stat_batch_within_cap(MAX_CURRENT_FILES_PER_STAT).is_ok());
+        let error = ensure_stat_batch_within_cap(MAX_CURRENT_FILES_PER_STAT + 1)
             .expect_err("one past the cap is refused");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert!(
             error
                 .to_string()
-                .contains(&MAX_RESOLVE_CURRENT_FILES.to_string()),
+                .contains(&MAX_CURRENT_FILES_PER_STAT.to_string()),
             "the refusal should name the cap: {error}"
         );
     }

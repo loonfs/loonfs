@@ -14,10 +14,10 @@ use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
     LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
-    StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind, Writable, WriterId,
+    StoredMetadataBlockCacheCloseError, TraceMode, Writable, WriterId,
 };
 use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
-use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
+use loonfs_http::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
@@ -131,7 +131,7 @@ pub struct AppState {
 
 /// Optional inputs for building the HTTP application.
 #[derive(Default)]
-pub struct AppOptions {
+pub struct AppConfig {
     /// Existing object store to use instead of building one from the config.
     pub store: Option<SharedObjectStore>,
     /// Direct-transfer issuers to use instead of the store's issuers.
@@ -147,14 +147,14 @@ pub struct AppOptions {
 /// performs these steps automatically. The cache is optional.
 pub async fn app(
     config: ServerConfig,
-    options: AppOptions,
+    options: AppConfig,
 ) -> Result<(Router, AppState), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
     let memory = config.validate()?;
     memory.log();
-    let AppOptions {
+    let AppConfig {
         store,
         direct_transfers,
     } = options;
@@ -167,7 +167,7 @@ pub async fn app(
         }
     };
     let metrics = HttpMetrics::new();
-    let maintains_grep_index = config.grep.mode.maintains_index();
+    let maintains_grep_index = config.grep.mode.maintains();
     // Opened before the runtime, because the runtime is what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
@@ -188,19 +188,18 @@ pub async fn app(
     // answers queries with one. It runs on the runtime's own instrumented
     // client, so the grep-owned traffic is measured like every other
     // request instead of escaping on a second, raw client.
-    let grep_worker =
-        (config.grep.mode.serves_grep() || config.grep.mode.maintains_index()).then(|| {
-            GrepWorker::new(
-                runtime.object_store(),
-                runtime.read_only(),
-                maintenance.clone(),
-                loonfs_grep::GrepStepBudget::new(
-                    std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
-                        .expect("validated grep step limit should be nonzero"),
-                ),
-            )
-        });
-    let grep_service = config.grep.mode.serves_grep().then(|| {
+    let grep_worker = (config.grep.mode.serves() || config.grep.mode.maintains()).then(|| {
+        GrepWorker::new(
+            runtime.object_store(),
+            runtime.read_only(),
+            maintenance.clone(),
+            loonfs_grep::GrepStepBudget::new(
+                std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
+                    .expect("validated grep step limit should be nonzero"),
+            ),
+        )
+    });
+    let grep_service = config.grep.mode.serves().then(|| {
         let grep_block_cache = Arc::new(new_grep_block_cache(
             memory.grep.bytes,
             metrics.recorder().as_ref(),
@@ -224,20 +223,19 @@ pub async fn app(
             )
         })
         .transpose()?;
-    let options = Arc::new(BindingOptions {
-        serves_grep: config.grep.mode.serves_grep(),
-        maintains_grep_index,
+    let options = Arc::new(BindingConfig {
+        grep: config.grep.mode,
         serves_maintenance: config.maintenance.serves(),
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
             max_lifetime_ms: config.snapshot_max_lifetime_ms,
             max_live_per_namespace: config.snapshot_max_live_per_namespace,
         },
-        max_download_bytes: config.max_download_bytes,
-        max_upload_bytes: config.max_upload_bytes,
+        max_download_bytes: Some(config.max_download_bytes),
+        max_upload_bytes: Some(config.max_upload_bytes),
         max_concurrent_uploads: config.max_concurrent_uploads,
         max_concurrent_downloads: config.max_concurrent_downloads,
-        inline_content: config.inline_content.resolve(),
+        inline_content: config.inline_content.effective_policy(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
         idle_fold_after_ms: config.idle_fold_after_ms,
@@ -307,7 +305,7 @@ pub(super) async fn build_handles(
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
-    let trace_store_kind = TraceStoreKind::from(config.store.kind());
+    let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let invalid_runtime = |error: loonfs::Error| ServerConfigError::InvalidField {
         field: "runtime",
@@ -317,15 +315,15 @@ pub(super) async fn build_handles(
     let mut builder = LoonFs::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
-        .publication_limits(config.publication.resolve())
-        .inline_content(config.inline_content.resolve())
+        .publication_policy(config.publication.effective_policy())
+        .inline_content(config.inline_content.effective_policy())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
         .metadata_cache(memory.metadata_cache(metrics.recorder()))
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(trace_store_kind)
+        .store_kind(store_kind)
         .metrics_recorder(metrics.recorder());
     if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
         builder = builder.manifest_revalidation_interval_ms(interval_ms);
@@ -378,6 +376,8 @@ pub enum ServeError {
     },
     #[error("failed to load the configured TLS identity: {0}")]
     Tls(#[source] TlsConfigError),
+    #[error("failed to install the shutdown signal handlers: {0}")]
+    Signal(#[source] std::io::Error),
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
     #[error("runtime or maintenance shutdown did not settle: {0}")]
@@ -433,7 +433,8 @@ pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, Serv
 /// closes while the listener remains available to reads and probes. After
 /// active requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
-    serve_with_shutdown(config, shutdown_signal()).await
+    let shutdown = shutdown_signal().map_err(ServeError::Signal)?;
+    serve_with_shutdown(config, shutdown).await
 }
 
 /// [`serve`] with a caller-supplied shutdown trigger instead of process
@@ -479,7 +480,7 @@ where
 {
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
     let max_connections = config.max_connections;
-    let (router, state) = app(config, AppOptions::default()).await?;
+    let (router, state) = app(config, AppConfig::default()).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
         max_connections,
@@ -616,25 +617,27 @@ where
     }
 }
 
-/// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container
-/// orchestrators send before a kill.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("ctrl-c handler should install");
-    };
+/// Installs the handlers for ctrl-c and, on unix, SIGTERM (the stop signal
+/// container orchestrators send before a kill), and returns a future that
+/// resolves when either signal arrives.
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler should install")
-            .recv()
-            .await;
-    };
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        })
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        _ = terminate => {}
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+        Ok(async move {
+            ctrl_c.recv().await;
+        })
     }
 }

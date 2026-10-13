@@ -100,8 +100,8 @@ pub(super) fn committed_change_from_wal_record(
 /// event. The deltas carry the request-operation index they came from, so the
 /// events stay in request order whatever their count.
 ///
-/// Validation emits one fixed delta pattern per internal operation. An
-/// unmatched pattern means validation and the feed mapper disagree.
+/// Validation emits one fixed delta pattern per internal operation, so a
+/// stored commit with an unmatched pattern returns `namespace_corrupt`.
 ///
 /// `committed_seq` is also the bind sequence for bindings created by this
 /// commit.
@@ -252,10 +252,9 @@ fn event_from_op_deltas(
             grants: grants.clone(),
         },
         other => {
-            return Err(CoreError::Internal(format!(
-                "change feed cannot map a committed operation's delta \
-                 pattern ({} deltas); the feed mapper and the commit \
-                 reducer have drifted",
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "commit {committed_seq} has an operation whose {} deltas form no pattern \
+                 the change feed maps",
                 other.len()
             )))
         }
@@ -368,7 +367,7 @@ mod tests {
         use crate::heap_bytes::HeapBytes;
         use crate::limits::{CHANGE_FEED_PAGE_BYTES, MAX_COMMIT_OPERATIONS};
         use crate::path::read::load_current_metadata_view;
-        use crate::publish::{CommitRequest, FilesystemOperation};
+        use crate::publish::{CommitIntent, FilesystemOperation};
         use loonfs_types::{AbsolutePath, CommitId};
 
         let directory = tempdir().expect("tempdir");
@@ -384,7 +383,7 @@ mod tests {
         let mut expected = Vec::new();
         for number in 1..=5 {
             let depth = if number == 4 { 4 } else { 2 };
-            let request = CommitRequest {
+            let request = CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse(format!("commit-{number}")).expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -526,6 +525,6 @@ mod tests {
 
         let error = event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&first, &second])
             .expect_err("two attribute deltas are not one operation");
-        assert!(error.to_string().contains("drifted"), "{error}");
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     }
 }

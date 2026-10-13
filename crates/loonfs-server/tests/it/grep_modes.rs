@@ -11,7 +11,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheOverrides, ServerConfig,
+    app, AppConfig, GarbageCollection, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig,
     StoreConfig,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
@@ -33,8 +33,8 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::Disabled),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::Disabled),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -94,9 +94,9 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 
 #[tokio::test]
 async fn grep_gc_requires_grep_maintenance() {
-    for mode in [GrepMode::Disabled, GrepMode::ServeOnly] {
+    for mode in [JobMode::Disabled, JobMode::ServeOnly] {
         let temp_dir = tempdir().expect("store tempdir");
-        let (router, server) = app(test_config(temp_dir.path(), mode), AppOptions::default())
+        let (router, server) = app(test_config(temp_dir.path(), mode), AppConfig::default())
             .await
             .expect("build app");
         assert_not_supported(
@@ -120,8 +120,8 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeOnly),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::ServeOnly),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -198,8 +198,8 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -236,7 +236,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         enabled.lifecycle
     );
     assert_eq!(
-        server.binding.namespaces.with_held(&namespace_id, |held| (
+        server.binding.namespaces.visit_held(&namespace_id, |held| (
             held.handle.last_published_seq(),
             held.index_dirty
         )),
@@ -247,7 +247,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         server
             .binding
             .namespaces
-            .with_held(&namespace_id, |held| held.index_dirty),
+            .visit_held(&namespace_id, |held| held.index_dirty),
         Some(false)
     );
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
@@ -319,7 +319,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         server
             .binding
             .namespaces
-            .with_held(&namespace_id, |held| held.index_dirty),
+            .visit_held(&namespace_id, |held| held.index_dirty),
         Some(true)
     );
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
@@ -388,7 +388,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let temp_dir = tempdir().expect("store tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("restart-seed")
+        .writer_id(loonfs_test_support::ids::writer_id("restart-seed"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -464,8 +464,8 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     // Nothing in this process has touched either namespace: one sweep pass
     // carries both indexes to their heads.
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
+        AppConfig::default(),
     )
     .await
     .expect("reopen app");
@@ -501,8 +501,8 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeOnly),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::ServeOnly),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -593,8 +593,8 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::MaintainOnly),
-        AppOptions::default(),
+        test_config(temp_dir.path(), JobMode::MaintainOnly),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -676,10 +676,10 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         .expect("open namespace");
     let (router, server) = app(
         ServerConfig {
-            maintenance: MaintenanceMode::ServeOnly,
-            ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
+            maintenance: JobMode::ServeOnly,
+            ..test_config(temp_dir.path(), JobMode::ServeAndMaintain)
         },
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -738,7 +738,9 @@ async fn seed_namespace(
 ) -> (SharedObjectStore, LoonFs<Writable>, NamespaceId) {
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(format!("grep-mode-seed-{name}"))
+        .writer_id(loonfs_test_support::ids::writer_id(&format!(
+            "grep-mode-seed-{name}"
+        )))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -751,25 +753,25 @@ async fn seed_namespace(
     (store, writer, namespace_id)
 }
 
-fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
+fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
-        writer_id: format!("grep-mode-{mode:?}"),
+        writer_id: loonfs_test_support::ids::writer_id(&format!("grep-mode-{mode:?}")),
         max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: GrepConfig {
             mode,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::ServeAndMaintain,
+        maintenance: JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
@@ -791,7 +793,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,
@@ -809,14 +811,14 @@ async fn sweep(server: &loonfs_server::AppState) {
         .sweep
         .as_ref()
         .expect("a maintaining server has a sweep")
-        .run_pass(false)
+        .run_pass(GarbageCollection::Skip)
         .await
         .expect("list the namespaces");
 }
 
 /// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.binding.options.maintains_grep_index
+    server.binding.options.grep.maintains()
 }
 
 /// The sequence this namespace's index is built through.
@@ -997,7 +999,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .await
         .expect("build reader");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(actor)
+        .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
         .expect("build maintenance")

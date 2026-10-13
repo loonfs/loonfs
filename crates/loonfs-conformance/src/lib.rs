@@ -178,9 +178,7 @@ pub fn byte_pattern(length: usize, modulus: u8) -> Result<Vec<u8>, PatternError>
     if modulus == 0 {
         return Err(PatternError::ZeroModulus);
     }
-    Ok((0..length)
-        .map(|offset| (offset % usize::from(modulus)) as u8)
-        .collect())
+    Ok((0..modulus).cycle().take(length).collect())
 }
 
 /// Invalid pagination results.

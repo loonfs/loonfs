@@ -2,7 +2,7 @@
 
 use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
 use crate::object_operation::{ObjectOperation, ObjectOperationKind};
-use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
+use crate::trace::{RunId, SharedSimTrace, SimEventOutcome, SimTrace, SimTraceEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -75,7 +75,7 @@ impl<S> FaultInjectingObjectStore<S> {
         op: ObjectOperation,
         operation: impl Into<String>,
         fault: Option<ObjectStoreFault>,
-        result: SimEventResult,
+        result: SimEventOutcome,
     ) {
         push_trace_event(&self.trace, op, operation, fault, result);
     }
@@ -131,7 +131,7 @@ impl<S> FaultInjectingObjectStore<S> {
                     op,
                     "put_transient_error",
                     Some(ObjectStoreFault::PutReturnsTransientError),
-                    SimEventResult::Error {
+                    SimEventOutcome::Error {
                         class: "transport".to_owned(),
                     },
                 );
@@ -149,7 +149,7 @@ impl<S> FaultInjectingObjectStore<S> {
                         op,
                         "put_lost_success",
                         Some(ObjectStoreFault::PutSucceedsButResponseLost),
-                        SimEventResult::Error {
+                        SimEventOutcome::Error {
                             class: "transport".to_owned(),
                         },
                     );
@@ -174,7 +174,7 @@ impl<S> FaultInjectingObjectStore<S> {
                     op,
                     "compare_and_swap_stale",
                     Some(ObjectStoreFault::CompareAndSwapStale),
-                    SimEventResult::Error {
+                    SimEventOutcome::Error {
                         class: "precondition_failed".to_owned(),
                     },
                 );
@@ -193,7 +193,7 @@ impl<S> FaultInjectingObjectStore<S> {
                     op,
                     "put_fault_skipped",
                     Some(fault),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "fault_not_applicable_to_operation".to_owned(),
                     },
                 );
@@ -242,7 +242,7 @@ where
                         op,
                         "get_stale_value",
                         Some(ObjectStoreFault::GetReturnsStaleValue),
-                        SimEventResult::Ok,
+                        SimEventOutcome::Ok,
                     );
                     return Ok(Some(apply_range(key, body.bytes, range)?));
                 }
@@ -251,7 +251,7 @@ where
                     op,
                     "get_stale_value_skipped",
                     Some(ObjectStoreFault::GetReturnsStaleValue),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "no_stale_value_recorded".to_owned(),
                     },
                 );
@@ -280,7 +280,7 @@ where
                     op,
                     "get_fault_skipped",
                     Some(incompatible.clone()),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "fault_not_applicable_to_operation".to_owned(),
                     },
                 );
@@ -304,7 +304,7 @@ where
                         op,
                         "get_with_metadata_stale_value",
                         Some(ObjectStoreFault::GetReturnsStaleValue),
-                        SimEventResult::Ok,
+                        SimEventOutcome::Ok,
                     );
                     return Ok(Some(body));
                 }
@@ -313,7 +313,7 @@ where
                     op,
                     "get_with_metadata_stale_value_skipped",
                     Some(ObjectStoreFault::GetReturnsStaleValue),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "no_stale_value_recorded".to_owned(),
                     },
                 );
@@ -340,7 +340,7 @@ where
                     op,
                     "get_with_metadata_fault_skipped",
                     Some(incompatible.clone()),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "fault_not_applicable_to_operation".to_owned(),
                     },
                 );
@@ -399,10 +399,10 @@ where
         let class = match &result {
             Ok(_) => {
                 self.remember_successful_write(key);
-                SimEventResult::Ok
+                SimEventOutcome::Ok
             }
             Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
-            Err(_) => SimEventResult::Error {
+            Err(_) => SimEventOutcome::Error {
                 class: "precondition_failed".to_owned(),
             },
         };
@@ -422,10 +422,10 @@ where
         let class = match &result {
             Ok(_) => {
                 self.remember_successful_write(key);
-                SimEventResult::Ok
+                SimEventOutcome::Ok
             }
             Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
-            Err(_) => SimEventResult::Error {
+            Err(_) => SimEventOutcome::Error {
                 class: "precondition_failed".to_owned(),
             },
         };
@@ -442,7 +442,7 @@ where
                     op,
                     "delete_transient_error",
                     Some(ObjectStoreFault::DeleteReturnsTransientError),
-                    SimEventResult::Error {
+                    SimEventOutcome::Error {
                         class: "transport".to_owned(),
                     },
                 );
@@ -457,7 +457,7 @@ where
                     op,
                     "delete_fault_skipped",
                     Some(incompatible.clone()),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "fault_not_applicable_to_operation".to_owned(),
                     },
                 );
@@ -504,7 +504,7 @@ where
                     op,
                     "list_fault_skipped",
                     Some(incompatible.clone()),
-                    SimEventResult::Skipped {
+                    SimEventOutcome::Skipped {
                         reason: "fault_not_applicable_to_operation".to_owned(),
                     },
                 );
@@ -630,13 +630,13 @@ struct TracedListStream {
 }
 
 impl TracedListStream {
-    fn finish(&mut self, result: SimEventResult) {
+    fn finish(&mut self, result: SimEventOutcome) {
         let Some(op) = self.op.take() else {
             return;
         };
         let result = self
             .skipped_reason
-            .map_or(result, |reason| SimEventResult::Skipped {
+            .map_or(result, |reason| SimEventOutcome::Skipped {
                 reason: reason.to_owned(),
             });
         push_trace_event(&self.trace, op, self.operation, self.fault.clone(), result);
@@ -660,7 +660,7 @@ impl Stream for TracedListStream {
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
-                    self.finish(SimEventResult::Ok);
+                    self.finish(SimEventOutcome::Ok);
                     return Poll::Ready(None);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -673,7 +673,7 @@ impl Drop for TracedListStream {
     fn drop(&mut self) {
         if self.op.is_some() {
             self.skipped_reason = Some("stream_dropped_before_completion");
-            self.finish(SimEventResult::Ok);
+            self.finish(SimEventOutcome::Ok);
         }
     }
 }
@@ -683,7 +683,7 @@ fn push_trace_event(
     op: ObjectOperation,
     operation: impl Into<String>,
     fault: Option<ObjectStoreFault>,
-    result: SimEventResult,
+    result: SimEventOutcome,
 ) {
     trace.push(SimTraceEvent {
         step: op.step,
@@ -742,39 +742,39 @@ fn recent_key_for_prefix<'a>(prefix: &str, recent_writes: &'a [String]) -> Optio
         .map(String::as_str)
 }
 
-fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
+fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventOutcome {
     match result {
-        Ok(_) => SimEventResult::Ok,
+        Ok(_) => SimEventOutcome::Ok,
         Err(error) => error_result_class(error),
     }
 }
 
-fn error_result_class(error: &ObjectStoreError) -> SimEventResult {
+fn error_result_class(error: &ObjectStoreError) -> SimEventOutcome {
     match error {
-        ObjectStoreError::NotFound { .. } => SimEventResult::Error {
+        ObjectStoreError::NotFound { .. } => SimEventOutcome::Error {
             class: "not_found".to_owned(),
         },
-        ObjectStoreError::InvalidKey { .. } => SimEventResult::Error {
+        ObjectStoreError::InvalidKey { .. } => SimEventOutcome::Error {
             class: "invalid_key".to_owned(),
         },
-        ObjectStoreError::InvalidRange { .. } => SimEventResult::Error {
+        ObjectStoreError::InvalidRange { .. } => SimEventOutcome::Error {
             class: "invalid_range".to_owned(),
         },
-        ObjectStoreError::PreconditionFailed { .. } => SimEventResult::Error {
+        ObjectStoreError::PreconditionFailed { .. } => SimEventOutcome::Error {
             class: "precondition_failed".to_owned(),
         },
-        ObjectStoreError::PermissionDenied { .. } => SimEventResult::Error {
+        ObjectStoreError::PermissionDenied { .. } => SimEventOutcome::Error {
             class: "permission_denied".to_owned(),
         },
-        ObjectStoreError::Unsupported(_) => SimEventResult::Error {
+        ObjectStoreError::Unsupported(_) => SimEventOutcome::Error {
             class: "unsupported".to_owned(),
         },
-        ObjectStoreError::Transport { .. } => SimEventResult::Error {
+        ObjectStoreError::Transport { .. } => SimEventOutcome::Error {
             class: "transport".to_owned(),
         },
         // Keep the label set low-cardinality for error kinds this build
         // does not know yet.
-        _ => SimEventResult::Error {
+        _ => SimEventOutcome::Error {
             class: "other".to_owned(),
         },
     }
@@ -940,7 +940,7 @@ mod tests {
             event.injected_fault,
             Some(ObjectStoreFault::ListOmitsRecentObject)
         );
-        assert_eq!(event.result, SimEventResult::Ok);
+        assert_eq!(event.result, SimEventOutcome::Ok);
         assert_eq!(
             event
                 .object_op

@@ -6,8 +6,8 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
+    CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
+    PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
@@ -26,8 +26,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
-    OperationContext, OperationKind, RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationContext,
+    OperationKind, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{
@@ -118,7 +118,7 @@ async fn fold_wal_and_advance_retention(
     maintenance
         .maintain_metadata_with_options(
             namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -143,7 +143,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
     let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id("index-ahead-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("index-ahead-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -160,7 +160,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     let blocking = Arc::new(BlockingStore::new(
         base.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
+        OperationSelector::GetWithMetadata,
     ));
     let query_store: SharedObjectStore = blocking.clone();
     let query_host = GrepHost::new(&query_store, "stale-reader").await;
@@ -207,7 +207,7 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let base_store: SharedObjectStore = base.clone();
     let namespace_id = NamespaceId::parse("query-pin").expect("namespace id");
     let writer = LoonFs::builder_with_store(base_store.clone())
-        .writer_id("query-pin-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("query-pin-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -228,7 +228,7 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let blocking = Arc::new(BlockingStore::new(
         base.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
+        OperationSelector::GetWithMetadata,
     ));
     let query_store: SharedObjectStore = blocking.clone();
     blocking.block_next();
@@ -268,7 +268,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-lifecycle").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("lifecycle-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("lifecycle-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -355,7 +355,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .gc_namespace(&namespace_id, u64::MAX)
         .await
         .expect("collect disabled segments");
     assert!(
@@ -400,13 +400,15 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 }
 
 #[tokio::test]
-async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifest() {
+async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("run-number-limit").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("run-number-limit-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "run-number-limit-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -492,11 +494,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
             .await
             .expect_err("a reorganization cannot allocate above the public maximum"),
     ] {
-        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert_eq!(error.code(), ErrorCode::IndexCorrupt);
         assert!(matches!(
             error,
-            GrepError::Runtime(loonfs::Error::Core(CoreError::Internal(message)))
-                if message.contains("run number must be an integer")
+            GrepError::IndexCorrupt { message } if message.contains("largest run number")
         ));
     }
 
@@ -542,7 +543,9 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-manifest-failure").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("enable-manifest-failure-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "enable-manifest-failure-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -599,7 +602,9 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-enable").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("ambiguous-enable-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "ambiguous-enable-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -656,7 +661,9 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-restart").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("ambiguous-restart-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "ambiguous-restart-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -724,13 +731,13 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("gap-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id("gap-maintenance"))
         .build()
         .await
         .expect("maintenance")
@@ -805,13 +812,15 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("handoff-gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("handoff-gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
     let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("handoff-gap-maintenance")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "handoff-gap-maintenance",
+        ))
         .build()
         .await
         .expect("maintenance")
@@ -933,7 +942,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("expiry-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("expiry-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1079,7 +1088,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("overlap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("overlap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1188,7 +1197,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("move-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("move-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1248,7 +1257,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("delete-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1352,7 +1361,9 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("undelete-backfill-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "undelete-backfill-writer",
+        ))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1458,7 +1469,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("isolation-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("isolation-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1507,7 +1518,7 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("error-surface").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("error-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("error-writer"))
         .build()
         .await
         .expect("writer");
@@ -1577,7 +1588,9 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("checkpoint-mismatch-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "checkpoint-mismatch-writer",
+        ))
         .build()
         .await
         .expect("writer");
@@ -1620,7 +1633,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect_err("mismatch");
-    assert!(matches!(error, GrepError::CorruptIndex { .. }), "{error:?}");
+    assert!(matches!(error, GrepError::IndexCorrupt { .. }), "{error:?}");
     assert_eq!(recording.counts().puts, 0);
     assert_eq!(recording.counts().deletes, 0);
     writer.shutdown().await.expect("shutdown");
@@ -1633,7 +1646,9 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("missing-checkpoint-writer")
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "missing-checkpoint-writer",
+        ))
         .build()
         .await
         .expect("writer");
@@ -1724,7 +1739,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("scan-gap-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("scan-gap-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1792,7 +1807,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
 
 #[tokio::test]
 async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
-    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs::{CommitId, FilesystemChange};
     use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
 
@@ -1801,7 +1816,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("deep-scan-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("deep-scan-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1814,7 +1829,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let commit = |operation| {
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1922,7 +1937,7 @@ fn assert_backfilling_error(case: &str, result: loonfs_grep::Result<GrepResponse
 
 fn assert_corrupt_index_error(case: &str, result: loonfs_grep::Result<GrepResponse>) {
     match result {
-        Err(error @ GrepError::CorruptIndex { .. }) => {
+        Err(error @ GrepError::IndexCorrupt { .. }) => {
             assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
             assert!(
                 error
@@ -1942,7 +1957,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("worker-results-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("worker-results-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2108,7 +2123,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let source = NamespaceId::parse("grep-fork-source").expect("source namespace");
     let target = NamespaceId::parse("grep-fork-target").expect("target namespace");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("fork-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("fork-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2196,7 +2211,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
     let backfill_namespace = NamespaceId::parse("equiv-backfill").expect("namespace id");
     let incremental_namespace = NamespaceId::parse("equiv-incremental").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("equiv-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("equiv-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2272,7 +2287,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("enable-honesty-writer")
+        .writer_id(loonfs_test_support::ids::writer_id("enable-honesty-writer"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2369,7 +2384,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("numbered-grep-tests")
+        .writer_id(loonfs_test_support::ids::writer_id("numbered-grep-tests"))
         .build()
         .await
         .expect("writer");
@@ -2451,7 +2466,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 
 #[tokio::test]
 async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
-    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
     use loonfs_grep::manifest::encode_grep_manifest;
     use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
@@ -2465,15 +2480,15 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         aged,
         KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
         |mut metadata| {
-            metadata.last_modified_ms =
-                Some(UNREFERENCED_SEGMENT_MIN_AGE_MS - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata.last_modified_at_ms =
+                Some(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GREP_GC_GRACE_WINDOW_MS + 1);
             metadata
         },
     );
     let recording = Arc::new(RecordingStore::new(young_successor, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("numbered-grep-tests")
+        .writer_id(loonfs_test_support::ids::writer_id("numbered-grep-tests"))
         .build()
         .await
         .expect("writer");
@@ -2531,7 +2546,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let collector = worker(&store).await;
     recording.reset();
     let young = collector
-        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS)
         .await
         .expect("young pass");
     assert_eq!(
@@ -2545,7 +2560,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .expect("head")
         .is_none());
     let aged = collector
-        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1)
         .await
         .expect("aged pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 0));
@@ -2564,7 +2579,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let failing = Arc::new(FailStore::new(
         store.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("unreadable hint".to_owned()),
     ));
     failing.fail_all();
@@ -2573,7 +2588,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     assert!(matches!(
         worker(&failing_store)
             .await
-            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .gc_namespace(&namespace_id, u64::MAX)
             .await,
         Err(GrepError::StoreUnavailable { .. })
     ));
@@ -2592,10 +2607,8 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .expect("corrupt hint");
     recording.reset();
     assert!(matches!(
-        collector
-            .garbage_collect_namespace(&namespace_id, u64::MAX)
-            .await,
-        Err(GrepError::CorruptIndex { .. })
+        collector.gc_namespace(&namespace_id, u64::MAX).await,
+        Err(GrepError::IndexCorrupt { .. })
     ));
     assert_eq!(recording.counts().deletes, 0);
     namespace.delete().await.expect("tombstone");
@@ -2607,7 +2620,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .filter(|key| !key.starts_with(&grep_prefix(&namespace_id)))
         .collect();
     let reaped = collector
-        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .gc_namespace(&namespace_id, u64::MAX)
         .await
         .expect("reap tombstone");
     assert!(reaped.namespace_reaped);
@@ -2634,7 +2647,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     assert!(
         worker(&store)
             .await
-            .garbage_collect_namespace(&absent, u64::MAX)
+            .gc_namespace(&absent, u64::MAX)
             .await
             .expect("reap absent")
             .namespace_reaped
@@ -2644,24 +2657,24 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
 
 #[tokio::test]
 async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_young() {
-    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
     use loonfs_grep::manifest::encode_grep_manifest;
     use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("superseded-gc").expect("namespace");
-    let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + 1;
+    let now_ms = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1;
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let aged = MetadataMapStore::aged(base, KeyPredicate::prefix(grep_prefix(&namespace_id)));
     let store: SharedObjectStore = Arc::new(MetadataMapStore::new(
         aged,
         KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
         move |mut metadata| {
-            metadata.last_modified_ms = Some(now_ms - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata.last_modified_at_ms = Some(now_ms - GREP_GC_GRACE_WINDOW_MS + 1);
             metadata
         },
     ));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("superseded-grep-gc")
+        .writer_id(loonfs_test_support::ids::writer_id("superseded-grep-gc"))
         .build()
         .await
         .expect("writer");
@@ -2712,7 +2725,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         segment_key(&namespace_id, &superseded.segment_id),
     ];
     let young = collector
-        .garbage_collect_namespace(&namespace_id, now_ms)
+        .gc_namespace(&namespace_id, now_ms)
         .await
         .expect("young successor pass");
     assert_eq!(
@@ -2723,7 +2736,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }
     let aged = collector
-        .garbage_collect_namespace(&namespace_id, now_ms + 1)
+        .gc_namespace(&namespace_id, now_ms + 1)
         .await
         .expect("aged successor pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));
@@ -2740,7 +2753,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
 
 #[tokio::test]
 async fn grep_filters_candidates_the_subject_cannot_read() {
-    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
         AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
         PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -2764,7 +2777,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("grep-access")
+        .writer_id(loonfs_test_support::ids::writer_id("grep-access"))
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -2814,7 +2827,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     ] {
         namespace
             .commit(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -2832,7 +2845,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .expect("content");
         namespace
             .commit_prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,

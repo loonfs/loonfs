@@ -6,13 +6,13 @@ use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cu
 use crate::authorize::{Absence, ReadAccess};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::error::{CoreError, Result};
 use crate::manifest::{
     load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCacheKey,
 };
 use crate::metadata::{
-    LeafRevisionPrefetch, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
+    LeafRevisionPreload, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
     VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
@@ -26,6 +26,7 @@ use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
@@ -275,7 +276,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // what the entry build reads back as cache hits.
         let mut session = self.metadata_view().session();
         let resolved = session
-            .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Prefetch)
+            .resolve_visible_path(&absolute_path, LeafRevisionPreload::Preload)
             .await?;
         access
             .require(
@@ -356,7 +357,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .get_bytes(store, &content_ref)
+            .read_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -387,7 +388,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     )
                     .await?;
             }
-            let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
+            let revision = self.revision_by_inode(entry.inode_id, revision_no).await?;
             entry.kind = PathEntryKind::File {
                 revision_no: revision.revision_no,
                 size_bytes: revision.content_ref.size_bytes,
@@ -423,7 +424,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         let cannot_write = |error| match error {
             CoreError::Store {
-                class: StoreFailureClass::PermissionDenied,
+                kind: ObjectStoreErrorKind::PermissionDenied,
                 ..
             } => CoreError::ContentNotMaterialized {
                 content_id: content_ref.content_id.clone(),
@@ -548,7 +549,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// Resolves one retained revision after the access checks a direct read
     /// of it needs: `read` on the inode, and `history` when the revision is
     /// not the current one.
-    pub(crate) async fn authorized_revision_for_inode(
+    pub(crate) async fn authorized_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -579,12 +580,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 )
                 .await?;
         }
-        self.revision_for_inode(inode_id, revision_no).await
+        self.revision_by_inode(inode_id, revision_no).await
     }
 
     /// Resolves the current revision of a visible file inode after the `read`
     /// check a current read needs.
-    pub(crate) async fn current_revision_for_inode(
+    pub(crate) async fn current_revision_by_inode(
         &self,
         inode_id: InodeId,
         access: &ReadAccess<'_, S>,
@@ -628,10 +629,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
             Some(revision_no) => {
-                self.authorized_revision_for_inode(inode_id, revision_no, access)
+                self.authorized_revision_by_inode(inode_id, revision_no, access)
                     .await?
             }
-            None => self.current_revision_for_inode(inode_id, access).await?,
+            None => self.current_revision_by_inode(inode_id, access).await?,
         };
         let ranges = self
             .download_ranges(store, &revision.content_ref, start_offset, content_writes)
@@ -669,7 +670,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             )
             .await?;
         let page = self
-            .list_file_revisions_for_inode_page(entry.inode_id, request, access)
+            .list_file_revisions_by_inode_page(entry.inode_id, request, access)
             .await?;
         Ok((entry.inode_id, page))
     }
@@ -762,7 +763,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    pub(crate) async fn list_file_revisions_for_inode_page(
+    pub(crate) async fn list_file_revisions_by_inode_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
@@ -810,7 +811,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut revision_records = self
             .metadata_view()
             .session()
-            .revisions_for_inode_page_desc(inode_id, start_after, request.limit.limit_plus_one())
+            .revisions_by_inode_page_desc(inode_id, start_after, request.limit.limit_plus_one())
             .await?;
         let next_cursor =
             request
@@ -841,7 +842,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    pub(crate) async fn get_file_revision_bytes(
+    pub(crate) async fn read_file_revision_bytes(
         &self,
         store: &S,
         absolute_path: &str,
@@ -856,12 +857,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .get_bytes(store, &content_ref)
+            .read_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
 
-    pub(crate) async fn get_file_revision_bytes_for_inode(
+    pub(crate) async fn read_file_revision_bytes_by_inode(
         &self,
         store: &S,
         inode_id: InodeId,
@@ -870,13 +871,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Vec<u8>> {
         let revision = self
-            .authorized_revision_for_inode(inode_id, revision_no, access)
+            .authorized_revision_by_inode(inode_id, revision_no, access)
             .await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         Ok(self
             .resolve_content_location(&revision.content_ref)
             .await?
-            .get_bytes(store, &revision.content_ref)
+            .read_bytes(store, &revision.content_ref)
             .await?)
     }
 
@@ -907,7 +908,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let mut session = self.metadata_view().session();
         let resolved = session
-            .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Skip)
+            .resolve_visible_path(&absolute_path, LeafRevisionPreload::Skip)
             .await?;
         access
             .require(
@@ -997,10 +998,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         attributes: AttributeInclusion,
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        let start_after = request
-            .cursor
-            .as_ref()
-            .map(|cursor| cursor.last_name_key.as_str());
+        let start_after = request.cursor.as_ref().map(|cursor| &cursor.last_name_key);
         let select_span = tracing::debug_span!(
             target: "loonfs::page",
             "loonfs.phase",
@@ -1175,11 +1173,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     async fn build_authoritative_path_entry_from_visible_child(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
-        resolved_dir: &ResolvedVisiblePath,
+        resolved_directory: &ResolvedVisiblePath,
         child: VisibleChildEntry,
         attributes: AttributeInclusion,
     ) -> Result<PathEntry> {
-        let child_path = resolved_dir.absolute_path.join(
+        let child_path = resolved_directory.absolute_path.join(
             child
                 .binding
                 .display_name()
@@ -1206,13 +1204,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         .await
     }
 
-    pub(crate) async fn revision_for_inode(
+    pub(crate) async fn revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<RevisionRecord> {
         self.metadata_view()
-            .revision_for_inode(inode_id, revision_no)
+            .revision_by_inode(inode_id, revision_no)
             .await
     }
 
@@ -1268,7 +1266,7 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::control::load_namespace_read_state;
-    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::test_support::ops::create;
     use bytes::Bytes;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1335,7 +1333,7 @@ mod tests {
             publish_namespace_commits_batch(
                 &store,
                 &namespace_id,
-                vec![CommitCandidate::new(CommitRequest::single(
+                vec![CommitCandidate::new(CommitIntent::single(
                     CommitId::parse(commit_id).expect("commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -1384,7 +1382,7 @@ mod tests {
         let published = publish_namespace_commits_batch(
             &store,
             &namespace_id,
-            vec![CommitCandidate::new(CommitRequest::single(
+            vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("create-after-tamper").expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1478,7 +1476,7 @@ mod tests {
         ] {
             let mut session = view.metadata_view().session();
             let resolved = session
-                .resolve_visible_path(&directory, LeafRevisionPrefetch::Skip)
+                .resolve_visible_path(&directory, LeafRevisionPreload::Skip)
                 .await
                 .expect("resolve directory");
             let children = session
@@ -1520,7 +1518,7 @@ mod tests {
             let mut session = view.metadata_view().session();
             let directory = AbsolutePath::parse("/docs").expect("path");
             let resolved = session
-                .resolve_visible_path(&directory, LeafRevisionPrefetch::Skip)
+                .resolve_visible_path(&directory, LeafRevisionPreload::Skip)
                 .await
                 .expect("resolve directory");
             let children = session

@@ -11,7 +11,7 @@ use loonfs_core::metadata::{
     TombstoneRowAction as CoreTombstoneAction, VisiblePathError,
 };
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_model::metadata::{
@@ -1217,7 +1217,7 @@ async fn planned_appends_match_the_model() {
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for (index, operations) in requests.into_iter().enumerate() {
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -1334,7 +1334,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for operation in operations {
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -1646,6 +1646,11 @@ fn core_path_answer(answer: Result<ResolvedVisiblePath, VisiblePathError>) -> Pa
             inode_kind,
         },
         Err(VisiblePathError::RootMissing) => PathAnswer::RootMissing,
+        #[expect(
+            clippy::panic,
+            reason = "a new visible-path error needs a model answer before the differential compares it"
+        )]
+        Err(other) => panic!("expected a path answer the model compares, got {other:?}"),
     }
 }
 

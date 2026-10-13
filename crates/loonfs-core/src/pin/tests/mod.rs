@@ -13,7 +13,7 @@ use super::{create, record};
 use crate::error::{CoreError, ErrorCode};
 use crate::manifest::tests::*;
 use crate::manifest::{
-    compaction_step, fold_wal, CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy,
+    compaction_step, fold_wal, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
 };
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
@@ -33,7 +33,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::{ManifestNo, NamespaceId, PinId};
 use std::collections::BTreeSet;

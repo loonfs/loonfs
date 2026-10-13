@@ -21,46 +21,10 @@ impl TraceMode {
     }
 }
 
-/// Object-store backend label used in trace spans and metrics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceStoreKind {
-    /// Local-filesystem object store.
-    LocalFs,
-    /// Amazon S3.
-    S3,
-    /// Cloudflare R2.
-    R2,
-    /// Google Cloud Storage.
-    Gcs,
-    /// Backend not identified by the caller.
-    Unknown,
-}
-
-impl TraceStoreKind {
-    /// Returns the stable low-cardinality span label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalFs => "local_fs",
-            Self::S3 => "s3",
-            Self::R2 => "r2",
-            Self::Gcs => "gcs",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-impl From<ConfiguredObjectStoreKind> for TraceStoreKind {
-    /// Derives the trace label from a configured object-store kind, so
-    /// callers wiring a [`ConfiguredObjectStoreKind`]-reporting store into the
-    /// runtime never hand-maintain the mapping.
-    fn from(kind: ConfiguredObjectStoreKind) -> Self {
-        match kind {
-            ConfiguredObjectStoreKind::LocalFs => Self::LocalFs,
-            ConfiguredObjectStoreKind::AwsS3 => Self::S3,
-            ConfiguredObjectStoreKind::CloudflareR2 => Self::R2,
-            ConfiguredObjectStoreKind::GcpGcs => Self::Gcs,
-        }
-    }
+/// Returns the object-store backend label used in trace spans and metrics,
+/// or `unknown` when the caller didn't identify the backend.
+pub(crate) fn store_kind_label(kind: Option<ConfiguredObjectStoreKind>) -> &'static str {
+    kind.map_or("unknown", ConfiguredObjectStoreKind::as_str)
 }
 
 macro_rules! phase_span {
@@ -105,31 +69,30 @@ pub fn payload_class(size_bytes: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_class, TraceMode, TraceStoreKind};
+    use super::{payload_class, store_kind_label, TraceMode};
     use loonfs_objectstore::ConfiguredObjectStoreKind;
-
-    #[test]
-    fn trace_store_kind_derives_from_configured_kind() {
-        let cases = [
-            (ConfiguredObjectStoreKind::LocalFs, TraceStoreKind::LocalFs),
-            (ConfiguredObjectStoreKind::AwsS3, TraceStoreKind::S3),
-            (ConfiguredObjectStoreKind::CloudflareR2, TraceStoreKind::R2),
-            (ConfiguredObjectStoreKind::GcpGcs, TraceStoreKind::Gcs),
-        ];
-        for (kind, expected) in cases {
-            assert_eq!(TraceStoreKind::from(kind), expected);
-        }
-    }
 
     #[test]
     fn trace_labels_are_low_cardinality() {
         assert_eq!(TraceMode::Embedded.as_str(), "embedded");
         assert_eq!(TraceMode::Remote.as_str(), "remote");
-        assert_eq!(TraceStoreKind::LocalFs.as_str(), "local_fs");
-        assert_eq!(TraceStoreKind::S3.as_str(), "s3");
-        assert_eq!(TraceStoreKind::R2.as_str(), "r2");
-        assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
-        assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
+        assert_eq!(
+            store_kind_label(Some(ConfiguredObjectStoreKind::LocalFs)),
+            "local-fs"
+        );
+        assert_eq!(
+            store_kind_label(Some(ConfiguredObjectStoreKind::AwsS3)),
+            "aws-s3"
+        );
+        assert_eq!(
+            store_kind_label(Some(ConfiguredObjectStoreKind::CloudflareR2)),
+            "cloudflare-r2"
+        );
+        assert_eq!(
+            store_kind_label(Some(ConfiguredObjectStoreKind::GcpGcs)),
+            "gcp-gcs"
+        );
+        assert_eq!(store_kind_label(None), "unknown");
     }
 
     #[test]

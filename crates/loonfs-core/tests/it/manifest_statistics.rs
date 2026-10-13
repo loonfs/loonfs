@@ -7,14 +7,14 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
     load_checkpoint_statistics, load_namespace_current_manifest, load_namespace_statistics,
 };
-use loonfs_core::publish::{CommitRequest, FilesystemOperation, NamespaceCommitEngine};
+use loonfs_core::publish::{CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
 use loonfs_types::{
@@ -89,7 +89,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         )
         .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
         for (index, operation) in operations.into_iter().enumerate() {
-            let request = CommitRequest::single(
+            let request = CommitIntent::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -221,7 +221,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .create_snapshot("baseline".to_owned(), u64::MAX / 2)
         .await
         .expect("snapshot");
-    let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
+    let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
         .await
         .expect("pin activity");
     write_file_bytes(&store, &parent, "/file", b"newer", &context, Some("newer"))
@@ -230,12 +230,12 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let unavailable_wal = FailStore::new(
         LocalFsStore::new(dir.path()).expect("statistics store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&parent)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::PermissionDenied("WAL unavailable".to_owned()),
     );
     unavailable_wal.fail_all();
     assert_eq!(
-        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.checkpoint_id)
+        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.snapshot_id)
             .await
             .expect("checkpoint statistics exclude newer WAL"),
         baseline
@@ -282,7 +282,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         ])
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &layout_snapshot.checkpoint_id)
+        load_checkpoint_statistics(&store, &parent, &layout_snapshot.snapshot_id)
             .await
             .expect("checkpoint layout statistics"),
         layout
@@ -291,7 +291,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .fork_namespace(
             &child,
             &loonfs_test_support::test_actor(),
-            Some(&snapshot.checkpoint_id),
+            Some(&snapshot.snapshot_id),
         )
         .await
         .expect("fork old snapshot");
@@ -347,7 +347,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         observed.manifest
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
+        load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
             .await
             .expect("pin unchanged"),
         baseline
@@ -439,7 +439,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     let store = FailStore::new(
         LocalFsStore::new(dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PermissionDenied("fold unavailable".to_owned()),
     );
     let ns = namespace_id("activity");
@@ -514,7 +514,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         let store = FailStore::new(
             inner,
             KeyPredicate::manifest(&ns),
-            OperationClass::Put,
+            OperationSelector::Put,
             if applied {
                 InjectedError::Transport("acknowledgment lost".to_owned())
             } else {

@@ -5,7 +5,7 @@ use crate::test_support::ops::create;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{AbsolutePath, WriterId};
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ async fn deletion_budget_includes_writer_acquisition() {
             KeyPredicate::any(),
         ),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     );
     let context = context();
     create(&store, &namespace_id, &context)
@@ -76,7 +76,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     stale
         .publish_batch(
             &store,
-            [CommitCandidate::new(CommitRequest::single(
+            [CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("before-delete").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -99,7 +99,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     .delete_namespace(&store, Default::default(), &context)
     .await
     .expect("delete");
-    let candidate = CommitCandidate::new(CommitRequest::single(
+    let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("after-delete").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -159,7 +159,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let candidate = CommitCandidate::with_inline_content(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,

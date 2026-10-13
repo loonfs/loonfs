@@ -2,7 +2,7 @@
 
 use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
 use crate::common::{namespace_engine, read_context};
-use loonfs_core::publish::{CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -166,7 +166,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     let batch = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse("batch-access").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: Some(subject("root", &["prn_root"])),
@@ -358,11 +358,11 @@ async fn commit_as(
     context: &MutationContext,
     subject: loonfs_types::Subject,
     operation: FilesystemOperation,
-) -> Result<loonfs_types::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
     submit_commit(
         store,
         namespace_id,
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -396,7 +396,7 @@ async fn seed(
 #[tokio::test]
 async fn an_acl_namespace_requires_a_subject_and_an_unrestricted_one_ignores_it() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,
@@ -763,7 +763,7 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
         ],
     )
     .await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,
@@ -800,7 +800,7 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
 #[tokio::test]
 async fn a_replay_from_another_principal_scope_is_refused() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("scope-replay").expect("commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -823,7 +823,7 @@ async fn a_replay_from_another_principal_scope_is_refused() {
     .expect_err("wrong-scope replay");
     assert!(matches!(
         error,
-        loonfs_core::Error::PrincipalScopeMismatch {
+        loonfs_core::CoreError::PrincipalScopeMismatch {
             expected_principal_scope,
             actual_principal_scope,
         } if expected_principal_scope.as_str() == "org_demo"
@@ -876,11 +876,11 @@ async fn submit_operation(
     commit_id: CommitId,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> Result<loonfs_types::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
     submit_commit(
         store,
         namespace_id,
-        CommitRequest::single(
+        CommitIntent::single(
             commit_id,
             loonfs_test_support::test_actor(),
             None,
@@ -909,7 +909,7 @@ async fn resolve_path(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     path: &str,
-) -> Result<loonfs_types::PathEntry, loonfs_core::Error> {
+) -> Result<loonfs_types::PathEntry, loonfs_core::CoreError> {
     read_engine(store, namespace_id, "prn_root")
         .resolve_path(
             path,
@@ -922,7 +922,7 @@ async fn resolve_path(
 fn read_page<C>(limit: u32) -> PageRequest<C> {
     PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(Some(limit))
+            .effective_limit(Some(limit))
             .expect("limit"),
         cursor: None,
     }
@@ -982,7 +982,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
         .expect("stat");
     assert_eq!(
         viewer
-            .get_file("/team/file", &context, None)
+            .read_file("/team/file", &context, None)
             .await
             .expect("content")
             .bytes,
@@ -1080,7 +1080,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     );
     assert_eq!(
         stranger
-            .get_file("/team/file", &context, None)
+            .read_file("/team/file", &context, None)
             .await
             .expect_err("hidden content")
             .code(),
@@ -1128,7 +1128,7 @@ async fn history_needs_the_history_right() {
             };
             assert_eq!(
                 engine
-                    .get_file_revision("/team/file", revision, &context, None)
+                    .read_file_revision("/team/file", revision, &context, None)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1136,7 +1136,7 @@ async fn history_needs_the_history_right() {
             );
             assert_eq!(
                 engine
-                    .get_file_revision_for_inode(inode_id, revision, &context, None)
+                    .read_file_revision_by_inode(inode_id, revision, &context, None)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1174,7 +1174,7 @@ async fn history_needs_the_history_right() {
         );
         assert_eq!(
             engine
-                .list_file_revisions_for_inode_page(inode_id, read_page(10), &context)
+                .list_file_revisions_by_inode_page(inode_id, read_page(10), &context)
                 .await
                 .map(|page| page.items.len())
                 .map_err(|error| error.code()),
@@ -1198,7 +1198,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     let viewer = read_engine(&store, &namespace_id, "viewer").with_authorization_head(head.clone());
     assert_eq!(
         viewer
-            .get_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &snapshot, None)
             .await
             .expect_err("moved historical inode is hidden")
             .code(),
@@ -1206,7 +1206,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     );
     assert_eq!(
         viewer
-            .get_file("/team/kept", &snapshot, None)
+            .read_file("/team/kept", &snapshot, None)
             .await
             .expect_err("snapshot needs history")
             .code(),
@@ -1216,7 +1216,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
         read_engine(&store, &namespace_id, "finance").with_authorization_head(head.clone());
     assert_eq!(
         finance
-            .get_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &snapshot, None)
             .await
             .expect("historical inode")
             .bytes,
@@ -1292,7 +1292,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     let viewer = read_engine(&store, &namespace_id, "viewer");
     assert_eq!(
         viewer
-            .require_administrator(&context)
+            .ensure_administrator(&context)
             .await
             .expect_err("feed requires administrator")
             .code(),
@@ -1315,7 +1315,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         ),
     ] {
         engine
-            .require_administrator(&context)
+            .ensure_administrator(&context)
             .await
             .expect("feed authorized");
         assert!(!engine
@@ -1342,7 +1342,10 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         .await
         .expect_err("subject required");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert!(matches!(error, loonfs_core::Error::SubjectRequired { .. }));
+    assert!(matches!(
+        error,
+        loonfs_core::CoreError::SubjectRequired { .. }
+    ));
 }
 
 #[tokio::test]
@@ -1762,7 +1765,7 @@ async fn path_absence_preconditions_hide_an_unreadable_parent_kind() {
         ("/team/secret/file/child", "/team/precondition-file"),
         ("/team/secret/child", "/team/precondition-directory"),
     ] {
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1890,7 +1893,7 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
         let result = submit_commit(
             &store,
             &namespace_id,
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

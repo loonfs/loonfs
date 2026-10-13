@@ -6,20 +6,21 @@ mod admission;
 mod composition;
 
 use super::serve::{build_handles, serve_on};
-use super::{app, AppOptions};
-use crate::config::MetadataCacheOverrides;
+use super::{app, AppConfig};
+use crate::config::MetadataCacheConfig;
 use crate::{ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
 use loonfs::{
-    LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode, TraceStoreKind, Writable,
+    ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
+    Writable,
 };
 use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
-use loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
 use std::path::Path;
 use std::sync::Arc;
@@ -60,7 +61,7 @@ async fn app_validates_directly_built_configs() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(temp_dir.path(), "app-validate-writer");
     config.max_concurrent_uploads = 0;
-    match app(config, AppOptions::default()).await {
+    match app(config, AppConfig::default()).await {
         Err(crate::config::ServerConfigError::InvalidField { field, .. }) => {
             assert_eq!(field, "max_concurrent_uploads");
         }
@@ -360,7 +361,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::metadata_segment(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::any(),
     ));
@@ -431,7 +432,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
-        OperationClass::List,
+        OperationSelector::List,
     ));
     let shutdown_deadline_ms = 25;
     let mut config = test_config(temp_dir.path(), "parked-sweep-server");
@@ -582,7 +583,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
-    config.maintenance = crate::config::MaintenanceMode::MaintainOnly;
+    config.maintenance = crate::config::JobMode::MaintainOnly;
     let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
@@ -801,8 +802,8 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     );
 }
 
-fn options_with_store(store: SharedObjectStore) -> AppOptions {
-    AppOptions {
+fn options_with_store(store: SharedObjectStore) -> AppConfig {
+    AppConfig {
         store: Some(store),
         direct_transfers: None,
     }
@@ -814,19 +815,19 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
-        writer_id: writer_id.to_owned(),
+        writer_id: loonfs_test_support::ids::writer_id(writer_id),
         max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
-            mode: crate::config::GrepMode::ServeAndMaintain,
+            mode: crate::config::JobMode::ServeAndMaintain,
             ..crate::config::GrepConfig::default()
         },
-        maintenance: crate::config::MaintenanceMode::ServeAndMaintain,
+        maintenance: crate::config::JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
@@ -848,7 +849,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,
@@ -861,9 +862,9 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
-        .writer_id(writer_id)
+        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")

@@ -5,7 +5,7 @@ use crate::{ExecutionBudgetStats, LoonFs, Namespace, Writable};
 
 async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<Writable>) {
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
         .execution_budget(
             ExecutionBudget::builder()
@@ -28,7 +28,7 @@ async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<
         .expect("first writer");
     writer.drain().await.expect("first publication ends");
     let rival = LoonFs::builder_with_store(store)
-        .writer_id("writer-b")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
         .build()
         .await
         .expect("rival");
@@ -50,7 +50,7 @@ async fn discover_fence(namespace: &Namespace<Writable>) -> Error {
         .await
         .expect_err("discover the fence");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
-    assert_eq!(namespace.session_state(), NamespaceSessionState::Fenced);
+    assert_eq!(namespace.session_status(), NamespaceSessionStatus::Fenced);
     error
 }
 
@@ -161,7 +161,7 @@ async fn a_fenced_session_starts_no_fold_or_compaction() {
     assert!(report.fenced);
     assert_no_work(publisher);
     assert_eq!(store.counts(), requests);
-    assert_eq!(replacement.session_state(), NamespaceSessionState::Open);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
     writer.shutdown().await.expect("shutdown");
     assert_eq!(
         writer.execution_budget().stats(),

@@ -1,11 +1,11 @@
 //! Errors shared by every mutable control-object loader.
 
-use crate::error::StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::NamespaceId;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ControlObjectLoadError {
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
@@ -46,7 +46,7 @@ pub enum ControlObjectLoadError {
     Store {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
 }
 
@@ -61,7 +61,7 @@ impl ControlObjectLoadError {
             | Self::KeyLayout { .. }
             | Self::ChecksumMismatch { .. }
             | Self::Codec { .. } => ErrorCode::NamespaceCorrupt,
-            Self::Store { class, .. } => crate::error::classify_store_failure(*class),
+            Self::Store { kind, .. } => crate::error::classify_store_failure(*kind),
         }
     }
 }

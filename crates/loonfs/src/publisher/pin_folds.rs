@@ -30,7 +30,7 @@ async fn writer_over(
     namespaces: &[&NamespaceId],
 ) -> crate::LoonFs<crate::Writable> {
     let writer = crate::LoonFs::builder_with_store(store)
-        .writer_id("writer-a")
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(execution_budget)
         .build()
         .await
@@ -52,7 +52,7 @@ fn start_creations(
 ) -> Vec<JoinHandle<crate::Result<()>>> {
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("pin-maintenance"));
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-    let expires_at_ms = writer.now_ms().expect("read the clock") + 60_000;
+    let expires_at_ms = writer.now_ms() + 60_000;
     let fork_writer = writer.clone();
     let source = namespace_id.clone();
     let target = NamespaceId::parse(format!("{namespace_id}-fork")).expect("fork namespace id");
@@ -107,7 +107,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
         .expect("open namespace")
         .create_snapshot(
             "fork-basis",
-            writer.now_ms().expect("read the clock") + 60_000,
+            writer.now_ms() + 60_000,
             &crate::SnapshotPolicy::default(),
         )
         .await
@@ -127,7 +127,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
             &NamespaceId::parse("snapshot-fork").expect("namespace id"),
             &loonfs_test_support::test_actor(),
             &crate::ForkNamespaceOptions {
-                snapshot_id: Some(snapshot.checkpoint_id),
+                snapshot_id: Some(snapshot.snapshot_id),
             },
         ),
     )

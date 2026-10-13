@@ -5,10 +5,10 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::{expect_code, open_runtime_async, store};
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, CreateDirectoryOptions, ErrorCode, FilesystemChange, InodeId, Namespace, PageRequest,
-    PaginationPolicy, Writable,
+    CommitId, CreateDirectoryOptions, CurrentFile, ErrorCode, FilesystemChange, InodeId, Namespace,
+    PageRequest, PaginationPolicy, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -19,7 +19,7 @@ use tempfile::tempdir;
 fn page_request() -> PageRequest<String> {
     PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(None)
+            .effective_limit(None)
             .expect("default page limit"),
         cursor: None,
     }
@@ -31,7 +31,7 @@ async fn create_directory_by_inode(
     name: &str,
 ) -> InodeId {
     let commit = namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -72,7 +72,7 @@ async fn assert_inode_addressing_serves(
         .expect("put a file to move");
     let loose = namespace.stat("/loose.txt").await.expect("stat the file");
     namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -111,13 +111,16 @@ async fn assert_inode_addressing_serves(
         [file_path.as_str()]
     );
     let current = namespace
-        .resolve_current_files(&[loose.inode_id])
+        .stat_current_files_by_inode(&[loose.inode_id])
         .await
         .expect("resolve the moved file");
-    assert_eq!(
-        current[0].current_path.as_ref().map(|path| path.as_str()),
-        Some(file_path.as_str())
-    );
+    let CurrentFile::Visible { path, .. } = &current[0].file else {
+        panic!(
+            "expected the moved file to be visible, got {:?}",
+            current[0].file
+        );
+    };
+    assert_eq!(path.as_str(), file_path.as_str());
 
     // Path-addressed requests keep the parse-time limits.
     expect_code(

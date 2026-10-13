@@ -1,20 +1,24 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
-use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
+use super::query_params::{effective_page_limit, parse_boolean_query_param, required_query_param};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
 use super::{AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
-use axum::Json;
-use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
+use axum::{Extension, Json};
+use loonfs::SharedObjectStore;
+use loonfs_grep::{
+    GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepService, GrepWorker, NamespaceReads,
+};
 use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
 use loonfs_types::{
     GrepRequest, GrepResponse, NamespaceId, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
+use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,13 +75,13 @@ pub(super) struct GrepQuery {
 )]
 pub(super) async fn grep(
     State(state): State<BindingState>,
+    Extension(service): Extension<Arc<GrepService>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    let limit = resolve_page_limit(query.limit.take())?;
+    let limit = effective_page_limit(query.limit.take())?;
     let request = grep_request(query)?;
-    let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
     // through the same runtime the core API groups serve from.
@@ -176,6 +180,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
 )]
 pub(super) async fn enable_grep_index(
     State(state): State<BindingState>,
+    Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
@@ -184,8 +189,7 @@ pub(super) async fn enable_grep_index(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let outcome = state
-        .grep_worker()
+    let outcome = worker
         .enable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
@@ -198,7 +202,7 @@ pub(super) async fn enable_grep_index(
     }
     // Read after the transition so every index endpoint reports bookkeeping
     // from the same durable root source as the status handler.
-    let response = read_grep_index_status(&state, &namespace_id).await?;
+    let response = read_grep_index_status(&worker, &namespace_id).await?;
     Ok(Json(response))
 }
 
@@ -224,19 +228,18 @@ pub(super) async fn enable_grep_index(
     )
 )]
 pub(super) async fn get_grep_index(
-    State(state): State<BindingState>,
+    Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
+    Ok(Json(read_grep_index_status(&worker, &namespace_id).await?))
 }
 
 async fn read_grep_index_status(
-    state: &BindingState,
+    worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
 ) -> Result<GrepIndex, ApiResponseError> {
-    state
-        .grep_worker()
+    worker
         .get_grep_index(namespace_id)
         .await
         .map_err(|error| map_grep_error(namespace_id, error))
@@ -267,6 +270,7 @@ async fn read_grep_index_status(
 )]
 pub(super) async fn disable_grep_index(
     State(state): State<BindingState>,
+    Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
@@ -275,8 +279,7 @@ pub(super) async fn disable_grep_index(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let outcome = state
-        .grep_worker()
+    let outcome = worker
         .disable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
@@ -287,7 +290,7 @@ pub(super) async fn disable_grep_index(
             return Err(grep_publication_conflict());
         }
     }
-    Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
+    Ok(Json(read_grep_index_status(&worker, &namespace_id).await?))
 }
 
 pub(super) fn map_grep_error(

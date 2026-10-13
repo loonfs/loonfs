@@ -3,7 +3,6 @@
 //! A namespace manifest references the immutable metadata segment runs for one
 //! namespace state. Folding, compaction, and retention publish manifests.
 
-mod block_fetch;
 mod block_load;
 mod build;
 pub(crate) mod cache;
@@ -14,6 +13,7 @@ mod compactor;
 mod data_block_load;
 mod error;
 mod fold;
+mod index_block_load;
 mod load;
 pub(crate) mod publish;
 mod retention;
@@ -37,10 +37,10 @@ pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy};
-pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
+pub use self::error::ManifestLoadError;
 pub use self::fold::{fold_wal_tail, next_run_no_after, FoldedWalTail};
 pub use self::retention::RetentionTarget;
-pub use self::runs::{MetadataFamilyGroup, MetadataLsmPolicy};
+pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
 };
@@ -58,7 +58,7 @@ pub use self::compaction_step::metadata_compaction_due;
 pub(crate) use self::compactor::claim_compactor;
 #[cfg(test)]
 pub(crate) use self::fold::fold_wal;
-pub(crate) use self::fold::{fold_wal_with_deadline, try_fold_wal, TryFoldWal};
+pub(crate) use self::fold::{fold_wal_with_deadline, try_fold_wal, TryFoldWalOutcome};
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, head_from_manifest, load_basis_metadata_segments,
     load_manifest_segments, load_namespace_manifest_envelope,

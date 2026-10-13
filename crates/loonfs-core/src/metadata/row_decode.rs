@@ -4,7 +4,7 @@
 //! result is namespace corruption, not a case to skip: each decoder
 //! hard-rejects foreign rows instead of filtering them out.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
@@ -22,7 +22,7 @@ fn foreign_row(expected_kind: &str, row: &MetadataRow) -> CoreError {
     ))
 }
 
-pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord, CoreError> {
+pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord> {
     match row {
         MetadataRow::Inode(record) => Ok(record),
         other => Err(foreign_row("inode", &other)),
@@ -31,57 +31,49 @@ pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord, C
 
 pub(crate) fn direntry_binding_from_manifest_row(
     row: MetadataRow,
-) -> Result<DirentryBindingRecord, CoreError> {
+) -> Result<DirentryBindingRecord> {
     match row {
         MetadataRow::DirentryBinding(record) => Ok(record),
         other => Err(foreign_row("direntry_binding", &other)),
     }
 }
 
-pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRecord, CoreError> {
+pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRecord> {
     match row {
         MetadataRow::FileRevision(record) => Ok(record),
         other => Err(foreign_row("file_revision", &other)),
     }
 }
 
-pub(crate) fn tombstone_from_manifest_row(
-    row: MetadataRow,
-) -> Result<SubtreeTombstoneRecord, CoreError> {
+pub(crate) fn tombstone_from_manifest_row(row: MetadataRow) -> Result<SubtreeTombstoneRecord> {
     match row {
         MetadataRow::Tombstone(record) => Ok(record),
         other => Err(foreign_row("tombstone", &other)),
     }
 }
 
-pub(crate) fn active_deletion_from_manifest_row(
-    row: MetadataRow,
-) -> Result<ActiveDeletionRecord, CoreError> {
+pub(crate) fn active_deletion_from_manifest_row(row: MetadataRow) -> Result<ActiveDeletionRecord> {
     match row {
         MetadataRow::ActiveDeletion(record) => Ok(record),
         other => Err(foreign_row("active_deletion", &other)),
     }
 }
 
-pub(crate) fn content_layout_from_manifest_row(
-    row: MetadataRow,
-) -> Result<ContentLayoutRecord, CoreError> {
+pub(crate) fn content_layout_from_manifest_row(row: MetadataRow) -> Result<ContentLayoutRecord> {
     match row {
         MetadataRow::ContentLayout(record) => Ok(record),
         other => Err(foreign_row("content_layout", &other)),
     }
 }
 
-pub(crate) fn commit_receipt_from_manifest_row(
-    row: MetadataRow,
-) -> Result<CommitReceiptRecord, CoreError> {
+pub(crate) fn commit_receipt_from_manifest_row(row: MetadataRow) -> Result<CommitReceiptRecord> {
     match row {
         MetadataRow::CommitReceipt(record) => Ok(record),
         other => Err(foreign_row("commit_receipt", &other)),
     }
 }
 
-pub(crate) fn commit_from_manifest_row(row: MetadataRow) -> Result<WalCommitPayload, CoreError> {
+pub(crate) fn commit_from_manifest_row(row: MetadataRow) -> Result<WalCommitPayload> {
     match row {
         MetadataRow::Commit(record) if record.inline_content.is_empty() => Ok(record),
         MetadataRow::Commit(record) => Err(CoreError::NamespaceCorrupt(format!(
@@ -94,16 +86,14 @@ pub(crate) fn commit_from_manifest_row(row: MetadataRow) -> Result<WalCommitPayl
 
 pub(crate) fn attributes_revision_from_manifest_row(
     row: MetadataRow,
-) -> Result<AttributesRevisionRecord, CoreError> {
+) -> Result<AttributesRevisionRecord> {
     match row {
         MetadataRow::AttributesRevision(record) => Ok(record),
         other => Err(foreign_row("attributes_revision", &other)),
     }
 }
 
-pub(crate) fn access_revision_from_manifest_row(
-    row: MetadataRow,
-) -> Result<AccessRevisionRecord, CoreError> {
+pub(crate) fn access_revision_from_manifest_row(row: MetadataRow) -> Result<AccessRevisionRecord> {
     match row {
         MetadataRow::AccessRevision(record) => Ok(record),
         other => Err(foreign_row("access_revision", &other)),

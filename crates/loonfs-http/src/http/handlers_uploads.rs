@@ -215,7 +215,7 @@ async fn fill_direct_put_access(
             .presign_put(
                 PresignedPutRequest {
                     object_key,
-                    expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
+                    ttl: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
                 },
                 presign_time(),
             )
@@ -351,7 +351,7 @@ async fn sign_parts(
                     provider_upload_id: &targets.provider_upload_id,
                     part_number: part.part_number,
                     checksum: &part.checksum,
-                    expires_in: MULTIPART_PART_URL_TTL,
+                    ttl: MULTIPART_PART_URL_TTL,
                 },
                 signing_time,
             )
@@ -598,7 +598,7 @@ pub(super) async fn complete_upload(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.evidence.as_ref(),
-        state.runtime.now_ms().map_err(ApiResponseError::runtime)?,
+        state.runtime.now_ms(),
     )?))
 }
 
@@ -691,7 +691,7 @@ pub(super) async fn get_upload(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.evidence.as_ref(),
-        state.runtime.now_ms().map_err(ApiResponseError::runtime)?,
+        state.runtime.now_ms(),
     )?))
 }
 
@@ -759,7 +759,7 @@ mod completion_body_tests {
         let store =
             loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
         let writer = LoonFs::builder_with_store(std::sync::Arc::new(store))
-            .writer_id("writer")
+            .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .build()
             .await
             .expect("writer");
@@ -858,7 +858,8 @@ mod completion_body_tests {
     fn maximum_multipart_completion_fits_the_completion_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "f".repeat(64),
+            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
+                .expect("a lowercase hex checksum"),
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
@@ -892,12 +893,14 @@ mod completion_body_tests {
     fn maximum_part_signing_request_fits_the_control_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "f".repeat(64),
+            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
+                .expect("a lowercase hex checksum"),
         };
         let request = SignUploadPartsRequest {
-            parts: (1..=loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
+            parts: (1_u32..)
+                .take(loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
                 .map(|part_number| UploadPartChecksumClaim {
-                    part_number: part_number as u32,
+                    part_number,
                     checksum: checksum.clone(),
                 })
                 .collect(),

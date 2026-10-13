@@ -6,7 +6,7 @@ use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
     ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
 };
