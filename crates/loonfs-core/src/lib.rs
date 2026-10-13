@@ -185,7 +185,7 @@ pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
     MetadataViewError, Result, WriterFence,
 };
-pub use gc::{gc_namespace, GcOptions, GraceAge};
+pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::ManifestLoadError;
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
