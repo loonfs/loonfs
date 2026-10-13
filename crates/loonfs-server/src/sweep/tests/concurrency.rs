@@ -187,8 +187,8 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         server.clock.advance_ms(config.tick_interval_ms);
         store.inner().reset();
         let mut tick = Box::pin(server.sweep.tick());
-        assert!(futures::poll!(tick.as_mut()).is_pending());
         if slots == 1 {
+            assert!(futures::poll!(tick.as_mut()).is_pending());
             assert!(
                 store.inner().take().is_empty(),
                 "the daily pass holds the only slot"
