@@ -17,8 +17,11 @@ use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE}
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::EffectiveLimit;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -60,9 +63,13 @@ pub enum GarbageCollection {
 /// retrying. Collection requires a moved seq and `gc_interval_ms` elapsed.
 /// A call that fails on a namespace waits one tick interval before its next
 /// try there, each failure in a row doubles the wait up to
-/// [`MAX_SWEEP_BACKOFF_MS`], and a success clears it.
+/// [`MAX_SWEEP_BACKOFF_MS`], and a success clears it. A call that panics
+/// counts as a `server_error` failure. The panic stops neither the sweep nor
+/// the visits to other namespaces.
 /// Quiet sessions close after `idle_session_close_after_ms` without an open,
 /// when no caller holds a handle. An open during close waits for its drain.
+/// A failing call keeps an idle session held, so ticks retry it, until its
+/// wait reaches [`MAX_SWEEP_BACKOFF_MS`].
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage
@@ -108,6 +115,14 @@ struct Backoff {
     attempts: u32,
     /// When the sweep may make the call again, on the namespace table's clock.
     next_at_ms: u64,
+}
+
+/// Where a call that just failed stands in its backoff.
+struct Retry {
+    /// Failures in a row, counting this one.
+    attempts: u32,
+    /// How long the sweep waits before it makes the call again.
+    wait_ms: u64,
 }
 
 struct GrepIndexing {
@@ -321,19 +336,26 @@ impl Sweep {
 
     async fn maintain_metadata(&self, namespace_id: &NamespaceId) -> MetadataMaintenanceOutcome {
         let inner = &self.inner;
-        match inner
-            .maintenance
-            .maintain_metadata_while_due_with_options(namespace_id, &inner.stop, &inner.metadata)
-            .await
-        {
-            Ok(outcome) => {
-                self.record_success(namespace_id, SweepCall::Metadata);
+        let call = SweepCall::Metadata;
+        let result = self.contain(
+            namespace_id,
+            call,
+            inner.maintenance.maintain_metadata_while_due_with_options(
+                namespace_id,
+                &inner.stop,
+                &inner.metadata,
+            ),
+        );
+        match result.await {
+            Some(Ok(outcome)) => {
+                self.record_success(namespace_id, call);
                 outcome
             }
-            Err(error) => {
-                self.record_failure(namespace_id, SweepCall::Metadata, error.code(), &error);
+            Some(Err(error)) => {
+                self.record_failure(namespace_id, call, error.code(), &error);
                 MetadataMaintenanceOutcome::Due
             }
+            None => MetadataMaintenanceOutcome::Due,
         }
     }
 
@@ -376,15 +398,20 @@ impl Sweep {
             entry,
             caught_up: false,
         };
-        build.caught_up = match self.build_index(grep, namespace_id).await {
-            Ok(caught_up) => {
-                self.record_success(namespace_id, SweepCall::GrepIndex);
+        let call = SweepCall::GrepIndex;
+        build.caught_up = match self
+            .contain(namespace_id, call, self.build_index(grep, namespace_id))
+            .await
+        {
+            Some(Ok(caught_up)) => {
+                self.record_success(namespace_id, call);
                 caught_up
             }
-            Err(error) => {
-                self.record_failure(namespace_id, SweepCall::GrepIndex, error.code(), &error);
+            Some(Err(error)) => {
+                self.record_failure(namespace_id, call, error.code(), &error);
                 false
             }
+            None => false,
         };
         if build.caught_up {
             if let Some(entry) = entry {
@@ -421,10 +448,51 @@ impl Sweep {
             .is_some_and(|backoff| now_ms < backoff.next_at_ms)
     }
 
-    /// Whether `call` failed on the namespace and hasn't succeeded since. An
-    /// idle session doesn't wait for such a call before it closes.
-    fn failing(&self, namespace_id: &NamespaceId, call: SweepCall) -> bool {
-        lock(&self.inner.backoff).contains_key(&(namespace_id.clone(), call))
+    /// Whether `call` keeps failing on the namespace and its wait has reached
+    /// [`MAX_SWEEP_BACKOFF_MS`]. An idle session doesn't wait for such a call
+    /// before it closes. Below the cap, the session stays held so that ticks
+    /// retry the call on its backoff, instead of the next full pass.
+    fn backoff_at_cap(&self, namespace_id: &NamespaceId, call: SweepCall) -> bool {
+        let first_backoff_ms = self.first_backoff_ms();
+        lock(&self.inner.backoff)
+            .get(&(namespace_id.clone(), call))
+            .is_some_and(|backoff| {
+                backoff_ms(first_backoff_ms, backoff.attempts) >= MAX_SWEEP_BACKOFF_MS
+            })
+    }
+
+    /// The wait after a call's first failure: one tick interval.
+    fn first_backoff_ms(&self) -> u64 {
+        u64::try_from(self.inner.tick_interval.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Runs one call on a namespace, and contains a panic in it. The panic
+    /// counts as a `server_error` failure of `call`, so the call backs off
+    /// and is retried like any failed call, and the sweep goes on with its
+    /// other calls and namespaces. Returns `None` after a panic.
+    async fn contain<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        call: SweepCall,
+        work: impl Future<Output = T>,
+    ) -> Option<T> {
+        let payload = match AssertUnwindSafe(work).catch_unwind().await {
+            Ok(output) => return Some(output),
+            Err(payload) => payload,
+        };
+        self.inner.metrics.panics.increment(1);
+        let code = ErrorCode::ServerError;
+        let backoff = self.back_off(namespace_id, call, code);
+        tracing::error!(
+            namespace_id = %namespace_id,
+            call = call.as_str(),
+            code = %code,
+            attempts = backoff.attempts,
+            backoff_ms = backoff.wait_ms,
+            panic = panic_message(payload.as_ref()),
+            "maintenance sweep call panicked; the sweep retries it after a backoff"
+        );
+        None
     }
 
     async fn gc(&self, namespace_id: &NamespaceId) -> bool {
@@ -436,12 +504,17 @@ impl Sweep {
         if self.backed_off(namespace_id, SweepCall::Gc) {
             collected = false;
         } else {
-            match inner.maintenance.gc(namespace_id).await {
-                Ok(_) => self.record_success(namespace_id, SweepCall::Gc),
-                Err(error) => {
-                    self.record_failure(namespace_id, SweepCall::Gc, error.code(), &error);
+            let call = SweepCall::Gc;
+            match self
+                .contain(namespace_id, call, inner.maintenance.gc(namespace_id))
+                .await
+            {
+                Some(Ok(_)) => self.record_success(namespace_id, call),
+                Some(Err(error)) => {
+                    self.record_failure(namespace_id, call, error.code(), &error);
                     collected = false;
                 }
+                None => collected = false,
             }
         }
         let Some(grep) = &inner.grep else {
@@ -453,16 +526,20 @@ impl Sweep {
         if self.backed_off(namespace_id, SweepCall::GrepGc) {
             return false;
         }
-        let result = grep
-            .worker
-            .gc_namespace(namespace_id, inner.maintenance.now_ms())
-            .await;
-        match result {
-            Ok(_) => self.record_success(namespace_id, SweepCall::GrepGc),
-            Err(error) => {
-                self.record_failure(namespace_id, SweepCall::GrepGc, error.code(), &error);
+        let call = SweepCall::GrepGc;
+        let result = self.contain(
+            namespace_id,
+            call,
+            grep.worker
+                .gc_namespace(namespace_id, inner.maintenance.now_ms()),
+        );
+        match result.await {
+            Some(Ok(_)) => self.record_success(namespace_id, call),
+            Some(Err(error)) => {
+                self.record_failure(namespace_id, call, error.code(), &error);
                 collected = false;
             }
+            None => collected = false,
         }
         collected
     }
@@ -514,10 +591,36 @@ impl Sweep {
         ) {
             return;
         }
+        let backoff = self.back_off(namespace_id, call, code);
+        if backoff.attempts == 1 {
+            tracing::error!(
+                namespace_id = %namespace_id,
+                call = call.as_str(),
+                code = %code,
+                attempts = backoff.attempts,
+                backoff_ms = backoff.wait_ms,
+                error = %error,
+                "maintenance sweep call failed; the sweep retries it after a backoff"
+            );
+        } else {
+            tracing::warn!(
+                namespace_id = %namespace_id,
+                call = call.as_str(),
+                code = %code,
+                attempts = backoff.attempts,
+                backoff_ms = backoff.wait_ms,
+                error = %error,
+                "maintenance sweep call failed again; the sweep doubles its backoff"
+            );
+        }
+    }
+
+    /// Counts a failed call and backs it off on that namespace.
+    fn back_off(&self, namespace_id: &NamespaceId, call: SweepCall, code: ErrorCode) -> Retry {
         let inner = &self.inner;
         inner.metrics.visit_failures[call as usize].increment(1);
         let now_ms = inner.namespaces.now_ms();
-        let first_backoff_ms = u64::try_from(inner.tick_interval.as_millis()).unwrap_or(u64::MAX);
+        let first_backoff_ms = self.first_backoff_ms();
         let (backoff, entries) = {
             let mut entries = lock(&inner.backoff);
             let key = (namespace_id.clone(), call);
@@ -545,27 +648,9 @@ impl Sweep {
             .metrics
             .backoff_entries
             .set(i64::try_from(entries).unwrap_or(i64::MAX));
-        let backoff_ms = backoff.next_at_ms.saturating_sub(now_ms);
-        if backoff.attempts == 1 {
-            tracing::error!(
-                namespace_id = %namespace_id,
-                call = call.as_str(),
-                code = %code,
-                attempts = backoff.attempts,
-                backoff_ms,
-                error = %error,
-                "maintenance sweep call failed; the sweep retries it after a backoff"
-            );
-        } else {
-            tracing::warn!(
-                namespace_id = %namespace_id,
-                call = call.as_str(),
-                code = %code,
-                attempts = backoff.attempts,
-                backoff_ms,
-                error = %error,
-                "maintenance sweep call failed again; the sweep doubles its backoff"
-            );
+        Retry {
+            attempts: backoff.attempts,
+            wait_ms: backoff.next_at_ms.saturating_sub(now_ms),
         }
     }
 
@@ -631,6 +716,15 @@ fn backoff_ms(first_backoff_ms: u64, attempts: u32) -> u64 {
         .min(MAX_SWEEP_BACKOFF_MS)
 }
 
+/// The message a panic carried, when it carried a string.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("a panic payload that isn't a string")
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -688,6 +782,7 @@ struct SweepMetrics {
     passes_failed: Arc<dyn CounterHandle>,
     pass_seconds: Arc<dyn HistogramHandle>,
     visit_failures: [Arc<dyn CounterHandle>; 4],
+    panics: Arc<dyn CounterHandle>,
     backoff_entries: Arc<dyn GaugeHandle>,
     namespaces: Arc<dyn GaugeHandle>,
 }
@@ -717,6 +812,11 @@ impl SweepMetrics {
                     &[("call", call.as_str())],
                 )
             }),
+            panics: recorder.register_counter(
+                "loonfs.maintenance.sweep_panics",
+                "Maintenance sweep calls and idle-session closes that panicked",
+                &[],
+            ),
             backoff_entries: recorder.register_gauge(
                 "loonfs.maintenance.sweep_backoff_entries",
                 "Namespace calls the maintenance sweep is backing off after a failure",

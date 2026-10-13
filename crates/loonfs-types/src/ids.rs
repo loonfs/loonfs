@@ -184,7 +184,11 @@ macro_rules! string_id {
                 D: serde::Deserializer<'de>,
             {
                 let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-                Self::parse(value).map_err(serde::de::Error::custom)
+                // Validates the decoded string and keeps it, so a decode is
+                // one allocation.
+                let validated: Result<(), $error> = ($validate)(value.as_str());
+                validated.map_err(serde::de::Error::custom)?;
+                Ok(Self(value))
             }
         }
     };

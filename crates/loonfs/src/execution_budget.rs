@@ -409,7 +409,11 @@ impl AdmittedTotals {
     }
 
     fn refund(&self, estimated_bytes: usize) -> AdmissionChange {
-        let mut admitted = self.lock();
+        // A refund runs in a drop, which can run while a panic unwinds, and a
+        // second panic then aborts the process, so this recovers a poisoned
+        // lock instead of panicking. The critical section only updates two
+        // counts.
+        let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
         admitted.requests -= 1;
         admitted.bytes -= estimated_bytes;
         AdmissionChange::Admitted(*admitted)

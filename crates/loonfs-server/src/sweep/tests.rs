@@ -19,7 +19,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_test_support::test_actor;
 use loonfs_types::EffectiveLimit;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -529,6 +529,75 @@ async fn a_sweep_survives_a_failing_namespace() {
     );
 }
 
+/// Forwards every call to a local store, and panics on a read of one
+/// namespace's manifest while armed.
+#[derive(Debug)]
+struct PanicOnManifestRead {
+    inner: LocalFsStore,
+    manifest_prefix: String,
+    armed: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PanicOnManifestRead {
+    loonfs_test_support::delegate_object_store!(self => self.inner; except get);
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<loonfs_objectstore::ByteRange>,
+    ) -> Result<Option<bytes::Bytes>, ObjectStoreError> {
+        if self.armed.load(Ordering::SeqCst) && key.starts_with(&self.manifest_prefix) {
+            panic!("injected panic reading `{key}`");
+        }
+        self.inner.get(key, range).await
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited() {
+    let directory = tempdir().expect("tempdir");
+    let base: SharedObjectStore = local_store(directory.path());
+    let names = ["alpha", "beta", "gamma"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&base).await;
+    for namespace_id in &names {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer.shutdown().await.expect("stop the writer");
+    let store = Arc::new(PanicOnManifestRead {
+        inner: LocalFsStore::new(directory.path()).expect("local store"),
+        manifest_prefix: loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
+        armed: AtomicBool::new(true),
+    });
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
+
+    server.pass_after(0).await;
+    store.armed.store(false, Ordering::SeqCst);
+    assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
+    assert!(server.wal_tail_objects(&names[1]).await > 0);
+    assert_eq!(
+        server.wal_tail_objects(&names[2]).await,
+        0,
+        "the panic doesn't stop the visits to other namespaces"
+    );
+    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 1);
+    assert_eq!(server.metadata_failures(), 1);
+    let backoff = super::lock(&server.sweep.inner.backoff)
+        .get(&(names[1].clone(), super::SweepCall::Metadata))
+        .copied()
+        .expect("the panic is backed off");
+    assert_eq!(backoff.code, loonfs::ErrorCode::ServerError);
+    assert_eq!(backoff.attempts, 1);
+
+    server.pass_after(config.tick_interval_ms).await;
+    assert_eq!(
+        server.wal_tail_objects(&names[1]).await,
+        0,
+        "a pass after the backoff tries the namespace again"
+    );
+}
+
 /// A server over one seeded namespace whose store calls fail until cleared,
 /// with an idle WAL tail that a visit folds.
 async fn failing_namespace_server(
@@ -678,14 +747,16 @@ async fn the_backoff_map_evicts_the_earliest_retry_at_its_cap() {
 }
 
 #[tokio::test]
-async fn a_backed_off_namespace_still_closes_its_idle_session() {
+async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the_cap() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(FailStore::matching(
         LocalFsStore::new(directory.path()).expect("local store"),
         |_| true,
         InjectedError::PermissionDenied("expired credentials".to_owned()),
     ));
-    let config = sweep_config(None);
+    let mut config = sweep_config(None);
+    // Keeps collection from coming due while the clock runs for hours.
+    config.gc_interval_ms = 30 * DAY_MS;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("held-failing");
     server
@@ -705,14 +776,32 @@ async fn a_backed_off_namespace_still_closes_its_idle_session() {
     store.fail_all();
 
     server.tick_after(config.tick_interval_ms).await;
-    assert_eq!(server.metadata_failures(), 1);
     server
         .tick_after(config.idle_session_close_after_ms + 1)
         .await;
     server.tick_after(config.tick_interval_ms).await;
+    assert_eq!(server.metadata_failures(), 2);
+    assert_eq!(
+        namespaces.held_ids(),
+        std::slice::from_ref(&namespace_id),
+        "a transient failure keeps the idle session held"
+    );
+
+    let attempts = || server.backoff_attempts(&namespace_id).expect("backing off");
+    while super::backoff_ms(config.tick_interval_ms, attempts()) < super::MAX_SWEEP_BACKOFF_MS {
+        let failures = server.metadata_failures();
+        server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
+        assert_eq!(
+            server.metadata_failures(),
+            failures + 1,
+            "ticks retry the call on its backoff"
+        );
+        assert!(!namespaces.held_ids().is_empty());
+    }
+    server.tick_after(config.tick_interval_ms).await;
     assert!(
         namespaces.held_ids().is_empty(),
-        "a failing call doesn't keep an idle session open"
+        "a call whose backoff reached the cap doesn't keep an idle session open"
     );
 }
 

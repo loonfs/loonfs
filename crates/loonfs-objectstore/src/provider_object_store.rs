@@ -79,7 +79,7 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Concurrent in-flight parts of one multipart overwrite or verified
 /// immutable write. A `put_streamed` write sends one part at a time.
-pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
+pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
 /// so the shortest base prefix a provider copies instead of receiving it
@@ -681,7 +681,7 @@ impl MultipartWrite<'_> {
         let mut next_part = 0usize;
 
         loop {
-            while in_flight.len() < PROVIDER_MULTIPART_PART_WINDOW && next_part < part_count {
+            while in_flight.len() < PROVIDER_MULTIPART_PARTS_IN_FLIGHT && next_part < part_count {
                 let part_index = next_part;
                 let start = part_index * part_size;
                 let end = (start + part_size).min(bytes.len());
@@ -948,7 +948,7 @@ impl ObjectStore for ProviderObjectStore {
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
-                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PART_WINDOW)
+                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PARTS_IN_FLIGHT)
                     .await
             }
         })
@@ -1019,7 +1019,7 @@ impl ObjectStore for ProviderObjectStore {
                 head,
                 reader,
                 PutMode::CreateIfAbsent,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
             )
             .await
         }
@@ -2979,7 +2979,10 @@ mod tests {
             .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("a large verified write creates through the controller");
-        assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
+        assert_eq!(
+            controller.part_windows(),
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT]
+        );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
@@ -2994,7 +2997,7 @@ mod tests {
             .expect("a large streamed verified write creates through the controller");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
@@ -3006,7 +3009,7 @@ mod tests {
             .expect("a small streamed verified write is one request");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
@@ -3024,8 +3027,8 @@ mod tests {
         assert_eq!(
             controller.part_windows(),
             [
-                PROVIDER_MULTIPART_PART_WINDOW,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
                 1
             ],
             "a client's upload keeps one part in flight"

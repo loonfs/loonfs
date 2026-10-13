@@ -1,8 +1,9 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, GarbageCollection, RunningSweep, Sweep, SweepCall};
+use super::{lock, panic_message, GarbageCollection, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
+use std::panic::AssertUnwindSafe;
 use tokio::time::MissedTickBehavior;
 
 enum Due {
@@ -83,7 +84,8 @@ impl Sweep {
                 && !self.backed_off(&namespace_id, SweepCall::GrepGc)
             {
                 Due::Collection
-            } else if metadata_caught_up || self.failing(&namespace_id, SweepCall::Metadata) {
+            } else if metadata_caught_up || self.backoff_at_cap(&namespace_id, SweepCall::Metadata)
+            {
                 Due::Close
             } else {
                 return;
@@ -106,7 +108,18 @@ impl Sweep {
                     self.record_collection(&entry, seq);
                 }
             }
-            Due::Close => self.close_idle_session(&namespace_id, seq).await,
+            Due::Close => {
+                let close = AssertUnwindSafe(self.close_idle_session(&namespace_id, seq));
+                if let Err(payload) = close.catch_unwind().await {
+                    inner.metrics.panics.increment(1);
+                    tracing::error!(
+                        namespace_id = %namespace_id,
+                        call = "close",
+                        panic = panic_message(payload.as_ref()),
+                        "closing an idle session panicked; the next tick tries again"
+                    );
+                }
+            }
         }
     }
 
@@ -122,21 +135,23 @@ impl Sweep {
                 seq,
                 inner.idle_session_close_after_ms,
                 |held| {
-                    // A call that keeps failing doesn't keep an idle session
-                    // open; the next full pass retries it.
+                    // A failing call keeps an idle session held, so ticks
+                    // retry it on its backoff, until its wait reaches the
+                    // cap. Then the session closes and the next full pass
+                    // retries the call.
                     (held.handle.metadata_caught_up()
-                        || self.failing(namespace_id, SweepCall::Metadata))
+                        || self.backoff_at_cap(namespace_id, SweepCall::Metadata))
                         && (inner.grep.is_none()
                             || (!held.index_dirty && held.indexed_seq == seq)
-                            || self.failing(namespace_id, SweepCall::GrepIndex))
+                            || self.backoff_at_cap(namespace_id, SweepCall::GrepIndex))
                         && (held.collected_seq == seq
                             || inner
                                 .namespaces
                                 .now_ms()
                                 .saturating_sub(held.collected_at_ms)
                                 < inner.collection_interval_ms
-                            || self.failing(namespace_id, SweepCall::Gc)
-                            || self.failing(namespace_id, SweepCall::GrepGc))
+                            || self.backoff_at_cap(namespace_id, SweepCall::Gc)
+                            || self.backoff_at_cap(namespace_id, SweepCall::GrepGc))
                 },
             )
             .await
