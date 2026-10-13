@@ -56,34 +56,7 @@ cargo build --locked --tests --bins \
     --features loonfs-core/test-support \
     --message-format=json-render-diagnostics >"$RUN_DIR/artifacts.jsonl"
 
-python3 - "$RUN_DIR" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-directory = Path(sys.argv[1])
-targets = {
-    ("crates/loonfs-cli/tests/it/main.rs", True): "cli",
-    ("crates/loonfs/src/lib.rs", True): "runtime",
-    ("crates/loonfs-core/src/lib.rs", True): "core",
-    ("crates/loonfs-server/src/lib.rs", True): "server",
-    ("crates/loonfs-cli/src/main.rs", False): "loonfs",
-    ("crates/loonfs-server/src/main.rs", False): "loonfs-server",
-}
-found = {}
-for line in (directory / "artifacts.jsonl").read_text().splitlines():
-    artifact = json.loads(line)
-    if artifact["reason"] != "compiler-artifact" or not artifact.get("executable"):
-        continue
-    source = str(Path(artifact["target"]["src_path"]).relative_to(Path.cwd()))
-    name = targets.get((source, artifact["profile"]["test"]))
-    if name:
-        found[name] = artifact["executable"]
-for name in targets.values():
-    if name not in found:
-        sys.exit(f"missing build artifact: {name}")
-    (directory / name).write_text(found[name] + "\n")
-PY
+python3 scripts/find-write-stress-binaries.py "$RUN_DIR"
 
 cat >"$RUN_DIR/tests" <<'TESTS'
 cli|output::ls_default_all_jsonl_and_cursor_obey_page_boundaries
@@ -131,21 +104,7 @@ done <"$RUN_DIR/tests"
 report_failure() {
     printf 'FAIL: %s round %s/%s copy %s/%s (exit %s)\n' \
         "$test" "$round" "$ROUNDS" "$copy" "$COPIES" "$copy_status" >&2
-    python3 - "$log" <<'PY' >&2
-from pathlib import Path
-import re
-import sys
-
-output = Path(sys.argv[1]).read_text(errors="replace")
-registry = Path("crates/loonfs-types/src/error.rs").read_text()
-codes = {
-    code
-    for variant, code in re.findall(r'^\s+(\w+) => "([a-z_]+)"', registry, re.M)
-    if re.search(r"\b(?:" + variant + "|" + code + r")\b", output)
-}
-if codes:
-    print("error codes in output: " + ", ".join(sorted(codes)))
-PY
+    python3 scripts/list-log-error-codes.py "$log" >&2
     tail -n 60 "$log" >&2
 }
 
