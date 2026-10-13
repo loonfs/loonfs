@@ -4,7 +4,6 @@ use crate::args::PageLimitArgs;
 use crate::error::CliError;
 use loonfs_types::{PageRequest, PagedResponse, PaginationPolicy};
 use std::future::Future;
-use std::io::{self, Write};
 
 /// Tracks the total result limit and the size of each request.
 pub(super) struct PagePlan {
@@ -90,25 +89,12 @@ where
             .await
             .map(PagedListing::Collected);
     }
-    let mut stdout = io::BufWriter::with_capacity(64 * 1024, io::stdout());
     visit_pages(plan, cursor, load_page, |page| {
         observe(&page);
-        write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)
+        crate::render::write_jsonl_page(page.items()).map_err(CliError::io)
     })
     .await?;
     Ok(PagedListing::Streamed)
-}
-
-/// Writes one JSON item per line and flushes the page before the next request.
-pub(super) fn write_jsonl_page<T: serde::Serialize>(
-    stdout: &mut impl Write,
-    items: &[T],
-) -> io::Result<()> {
-    for item in items {
-        serde_json::to_writer(&mut *stdout, item).map_err(io::Error::other)?;
-        stdout.write_all(b"\n")?;
-    }
-    stdout.flush()
 }
 
 /// Names one page for the client. The limit meets the pagination contract

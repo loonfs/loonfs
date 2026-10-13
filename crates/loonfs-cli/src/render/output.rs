@@ -3,6 +3,8 @@
 use super::{human, json, json_error};
 use crate::commands::{CommandData, CommandFailure, CommandOutput, ListingHeadDrift};
 use crate::error::CliError;
+use loonfs_types::PathEntry;
+use serde::Serialize;
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,32 @@ pub(crate) fn write_success(
         }
     }
     Ok(())
+}
+
+/// Writes one JSON item per line and flushes the page before the next request.
+pub(crate) fn write_jsonl_page<T: Serialize>(items: &[T]) -> io::Result<()> {
+    let mut stdout = page_stdout();
+    for item in items {
+        serde_json::to_writer(&mut stdout, item).map_err(io::Error::other)?;
+        stdout.write_all(b"\n")?;
+    }
+    stdout.flush()
+}
+
+/// Writes one listing page and makes it visible before the next fetch.
+pub(crate) fn write_path_entries_page(entries: &[PathEntry], jsonl: bool) -> io::Result<()> {
+    if jsonl {
+        return write_jsonl_page(entries);
+    }
+    let mut stdout = page_stdout();
+    for entry in entries {
+        writeln!(stdout, "{}", human::human_path_entry(entry))?;
+    }
+    stdout.flush()
+}
+
+fn page_stdout() -> io::BufWriter<io::Stdout> {
+    io::BufWriter::with_capacity(64 * 1024, io::stdout())
 }
 
 pub(crate) fn render_error(failure: &CommandFailure, format: OutputFormat) -> io::Result<()> {

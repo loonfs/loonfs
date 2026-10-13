@@ -58,8 +58,8 @@ jobs:
 
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Install stable toolchain
-        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal --no-self-update
 
       - name: Resolve workspace version
         id: version
@@ -114,10 +114,10 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Install stable toolchain
+      - name: Install the pinned toolchain
         id: rust
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update --target "${{ matrix.target }}"
+          rustup toolchain install --profile minimal --no-self-update --target "${{ matrix.target }}"
           echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo artifacts
@@ -451,10 +451,10 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Install stable toolchain
+      - name: Install the pinned toolchain
         id: rust
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
+          rustup toolchain install --profile minimal --no-self-update
           echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo artifacts

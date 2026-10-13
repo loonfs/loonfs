@@ -137,11 +137,11 @@ impl Maintenance {
     /// Returns namespace state and storage details used by maintenance.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.diagnostics",
+        name = "loonfs.diagnostics",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.diagnostics",
+            operation = "diagnostics",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -238,11 +238,24 @@ impl Maintenance {
     /// runs one bounded compaction step. A fold waits for a fold permit from
     /// the runtime's execution budget, and a step that finds work waits for
     /// a compaction permit from it.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintain_metadata",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintain_metadata",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn maintain_metadata_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataMaintenanceResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.metadata_step(namespace_id, options)
             .await
             .map(|step| step.response)
@@ -331,11 +344,11 @@ impl Maintenance {
     /// or while a tail waits for the idle fold age.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.maintain_metadata_while_due",
+        name = "loonfs.maintain_metadata_while_due",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.maintain_metadata_while_due",
+            operation = "maintain_metadata_while_due",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -593,11 +606,11 @@ impl Maintenance {
     /// cancelled. A running streaming compaction stops at its next block.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.compact_metadata",
+        name = "loonfs.compact_metadata",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.compact_metadata",
+            operation = "compact_metadata",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -726,11 +739,11 @@ impl Maintenance {
     /// `namespace_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.gc",
+        name = "loonfs.gc",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.gc",
+            operation = "gc",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -786,11 +799,11 @@ impl Maintenance {
     /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.create_checkpoint",
+        name = "loonfs.create_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.create_checkpoint",
+            operation = "create_checkpoint",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -833,11 +846,11 @@ impl Maintenance {
 
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.list_checkpoints",
+        name = "loonfs.list_checkpoints",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.list_checkpoints",
+            operation = "list_checkpoints",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -867,11 +880,11 @@ impl Maintenance {
     /// missing id returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.get_checkpoint",
+        name = "loonfs.get_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.get_checkpoint",
+            operation = "get_checkpoint",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -893,11 +906,11 @@ impl Maintenance {
     /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.delete_checkpoint",
+        name = "loonfs.delete_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.delete_checkpoint",
+            operation = "delete_checkpoint",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -926,11 +939,11 @@ impl Maintenance {
     /// compaction step.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.fold_wal",
+        name = "loonfs.fold_wal",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.fold_wal",
+            operation = "fold_wal",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -963,11 +976,11 @@ impl Maintenance {
     /// unattended deployment keeps its whole history.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.advance_retention_floor",
+        name = "loonfs.advance_retention_floor",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.advance_retention_floor",
+            operation = "advance_retention_floor",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1011,6 +1024,18 @@ impl Maintenance {
 impl crate::Namespace<crate::Writable> {
     /// Grants `admin` on the root row to `principal_id`, keeping every other
     /// root grant, through a commit no subject check applies to.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.recover_administrator",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "recover_administrator",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn recover_administrator(
         &self,
         principal_id: &loonfs_types::PrincipalId,
@@ -1019,6 +1044,7 @@ impl crate::Namespace<crate::Writable> {
         use loonfs_types::api::v0::FilesystemChange;
         use loonfs_types::{AccessGrants, AccessRight, AccessRights};
 
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
         let root = engine.root_access(&context).await?;
         let grants = root.access.grants;

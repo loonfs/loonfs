@@ -13,7 +13,7 @@ use super::output::{
     TrashListing,
 };
 use super::pagination::{
-    collect_or_stream_pages, page_request, visit_pages, write_jsonl_page, PagePlan, PagedListing,
+    collect_or_stream_pages, page_request, visit_pages, PagePlan, PagedListing,
 };
 use super::partial::{self, PartialDownload, PartialDownloadMetadata};
 use super::recursive;
@@ -44,7 +44,7 @@ use loonfs_types::{
 };
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -123,7 +123,6 @@ pub(crate) async fn run_filesystem_ls(
     let streams_pages = args.pagination.page_limits.jsonl
         || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
     if streams_pages {
-        let mut stdout = BufWriter::with_capacity(64 * 1024, io::stdout());
         let followed = follow_path_entry_pages(
             &context,
             kind,
@@ -132,7 +131,7 @@ pub(crate) async fn run_filesystem_ls(
             args.pagination.cursor.as_deref(),
             snapshot_id.as_ref(),
             |entries| {
-                write_path_entries_page(&mut stdout, &entries, args.pagination.page_limits.jsonl)
+                crate::render::write_path_entries_page(&entries, args.pagination.page_limits.jsonl)
                     .map_err(CliError::io)
             },
         )
@@ -646,21 +645,6 @@ fn destination_behavior(force: bool) -> DestinationBehavior {
     } else {
         DestinationBehavior::NoReplace
     }
-}
-
-/// Writes one listing page and makes it visible before the next fetch.
-fn write_path_entries_page(
-    stdout: &mut impl Write,
-    entries: &[loonfs_types::PathEntry],
-    jsonl: bool,
-) -> io::Result<()> {
-    if jsonl {
-        return write_jsonl_page(stdout, entries);
-    }
-    for entry in entries {
-        writeln!(stdout, "{}", crate::render::human_path_entry(entry))?;
-    }
-    stdout.flush()
 }
 
 /// Writes a download to standard output as it arrives.

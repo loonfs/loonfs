@@ -15,7 +15,6 @@ use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse, WalFoldStepOutco
 use serde::Serialize;
 use std::io::{self, Write};
 
-pub(crate) use human::human_path_entry;
 #[cfg(test)]
 use human::human_success;
 #[cfg(test)]
@@ -25,8 +24,8 @@ pub(crate) use json::{json_error, render_parse_error};
 pub(crate) use output::write_success;
 use output::{human_error, request_id_suffix};
 pub(crate) use output::{
-    more_entries_hint, render_error, render_success, write_listing_drift_warning,
-    write_stderr_progress, write_stderr_warning, OutputFormat,
+    more_entries_hint, render_error, render_success, write_jsonl_page, write_listing_drift_warning,
+    write_path_entries_page, write_stderr_progress, write_stderr_warning, OutputFormat,
 };
 pub(crate) use summaries::{
     store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome,

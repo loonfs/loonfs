@@ -13,8 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 const TRACE_ENV: &str = "LOONFS_TRACE";
 const RUST_LOG_ENV: &str = "RUST_LOG";
-const DEFAULT_TRACE_FILTER: &str =
-    "loonfs_server=info,loonfs_grep=info,loonfs=info,loonfs_core=info";
+const DEFAULT_TRACE_FILTER: &str = "loonfs_server=info,loonfs_grep=info,loonfs=info,loonfs_core=info,loonfs_objectstore=info,loonfs_http=info";
 /// The `LOONFS_TRACE` value that turns logging off.
 const TRACE_MODE_OFF: &str = "off";
 /// The `LOONFS_TRACE` value that names the default mode.

@@ -6,6 +6,7 @@
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{ErrorCode, PrincipalId};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -70,13 +71,23 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
+        let recovery = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .recover_administrator(
+                &PrincipalId::parse("prn_root").expect("principal"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect_err("an unrestricted namespace has no administrator to recover");
+        assert_eq!(recovery.code(), ErrorCode::NamespaceUnrestricted);
 
         let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
         namespace.stat("/").await.expect("stat namespace root");
         namespace.metadata().await.expect("read namespace state");
 
-        LoonFs::builder_with_store(writer.object_store())
+        let maintenance = LoonFs::builder_with_store(writer.object_store())
             .writer_id(loonfs_test_support::ids::writer_id(
                 "operation-span-maintenance",
             ))
@@ -85,25 +96,34 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .expect("build maintenance")
             .maintenance(loonfs_test_support::ids::writer_id(
                 "operation-span-maintenance",
-            ))
+            ));
+        maintenance
             .diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");
+        maintenance
+            .maintain_metadata(&namespace_id)
+            .await
+            .expect("maintain metadata");
     });
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
         .expect("captured log is utf8");
     for span_name in [
         "loonfs.create_namespace",
+        "loonfs.recover_administrator",
         "loonfs.stat",
         "loonfs.metadata",
-        "loonfs.maintenance.diagnostics",
+        "loonfs.diagnostics",
+        "loonfs.maintain_metadata",
     ] {
+        let operation = span_name.trim_start_matches("loonfs.");
         assert!(
-            closed_spans(&log, span_name)
-                .iter()
-                .any(|event| event["span"]["namespace_id"] == "operation-spans"),
-            "`{span_name}` lacks a close event with its namespace in:\n{log}"
+            closed_spans(&log, span_name).iter().any(|event| {
+                event["span"]["namespace_id"] == "operation-spans"
+                    && event["span"]["operation"] == operation
+            }),
+            "`{span_name}` lacks a close event with its namespace and operation in:\n{log}"
         );
     }
 }
