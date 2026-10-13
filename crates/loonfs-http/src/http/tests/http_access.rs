@@ -246,6 +246,66 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
 }
 
 #[tokio::test]
+async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_subject() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "snapshot-retrieve-acl"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo-acl/snapshots",
+            Some(r#"{"name":"pin","ttl_ms":60000}"#),
+            &[],
+        ))
+        .await
+        .expect("snapshot response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot_id = json_body(response).await["snapshot_id"]
+        .as_str()
+        .expect("snapshot id")
+        .to_owned();
+    let uri = format!("/v0/namespaces/demo-acl/snapshots/{snapshot_id}");
+
+    for (principals, status) in [
+        (Some("nobody"), StatusCode::FORBIDDEN),
+        (Some("team"), StatusCode::OK),
+        (None, StatusCode::OK),
+    ] {
+        let headers = principals.map_or_else(Vec::new, |principals| {
+            vec![
+                ("Loonfs-Subject", "usr_ada"),
+                ("Loonfs-Principal-Scope", "org"),
+                ("Loonfs-Principals", principals),
+            ]
+        });
+        let response = router
+            .clone()
+            .oneshot(request("GET", &uri, None, &headers))
+            .await
+            .expect("retrieve response");
+        assert_eq!(response.status(), status, "principals {principals:?}");
+    }
+}
+
+#[tokio::test]
 async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, _state) = test_app(

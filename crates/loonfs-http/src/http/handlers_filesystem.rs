@@ -702,14 +702,14 @@ pub(super) async fn read_target(
 pub(super) fn reject_snapshot_with_revision(
     snapshot_id: Option<&PinId>,
     revision_no: Option<RevisionNo>,
-    revision_param: &str,
+    param: &str,
 ) -> Result<(), ApiResponseError> {
     if snapshot_id.is_some() && revision_no.is_some() {
         return Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "revision_no cannot be combined with snapshot_id",
         )
-        .with_param(revision_param));
+        .with_param(param));
     }
     Ok(())
 }

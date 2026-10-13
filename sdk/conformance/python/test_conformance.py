@@ -1552,6 +1552,16 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert extended.name == request.snapshot_name
     assert extended.expires_at_ms > snapshot.expires_at_ms
 
+    retrieved = client.snapshots.retrieve(namespace_id, snapshot.snapshot_id)
+    assert retrieved.snapshot_id == snapshot.snapshot_id
+    assert retrieved.expires_at_ms == extended.expires_at_ms
+    checkpoint = client.maintenance.checkpoints.retrieve(
+        namespace_id, snapshot.snapshot_id
+    )
+    assert checkpoint.checkpoint_id == snapshot.snapshot_id
+    assert checkpoint.captured_seq == expected.snapshot_head_seq
+    assert checkpoint.expires_at_ms == extended.expires_at_ms
+
     listed = client.snapshots.list(namespace_id)
     assert listed.namespace_id == namespace_id
     assert listed.next_cursor is None

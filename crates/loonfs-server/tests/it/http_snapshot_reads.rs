@@ -726,7 +726,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 live.snapshot_id
             ))
             .map(|_| serde_json::Value::Null),
-            "revision_no",
+            "snapshot_id",
         ),
         (
             post_json::<serde_json::Value>(

@@ -3296,6 +3296,69 @@ mod direct_download {
         }
     }
 
+    #[tokio::test]
+    async fn an_inode_download_accepts_a_missing_body_and_rejects_a_malformed_one() {
+        use tower::ServiceExt;
+
+        let directory = tempdir().expect("tempdir");
+        let (router, state) = test_app(
+            test_options(directory.path(), "inode-download-bodies"),
+            TestAppOptions {
+                store: None,
+                direct_transfers: Some(DirectTransferIssuers {
+                    get: LoopbackIssuer::at("http://objects"),
+                    put: None,
+                    multipart: None,
+                }),
+            },
+        )
+        .await
+        .expect("app");
+        let actor = loonfs_test_support::test_actor();
+        let namespace = namespace_id("demo");
+        state
+            .runtime
+            .create_namespace(&namespace, &actor)
+            .await
+            .expect("namespace");
+        state
+            .runtime
+            .open_namespace(&namespace)
+            .expect("open namespace")
+            .put_file("/report.txt", b"report", &actor)
+            .await
+            .expect("put file");
+        let inode_id = state
+            .runtime
+            .namespace(&namespace)
+            .stat("/report.txt")
+            .await
+            .expect("stat")
+            .inode_id;
+        let inode = format!("/v0/namespaces/demo/inodes/ino_{inode_id}");
+        for uri in [
+            format!("{inode}/downloads"),
+            format!("{inode}/revisions/1/downloads"),
+        ] {
+            for (body, status) in [("", StatusCode::OK), ("{", StatusCode::BAD_REQUEST)] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("authorization", "Bearer test-token")
+                            .body(axum::body::Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), status, "{uri} with body {body:?}");
+            }
+        }
+        state.runtime.shutdown().await.expect("shutdown writer");
+    }
+
     /// The read cap these deployments are configured with.
     ///
     /// Small on purpose. The audit's case is a file the deployment refuses

@@ -6,7 +6,7 @@ use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
-use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
 use loonfs::DownloadOptions;
@@ -132,8 +132,9 @@ pub(super) async fn create_download_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<CreateDownloadByInodeRequest>,
+    OptionalAppJson(request): OptionalAppJson<CreateDownloadByInodeRequest>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+    let request = request.unwrap_or_default();
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
@@ -193,8 +194,9 @@ pub(super) async fn create_revision_download_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<CreateRevisionDownloadByInodeRequest>,
+    OptionalAppJson(request): OptionalAppJson<CreateRevisionDownloadByInodeRequest>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+    let request = request.unwrap_or_default();
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;

@@ -21,6 +21,7 @@ import (
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/files"
+	"github.com/loonfs/loonfs-sdk-go/maintenance"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	loonfsproxy "github.com/loonfs/loonfs-sdk-go/proxy"
 	"github.com/loonfs/loonfs-sdk-go/server"
@@ -2190,6 +2191,28 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	if extended.ExpiresAtMs <= snapshot.ExpiresAtMs {
 		t.Errorf("extended expires_at_ms = %d, want greater than %d", extended.ExpiresAtMs, snapshot.ExpiresAtMs)
+	}
+
+	retrieved, err := h.client.Snapshots.Retrieve(ctx, &loonfs.GetSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
+	})
+	if err != nil {
+		t.Fatalf("retrieve snapshot: %v", err)
+	}
+	if retrieved.SnapshotID != snapshotID || retrieved.ExpiresAtMs != extended.ExpiresAtMs {
+		t.Errorf("retrieved snapshot = %#v, want the extended snapshot %#v", retrieved, extended)
+	}
+	checkpoint, err := h.client.Maintenance.Checkpoints.Retrieve(ctx, &maintenance.GetCheckpointRequest{
+		NamespaceID:  request.NamespaceID,
+		CheckpointID: snapshotID,
+	})
+	if err != nil {
+		t.Fatalf("retrieve the snapshot's checkpoint: %v", err)
+	}
+	if checkpoint.CheckpointID != snapshotID || int64(checkpoint.CapturedSeq) != expected.SnapshotHeadSeq ||
+		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != extended.ExpiresAtMs {
+		t.Errorf("retrieved checkpoint = %#v, want the snapshot's pin", checkpoint)
 	}
 
 	listed, err := h.client.Snapshots.List(ctx, &loonfs.ListSnapshotsRequest{

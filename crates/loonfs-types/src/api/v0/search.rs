@@ -98,9 +98,9 @@ pub struct GrepResponse {
     pub next_cursor: Option<String>,
 }
 
-/// The grep index lifecycle for a namespace.
+/// The grep index status for a namespace.
 ///
-/// A namespace is searchable only when the lifecycle is `Active`.
+/// A namespace is searchable only when the status is `Active`.
 ///
 /// The durable twin is `GrepIndexStatus` in `loonfs-grep`. The two types share
 /// a name because they describe the same status, and their fields differ
@@ -168,7 +168,7 @@ impl GrepIndexStatus {
 pub struct GrepIndex {
     /// Namespace the status describes.
     pub namespace_id: NamespaceId,
-    /// Where the index is in its lifecycle.
+    /// The index's status, with the fields that status records.
     #[serde(flatten)]
     pub status: GrepIndexStatus,
     /// Run number the index allocates next.

@@ -2271,6 +2271,20 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(extended.name, request.snapshot_name);
     assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
 
+    const retrieved = await client.snapshots.retrieve({
+        namespace_id: namespaceId,
+        snapshot_id: snapshot.snapshot_id,
+    });
+    assert.equal(retrieved.snapshot_id, snapshot.snapshot_id);
+    assert.equal(retrieved.expires_at_ms, extended.expires_at_ms);
+    const checkpoint = await client.maintenance.checkpoints.retrieve({
+        namespace_id: namespaceId,
+        checkpoint_id: snapshot.snapshot_id,
+    });
+    assert.equal(checkpoint.checkpoint_id, snapshot.snapshot_id);
+    assert.equal(checkpoint.captured_seq, expected.snapshot_head_seq);
+    assert.equal(checkpoint.expires_at_ms, extended.expires_at_ms);
+
     const listed = await client.snapshots.list({ namespace_id: namespaceId });
     assert.equal(listed.response.namespace_id, namespaceId);
     assert.equal(listed.response.next_cursor, undefined);

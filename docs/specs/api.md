@@ -957,7 +957,7 @@ The snapshot listing returns snapshot-owned pins whose lifetimes haven't expired
 
 `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one live snapshot, as the same object the listing returns. A missing ID, or the ID of a pin with another owner, returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`.
 
-In an ACL namespace, creating, reading, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
+In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
 The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. File content and download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision routes identify their revision in the route, so they reject `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
@@ -2182,7 +2182,7 @@ The response contains a short-lived read capability, plus everything the reader 
 }
 ```
 
-The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It takes a JSON body whose only field is the optional `start_offset`, and its response doesn't include a path:
+The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It takes an optional JSON body whose only field is `start_offset`, and its response doesn't include a path:
 
 ```json
 {
@@ -2210,7 +2210,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 }
 ```
 
-`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes a JSON body with two optional fields: `snapshot_id` grants the revision that the snapshot captured instead, and `start_offset` is the first byte to read.
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with two fields: `snapshot_id` grants the revision that the snapshot captured instead, and `start_offset` is the first byte to read.
 
 The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename or a deletion, as long as the revision is retained. The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
 

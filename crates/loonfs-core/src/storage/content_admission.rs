@@ -373,6 +373,39 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_token_of_another_kind_is_rejected() {
+        #[derive(Serialize, Deserialize)]
+        struct OtherTokenPayload {
+            content_ref: ContentRef,
+            expires_at_ms: u64,
+        }
+        impl OpaqueToken for OtherTokenPayload {
+            const KIND: &'static str = "other_token";
+        }
+
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let content = fixed_content(&namespace);
+        let payload = OtherTokenPayload {
+            content_ref: content.clone(),
+            expires_at_ms: 2_000,
+        };
+        let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION).expect("encode");
+        let signature_part = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+            b"secret",
+            payload_part.as_bytes(),
+        ));
+        let token = ContentToken {
+            content_ref: content,
+            token: format!("{payload_part}.{signature_part}"),
+        };
+        let catalog = catalog_entry(namespace);
+        assert_eq!(
+            verify_content_token("secret", &catalog, &token, 1_000),
+            Err(ContentTokenError::Malformed)
+        );
+    }
+
+    #[test]
     fn tokens_and_proofs_are_valid_before_their_expiry_and_expired_at_it() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(

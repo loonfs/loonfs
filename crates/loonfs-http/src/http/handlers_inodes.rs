@@ -323,7 +323,7 @@ pub(super) async fn get_file_revision_content_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "revision_no")?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let permit = acquire_download_permit(&state)?;
     let stream = namespace
         .read_file_revision_stream_by_inode(inode_id, revision_no)
