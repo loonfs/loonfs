@@ -2,6 +2,7 @@
 """Removes the streaming and deprecated options from the generated Python SDK, applies the LoonFS retry and error rules, and moves its entry point to `loonfs.server`."""
 
 import pathlib
+import re
 
 
 def remove_exact(source, snippet, expected_count, label):
@@ -159,6 +160,25 @@ client_path.write_text(source)
 
 wrapper_path = pathlib.Path("generated/python/core/client_wrapper.py")
 source = wrapper_path.read_text()
+source = replace_once(
+    source,
+    "from .logging import LogConfig, Logger\n",
+    "from .logging import LogConfig, Logger\n"
+    "from importlib.metadata import PackageNotFoundError, version\n"
+    "\n"
+    "\n"
+    "def _sdk_version() -> str:\n"
+    "    try:\n"
+    "        return version(\"loonfs\")\n"
+    "    except PackageNotFoundError:\n"
+    "        return \"unknown\"\n",
+)
+# Fern writes the version of the last published package plus one patch into
+# the User-Agent, so the literal is stale in every release; the installed
+# distribution's own version is always right.
+user_agent_matches = re.findall(r'"User-Agent": "loonfs/[^"]+"', source)
+assert len(user_agent_matches) == 1, f"expected one User-Agent literal, found {user_agent_matches}"
+source = source.replace(user_agent_matches[0], '"User-Agent": f"loonfs/{_sdk_version()}"')
 source = remove_exact(
     source,
     "        stream_reconnection_enabled: typing.Optional[bool] = None,\n",

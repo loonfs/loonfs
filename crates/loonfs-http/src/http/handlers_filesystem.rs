@@ -519,7 +519,7 @@ pub(super) async fn list_file_revisions(
             (status = 409, description = "Operation conflict", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit, or an append carries more than 256 KiB", body = ErrorResponse),
-            (status = 501, description = "Inline content is disabled, or an append names content with no recorded digest to continue", body = ErrorResponse),
+            (status = 501, description = "Inline content is disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
