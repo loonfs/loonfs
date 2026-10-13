@@ -2,7 +2,7 @@
 
 This guide describes how LoonFS code is written. Each rule is a design decision, recorded with an explanation and usually an example from the codebase. When you run into a case that no rule covers, use the closest decision and its explanation to decide, instead of guessing.
 
-The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide. [CODE_MAP.md](CODE_MAP.md) describes how the crates fit together and where code lives.
+The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide.
 
 ## Goals
 
@@ -63,7 +63,7 @@ Three kinds of failure can happen, and the code responds to each kind differentl
 
 - **Return the error for a terminal state, without retry or recovery code.** A fenced writer, a corrupt namespace, and a permission failure are terminal, which means that retrying can't change them. A transient transport failure is retried, with a count and a deadline. For example, when a read finds a metadata segment missing, `fs/read_result.rs` checks whether a newer manifest has been published. If one has, the read was stale rather than corrupt, and LoonFS retries it once. Otherwise, the corruption error stands.
 
-- **Contain a panic only in the places that the code map lists**, each of which has a test. A contained panic is counted, and the writer session stays open. Ending the session wouldn't fix anything, because a panic is a bug, and the same bug would panic again in the next session.
+- **Contain a panic only on purpose, with a test that shows what happens next.** A contained panic is counted, and the writer session stays open. Ending the session wouldn't fix anything, because a panic is a bug, and the same bug would panic again in the next session.
 
 - **Treat a poisoned lock as a bug**, with `expect("... lock should not be poisoned")`. (A mutex is poisoned when a thread panics with the mutex locked.) Only a component that contains panics by design (the publisher registry) recovers the lock, with `into_inner` through one helper, because it has to stay usable after a contained panic.
 
@@ -71,7 +71,7 @@ Three kinds of failure can happen, and the code responds to each kind differentl
 
 - **Never cap a decoded value below the limit the writer enforces**, because then LoonFS could write an object it can't read back. For example, the writer and the reader share one constant for the WAL object size cap.
 
-Why does a bug panic instead of returning an error? If the code kept going after it found a bug in its own state, it could corrupt durable state in object storage, because it can't trust anything else it computes. A panic stops the task, but not always the process: Tokio contains a panic to the task that panicked. That's why each place that contains a panic is named and tested.
+Why does a bug panic instead of returning an error? If the code kept going after it found a bug in its own state, it could corrupt durable state in object storage, because it can't trust anything else it computes. A panic stops the task, but not always the process: Tokio contains a panic to the task that panicked. That's why each place that contains a panic has a test.
 
 Why doesn't LoonFS panic on bad bytes too? A panic wouldn't fix anything. The durable state is stored in shared object storage, not on a local disk, so a restarted process would load the same object and panic again, and so would every other process that opens the namespace. An error scoped to the namespace reports the problem, and the process keeps serving its other namespaces.
 
@@ -202,7 +202,7 @@ Each span word has one meaning. These are the easiest to confuse:
 
 This section describes where work can be spawned, and which locks, atomics, and channels to use.
 
-- **Build concurrency from the operation's own futures** (`try_join`, `select!`, `buffer_unordered`), so that dropping the operation cancels its work. A future doesn't run until something polls it, so a stored future makes no progress on its own. Spawn a task only from one of the owners that the code map lists.
+- **Build concurrency from the operation's own futures** (`try_join`, `select!`, `buffer_unordered`), so that dropping the operation cancels its work. A future doesn't run until something polls it, so a stored future makes no progress on its own. Only the publisher registry and a host's scheduler spawn tasks.
 
 - **Apply a result only if the attempt that produced it is still current**, so that a slow attempt can't overwrite the result of a newer one. For example, a compaction can't publish if a newer compactor has claimed the namespace since it started.
 
@@ -339,7 +339,7 @@ Why a closed set of verbs? Naming drift usually doesn't come from carelessness. 
 
 This section describes where code goes, and how large a module or a function can be.
 
-- **Define a type in the lowest crate whose vocabulary it belongs to**, and re-export it from higher crates instead of defining a copy. The code map lists the crates.
+- **Define a type in the lowest crate whose vocabulary it belongs to**, and re-export it from higher crates instead of defining a copy.
 
 - **Implement each rule, constant, mapping, and helper once**, in one place that every caller uses, because when a rule has two copies, a change to one can miss the other. The two deliberate duplications are the model oracle and grep.
 
