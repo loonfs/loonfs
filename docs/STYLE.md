@@ -17,7 +17,7 @@ When you're deciding how to write something, choose the option that makes the co
 
 Three rules apply everywhere:
 
-- **Use one pattern for each decision**, everywhere in the code. A convention that half the code follows is worse than none, because a reader can't rely on it. For example, every ID is defined with `string_id!` or `numeric_id!`, and there's no other way to define one.
+- **Use one pattern for each decision**, so that a reader can rely on it. A convention applies to new code, and to code that a change already touches. An existing departure isn't, on its own, a reason for a change. For example, every ID is defined with `string_id!` or `numeric_id!`, and there's no other way to define one.
 
 - **Remove the old design in the same change that adds a new one.** No setter, knob, type, or code path stays behind for compatibility, because a compatibility layer keeps two designs alive, and every later reader has to learn both. For example, the change that added the shared read cache also removed the per-handle caches and their builder setters.
 
@@ -27,7 +27,7 @@ Three rules apply everywhere:
 
 This section describes how to keep a design simple.
 
-- **Design types so that an invalid state can't exist**, instead of checking for it at runtime. A runtime check has to run everywhere the state is created, and a missed check is a bug. For example, `GrepMode` and `MaintenanceMode` in the server config list the four combinations of two jobs (serving requests and doing background work) as four variants, so there's no invalid combination to reject.
+- **Design types so that an invalid state can't exist**, instead of checking for it at runtime. A runtime check has to run everywhere the state is created, and a missed check is a bug. For example, `GrepBinding` in `loonfs-http` has one variant for each combination of serving grep queries and maintaining the index, and each variant contains the handles that its mode needs, so a capability that the server advertises always has its handle.
 
 - **Remove code before you add a layer.** If a change can be made by removing code, that's better than adding an abstraction. Use few abstractions, and only ones that match a concept in the domain. For example, the fold used to pick one of three write paths based on the sizes involved (an in-memory merge, a streamed put, or a provider assembly). The provider adapters already knew how to make that choice, so the fold now writes every extent with one `assemble` call, and the three paths are gone.
 
@@ -53,6 +53,8 @@ Three kinds of failure can happen, and the code responds to each kind differentl
 
 - **Check each assumption with `assert!`, or with `expect` and a message that says what should be true**, and keep these checks on in release builds. Don't return `CoreError::Internal` instead of panicking. That variant is reserved for a panic the runtime caught, and for a task that failed to join.
 
+- **Check an invariant in its most direct form, at the point where it's true.** An `expect` whose message says what should be true is that form, so don't restructure code to avoid one. For example, an `expect` on each element of a list is better than `flatten()` followed by a check of the count, which can't say which element broke the invariant.
+
 - **Don't use `unsafe`, and don't panic outside an invariant check.** `unsafe` is denied, with one allowance at the monotonic clock boundary. `unwrap`, `panic`, `todo`, `unimplemented`, and `unreachable` are lint errors in production code, so every panic is an `assert!` or an `expect` that states an invariant. `unwrap` appears only inside a `const` block, where it's checked at compile time.
 
 - **Check bytes when they're decoded, and rely on that check where they're used.** The decoder rejects bad bytes from the store with a corruption error, and no code matches on that error to recover from it. Later code that relies on the same property uses `expect`, with a message that refers to the decode check, because by then a failure would be a bug. For example, decoding a WAL object rejects inline content that has no reference in the same commit, and `projected_tail.rs` expects that reference when it uses the content.
@@ -61,15 +63,22 @@ Three kinds of failure can happen, and the code responds to each kind differentl
 
 - **Return the error for a terminal state, without retry or recovery code.** A fenced writer, a corrupt namespace, and a permission failure are terminal, which means that retrying can't change them. A transient transport failure is retried, with a count and a deadline. For example, when a read finds a metadata segment missing, `fs/read_result.rs` checks whether a newer manifest has been published. If one has, the read was stale rather than corrupt, and LoonFS retries it once. Otherwise, the corruption error stands.
 
-- **End the writer session when background work panics.** The runtime catches a panic in background work (publishing, folding, compaction, and deletion), so that a library doesn't take down the process that embeds it. It counts the panic and ends that namespace's writer session. It doesn't retry the work that panicked, because a panic is a bug, not a transient condition.
+- **Contain a panic only where the containment is named and tested.** There are three such places:
+  - The publisher catches a panic in background work (publishing, folding, compaction, and deletion) in `crates/loonfs/src/publisher.rs`, so that a library doesn't take down the process that embeds it.
+  - When a handler panics, `catch_handler_panic` in `loonfs-http` returns a 500 with the error envelope.
+  - The server's maintenance sweep contains a panic in each visit to a namespace, and counts it as a `server_error` failure.
+
+  A contained panic is counted, and the writer session stays open. Ending the session wouldn't fix anything, because a panic is a bug, and the same bug would panic again in the next session.
 
 - **Treat a poisoned lock as a bug**, with `expect("... lock should not be poisoned")`. (A mutex is poisoned when a thread panics with the mutex locked.) Only a component that contains panics by design (the publisher registry) recovers the lock, with `into_inner` through one helper, because it has to stay usable after a contained panic.
 
-- **Don't retry terminal failures in the maintenance sweep.** When the server's maintenance sweep fails on a namespace with a corruption error or another non-transient code, it skips that namespace until an operator acts, logs the failure at `error!`, and counts it. A retry can't succeed, and it would fill the logs with the same failure.
+- **Don't hold a `std::sync::Mutex` across a call into a trait object, a callback, or the metrics recorder.** Code that the lock's owner doesn't control might panic, which poisons the lock, or take the same lock, which deadlocks. Fix a lock that does this before you add an `expect` for its poisoning.
+
+- **Back off a maintenance call that keeps failing.** When a call in the server's maintenance sweep fails on a namespace, the sweep waits one tick before it tries that call on that namespace again, doubles the wait after each failure in a row, up to one hour, and clears the wait after a success. It logs the first failure at `error!` and the recovery at `info!`, and the gauge `loonfs.maintenance.sweep_backoff_entries` counts the calls that are waiting. A retry on every tick would fill the logs with the same failure.
 
 - **Never cap a decoded value below the limit the writer enforces**, because then LoonFS could write an object it can't read back. For example, the writer and the reader share one constant for the WAL object size cap.
 
-Why does a bug panic instead of returning an error? If the process kept going, it could corrupt durable state in object storage, because a process that has found a bug in its own state can't trust anything else it computes.
+Why does a bug panic instead of returning an error? If the code kept going after it found a bug in its own state, it could corrupt durable state in object storage, because it can't trust anything else it computes. A panic stops the task, but not always the process: Tokio contains a panic to the task that panicked. That's why each place that contains a panic is named and tested.
 
 Why doesn't LoonFS panic on bad bytes too? A panic wouldn't fix anything. The durable state is stored in shared object storage, not on a local disk, so a restarted process would load the same object and panic again, and so would every other process that opens the namespace. An error scoped to the namespace reports the problem, and the process keeps serving its other namespaces.
 
@@ -104,11 +113,11 @@ This section describes how errors are defined and formatted.
 
 This section describes how to use types so that an invalid state can't be represented.
 
-- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (`u64::MAX`, revision `0`, or a zero-filled count) that stands in for a variant is a bug, because it allows combinations that don't mean anything. Two examples are `WriterSessionStatus { Unclaimed, Claimed(..), Fenced(..) }` and `PagerState { NotStarted, More(cursor), Done }`.
+- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (`u64::MAX` or a zero-filled count) that stands in for a variant is a bug, because it allows combinations that don't mean anything. A value that the format or the protocol defines isn't a sentinel. Two examples are `WriterSessionStatus { Unacquired, Acquired(..), Fenced(..) }` and `PagerState { NotStarted, More(cursor), Done }`.
 
-- **Pass a choice across a module boundary as a two-variant enum, not a bool.** The enum's name describes the choice (`DestinationBehavior`, `AttributeInclusion`), so a call site says what it's asking for instead of passing `true`. A private helper can take a bool.
+- **Pass a choice across a module boundary as a two-variant enum, not a bool.** The enum's name describes the choice (`DestinationBehavior`, `AttributeInclusion`), so a call site says what it's asking for instead of passing `true`. A private helper can take a bool, and so can a named field whose name says what `true` means, such as `serves_maintenance`. Don't combine two choices into one enum when the code that reads it ignores one of them.
 
-- **Make a handle's mode part of its type.** `LoonFs<M>`, `Namespace<M>`, and the builder are generic over `ReadOnly` or `Writable` (a pattern called "typestate"), so a call to a write method on a read-only handle doesn't compile. Store data that only one mode needs in the mode, through a sealed trait with associated types, not in an `Option` that's read with `expect`.
+- **Make a handle's mode part of its type.** `LoonFs<M>`, `Namespace<M>`, and the builder are generic over `ReadOnly` or `Writable` (a pattern called "typestate"), so a call to a write method on a read-only handle doesn't compile. Store data that only one mode needs in the handle, typed by the mode (`M::Session`), not in an `Option` that's read with `expect`. The mode trait doesn't extend to the builder's internals.
 
 - **Put a durable status's transition rules on its enum.** When more than one place in the code performs a transition, the enum has a method for it that refuses an illegal move, so the rule for legal moves is written once. For example, the upload session's status has a method for the move from open to aborted.
 
@@ -128,9 +137,9 @@ This section describes which integer, ID, path, and time types to use.
 | `u32` | Positions inside one object |
 | `usize` | In-memory budgets and counts, and nothing else |
 
-- **Never put a `usize` in a wire, durable, serialized config, or sidecar shape**, because its width depends on the platform. Convert a value to `usize` once, when it's loaded.
+- **Never put a `usize` in a wire, durable, or sidecar shape**, because its width depends on the platform. Convert a value to `usize` once, when it's loaded.
 
-- **Narrow integers with `try_from` or a named conversion, not `as`.** `as` can widen a value (`usize as u64`), but it truncates without saying so when it narrows, and the truncation lint is on.
+- **Narrow integers with `try_from` or a named conversion, not `as`.** `as` can widen a value (`usize as u64`), but it truncates without saying so when it narrows, and the truncation lint is on. Convert a `u64` to a `usize` with `usize_from_u64`. A `const` assertion in the same module fails the build on a target where `usize` isn't 64 bits, so the conversion can't truncate. In tests, define a constant of the narrow type instead of converting at each use.
 
 - **Define every ID, sequence, and validated string as a newtype** with `string_id!` or `numeric_id!`. Both macros generate the same methods for each type (`parse`, `as_str`, serde, `Ord`, `Hash`), so one kind of ID can't be passed as another. `parse()` is the one constructor that can fail. Numeric IDs are transparent (`pub u64`), because they're ordinals used in key arithmetic.
 
@@ -143,7 +152,7 @@ This section describes which integer, ID, path, and time types to use.
 
 - **Take paths as `&str` in the embedded handles**, and report an invalid path as the operation's own error. The Rust client takes a typed `NamespacePath`.
 
-- **Represent a time as a `u64` number of milliseconds**, with the unit in its name, or as a `Duration` where a timer or transport API takes one. Don't use `secs`, `millis`, `micros`, or `nanos` in names.
+- **Represent a time as a `u64` number of milliseconds**, with the unit in its name, or as a `Duration` where a timer or transport API takes one. Don't use `secs`, `millis`, `micros`, or `nanos` in names. A value that's stored, or that needs more precision, keeps its own unit, such as `modified_ns` in the CLI's upload journal.
 
 Why does a random ID use this alphabet? It leaves out `i`, `l`, and `o`, which are easy to confuse with `1` and `0`, so an ID can be read aloud or copied by hand. It also leaves out `u`, which makes it less likely that an ID spells a word by accident. IDs aren't checked against a list of words.
 
@@ -174,6 +183,8 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Cap every count that work grows with.** Checkpoints per namespace, open writer sessions, and manifest segments all have caps.
 
+- **Stream a listing instead of collecting it.** A pass that lists objects processes them as the listing arrives, and never keeps the whole listing in memory. Any state that it keeps across the listing has a bound that doesn't depend on the listing's length, because a listing grows with the namespace.
+
 - **Cap whole-value reads by default** on every surface, including embedded use, because one large file could otherwise use all of the process's memory.
 
 ### Time
@@ -186,7 +197,7 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Use the injected timer.** Core and extensions take the runtime's `MonotonicTimer`, and `StdMonotonicTimer::default()` appears only in builders.
 
-- **Use a closed vocabulary for time fields and constants.** An instant ends in `_at_ms` (`now_ms`, for the current time, is the one exception). A span ends in a span word followed by `_ms`, and the span word is one of `interval`, `timeout`, `deadline`, `window`, `budget`, `lease`, `ttl`, `elapsed`, and `age`. `grace` qualifies a window (`GC_MIN_GRACE_WINDOW_MS`). A `Duration` keeps the span word and drops the unit.
+- **Use a closed vocabulary for time fields and constants.** An instant ends in `_at_ms` (`now_ms`, for the current time, is the one exception). A span ends in a span word followed by `_ms`, and the span word is one of `interval`, `timeout`, `deadline`, `window`, `budget`, `lease`, `ttl`, `elapsed`, `age`, `margin`, `bound`, and `after`. `grace` qualifies a window (`GC_MIN_GRACE_WINDOW_MS`). A `Duration` keeps the span word and drops the unit.
 
 Each span word has one meaning. These are the easiest to confuse:
 
@@ -197,6 +208,9 @@ Each span word has one meaning. These are the easiest to confuse:
 | `timeout` | A bound on one attempt (`PROVIDER_ATTEMPT_TIMEOUT`) |
 | `deadline` | A bound on the whole operation, including its retries (`PROVIDER_OPERATION_DEADLINE`) |
 | `ttl` | On the wire, a lifetime that the caller declares (the server converts `ttl_ms` to an absolute `expires_at_ms`) |
+| `margin` | An allowance added to another bound (`GC_SAFETY_MARGIN_MS`) |
+| `bound` | A worst case derived from other limits, which nothing enforces directly (`READ_REVALIDATION_BOUND_MS`) |
+| `after` | How long something stays idle before an action (`idle_fold_after_ms`) |
 
 ### Concurrency
 
@@ -218,7 +232,7 @@ Use these synchronization primitives:
 
 | Primitive | Use it |
 | --- | --- |
-| `std::sync::Mutex` | By default. Unlock it before any `.await`, because a task suspended with it locked can deadlock another task on the same thread. |
+| `std::sync::Mutex` | By default. Unlock it before any `.await`, because a task suspended with it locked can deadlock another task on the same thread, and before any call into a trait object, a callback, or the metrics recorder. |
 | `tokio::sync::Mutex` | Only when a lock has to stay locked across an `.await`, with a comment that says why |
 | `Relaxed` atomics | For statistics |
 | `Acquire` and `Release` atomics | For flags, with a comment |
@@ -265,15 +279,15 @@ This section summarizes the rules for durable objects and the HTTP API. `docs/sp
 
 - **Build every object key in one module.** `loonfs-objectstore::keys` builds every object key and prefix, and an extension builds its prefix through it. No other code builds a key with `format!`.
 
-- **Encode opaque tokens with one codec**, with golden fixtures. The tokens are cursors, binding versions, and content tokens.
+- **Encode opaque tokens with one codec**, with golden fixtures. The codec writes a JSON document as unpadded base64url. The tokens are cursors, binding versions, and content tokens.
 
 - **Update the spec-locked artifacts in the same change as a shape.** The spec-locked artifacts are the golden fixtures (`UPDATE_GOLDEN=1`), the spec-table sync tests, and `openapi.json`. They're how a reviewer sees a format change, so a change to a wire or durable shape updates them too.
 
 - **Follow the API grammar:**
-  - Resources are nouns, and operations are `verb_noun`. Handler names become `operationId`s and SDK method names, so a handler's name is its operation's name, with no `_handler` or `handle_`.
+  - Resources are nouns, and operations are `verb_noun`. Handler names become `operationId`s, so a handler's name is its operation's name, with no `_handler` or `handle_`. SDK method names come from the SDK naming table, not from operation IDs.
   - Every list uses one page shape (`cursor`, `limit`, `next_cursor`), except the change feed, which pages by `after_seq`, the one typed cursor.
   - There's one error envelope (`code`, `message`, `param`), and a precondition error reports `expected_*` and `actual_*` values.
-  - Commits are idempotent by commit ID, and a create that generates an ID returns the original record on a retry when the stored record matches.
+  - Commits are idempotent by commit ID.
   - An absent field is left out, never sent as `null`.
 
 - **Write config files in `snake_case` throughout**, including store kinds.
@@ -290,7 +304,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Use the glossary's terms exactly.** [`docs/specs/glossary.md`](specs/glossary.md) is the source of domain terms: namespace, head, seq, commit, WAL object, inode, direntry, binding, revision, manifest, checkpoint, tombstone, retention floor, change feed, layout, extent, span, and piece. Write "stored checksum", not "attestation". "Materialize" means writing a chain's pending pieces as its next extent.
 
-- **Spell words out.** Write `Directory` rather than `Dir`, `request` rather than `req`, and `error` rather than `err`. The allowed short forms are glossary terms (`WAL`, `CAS`, `seq`, `gc`) and `_no` for a numbered ordinal (`revision_no`, `manifest_no`). A wire value that can't change keeps its short spelling (`"dir"`), with a serde rename and a comment.
+- **Spell words out.** Write `Directory` rather than `Dir`, `request` rather than `req`, and `error` rather than `err`. The allowed short forms are glossary terms (`WAL`, `CAS`, `seq`, `gc`) and `_no` for a numbered ordinal (`revision_no`, `manifest_no`). A wire value that can't change keeps its short spelling (`"dir"`), with a serde rename and a comment. `err` and `e` are fine as closure parameters, because the rule applies to public signatures and type names.
 
 - **Use each verb for one meaning**, from the table below, and don't introduce near-synonyms (`fetch`, `retrieve`, `remove`, `lookup`, `require`, `check`).
 
@@ -320,9 +334,9 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   - After the verb, the parts of a method name come in this order, and each part is optional: the object, the form (`_stream` or `_prepared`, and in-memory bytes have no suffix), the address (`_by_inode`, and a path has no suffix), the time (`_at_snapshot` or `_at_checkpoint`), and `_with_options`. For example, `read_file_stream_by_inode_with_options`.
   - The Rust client uses the handle's name wherever the runtime has the operation, and the HTTP name only where it doesn't. `api.md` has the mapping table.
 
-- **Write each method in a plain form and an options form.** A required input is a positional parameter. Optional inputs go in one flat `*Options` struct, with public fields and `Default`, passed last. The plain form is a one-line call to its `_with_options` form, and there's no third shape (`foo_with_limit`, `foo_resumable`, `foo_for_mode`). One options type serves a base operation and its stream, by-inode, and time forms, and a separate by-inode type exists only when the fields differ.
+- **Write each method in a plain form and an options form.** A required input is a positional parameter. Optional inputs go in one flat `*Options` struct, with public fields and `Default`, passed last. The plain form is a one-line call to its `_with_options` form, and there's no third shape (`foo_with_limit`, `foo_for_mode`). The one exception is an extra input that's a borrowed capability, such as a journal, which gets its own method, as in `put_file_stream_resumable`. One options type serves a base operation and its stream, by-inode, and time forms, and a separate by-inode type exists only when the fields differ.
 
-- **Keep `with_`, constructors, and builder setters to one meaning each.** A `with_` method returns a copy with one field changed, or it's the `_with_options` form. Constructors are called `new_*` or `from_*`. A builder setter is the bare field name, takes `impl Into<T>`, and returns `Self`.
+- **Follow Rust's naming for constructors.** A constructor is `new` or `with_*` (`Vec::with_capacity`, `Client::with_transport`), a conversion is `from_*`, and a builder setter is the bare field name, takes `impl Into<T>`, and returns `Self`.
 
 - **Use each type suffix for one meaning:**
 
@@ -346,11 +360,11 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `Error` | An error enum | `CoreError` |
   | `Id` | An identifier newtype | `NamespaceId` |
 
-  Type names don't use `Class`, `Classification`, `Category`, `Verdict`, or `Step`, and there are no `*Result` structs, because `Result` is each crate's alias. `LoonFs`, `Namespace`, `ReadView`, and `Maintenance` are the only handle types, and new public capability goes on one of them.
+  A Rust name that mirrors a serialized field, a label, or a span keeps that spelling until the format changes, as `DirentryBindingState`, `KeyClass`, and `payload_class` do. Other type names don't use `Class`, `Classification`, `Category`, `Verdict`, or `Step`, and there are no `*Result` structs, because `Result` is each crate's alias. `LoonFs`, `Namespace`, `ReadView`, and `Maintenance` are the only handle types, and new public capability goes on one of them.
 
 - **Put the bound at the start of a name and the unit at the end.** A byte quantity ends in `_bytes`. A count ends in the plural noun it counts (`_rows`, `_objects`), and `_count` is for a computed tally. `len` is used for the std method and nothing else. A bound is written `<scope>_max_<noun>_<unit>` (`max_content_bytes`, `AWS_S3_MAX_DIRECT_PUT_BYTES`). Each quantity has one unit and one name.
 
-- **Describe a helper's job in its name**, such as `push_revision` and `push_revision_record`, instead of adding `_inner`, which says nothing about what the helper does. Give related names the same length where that lines them up (`source` and `target`).
+- **Make a helper's name say what it does**, such as `push_revision` and `push_revision_record`.
 
 - **Match a file's name to the type or subsystem it contains**, and keep each name to one meaning across the workspace. A type name can be reused in two crates with different fields only when the two surfaces differ, and the doc says why.
 
@@ -390,7 +404,7 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Use comments to explain why the code is written the way it is.** Write them in full sentences. A comment explains a surprising invariant, a deliberate departure from a rule, or a safety argument. It doesn't narrate what the next line does, repeat a doc, mark a section, point to another place in the code, or record a follow-up, because those comments go stale as the code changes. For example: "Treat a poisoned lock as fatal because another thread panicked while updating the session state."
 
-- **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and the doc of a type, field, or variant starts with a noun phrase. Put every identifier in backticks, and describe preconditions and failure modes in prose. Durable and API behavior is defined in `docs/specs/`, so a doc links to the spec instead of restating it. The docs on `ToSchema` types become the OpenAPI descriptions, so they can be longer. `loonfs`, `loonfs-client`, `loonfs-types`, and `loonfs-objectstore` enforce `missing_docs`.
+- **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and the doc of a type, field, or variant starts with a noun phrase. Put every identifier in backticks, and describe preconditions and failure modes in prose. Durable and API behavior is defined in `docs/specs/`, so a doc links to the spec instead of restating it. The docs on `ToSchema` types become the OpenAPI descriptions, so their wording and paragraph breaks are part of `openapi.json`, and editing one is an API change. `loonfs`, `loonfs-client`, `loonfs-types`, and `loonfs-objectstore` enforce `missing_docs`.
 
 - **Include the reason in every allow attribute**, in `reason = "..."`.
 
@@ -412,15 +426,20 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Write test names as declarative sentences** in snake_case, with no `test_` prefix, such as `stale_revision_precondition_is_rejected`.
 
-- **Check an error with one idiom.** Use `let Err(X { .. }) = result else { panic!("expected X, got {other:?}") }`, or `expect_err` followed by a check of `code()`. Don't use `assert!(result.is_err())` or `assert!(matches!(..))`, because when they fail, they don't show which error the code returned.
+- **Check an error with one of three idioms:**
+  - `assert_matches!(result, Err(X { .. }))` when the value implements `Debug`.
+  - `assert!(matches!(..))` when it doesn't, because `assert_matches!` couldn't show anything more.
+  - `expect_err("...")` followed by a check of the specific error, when the code under test returns one.
 
-- **Put shared helpers in `loonfs-test-support`.** A helper used in two files moves there, and extend an existing store wrapper before you write a new one.
+  Don't use `assert!(result.is_err())`, because when it fails, it doesn't show which error the code returned.
+
+- **Put shared helpers in `loonfs-test-support`.** A helper used in two files moves there, and extend an existing store wrapper before you write a new one. `loonfs-test-support` depends only on `loonfs-types` and `loonfs-objectstore`, and the higher crates use it as a development dependency, so a helper that needs a higher crate's own types stays in that crate. Core's `test_support` module is an example.
 
 - **Keep a test under about 100 lines.** Split a longer test by scenario.
 
 - **Use bare `#[tokio::test]` by default**, and `multi_thread` only where a harness needs it, with one comment per harness module that says why. Use `start_paused` for timer logic.
 
-- **Allow `clippy::panic` in test code through `clippy.toml`**, not file by file.
+- **Allow `clippy::panic` in test code through `clippy.toml`**, not file by file. The root of each integration test binary keeps one `clippy::panic` allow, with a reason, because `allow-panic-in-tests` doesn't reach a helper function in an integration binary.
 
 - **Keep the model oracle separate from core.** It restates the visibility rules from scratch, on purpose, and it's never deduplicated against core, because an oracle that shared core's code would share its bugs, and the differential suite couldn't find them.
 
@@ -430,7 +449,7 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Record IDs and values as fields, not in messages.** `namespace_id`, `seq`, `commit_id`, `object_key`, `store_kind`, `elapsed_ms`, and `error` are recorded as fields, each with one spelling (`namespace_id = %namespace_id`, `error = %error`), so a search on the field finds every event. Don't put an ID in a metric label, because each new ID would create a new metric series.
 
-- **Use the log levels for one purpose each.** The default log filter includes every LoonFS crate.
+- **Use the log levels for one purpose each.** The default log filter is one directive, `loonfs=info`, which covers every LoonFS crate, because a directive matches every target that starts with it.
 
   | Level | Use it for |
   | --- | --- |
@@ -439,17 +458,19 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
   | `info!` | One event per lifecycle event or batch |
   | `debug!` | One event per item |
 
+  Rate-limit a warning that can repeat for each item: log the first one, and then at most one per interval, with a `suppressed` count and the time since the last one logged (`since_ms`).
+
 - **Write CLI command output to stdout and diagnostics to stderr.** Output goes through `render`, and diagnostics go through tracing, so a script can read the output without filtering out log lines. The two exceptions are the byte stream of `cat` and the progress line.
 
 ### Tooling and dependencies
 
-- **Configure lints once**, in the workspace `[lints]` table, `clippy.toml`, and the default rustfmt settings. Pin the toolchain to an exact version, and update it in its own change, so a new Rust release can't break CI on a change that didn't touch the code.
+- **Configure lints once**, in the workspace `[lints]` table, `clippy.toml`, and the default rustfmt settings. Pin the toolchain to an exact version, and update it in its own change, so a new Rust release can't break CI on a change that didn't touch the code. The MSRV is the pinned toolchain.
 
-- **Use one crate for each job.** List every dependency in the workspace table, with a one-line reason. Don't add a crate that does the same job as one already in use, keep one version of each crate, and replace a dependency that fifty lines of code could replace. CI checks for duplicate versions.
+- **Use one crate for each job.** Don't add a crate that does the same job as one already in use, and replace a dependency that fifty lines of code could replace. In the workspace table, explain a dependency in a comment when its name doesn't say why it's there, such as a pinned version or a feature it turns on. `cargo deny check bans` runs in CI over the release targets, and each duplicate version that it allows has a `skip` entry that names the crates that pull it in.
 
-- **Write scripts in Rust, through `xtask`.** Use POSIX sh only where a script has to be sh (the installer and release packaging), and don't embed Python in a shell script.
+- **Write scripts in POSIX sh.** Put any Python that a script needs in its own file under `scripts/`, and call it with arguments, instead of embedding it in the shell script.
 
-- **Run the CI checks before every push**, from the repository root: fmt, clippy with `-D warnings`, the MSRV check, and the test suites. Run them again after a rebase or a merge, because a rebase or merge that applies without conflicts can still break the build or the tests.
+- **Run the CI checks before every push**, from the repository root: fmt, clippy with `-D warnings`, `cargo deny check bans`, and the test suites. Run them again after a rebase or a merge, because a rebase or merge that applies without conflicts can still break the build or the tests.
 
 ### Git
 
