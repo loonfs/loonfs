@@ -13,7 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 const TRACE_ENV: &str = "LOONFS_TRACE";
 const RUST_LOG_ENV: &str = "RUST_LOG";
-const DEFAULT_TRACE_FILTER: &str = "loonfs_server=info,loonfs_grep=info,loonfs=info,loonfs_core=info,loonfs_objectstore=info,loonfs_http=info";
+// `EnvFilter` matches a directive's target as a prefix, so `loonfs` also
+// covers every `loonfs_*` crate.
+const DEFAULT_TRACE_FILTER: &str = "loonfs=info";
 /// The `LOONFS_TRACE` value that turns logging off.
 const TRACE_MODE_OFF: &str = "off";
 /// The `LOONFS_TRACE` value that names the default mode.
@@ -79,6 +81,9 @@ fn trace_config_from_env(
 mod tests {
     use super::{trace_config_from_env, TraceInitError, DEFAULT_TRACE_FILTER};
     use std::assert_matches;
+    use tracing::Level;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::EnvFilter;
 
     #[test]
     fn tracing_is_enabled_without_env() {
@@ -96,6 +101,24 @@ mod tests {
             .expect("trace config parses")
             .expect("enabled tracing config");
         assert_eq!(explicit, unset);
+    }
+
+    #[test]
+    fn default_filter_logs_info_from_every_loonfs_crate() {
+        let filter = DEFAULT_TRACE_FILTER
+            .parse::<EnvFilter>()
+            .expect("default filter parses");
+        let subscriber = tracing_subscriber::registry().with(filter);
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(
+                target: "loonfs_objectstore::retry",
+                Level::INFO
+            ));
+            assert!(!tracing::enabled!(
+                target: "loonfs_objectstore::retry",
+                Level::DEBUG
+            ));
+        });
     }
 
     #[test]

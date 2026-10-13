@@ -183,15 +183,32 @@ pub(crate) struct TlsTestServer {
     _identity_dir: tempfile::TempDir,
 }
 
-pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer {
+pub(crate) async fn start_tls_server(config: ServerConfig) -> TlsTestServer {
+    start_tls_server_with_certificate(config, tls_certificate_params()).await
+}
+
+/// Returns the parameters of the harness's self-signed certificate, which
+/// names `localhost` and `127.0.0.1` and keeps rcgen's default validity.
+pub(crate) fn tls_certificate_params() -> rcgen::CertificateParams {
+    rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+        .expect("certificate parameters")
+}
+
+/// Starts the server of [`start_tls_server`] with a certificate self-signed
+/// from `certificate`.
+pub(crate) async fn start_tls_server_with_certificate(
+    mut config: ServerConfig,
+    certificate: rcgen::CertificateParams,
+) -> TlsTestServer {
     let identity_dir = tempfile::tempdir().expect("tls identity dir");
     let cert_path = identity_dir.path().join("server.crt");
     let key_path = identity_dir.path().join("server.key");
-    let identity =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
-            .expect("generate self-signed identity");
-    std::fs::write(&cert_path, identity.cert.pem()).expect("write certificate");
-    std::fs::write(&key_path, identity.signing_key.serialize_pem()).expect("write private key");
+    let signing_key = rcgen::KeyPair::generate().expect("generate signing key");
+    let certificate = certificate
+        .self_signed(&signing_key)
+        .expect("self-sign certificate");
+    std::fs::write(&cert_path, certificate.pem()).expect("write certificate");
+    std::fs::write(&key_path, signing_key.serialize_pem()).expect("write private key");
 
     let addr = reserve_loopback_addr().await;
     config.bind = addr.to_string();

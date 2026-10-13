@@ -563,7 +563,11 @@ pub trait ObjectStore: Send + Sync + Debug {
         key: &str,
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::immutable_write::put(self, key, bytes).await
+        // A store without a limiter of its own spaces the retry warnings of
+        // this one write only.
+        let warnings =
+            crate::retry::RetryWarnings::new(Arc::new(crate::timing::StdMonotonicTimer::default()));
+        crate::immutable_write::put(self, &warnings, key, bytes).await
     }
 
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.

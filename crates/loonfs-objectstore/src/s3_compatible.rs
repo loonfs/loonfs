@@ -25,7 +25,7 @@ use crate::provider_object_store::{
     AbortUploadOnDrop, CompareToken, MultipartController, PartReader, StoredChecksumReader,
     PROVIDER_MAX_MULTIPART_PARTS,
 };
-use crate::retry::{with_transport_retry, DEFAULT};
+use crate::retry::{with_transport_retry, RetryWarnings, StoreRetry, DEFAULT};
 use crate::signed_request::{
     classify_signed_response, object_length_from_signed_head, send_signed, signing_time,
     SignedResponse,
@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs_types::SecretString;
-use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, OperationDeadline};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
@@ -105,6 +105,7 @@ struct S3RequestSigner {
     http: HttpClient,
     io_runtime: tokio::runtime::Handle,
     kind: ConfiguredObjectStoreKind,
+    retry_warnings: Arc<RetryWarnings>,
 }
 
 /// Builds an AWS S3 store with bounded retries and native CRC-64/NVME checksums.
@@ -218,11 +219,13 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         })
         .build()
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let retry_warnings = Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default())));
     let signer = Arc::new(S3RequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
         io_runtime: io_runtime.handle(),
         kind: config.kind,
+        retry_warnings: Arc::clone(&retry_warnings),
     });
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
@@ -244,7 +247,12 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         multipart: Some(request_signer),
     };
 
-    Ok((store.compare_token(CompareToken::Etag), direct_transfers))
+    Ok((
+        store
+            .compare_token(CompareToken::Etag)
+            .retry_warnings(retry_warnings),
+        direct_transfers,
+    ))
 }
 
 impl SignedResponse {
@@ -368,7 +376,7 @@ impl MultipartController for S3RequestSigner {
     ) -> Result<ObjectMetadata> {
         let upload_id = self.create_upload(key).await?;
         let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
-        let mut crc = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
+        let mut crc = ChecksumDigest::new(ChecksumAlgorithm::Crc64nvme);
         let mut size_bytes = 0;
         let payloads = stream::once(async { Ok(head) })
             .chain(stream::try_unfold(rest, |mut rest| async move {
@@ -461,31 +469,32 @@ impl S3RequestSigner {
         payload: Bytes,
     ) -> Result<UploadedPart> {
         let checksum = Checksum::crc64nvme(&payload);
-        let etag = retry_part(key, "put_part", payload.len() as u64, || async {
-            let signed = self
-                .request_signer
-                .presign_multipart_part(
-                    PresignedPartRequest {
-                        object_key: key,
-                        provider_upload_id: upload_id,
-                        part_number,
-                        checksum: &checksum,
-                        ttl: MULTIPART_CONTROL_TTL,
-                    },
-                    signing_time(),
-                )
-                .await?;
-            let response = self
-                .send_checked(key, signed, payload.clone().into())
-                .await?;
-            response
-                .headers
-                .get(http::header::ETAG)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-                .ok_or_else(|| ObjectStoreError::transport(key, "part upload returned no etag"))
-        })
-        .await?;
+        let etag = self
+            .retry_part(key, "put_part", payload.len() as u64, || async {
+                let signed = self
+                    .request_signer
+                    .presign_multipart_part(
+                        PresignedPartRequest {
+                            object_key: key,
+                            provider_upload_id: upload_id,
+                            part_number,
+                            checksum: &checksum,
+                            ttl: MULTIPART_CONTROL_TTL,
+                        },
+                        signing_time(),
+                    )
+                    .await?;
+                let response = self
+                    .send_checked(key, signed, payload.clone().into())
+                    .await?;
+                response
+                    .headers
+                    .get(http::header::ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .ok_or_else(|| ObjectStoreError::transport(key, "part upload returned no etag"))
+            })
+            .await?;
         Ok(UploadedPart {
             part_number,
             etag,
@@ -504,24 +513,25 @@ impl S3RequestSigner {
     ) -> Result<UploadedPart> {
         let source_etag =
             (self.kind != ConfiguredObjectStoreKind::CloudflareR2).then_some(source_etag);
-        let response = retry_part(key, "copy_part", 0, || async {
-            let signed = self
-                .request_signer
-                .presign_copy_part(
-                    key,
-                    upload_id,
-                    part_number,
-                    source_key,
-                    source,
-                    source_etag,
-                    MULTIPART_CONTROL_TTL,
-                    signing_time(),
-                )
-                .await?;
-            self.send_checked(key, signed, HttpRequestBody::empty())
-                .await
-        })
-        .await?;
+        let response = self
+            .retry_part(key, "copy_part", 0, || async {
+                let signed = self
+                    .request_signer
+                    .presign_copy_part(
+                        key,
+                        upload_id,
+                        part_number,
+                        source_key,
+                        source,
+                        source_etag,
+                        MULTIPART_CONTROL_TTL,
+                        signing_time(),
+                    )
+                    .await?;
+                self.send_checked(key, signed, HttpRequestBody::empty())
+                    .await
+            })
+            .await?;
         let text = response.text();
         let etag = xml_etag(&text)
             .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no etag"))?;
@@ -656,6 +666,34 @@ impl S3RequestSigner {
         };
         AbortUploadOnDrop::new(key, self.io_runtime.clone(), abort.boxed())
     }
+
+    /// Retries one replay-safe part request under its own operation deadline.
+    async fn retry_part<T, Fut>(
+        &self,
+        key: &str,
+        operation: &'static str,
+        payload_bytes: u64,
+        attempt: impl FnMut() -> Fut,
+    ) -> Result<T>
+    where
+        Fut: Future<Output = Result<T>>,
+    {
+        let timer = StdMonotonicTimer::default();
+        let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
+        with_transport_retry(
+            StoreRetry {
+                policy: &DEFAULT,
+                warnings: &self.retry_warnings,
+            },
+            key,
+            operation,
+            payload_bytes,
+            Some(&deadline),
+            |error: &ObjectStoreError| error.kind() == ObjectStoreErrorKind::RetryableTransport,
+            attempt,
+        )
+        .await
+    }
 }
 
 /// Accepts a data response by its status alone. A success body is the bytes
@@ -671,30 +709,6 @@ fn checked_data(key: &str, response: SignedResponse) -> Result<SignedResponse> {
         Some(error) => Err(error),
         None => Ok(response),
     }
-}
-
-/// Retries one replay-safe part request under its own operation deadline.
-async fn retry_part<T, Fut>(
-    key: &str,
-    operation: &'static str,
-    payload_bytes: u64,
-    attempt: impl FnMut() -> Fut,
-) -> Result<T>
-where
-    Fut: Future<Output = Result<T>>,
-{
-    let timer = StdMonotonicTimer::default();
-    let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
-    with_transport_retry(
-        &DEFAULT,
-        key,
-        operation,
-        payload_bytes,
-        Some(&deadline),
-        |error: &ObjectStoreError| error.kind() == ObjectStoreErrorKind::RetryableTransport,
-        attempt,
-    )
-    .await
 }
 
 /// The CRC-64/NVME of the object that parts assemble to, combined in part
@@ -807,8 +821,10 @@ mod tests {
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
     use crate::provider_object_store::MultipartController;
+    use crate::retry::RetryWarnings;
     use crate::signed_request::{classify_signed_response, SignedResponse};
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
+    use crate::timing::StdMonotonicTimer;
     use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
@@ -1021,6 +1037,7 @@ mod tests {
             http: HttpClient::new(provider.clone()),
             io_runtime: tokio::runtime::Handle::current(),
             kind,
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default()))),
         }
     }
 

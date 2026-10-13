@@ -20,7 +20,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page, StreamingChecksum};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, EffectiveLimit, Page};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -159,7 +159,7 @@ impl LocalFsStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(key, err)),
         };
-        let mut state = StreamingChecksum::for_algorithm(algorithm);
+        let mut state = ChecksumDigest::new(algorithm);
         let size = file
             .metadata()
             .await
@@ -266,8 +266,7 @@ impl LocalFsStore {
 
         let staged: Result<u64> = async {
             let mut size_bytes = 0u64;
-            let mut checksum =
-                expected.map(|expected| StreamingChecksum::for_algorithm(expected.algorithm));
+            let mut checksum = expected.map(|expected| ChecksumDigest::new(expected.algorithm));
             while let Some(chunk) = body.next().await {
                 let chunk = chunk?;
                 #[cfg(test)]

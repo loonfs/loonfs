@@ -3704,16 +3704,14 @@ mod direct_download {
     }
 
     fn assert_offset_refused<T: std::fmt::Debug>(result: Result<T, ClientError>) {
-        let error = result.expect_err("an offset past the content should be refused");
         assert_matches!(
-            &error,
-            ClientError::Api { param: Some(param), .. } if param == "/start_offset"
-        );
-        assert_error_response(
-            Err::<T, _>(error),
-            400,
-            ErrorCode::InvalidRequest.as_str(),
-            None,
+            result,
+            Err(ClientError::Api {
+                status: 400,
+                code,
+                param: Some(param),
+                ..
+            }) if code == ErrorCode::InvalidRequest.as_str() && param == "/start_offset"
         );
     }
 

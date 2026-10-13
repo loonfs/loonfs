@@ -2,20 +2,45 @@
 //! two ways a connection can be wrong without taking the server with it.
 
 use crate::common::http_split_support::{replace_file_options, test_config};
-use crate::common::{start_tls_server, TlsTestServer};
+use crate::common::{
+    start_tls_server, start_tls_server_with_certificate, tls_certificate_params, TlsTestServer,
+};
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::civil_from_days;
 use std::io::{Read, Write};
 use tempfile::tempdir;
+
+/// Returns the harness certificate's parameters, valid from midnight UTC of
+/// the current date.
+fn certificate_issued_today() -> rcgen::CertificateParams {
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    let today = civil_from_days(
+        i64::try_from(loonfs_core::time::current_time_ms() / DAY_MS).expect("days fit in i64"),
+    );
+    let mut certificate = tls_certificate_params();
+    certificate.not_before = rcgen::date_time_ymd(
+        i32::try_from(today.year).expect("the year fits in i32"),
+        u8::try_from(today.month).expect("the month fits in u8"),
+        u8::try_from(today.day).expect("the day fits in u8"),
+    );
+    certificate
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
     let temp_dir = tempdir().expect("tempdir");
-    let harness = start_tls_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-tls",
-        "http-tls",
-    ))
+    // rcgen dates a certificate from 1975 unless told otherwise, which no
+    // validity check would question. A certificate issued today makes the
+    // client's check against the configured CA compare real dates.
+    let harness = start_tls_server_with_certificate(
+        test_config(
+            temp_dir.path().join("store"),
+            "loonfs-server-tls",
+            "http-tls",
+        ),
+        certificate_issued_today(),
+    )
     .await;
 
     assert!(

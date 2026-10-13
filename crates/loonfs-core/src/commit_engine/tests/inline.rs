@@ -1,8 +1,12 @@
 //! Inline publication, retry identity, admission, fold, and append contracts.
 
-mod retention;
-
+mod append;
+mod fold;
+mod gc;
 mod layouts;
+mod read;
+mod retention;
+mod retry_gc;
 
 use super::*;
 use crate::manifest::{fold_wal, fold_wal_tail, FoldWalOutcome};
@@ -507,7 +511,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .expect("fold inline content");
         if index == 0 {
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-            fold_tests::assert_content_before_metadata(&store, values.len());
+            fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
                     .expect("content key");
@@ -522,7 +526,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             }
         } else if index == 1 {
             assert_eq!(folded.response.outcome, FoldWalOutcome::ManifestAdvanced);
-            fold_tests::assert_content_before_metadata(&store, values.len());
+            fold::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }
                     if loonfs_objectstore::layout::manifest_no_of(key).is_some())
@@ -548,13 +552,3 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         );
     }
 }
-
-mod read_tests;
-
-mod fold_tests;
-
-mod gc_tests;
-
-mod retry_gc_tests;
-
-mod append_tests;

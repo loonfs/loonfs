@@ -122,7 +122,7 @@ impl Checksum {
     /// a payload held whole and one delivered in pieces cannot drift: both
     /// close the same digest.
     pub fn compute(algorithm: ChecksumAlgorithm, bytes: &[u8]) -> Self {
-        let mut digest = StreamingChecksum::for_algorithm(algorithm);
+        let mut digest = ChecksumDigest::new(algorithm);
         digest.update(bytes);
         digest.finish()
     }
@@ -148,12 +148,8 @@ impl Checksum {
         {
             return None;
         }
-        let algorithm = match self.algorithm {
-            ChecksumAlgorithm::Crc64nvme => crc_fast::CrcAlgorithm::Crc64Nvme,
-            ChecksumAlgorithm::Crc32c => crc_fast::CrcAlgorithm::Crc32Iscsi,
-        };
         let combined = crc_fast::checksum_combine(
-            algorithm,
+            crc_fast_algorithm(self.algorithm),
             u64::from_str_radix(self.value.as_str(), 16).ok()?,
             u64::from_str_radix(next.value.as_str(), 16).ok()?,
             next_len,
@@ -199,37 +195,58 @@ pub enum ChecksumValidationError {
 }
 
 /// An incremental checksum for streamed reads and writes.
-#[derive(Debug)]
-pub enum StreamingChecksum {
-    /// CRC-64/NVME folded over the payload.
-    Crc64nvme(Crc64Nvme),
-    /// CRC-32C folded over the payload.
-    Crc32c(Crc32c),
+pub struct ChecksumDigest {
+    algorithm: ChecksumAlgorithm,
+    // Boxed because a `crc_fast::Digest` is about 300 bytes, and every enum
+    // that holds a digest would otherwise be that large.
+    digest: Box<crc_fast::Digest>,
 }
 
-impl StreamingChecksum {
+impl ChecksumDigest {
     /// Starts an empty digest for `algorithm`.
-    pub fn for_algorithm(algorithm: ChecksumAlgorithm) -> Self {
-        match algorithm {
-            ChecksumAlgorithm::Crc64nvme => Self::Crc64nvme(Crc64Nvme::new()),
-            ChecksumAlgorithm::Crc32c => Self::Crc32c(Crc32c::new()),
+    pub fn new(algorithm: ChecksumAlgorithm) -> Self {
+        Self {
+            algorithm,
+            digest: Box::new(crc_fast::Digest::new(crc_fast_algorithm(algorithm))),
         }
     }
 
     /// Folds the next piece of the payload in, in order.
     pub fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Self::Crc64nvme(digest) => digest.update(bytes),
-            Self::Crc32c(digest) => digest.update(bytes),
-        }
+        self.digest.update(bytes);
     }
 
     /// Closes the digest over everything fed so far.
+    ///
+    /// The value is the big-endian spelling of the 64-bit CRC-64/NVME or the
+    /// 32-bit CRC-32C result
+    /// ([Appendix A.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a3-content-references-and-checksums)).
     pub fn finish(self) -> Checksum {
-        match self {
-            Self::Crc64nvme(digest) => digest.finish(),
-            Self::Crc32c(digest) => digest.finish(),
+        let result = self.digest.finalize();
+        let value = match self.algorithm {
+            ChecksumAlgorithm::Crc64nvme => ChecksumHex::encode(&result.to_be_bytes()),
+            ChecksumAlgorithm::Crc32c => ChecksumHex::encode(&crc32_from_u64(result).to_be_bytes()),
+        };
+        Checksum {
+            algorithm: self.algorithm,
+            value,
         }
+    }
+}
+
+impl fmt::Debug for ChecksumDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChecksumDigest")
+            .field("algorithm", &self.algorithm)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Names the `crc-fast` algorithm that computes `algorithm`.
+fn crc_fast_algorithm(algorithm: ChecksumAlgorithm) -> crc_fast::CrcAlgorithm {
+    match algorithm {
+        ChecksumAlgorithm::Crc64nvme => crc_fast::CrcAlgorithm::Crc64Nvme,
+        ChecksumAlgorithm::Crc32c => crc_fast::CrcAlgorithm::Crc32Iscsi,
     }
 }
 
@@ -252,7 +269,7 @@ pub struct ContentVerifier {
 
 #[derive(Debug)]
 enum ContentVerificationStatus {
-    Streaming(StreamingChecksum),
+    Streaming(ChecksumDigest),
     Verified,
     Failed(ContentMismatchError),
 }
@@ -266,7 +283,7 @@ impl ContentVerifier {
             start_offset,
             prefix_bytes: 0,
             fetched_bytes: 0,
-            status: ContentVerificationStatus::Streaming(StreamingChecksum::for_algorithm(
+            status: ContentVerificationStatus::Streaming(ChecksumDigest::new(
                 content_ref.checksum.algorithm,
             )),
         }
@@ -333,7 +350,7 @@ impl ContentVerifier {
         verdict
     }
 
-    fn digest(&mut self) -> Option<&mut StreamingChecksum> {
+    fn digest(&mut self) -> Option<&mut ChecksumDigest> {
         match &mut self.status {
             ContentVerificationStatus::Streaming(digest) => Some(digest),
             ContentVerificationStatus::Verified | ContentVerificationStatus::Failed(_) => None,
@@ -413,87 +430,6 @@ pub struct ResumedPrefixIncompleteError {
     pub prefix_bytes: u64,
 }
 
-/// An incremental CRC-64/NVME checksum.
-pub struct Crc64Nvme {
-    // Boxed because a `crc_fast::Digest` is about 300 bytes, and every enum
-    // that holds a digest would otherwise be that large.
-    digest: Box<crc_fast::Digest>,
-}
-
-impl Default for Crc64Nvme {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Crc64Nvme {
-    /// Starts an empty digest.
-    pub fn new() -> Self {
-        Self {
-            digest: Box::new(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64Nvme)),
-        }
-    }
-
-    /// Folds the next piece of the payload in, in order.
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.digest.update(bytes);
-    }
-
-    /// Closes the digest over everything fed so far.
-    ///
-    /// The value is the big-endian spelling of the 64-bit result
-    /// ([Appendix A.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a3-content-references-and-checksums)).
-    pub fn finish(self) -> Checksum {
-        Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: ChecksumHex::encode(&self.digest.finalize().to_be_bytes()),
-        }
-    }
-}
-
-impl fmt::Debug for Crc64Nvme {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Crc64Nvme").finish_non_exhaustive()
-    }
-}
-
-/// An incremental CRC-32C checksum.
-pub struct Crc32c {
-    // Boxed for the same reason as the `Crc64Nvme` digest.
-    digest: Box<crc_fast::Digest>,
-}
-
-impl Default for Crc32c {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Crc32c {
-    /// Starts an empty digest.
-    pub fn new() -> Self {
-        Self {
-            digest: Box::new(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi)),
-        }
-    }
-
-    /// Folds the next piece of the payload in, in order.
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.digest.update(bytes);
-    }
-
-    /// Closes the digest over everything fed so far.
-    ///
-    /// The value is the big-endian spelling of the 32-bit result
-    /// ([Appendix A.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a3-content-references-and-checksums)).
-    pub fn finish(self) -> Checksum {
-        Checksum {
-            algorithm: ChecksumAlgorithm::Crc32c,
-            value: ChecksumHex::encode(&crc32_from_u64(self.digest.finalize()).to_be_bytes()),
-        }
-    }
-}
-
 /// Computes the CRC-32C of `bytes`.
 pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
     crc32_from_u64(crc_fast::checksum(
@@ -505,12 +441,6 @@ pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
 /// Narrows a CRC-32 value, which `crc-fast` returns as a `u64`.
 fn crc32_from_u64(value: u64) -> u32 {
     u32::try_from(value).expect("a CRC-32 value should fit in 32 bits")
-}
-
-impl fmt::Debug for Crc32c {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Crc32c").finish_non_exhaustive()
-    }
 }
 
 /// Describes why a content reference cannot be part of a durable commit.
@@ -574,8 +504,8 @@ impl ContentRef {
 #[cfg(test)]
 mod tests {
     use super::{
-        Checksum, ChecksumAlgorithm, ChecksumHex, ChecksumValidationError, ContentRef,
-        ContentRefKind, ContentRefValidationError, StreamingChecksum,
+        Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumValidationError,
+        ContentRef, ContentRefKind, ContentRefValidationError,
     };
     use crate::ids::ContentId;
     use std::assert_matches;
@@ -758,7 +688,7 @@ mod tests {
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
         let payload: Vec<u8> = (0..=u8::MAX).cycle().take(4096).collect();
         for expected in [Checksum::crc64nvme(&payload), Checksum::crc32c(&payload)] {
-            let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
+            let mut streaming = ChecksumDigest::new(expected.algorithm);
             for chunk in payload.chunks(97) {
                 streaming.update(chunk);
             }

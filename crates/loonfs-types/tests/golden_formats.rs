@@ -51,12 +51,10 @@ use std::path::{Path, PathBuf};
 // Golden helpers
 // ---------------------------------------------------------------------------
 
-fn golden_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
-}
-
 fn golden_path(name: &str) -> PathBuf {
-    golden_dir().join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name)
 }
 
 fn actor() -> ActorId {
@@ -67,13 +65,34 @@ fn actor() -> ActorId {
 // rewriting it and fail on a half-written file.
 const REGENERATE_GOLDEN: &str = "UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1";
 
+// This copies `loonfs_test_support::golden::assert_matches_golden` because
+// `loonfs-test-support` depends on `loonfs-types`, and a dev-dependency back
+// on it would form a dependency cycle.
 fn assert_matches_golden(name: &str, actual: &[u8]) {
-    loonfs_test_support::golden::assert_matches_golden(
-        &golden_dir(),
-        REGENERATE_GOLDEN,
-        name,
-        actual,
-    );
+    let path = golden_path(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(path.parent().expect("fixture parent dir"))
+            .expect("create golden dir");
+        std::fs::write(&path, actual).expect("write golden fixture");
+    }
+    let expected = std::fs::read(&path).unwrap_or_else(|err| {
+        panic!("read golden fixture `{name}` ({err}); run `{REGENERATE_GOLDEN}` to generate it")
+    });
+    if expected != actual {
+        let offset = expected
+            .iter()
+            .zip(actual.iter())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| expected.len().min(actual.len()));
+        panic!(
+            "golden fixture `{name}` diverged at byte {offset} \
+             (expected {} bytes, actual {} bytes). The durable encoding changed: \
+             while pre-release, regenerate the version-1 fixture with UPDATE_GOLDEN=1 \
+             if the change is intentional.",
+            expected.len(),
+            actual.len(),
+        );
+    }
 }
 
 fn read_golden(name: &str) -> Vec<u8> {

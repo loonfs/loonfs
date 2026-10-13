@@ -1,7 +1,6 @@
 //! Runs every shared SDK case through `loonfs-client`.
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
-#![allow(clippy::unwrap_used)]
 
 use bytes::Bytes;
 use loonfs_client::{

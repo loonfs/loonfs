@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
-use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use std::sync::Arc;
@@ -238,7 +238,7 @@ impl MultipartController for GcsRequestSigner {
         let mut abort_on_drop =
             AbortUploadOnDrop::new(key, self.io_runtime.clone(), cancel.boxed());
 
-        let mut checksum = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c);
+        let mut checksum = ChecksumDigest::new(ChecksumAlgorithm::Crc32c);
         let mut offset = 0;
         let mut chunk = head;
         loop {
@@ -256,7 +256,7 @@ impl MultipartController for GcsRequestSigner {
             if last {
                 let full = std::mem::replace(
                     &mut checksum,
-                    StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c),
+                    ChecksumDigest::new(ChecksumAlgorithm::Crc32c),
                 )
                 .finish();
                 request = request.header(GCS_HASH_HEADER, crc32c_header(&full));

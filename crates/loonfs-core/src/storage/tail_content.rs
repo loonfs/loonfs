@@ -9,8 +9,8 @@ use bytes::Bytes;
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
-    Checksum, ChecksumAlgorithm, ContentExtent, ContentLayout, ContentRef, ExtentObject,
-    StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentLayout, ContentRef,
+    ExtentObject,
 };
 use tokio::sync::Semaphore;
 
@@ -230,7 +230,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
 }
 
 fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
-    let mut checksum = StreamingChecksum::for_algorithm(algorithm);
+    let mut checksum = ChecksumDigest::new(algorithm);
     for piece in pieces {
         checksum.update(piece);
     }

@@ -54,7 +54,12 @@ impl RuntimeCore {
         let _validation = validation
             .lock
             .lock()
-            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wait"))
+            .instrument(tracing::debug_span!(
+                target: "loonfs::page",
+                "loonfs.phase",
+                phase = "validation_wait",
+                namespace_id = %namespace_id,
+            ))
             .await;
         let reusable = self
             .inner

@@ -6,7 +6,9 @@ use crate::keyspace::{
     unscope_listed_key,
 };
 use crate::object_store::{unsupported_multipart, Result};
-use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
+use crate::retry::{
+    provider_transport_retryable, with_transport_retry, RetryWarnings, StoreRetry, DEFAULT,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::ListedObject;
@@ -255,6 +257,7 @@ pub struct ProviderObjectStore {
     key_prefix: Option<String>,
     transport_retry: TransportRetryPolicy,
     timer: Arc<dyn MonotonicTimer>,
+    retry_warnings: Arc<RetryWarnings>,
 }
 
 impl fmt::Debug for ProviderObjectStore {
@@ -288,6 +291,7 @@ impl ProviderObjectStore {
         checksum_reader: Arc<dyn StoredChecksumReader>,
         multipart_controller: Arc<dyn MultipartController>,
     ) -> Result<Self> {
+        let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
         Ok(Self {
             inner,
             one_attempt,
@@ -302,13 +306,28 @@ impl ProviderObjectStore {
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             transport_retry: DEFAULT,
-            timer: Arc::new(StdMonotonicTimer::default()),
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::clone(&timer))),
+            timer,
         })
     }
 
     pub(crate) fn compare_token(mut self, compare_token: CompareToken) -> Self {
         self.compare_token = compare_token;
         self
+    }
+
+    /// Shares `retry_warnings` with the requests a provider adapter signs
+    /// itself, so the bucket keeps one limiter.
+    pub(crate) fn retry_warnings(mut self, retry_warnings: Arc<RetryWarnings>) -> Self {
+        self.retry_warnings = retry_warnings;
+        self
+    }
+
+    fn retry(&self) -> StoreRetry<'_> {
+        StoreRetry {
+            policy: &self.transport_retry,
+            warnings: &self.retry_warnings,
+        }
     }
 
     #[cfg(test)]
@@ -334,6 +353,7 @@ impl ProviderObjectStore {
 
     #[cfg(test)]
     fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+        self.retry_warnings = Arc::new(RetryWarnings::new(Arc::clone(&timer)));
         self.timer = timer;
         self
     }
@@ -581,7 +601,7 @@ impl MultipartWrite<'_> {
             self.store.transport_retry.operation_deadline,
         );
         let upload_id = with_transport_retry(
-            &self.store.transport_retry,
+            self.store.retry(),
             self.key,
             "create_multipart",
             payload_bytes,
@@ -686,7 +706,7 @@ impl MultipartWrite<'_> {
             self.store.transport_retry.operation_deadline,
         );
         with_transport_retry(
-            &self.store.transport_retry,
+            self.store.retry(),
             self.key,
             "put_part",
             payload_bytes,
@@ -870,10 +890,10 @@ impl ObjectStore for ProviderObjectStore {
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         if (bytes.len() as u64) < self.multipart_geometry.threshold_bytes {
-            return crate::immutable_write::put(self, key, bytes).await;
+            return crate::immutable_write::put(self, &self.retry_warnings, key, bytes).await;
         }
         let controller = &self.multipart_controller;
-        crate::immutable_write::put_with(self, key, &bytes, || {
+        crate::immutable_write::put_with(self, &self.retry_warnings, key, &bytes, || {
             let bytes = bytes.clone();
             async move {
                 let mut parts = PartReader::new(
@@ -924,7 +944,7 @@ impl ObjectStore for ProviderObjectStore {
         let deadline =
             OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
         with_transport_retry(
-            &self.transport_retry,
+            self.retry(),
             key,
             "delete",
             0,
@@ -2898,8 +2918,7 @@ mod tests {
                 .lock()
                 .expect("part windows")
                 .push(part_window);
-            let mut checksum =
-                loonfs_types::StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
+            let mut checksum = loonfs_types::ChecksumDigest::new(ChecksumAlgorithm::Crc64nvme);
             checksum.update(&head);
             let mut size_bytes = head.len() as u64;
             while let Some(part) = rest.next_part().await? {

@@ -14,8 +14,8 @@ use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode,
 };
 use loonfs_types::{
-    Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentRefValidationError,
-    ContentVerifier, ErrorCode, NamespaceId, PathEntry, StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind,
+    ContentRefValidationError, ContentVerifier, ErrorCode, NamespaceId, PathEntry,
 };
 use std::future::Future;
 use std::num::NonZeroU64;
@@ -632,14 +632,14 @@ pub(crate) async fn identify_streamed_payload(
 #[derive(Debug)]
 struct StreamedPayload {
     size_bytes: u64,
-    checksum: StreamingChecksum,
+    checksum: ChecksumDigest,
 }
 
 impl StreamedPayload {
     fn new(algorithm: ChecksumAlgorithm) -> Self {
         Self {
             size_bytes: 0,
-            checksum: StreamingChecksum::for_algorithm(algorithm),
+            checksum: ChecksumDigest::new(algorithm),
         }
     }
 

@@ -78,16 +78,22 @@ object_store = { version = "0.14.2", default-features = false, features = ["aws"
 # Self-signed certificates for the TLS tests.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+# `rustls-no-provider` because the client builds its own TLS configuration
+# (`reqwest_transport.rs`), and reqwest's `rustls` feature would add the
+# aws-lc-rs provider.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 regex-syntax = "0.8"
 # Already in the tree beneath rustls and rcgen. Named directly because the GCS
 # presigner signs `GOOG4-RSA-SHA256` with an RSA key, which the hash and MAC
 # crates this workspace already carries cannot do.
 ring = "0.17"
-# `ring` because the server's TLS listener names the ring provider
-# (`http/tls.rs`). `aws-lc-rs` is also in the tree, through object_store and
-# reqwest.
+# `ring` because the server's TLS listener (`http/tls.rs`) and the client's
+# TLS configuration (`reqwest_transport.rs`) name the ring provider.
+# `aws-lc-rs` is also in the tree, through object_store and aws-config.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The operating system's root certificates, which the client trusts beside
+# `ca_cert_path`. Already in the tree beneath aws-config's HTTP client.
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
