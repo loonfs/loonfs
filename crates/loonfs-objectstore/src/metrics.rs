@@ -117,8 +117,10 @@ pub enum ObjectStoreOperation {
 }
 
 impl ObjectStoreOperation {
-    /// The label an aggregating recorder groups by. Identical to the serde
-    /// name: one operation has one spelling wherever it is reported.
+    /// Returns the label an aggregating recorder groups by.
+    ///
+    /// Identical to the serde name: one operation has one spelling wherever it
+    /// is reported.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Head => "head",
@@ -166,8 +168,10 @@ pub enum ObjectStoreResultKind {
 }
 
 impl ObjectStoreResultKind {
-    /// The label an aggregating recorder groups by. Identical to the serde
-    /// name: one outcome has one spelling wherever it is reported.
+    /// Returns the label an aggregating recorder groups by.
+    ///
+    /// Identical to the serde name: one outcome has one spelling wherever it is
+    /// reported.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -223,8 +227,10 @@ pub enum KeyClass {
 }
 
 impl KeyClass {
-    /// The label an aggregating recorder groups by. Identical to the serde
-    /// name: one class has one spelling wherever it is reported.
+    /// Returns the label an aggregating recorder groups by.
+    ///
+    /// Identical to the serde name: one class has one spelling wherever it is
+    /// reported.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Content => "content",

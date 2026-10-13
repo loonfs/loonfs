@@ -316,8 +316,8 @@ impl ObjectStoreError {
         self.kind().public_message()
     }
 
-    /// Key of the object (or listed prefix) the failing operation targeted,
-    /// when the failure is object-scoped.
+    /// Returns the key of the object (or listed prefix) the failing operation
+    /// targeted, when the failure is object-scoped.
     pub fn object_key(&self) -> Option<&str> {
         match self {
             Self::NotFound { object_key }
@@ -332,8 +332,8 @@ impl ObjectStoreError {
         }
     }
 
-    /// Failure text without the object key, for wrappers that record the key
-    /// as their own structured field.
+    /// Returns the failure text without the object key, for wrappers that record
+    /// the key as their own structured field.
     pub fn message(&self) -> String {
         match self {
             Self::NotFound { .. } => "object not found".to_owned(),

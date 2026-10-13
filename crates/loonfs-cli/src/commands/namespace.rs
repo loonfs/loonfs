@@ -19,8 +19,6 @@ use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, NamespaceNaming,
 use std::collections::BTreeMap;
 use std::path::Path;
 
-// --- namespace ---
-
 pub(crate) async fn run_namespace_command(
     kind: CommandKind,
     config_path: &Path,

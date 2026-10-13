@@ -491,12 +491,12 @@ pub struct MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
-    /// Every entry, ordered by name and then by labels.
+    /// Returns every entry, ordered by name and then by labels.
     pub fn all(&self) -> &[MetricEntry] {
         &self.entries
     }
 
-    /// The entries registered under `name`, one per label set.
+    /// Returns the entries registered under `name`, one per label set.
     pub fn by_name<'snapshot>(
         &'snapshot self,
         name: &'snapshot str,

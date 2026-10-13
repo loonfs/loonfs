@@ -22,8 +22,6 @@ use crate::profiles::{
 use crate::prompt;
 use std::path::Path;
 
-// --- profile ---
-
 pub(crate) fn run_profile_command(
     kind: CommandKind,
     config_path: &Path,

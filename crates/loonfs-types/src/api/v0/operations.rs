@@ -863,7 +863,7 @@ pub enum FilesystemOperation {
 }
 
 impl FilesystemOperation {
-    /// An undelete of the deletion of `inode_id` committed at
+    /// Builds an undelete of the deletion of `inode_id` committed at
     /// `deletion_seq`, bound where `destination` says.
     pub fn undelete(
         inode_id: InodeId,
@@ -944,6 +944,10 @@ impl FilesystemOperation {
 /// Admission conditions checked against the candidate's pre-state before its operations.
 /// The pre-state head sequence is the last admitted commit's sequence in the batch,
 /// or the batch's base head sequence when no earlier candidate was admitted.
+#[allow(
+    clippy::too_long_first_doc_paragraph,
+    reason = "a ToSchema doc is the OpenAPI description, so it keeps its wording"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1056,7 +1060,7 @@ impl CommitRequest {
         self
     }
 
-    /// A request carrying exactly one operation.
+    /// Builds a request with exactly one operation.
     pub fn single(
         commit_id: CommitId,
         message: Option<String>,
@@ -1412,7 +1416,8 @@ pub struct GcResponse {
 }
 
 impl GcResponse {
-    /// An empty report for `namespace_id`, before any candidate is examined.
+    /// Creates an empty report for `namespace_id`, before any candidate is
+    /// examined.
     pub fn empty(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
@@ -1511,9 +1516,10 @@ impl RetainedCandidates {
         self.upload_session_undecided += upload_session_undecided;
     }
 
-    /// The reason with the highest count, and that count. `None` when
-    /// nothing was retained. Ties go to the first reason in the fixed table
-    /// order, so one pass's report is stable.
+    /// Returns the reason with the highest count, and that count.
+    ///
+    /// `None` when nothing was retained. Ties go to the first reason in the
+    /// fixed table order, so one pass's report is stable.
     pub fn top_reason(&self) -> Option<(&'static str, u64)> {
         self.by_reason()
             .into_iter()
@@ -1612,8 +1618,9 @@ pub struct MetadataMaintenanceRequest {
     pub max_wal_tail_objects: Option<u64>,
 }
 
-/// An option-free request for one metadata compaction unit. Repeat it while
-/// it publishes to compact every eligible family group.
+/// An option-free request for one metadata compaction unit.
+///
+/// Repeat it while it publishes to compact every eligible family group.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]

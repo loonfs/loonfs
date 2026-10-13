@@ -12,10 +12,11 @@ pub const MAX_ATTRIBUTE_KEY_BYTES: usize = 128;
 pub const MAX_ATTRIBUTE_VALUE_BYTES: usize = 4096;
 /// Maximum number of entries in one attribute map.
 pub const MAX_ATTRIBUTE_ENTRIES: usize = 100;
-/// Maximum total size of one attribute map in logical UTF-8 bytes. The total
-/// counts every key's bytes plus every value's bytes. It excludes encoder
-/// framing, so the limit does not move when the map is written as JSON instead
-/// of CBOR.
+/// Maximum total size of one attribute map in logical UTF-8 bytes.
+///
+/// The total counts every key's bytes plus every value's bytes. It excludes
+/// encoder framing, so the limit does not move when the map is written as JSON
+/// instead of CBOR.
 pub const MAX_ATTRIBUTES_TOTAL_BYTES: usize = 65_536;
 
 /// Key prefix reserved for system-owned attributes.

@@ -308,8 +308,9 @@ impl ContentVerifier {
         })
     }
 
-    /// Folds in the next fetched chunk, in order. A chunk that arrives after
-    /// [`Self::finish`] is refused.
+    /// Folds in the next fetched chunk, in order.
+    ///
+    /// A chunk that arrives after [`Self::finish`] is refused.
     pub fn update(&mut self, chunk: &[u8]) -> Result<(), ChunkAfterEndError> {
         self.digest().ok_or(ChunkAfterEndError)?.update(chunk);
         self.fetched_bytes += chunk.len() as u64;
@@ -371,7 +372,9 @@ pub struct ContentMismatchError {
     pub actual: Checksum,
 }
 
-/// Why a resumed prefix was refused. None of the refused bytes are folded.
+/// Why a resumed prefix was refused.
+///
+/// None of the refused bytes are folded.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ResumedPrefixError {
@@ -438,9 +441,8 @@ impl Crc64Nvme {
 
     /// Closes the digest over everything fed so far.
     ///
-    /// The value is the big-endian spelling of the 64-bit result, which is
-    /// what the raw checksum bytes are on the wire and therefore what the
-    /// hex here has to be.
+    /// The value is the big-endian spelling of the 64-bit result
+    /// ([Appendix A.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a3-content-references-and-checksums)).
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
@@ -482,9 +484,8 @@ impl Crc32c {
 
     /// Closes the digest over everything fed so far.
     ///
-    /// The value is the big-endian spelling of the 32-bit result, which is
-    /// what the raw checksum bytes are on the wire and therefore what the
-    /// hex here has to be.
+    /// The value is the big-endian spelling of the 32-bit result
+    /// ([Appendix A.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a3-content-references-and-checksums)).
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,

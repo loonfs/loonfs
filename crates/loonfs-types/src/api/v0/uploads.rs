@@ -69,7 +69,7 @@ pub enum CreateUploadBody {
 }
 
 impl CreateUploadBody {
-    /// The transport this request asks for.
+    /// Returns the transport this request asks for.
     pub fn mode(&self) -> UploadMode {
         match self {
             Self::ServiceProxied {} => UploadMode::ServiceProxied,

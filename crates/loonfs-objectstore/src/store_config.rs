@@ -155,7 +155,7 @@ impl<'de> serde::Deserialize<'de> for StoreConfig {
 }
 
 impl StoreConfig {
-    /// The provider kind this configuration selects.
+    /// Returns the provider kind this configuration selects.
     pub fn kind(&self) -> ConfiguredObjectStoreKind {
         match self {
             StoreConfig::LocalFs { .. } => ConfiguredObjectStoreKind::LocalFs,
@@ -165,7 +165,8 @@ impl StoreConfig {
         }
     }
 
-    /// The configured credential-source kind, or `None` for local filesystem stores.
+    /// Returns the configured credential-source kind, or `None` for local
+    /// filesystem stores.
     pub fn credentials_kind(&self) -> Option<&'static str> {
         match self {
             StoreConfig::LocalFs { .. } => None,

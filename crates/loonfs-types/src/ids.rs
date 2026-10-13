@@ -389,11 +389,9 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
     validate_id_grammar(value).map_err(|reason| CommitIdValidationError::new(value, reason))
 }
 
-/// Maximum name-key length in UTF-8 bytes. Keys are derived from display
-/// names capped at [`crate::path::MAX_DISPLAY_NAME_BYTES`]; normalization and
-/// case folding expand at most threefold in bytes, so 768 admits every key
-/// derivable from a valid name while bounding row keys, filter keys, and
-/// cursors.
+/// Maximum name-key length in UTF-8 bytes
+/// ([Names and paths](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#14-names-and-paths)), three times the display-name
+/// cap, so every key derived from a valid name fits.
 pub const MAX_NAME_KEY_BYTES: usize = 768;
 const _: () = assert!(MAX_NAME_KEY_BYTES >= 3 * crate::path::MAX_DISPLAY_NAME_BYTES);
 /// Maximum validated namespace and commit id length in UTF-8 bytes.

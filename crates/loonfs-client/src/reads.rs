@@ -55,6 +55,7 @@ pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, ClientError
 
 impl Client {
     /// Saves the namespace's current state for a limited time.
+    ///
     /// Retrying this request starts a distinct attempt.
     pub async fn create_snapshot(
         &self,
@@ -100,8 +101,10 @@ impl Client {
             .await
     }
 
-    /// Returns one live snapshot. A missing id returns `snapshot_not_found`,
-    /// and an expired snapshot returns `snapshot_gone`.
+    /// Returns one live snapshot.
+    ///
+    /// A missing id returns `snapshot_not_found`, and an expired snapshot
+    /// returns `snapshot_gone`.
     pub async fn get_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -115,7 +118,9 @@ impl Client {
             .await
     }
 
-    /// Extends a snapshot's lifetime. Repeating the same request is safe.
+    /// Extends a snapshot's lifetime.
+    ///
+    /// Repeating the same request is safe.
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -134,7 +139,9 @@ impl Client {
         .await
     }
 
-    /// Deletes the snapshot record. A missing id returns `snapshot_not_found`.
+    /// Deletes the snapshot record.
+    ///
+    /// A missing id returns `snapshot_not_found`.
     pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -190,9 +197,10 @@ impl Client {
             .await
     }
 
-    /// Deletes the namespace (feature
-    /// `filesystem.namespaces.delete`). Pass `expected_head_seq` to delete only if the namespace is
-    /// still where you last observed it (`stale_head` on mismatch). Deleting an
+    /// Deletes the namespace (feature `filesystem.namespaces.delete`).
+    ///
+    /// Pass `expected_head_seq` to delete only if the namespace is still where
+    /// you last observed it (`stale_head` on mismatch). Deleting an
     /// already-deleted namespace fails with `namespace_deleted`.
     pub async fn delete_namespace(
         &self,
@@ -579,16 +587,19 @@ impl Client {
             .await
     }
 
-    /// Streams a file's current content through the server. See
-    /// [`Self::read_file_stream_with_options`].
+    /// Streams a file's current content through the server.
+    ///
+    /// See [`Self::read_file_stream_with_options`].
     pub async fn read_file_stream(&self, spec: &NamespacePath) -> Result<PayloadStream> {
         self.read_file_stream_with_options(spec, &ReadFileOptions::default())
             .await
     }
 
-    /// Streams content through the server. Successful completion means the server
-    /// verified the whole object; a late verification failure aborts the body.
-    /// Bytes already consumed remain provisional until the stream ends cleanly.
+    /// Streams content through the server.
+    ///
+    /// Successful completion means the server verified the whole object; a late
+    /// verification failure aborts the body. Bytes already consumed remain
+    /// provisional until the stream ends cleanly.
     pub async fn read_file_stream_with_options(
         &self,
         spec: &NamespacePath,
@@ -602,8 +613,9 @@ impl Client {
         .await
     }
 
-    /// Streams one retained revision of a file through the server. See
-    /// [`Self::read_file_stream_with_options`] for when the bytes are
+    /// Streams one retained revision of a file through the server.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
     /// verified.
     pub async fn read_file_revision_stream(
         &self,
@@ -666,9 +678,11 @@ impl Client {
         .await
     }
 
-    /// Streams the current content of a visible file inode through the
-    /// server, wherever it is bound. See [`Self::read_file_stream_with_options`]
-    /// for when the bytes are verified.
+    /// Streams the current content of a visible file inode through the server,
+    /// wherever it is bound.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified.
     pub async fn read_file_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -682,10 +696,11 @@ impl Client {
         .await
     }
 
-    /// Streams the content of a visible file inode through the server,
-    /// wherever it is bound: the current revision, or the revision a snapshot
-    /// captured when the options name one. See
-    /// [`Self::read_file_stream_with_options`] for when the bytes are
+    /// Streams the content of a visible file inode through the server, wherever
+    /// it is bound: the current revision, or the revision a snapshot captured
+    /// when the options name one.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
     /// verified.
     pub async fn read_file_stream_by_inode_with_options(
         &self,
@@ -712,9 +727,10 @@ impl Client {
             .await
     }
 
-    /// Streams one retained file revision by inode identity through the
-    /// server. See [`Self::read_file_stream_with_options`] for when the bytes
-    /// are verified.
+    /// Streams one retained file revision by inode identity through the server.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified.
     pub async fn read_file_revision_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,

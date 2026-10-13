@@ -8,7 +8,9 @@ use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
 
-/// One namespace. Every mode reads it, and only [`Writable`] writes it.
+/// One namespace.
+///
+/// Every mode reads it, and only [`Writable`] writes it.
 ///
 /// Methods on this handle take no namespace id. The mode `M` is the only
 /// difference between the two kinds of handle.
@@ -81,8 +83,10 @@ impl<M: Mode> Namespace<M> {
         }
     }
 
-    /// Returns a handle on the same namespace, for the same subject, that
-    /// holds no writer session. Holding it does not keep a session open.
+    /// Returns a handle on the same namespace, for the same subject, that holds
+    /// no writer session.
+    ///
+    /// Holding it does not keep a session open.
     pub fn read_only(&self) -> Namespace<ReadOnly> {
         Namespace::new(self.core.clone(), self.namespace_id.clone())
     }
@@ -121,9 +125,11 @@ impl Namespace<Writable> {
         self.session().state()
     }
 
-    /// Returns the highest seq this session has committed, or `None` before
-    /// its first commit. Reads memory only. A commit from another session or
-    /// another process does not change it.
+    /// Returns the highest seq this session has committed, or `None` before its
+    /// first commit.
+    ///
+    /// Reads memory only. A commit from another session or another process does
+    /// not change it.
     pub fn last_published_seq(&self) -> Option<ChangeSeq> {
         self.session().last_published_seq()
     }
@@ -152,6 +158,7 @@ impl Namespace<Writable> {
     }
 
     /// Returns whether this is the only handle holding its writer session.
+    ///
     /// Hosts must prevent concurrent opens while using this check to close it.
     pub fn is_exclusively_held(&self) -> bool {
         Arc::strong_count(&self.session) == 1

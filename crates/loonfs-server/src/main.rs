@@ -1,5 +1,7 @@
 //! The reference server binary: load config, open the runtime, serve HTTP
 //! until shutdown.
+//!
+//! Server behavior doesn't belong here: it's in the `loonfs_server` library.
 
 use clap::{ArgGroup, Parser};
 use std::io::Write as _;

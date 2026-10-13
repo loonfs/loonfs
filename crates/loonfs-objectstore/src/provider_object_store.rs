@@ -42,9 +42,10 @@ pub struct ProviderObjectStoreConfig {
 }
 
 /// Bound for one control-plane HTTP attempt's request phase, and the
-/// response-body idle bound for every request. An attempt that makes no
-/// progress for this long fails and counts against the operation deadline
-/// instead of consuming it invisibly.
+/// response-body idle bound for every request.
+///
+/// An attempt that makes no progress for this long fails and counts against the
+/// operation deadline instead of consuming it invisibly.
 pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One HTTP attempt's connect timeout.
@@ -70,15 +71,18 @@ pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 /// uses the provider's own conditional path where the provider has one.
 pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Fixed size of every multipart part except the last. Cloudflare R2
-/// requires all non-final parts to share one size, and every supported
-/// provider requires at least 5 MiB per non-final part; 8 MiB matches the
-/// part size mainstream storage clients default to, and keeps every part a
+/// Fixed size of every multipart part except the last.
+///
+/// Cloudflare R2 requires all non-final parts to share one size, and every
+/// supported provider requires at least 5 MiB per non-final part; 8 MiB matches
+/// the part size mainstream storage clients default to, and keeps every part a
 /// cheap retry that fits comfortably inside one flat attempt bound.
 pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Concurrent in-flight parts of one multipart overwrite or verified
-/// immutable write. A `put_streamed` write sends one part at a time.
+/// Concurrent in-flight parts of one multipart overwrite or verified immutable
+/// write.
+///
+/// A `put_streamed` write sends one part at a time.
 pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// The smallest part every supported provider accepts anywhere but last, and
@@ -89,9 +93,10 @@ pub const PROVIDER_MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
 /// The largest part every supported provider accepts.
 pub const PROVIDER_MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Parts one provider multipart upload accepts. Every supported provider
-/// stops at 10,000, which with the part size sets the largest object a
-/// multipart write can produce.
+/// Parts one provider multipart upload accepts.
+///
+/// Every supported provider stops at 10,000, which with the part size sets the
+/// largest object a multipart write can produce.
 pub const PROVIDER_MAX_MULTIPART_PARTS: u32 = 10_000;
 
 /// Request-phase timeout for one HTTP attempt that carries a payload.

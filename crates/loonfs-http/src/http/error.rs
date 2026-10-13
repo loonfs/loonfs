@@ -21,10 +21,12 @@ pub(super) struct ApiResponseError {
     retry_after_seconds: Option<u32>,
 }
 
-/// Render an already sanitized API error using the server's status and retry
-/// semantics. Composing hosts can preserve a runtime error's public details
-/// without maintaining a second error-code-to-HTTP registry. The typed code
-/// takes precedence over `body.code`; the caller supplies its correlation ID.
+/// Renders an already sanitized API error using the server's status and retry
+/// semantics.
+///
+/// Composing hosts can preserve a runtime error's public details without
+/// maintaining a second error-code-to-HTTP registry. The typed code takes
+/// precedence over `body.code`; the caller supplies its correlation ID.
 pub fn error_response(code: ErrorCode, mut body: ErrorResponse) -> Response {
     body.code = code.as_str().to_owned();
     ApiResponseError::from_error_response(code, body).into_response()

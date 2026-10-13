@@ -66,7 +66,7 @@ enum NextRange {
 }
 
 impl DirectDownloadStream {
-    /// The immutable content claim this stream verifies.
+    /// Returns the immutable content claim this stream verifies.
     pub fn content_ref(&self) -> &ContentRef {
         &self.expected
     }
@@ -85,9 +85,10 @@ impl DirectDownloadStream {
     }
 
     /// Returns the next response-body chunk, or `None` once the complete
-    /// revision has passed its length and checksum checks. After a read
-    /// fails, whether a range open, a body read, or a check, every later call
-    /// returns the same error.
+    /// revision has passed its length and checksum checks.
+    ///
+    /// After a read fails, whether a range open, a body read, or a check, every
+    /// later call returns the same error.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         self.verifier
             .ensure_resumed_prefix_complete()
@@ -204,6 +205,7 @@ fn poll_opens(next: &mut VecDeque<NextRange>, context: &mut Context<'_>) -> Poll
 
 impl Client {
     /// Returns whether the deployment offers direct object-store downloads.
+    ///
     /// Selection does not depend on the size of a different, current revision.
     pub async fn offers_direct_download(&self) -> Result<bool> {
         Ok(self
@@ -239,9 +241,10 @@ impl Client {
             .await
     }
 
-    /// Requests short-lived direct access to one retained revision of a
-    /// file, from the offset the options name. A revision cannot be
-    /// combined with a snapshot.
+    /// Requests short-lived direct access to one retained revision of a file,
+    /// from the offset the options name.
+    ///
+    /// A revision cannot be combined with a snapshot.
     pub async fn create_revision_download_with_options(
         &self,
         spec: &NamespacePath,
@@ -330,9 +333,10 @@ impl Client {
         .await
     }
 
-    /// Requests direct access to one retained inode revision, without
-    /// requiring a current path, from the offset the options name. A
-    /// revision cannot be combined with a snapshot.
+    /// Requests direct access to one retained inode revision, without requiring
+    /// a current path, from the offset the options name.
+    ///
+    /// A revision cannot be combined with a snapshot.
     pub async fn create_revision_download_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -386,7 +390,9 @@ impl Client {
         .await
     }
 
-    /// Opens an inode download grant. See [`Self::open_direct_download`].
+    /// Opens an inode download grant.
+    ///
+    /// See [`Self::open_direct_download`].
     pub async fn open_direct_download_by_inode(
         &self,
         download: &CreateDownloadByInodeResponse,

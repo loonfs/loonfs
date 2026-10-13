@@ -4,6 +4,9 @@
 //! hosted LoonFS server. Applications that embed the runtime directly should
 //! use the `loonfs` crate. Both crates share operation options from
 //! `loonfs-types`.
+//!
+//! Namespace logic doesn't belong here: the client sends HTTP API requests
+//! and decodes their responses, and the server does the work.
 
 #![warn(missing_docs)]
 #![allow(

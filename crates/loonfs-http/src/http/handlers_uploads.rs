@@ -247,7 +247,6 @@ async fn begin_direct_multipart_upload(
              deployment's endpoint cannot",
         ));
     }
-    // Use the server's default when no part size is requested.
     let prepared = namespace
         .create_direct_multipart_upload_target_with_options(&DirectMultipartUploadOptions {
             part_size_bytes,

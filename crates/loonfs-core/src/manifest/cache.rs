@@ -249,10 +249,11 @@ pub struct WalTailProjectionCacheKey {
     pub head_seq: ChangeSeq,
 }
 
-/// A namespace head and the metadata basis it was read against. Keeping them
-/// together ensures reads use a consistent pair. If compaction advances the
-/// current manifest, reads may replay additional WAL entries until the anchor
-/// refreshes.
+/// A namespace head and the metadata basis it was read against.
+///
+/// Keeping them together ensures reads use a consistent pair. If compaction
+/// advances the current manifest, reads may replay additional WAL entries until
+/// the anchor refreshes.
 #[derive(Debug, Clone)]
 pub struct CachedReadAnchor {
     pub head: NamespaceReadState,
@@ -313,10 +314,11 @@ impl DecodedBlock for HeadStateEntry {
     }
 }
 
-/// Namespace head anchors and WAL-tail projections for every scope, under
-/// one byte budget and one recency order. An entry heavier than the whole
-/// budget is not kept, because inserting it would evict everything else
-/// first.
+/// Namespace head anchors and WAL-tail projections for every scope, under one
+/// byte budget and one recency order.
+///
+/// An entry heavier than the whole budget is not kept, because inserting it
+/// would evict everything else first.
 pub struct SharedHeadState {
     entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
     max_decoded_bytes: usize,

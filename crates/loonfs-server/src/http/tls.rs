@@ -42,9 +42,12 @@ pub enum TlsConfigError {
 
 /// Builds the rustls server configuration from the configured files.
 ///
-/// The provider is named rather than taken from the process-wide default:
-/// this process links exactly one, and resolving it here keeps a startup
-/// misconfiguration a returned error instead of a panic deep in rustls.
+/// The provider is named rather than taken from the process-wide default.
+/// The server links two rustls crypto providers: `ring`, which the workspace
+/// enables for this listener, and `aws-lc-rs`, which `object_store` and
+/// `reqwest` use for their HTTP clients. With two providers linked, rustls
+/// has no single default and would panic when asked for one, so the listener
+/// names `ring`, and a bad configuration stays a returned error.
 pub(super) fn server_config(
     config: &TlsServerConfig,
 ) -> Result<rustls::ServerConfig, TlsConfigError> {

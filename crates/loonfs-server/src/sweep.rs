@@ -57,20 +57,21 @@ pub enum GarbageCollection {
     Skip,
 }
 
-/// Ticks held sessions every `tick_interval_ms`. Active sessions publish and
-/// maintain themselves. Settling sessions run the first due step: metadata,
-/// index, collection, or close. Quiet sessions cost no store requests.
-/// Metadata that remains unfinished waits `maintenance_interval_ms` before
-/// retrying. Collection requires a moved seq and `gc_interval_ms` elapsed.
-/// A call that fails on a namespace waits one tick interval before its next
-/// try there, each failure in a row doubles the wait up to
-/// [`MAX_SWEEP_BACKOFF_MS`], and a success clears it. A call that panics
-/// counts as a `server_error` failure. The panic stops neither the sweep nor
-/// the visits to other namespaces.
-/// Quiet sessions close after `idle_session_close_after_ms` without an open,
-/// when no caller holds a handle. An open during close waits for its drain.
-/// A failing call keeps an idle session held, so ticks retry it, until its
-/// wait reaches [`MAX_SWEEP_BACKOFF_MS`].
+/// Ticks held sessions every `tick_interval_ms`.
+///
+/// Active sessions publish and maintain themselves. Settling sessions run the
+/// first due step: metadata, index, collection, or close. Quiet sessions cost
+/// no store requests. Metadata that remains unfinished waits
+/// `maintenance_interval_ms` before retrying. Collection requires a moved seq
+/// and `gc_interval_ms` elapsed. A call that fails on a namespace waits one
+/// tick interval before its next try there, each failure in a row doubles the
+/// wait up to [`MAX_SWEEP_BACKOFF_MS`], and a success clears it. A call that
+/// panics counts as a `server_error` failure. The panic stops neither the sweep
+/// nor the visits to other namespaces. Quiet sessions close after
+/// `idle_session_close_after_ms` without an open, when no caller holds a
+/// handle. An open during close waits for its drain. A failing call keeps an
+/// idle session held, so ticks retry it, until its wait reaches
+/// [`MAX_SWEEP_BACKOFF_MS`].
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage

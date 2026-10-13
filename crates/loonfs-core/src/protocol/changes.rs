@@ -126,7 +126,6 @@ fn event_from_op_deltas(
     deltas: &[&WalDelta],
 ) -> Result<FilesystemChange> {
     Ok(match deltas {
-        // CreateDirectory: allocate + bind.
         [WalDelta::CreateInode {
             inode_id,
             inode_kind: loonfs_types::InodeKind::Directory,

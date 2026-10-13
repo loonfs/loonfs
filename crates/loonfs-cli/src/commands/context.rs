@@ -238,8 +238,6 @@ async fn resolve_command_context_with_actor(
     })
 }
 
-// --- general helpers ---
-
 /// Whether a command accepts the root path `/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootPath {
@@ -364,8 +362,6 @@ pub(crate) fn destination_path_for_get(
 pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &AbsolutePath) -> String {
     format!("{namespace_id}:{absolute_path}")
 }
-
-// --- printed recovery commands ---
 
 /// The flags a printed `loonfs undelete` has to spell so that pasting it into
 /// a later shell still reaches the filesystem this command ran against.

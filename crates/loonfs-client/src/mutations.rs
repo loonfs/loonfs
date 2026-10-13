@@ -428,8 +428,9 @@ impl Client {
         .await
     }
 
-    /// Writes and removes attributes on the inode a path resolves to. The
-    /// target may be a file or a directory.
+    /// Writes and removes attributes on the inode a path resolves to.
+    ///
+    /// The target may be a file or a directory.
     pub async fn update_attributes_with_options(
         &self,
         spec: &NamespacePath,

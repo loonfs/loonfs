@@ -111,9 +111,11 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native GCS store. Direct reads and whole-object writes are
-    /// enabled only after live validation sets `GCS_DIRECT_TRANSFERS_PROVEN`
-    /// to confirm that the provider enforces them.
+    /// Builds a native GCS store.
+    ///
+    /// Direct reads and whole-object writes are enabled only after live
+    /// validation sets `GCS_DIRECT_TRANSFERS_PROVEN` to confirm that the
+    /// provider enforces them.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
     /// multipart slot stays empty rather than holding a signer that would

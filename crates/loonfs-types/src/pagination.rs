@@ -50,8 +50,9 @@ pub struct Pager<P: PagedResponse, E> {
 }
 
 impl<P: PagedResponse, E> Pager<P, E> {
-    /// Creates a pager over the pages `load_page` returns. A request without a
-    /// cursor asks `load_page` for the first page.
+    /// Creates a pager over the pages `load_page` returns.
+    ///
+    /// A request without a cursor asks `load_page` for the first page.
     pub fn new<F, Fut>(mut load_page: F) -> Self
     where
         F: FnMut(PageRequest<P::Cursor>) -> Fut + Send + 'static,
@@ -87,8 +88,9 @@ impl<P: PagedResponse, E> Pager<P, E> {
     }
 
     /// Returns the page `request` names: the page at its cursor, or the first
-    /// page when it has none, with at most `request.limit` items. The pager's
-    /// own position does not move.
+    /// page when it has none, with at most `request.limit` items.
+    ///
+    /// The pager's own position does not move.
     pub async fn page(&mut self, request: PageRequest<P::Cursor>) -> Result<P, E> {
         (self.load_page)(request).await
     }

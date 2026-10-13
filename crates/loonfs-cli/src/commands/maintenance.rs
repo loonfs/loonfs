@@ -21,8 +21,6 @@ use loonfs_types::{
 };
 use std::path::Path;
 
-// --- maintenance API group ---
-
 pub(crate) async fn run_maintenance_command(
     kind: CommandKind,
     config_path: &Path,

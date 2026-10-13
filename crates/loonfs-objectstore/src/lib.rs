@@ -7,6 +7,9 @@
 //! [`layout`], and the contract probe in [`probe`] that proves a configured
 //! store honours that contract — the same checks the conformance suite runs
 //! against real providers.
+//!
+//! Namespace semantics don't belong here: the crate reads, writes, and lists
+//! objects by key, and `loonfs-core` gives the keys their meaning.
 
 #![warn(missing_docs)]
 

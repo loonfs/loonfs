@@ -1,5 +1,7 @@
 //! The `loonfs` CLI binary: parse arguments, run the command, render the
 //! result.
+//!
+//! Command behavior doesn't belong here: it's in the `loonfs_cli` library.
 
 // The embedded runtime's composed async graph outgrew rustc's default
 // future-layout query depth while building this binary. This is the raise

@@ -48,8 +48,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-// --- filesystem ---
-
 pub(crate) fn commit_options(args: &CommitArgs) -> CommitOptions {
     CommitOptions {
         preconditions: Vec::new(),

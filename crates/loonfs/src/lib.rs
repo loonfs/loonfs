@@ -4,6 +4,9 @@
 //! run, read through, write through, and maintain a runtime. The parts an
 //! extension uses to keep its own index over a namespace are in [`engine`].
 //!
+//! The durable protocol doesn't belong here: it's in `loonfs-core`, and this
+//! crate adds caching, batching, budgets, and maintenance around it.
+//!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
 //! several runtimes may share. A writable runtime runs its publications,

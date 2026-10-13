@@ -1,6 +1,7 @@
 //! Forwarding macros for small object-store test doubles.
 
 /// Forwards selected `ObjectStore` methods to an inner store.
+///
 /// `except put` keeps the write methods on the wrapper, so they route through
 /// its `put`: the trait defaults, and the [`loonfs_objectstore::buffered`]
 /// functions for `put_streamed` and `assemble`. `buffered` writes only those

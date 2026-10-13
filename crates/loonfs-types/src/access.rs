@@ -114,8 +114,10 @@ impl Subject {
     }
 }
 
-/// One part of the subject a request acts as. Each surface names a part
-/// after its own input: a header, a flag, or an environment variable.
+/// One part of the subject a request acts as.
+///
+/// Each surface names a part after its own input: a header, a flag, or an
+/// environment variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubjectPart {
     /// The comma-separated principal ids.
@@ -357,7 +359,7 @@ impl AccessRights {
     /// The set holding only `admin`.
     pub const ADMIN: Self = Self(AccessRight::Admin.bit());
 
-    /// Whether the set holds `right`.
+    /// Reports whether the set holds `right`.
     pub fn contains(self, right: AccessRight) -> bool {
         self.0 & right.bit() != 0
     }
@@ -377,17 +379,17 @@ impl AccessRights {
         Self(self.0 & !other.0)
     }
 
-    /// Whether every right in `self` is also in `other`.
+    /// Reports whether every right in `self` is also in `other`.
     pub fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
     }
 
-    /// Whether the set holds no rights.
+    /// Reports whether the set holds no rights.
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// The rights in encoding order.
+    /// Iterates over the rights in encoding order.
     pub fn iter(self) -> impl Iterator<Item = AccessRight> {
         AccessRight::ALL
             .into_iter()
@@ -465,33 +467,34 @@ impl AccessGrants {
         Ok(Self(entries))
     }
 
-    /// The rights granted to `principal_id`, empty when it has no entry.
+    /// Returns the rights granted to `principal_id`, empty when it has no
+    /// entry.
     pub fn get(&self, principal_id: &PrincipalId) -> AccessRights {
         self.0.get(principal_id).copied().unwrap_or_default()
     }
 
-    /// The entries in principal order.
+    /// Iterates over the entries in principal order.
     pub fn iter(&self) -> impl Iterator<Item = (&PrincipalId, AccessRights)> {
         self.0.iter().map(|(id, rights)| (id, *rights))
     }
 
-    /// Number of principals named.
+    /// Returns the number of principals named.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Whether no principal is named.
+    /// Reports whether no principal is named.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// The underlying map.
+    /// Returns the underlying map.
     pub fn as_map(&self) -> &BTreeMap<PrincipalId, AccessRights> {
         &self.0
     }
 
-    /// Bytes this map accounts for when decoded: every principal id plus one
-    /// byte per right.
+    /// Returns the bytes this map accounts for when decoded: every principal id
+    /// plus one byte per right.
     pub fn logical_bytes(&self) -> usize {
         self.0
             .iter()
@@ -596,22 +599,22 @@ impl PrincipalSet {
         Ok(Self(principals))
     }
 
-    /// The ids in principal order.
+    /// Iterates over the ids in principal order.
     pub fn iter(&self) -> impl Iterator<Item = &PrincipalId> {
         self.0.iter()
     }
 
-    /// Whether the request acts as `principal_id`.
+    /// Reports whether the request acts as `principal_id`.
     pub fn contains(&self, principal_id: &PrincipalId) -> bool {
         self.0.contains(principal_id)
     }
 
-    /// Number of distinct identities the request acts as.
+    /// Returns the number of distinct identities the request acts as.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Whether the request acts as no principal.
+    /// Reports whether the request acts as no principal.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

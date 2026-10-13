@@ -1733,8 +1733,8 @@ fn immutable_envelopes_reject_unknown_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-name pinning: the durable delta and precondition names the format
-// spec fixes ("Standard mutation operations" and "Preconditions")
+// Wire-name pinning: the durable delta and precondition names in format.md
+// 6.6, "Operations and WAL deltas", and B.3, "Preconditions"
 // ---------------------------------------------------------------------------
 
 #[test]

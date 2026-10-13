@@ -1,6 +1,9 @@
 //! Shared cases and server support for SDK conformance tests.
 //!
 //! Each client harness loads the same cases from `cases/`.
+//!
+//! Checks for one SDK don't belong here: each language's harness under
+//! `sdk/conformance/` makes them.
 
 pub mod server;
 

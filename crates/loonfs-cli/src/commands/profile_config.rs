@@ -148,8 +148,6 @@ pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
         }
 }
 
-// --- create/update helpers ---
-
 #[derive(Debug)]
 pub(super) struct CreateProfileSpec {
     provider: CreateProviderSpec,

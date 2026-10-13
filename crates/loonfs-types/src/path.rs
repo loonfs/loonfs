@@ -31,18 +31,20 @@ string_id! {
     schema(example = "report.txt")
 }
 
-/// Maximum stored display-name length in UTF-8 bytes: the 255-byte
-/// component cap of mainstream filesystems (ext4, APFS, NTFS components)
-/// and drives. Names are stored as given, so the cap applies to the bytes
-/// as given.
+/// Maximum stored display-name length in UTF-8 bytes: the 255-byte component
+/// cap of mainstream filesystems (ext4, APFS, NTFS components) and drives.
+///
+/// Names are stored as given, so the cap applies to the bytes as given.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 
-/// Largest absolute path a request may name, in UTF-8 bytes. A path derived
-/// from stored names may be longer.
+/// Largest absolute path a request may name, in UTF-8 bytes.
+///
+/// A path derived from stored names may be longer.
 pub const MAX_PATH_BYTES: usize = 4_096;
 
-/// Most components a request path may hold. A path derived from stored names
-/// may hold more.
+/// Most components a request path may hold.
+///
+/// A path derived from stored names may hold more.
 pub const MAX_PATH_DEPTH: usize = 128;
 
 /// Describes why caller-supplied path or display-name text is not admissible.

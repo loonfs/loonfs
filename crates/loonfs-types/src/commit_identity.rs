@@ -1,7 +1,7 @@
-//! Generates stable fingerprints for filesystem mutations (format spec,
-//! "Semantic commit fingerprints"). A fingerprint lets LoonFS determine
-//! whether two requests that use the same commit ID describe the same
-//! mutation.
+//! Generates stable fingerprints for filesystem mutations
+//! ([Appendix B](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-b-semantic-commit-fingerprints)).
+//! A fingerprint lets LoonFS determine whether two requests that use the same
+//! commit ID describe the same mutation.
 //!
 //! The publisher stores this fingerprint in the commit row and compares
 //! it when the same commit ID is submitted again.
@@ -64,10 +64,10 @@ fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
 
 /// Canonical preimage for one operation inside a mutation fingerprint.
 ///
-/// The serde representation is durable contract (format spec, "Semantic
-/// commit fingerprints"): the same normalized request must fingerprint
-/// identically across releases. A pinned-value test below fails if the
-/// encoding drifts.
+/// The serde representation is durable contract
+/// ([Appendix B](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-b-semantic-commit-fingerprints)):
+/// the same normalized request must fingerprint identically across releases.
+/// A pinned-value test below fails if the encoding drifts.
 ///
 /// The serialized variant names, the field names, and the field order below
 /// are all part of that preimage under the [`COMMIT_FINGERPRINT_DOMAIN`] tag.
@@ -302,21 +302,9 @@ fn precondition_fingerprint_input(
     }
 }
 
-/// Canonical preimage for the content a put attaches.
-///
-/// For the reference form, identity is *which object*, so the id and its
-/// length are the whole of it. The checksum is evidence about those bytes,
-/// pinned to the id by the verification every write and read already performs,
-/// and it is left out deliberately: a reference that named the same object
-/// with a differently spelled checksum would otherwise read as a different mutation.
-///
-/// For that form, a retry that re-runs the whole operation, upload included,
-/// creates a new content object, so it is a different request and a reused
-/// commit id conflicts. Retrying a commit means sending the same `ContentRef`
-/// again, which replays, rather than uploading the bytes again.
-///
-/// Inline content has no object to name, so its bytes identify it. The form
-/// follows how the request supplied the content, never where the bytes end up.
+/// Canonical preimage for the content a put attaches: the reference form for
+/// an uploaded object, or the inline form for bytes the request includes
+/// ([Content in a fingerprint](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b2-content-in-a-fingerprint)).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ContentRefFingerprintInput<'a> {

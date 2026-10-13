@@ -35,9 +35,10 @@ pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_COMMIT_PRECONDITIONS: usize = 1024;
 
 /// Maximum content-token or prepared-proof entries carried by one explicit
-/// commit, bounding preparation work for a new primary. An oversized
-/// candidate may occupy a publisher queue slot until candidate preparation
-/// rejects it.
+/// commit, bounding preparation work for a new primary.
+///
+/// An oversized candidate may occupy a publisher queue slot until candidate
+/// preparation rejects it.
 pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 
 /// Maximum distinct new external content refs in one explicit commit, bounding
@@ -46,16 +47,19 @@ pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 
 /// Maximum byte length of a commit's optional `message` annotation, which is
 /// stored in every durable WAL record, hashed into the mutation fingerprint,
-/// and replayed by the change feed. This is the only bound on the message:
-/// no transport-level body limit is relied on.
+/// and replayed by the change feed.
+///
+/// This is the only bound on the message: no transport-level body limit is
+/// relied on.
 pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 
 /// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
-/// Every publish surface rejects at this length with `maintenance_required`,
-/// so a landed publication never leaves more than this behind.
+///
+/// Every publish surface rejects at this length with `maintenance_required`, so
+/// a landed publication never leaves more than this behind.
 pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 128;
 
 /// Visible WAL-tail length, in WAL objects, that starts an automatic WAL fold.
@@ -71,9 +75,11 @@ pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = duration_ms(PROVIDER_OPERATION_D
 /// milliseconds. Payload-sized conditional writes use a longer timeout.
 pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = duration_ms(PROVIDER_ATTEMPT_TIMEOUT);
 
-/// Allowance for publication request phases, including retry admission,
-/// final backoff and a payload-sized final attempt. Conditional publications
-/// always use a single request, even when their bodies are large.
+/// Allowance for publication request phases, including retry admission, final
+/// backoff and a payload-sized final attempt.
+///
+/// Conditional publications always use a single request, even when their bodies
+/// are large.
 pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
     duration_ms(PROVIDER_PUBLICATION_REQUEST_BOUND);
 
@@ -92,15 +98,18 @@ pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
 /// Self-enforced budget for one metadata publication: a fold, a compaction
 /// step, a claim, a deletion, a fork installation, a retention advance, or a
-/// grep step. It runs from the start of the publication, before the publisher
-/// loads the manifest it builds on, until the manifest put-if-absent is
-/// initiated. A publication that exceeds it aborts without publishing; its
-/// immutable outputs remain unreachable garbage-collection candidates.
+/// grep step.
+///
+/// It runs from the start of the publication, before the publisher loads the
+/// manifest it builds on, until the manifest put-if-absent is initiated. A
+/// publication that exceeds it aborts without publishing; its immutable outputs
+/// remain unreachable garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
 /// Combined allowance for age overstatement from host-to-provider or
 /// host-to-host clock error, timestamp precision, and scheduling delay around
 /// publication checks.
+///
 /// Direct expiry comparisons do not add this margin to stored deadlines.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 
@@ -114,42 +123,55 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     }
 }
 
-/// Minimum age of an unreachable object before garbage collection or repair
-/// may remove it. The value covers the longer of two spans, then provider
-/// operation time and the combined clock-error and scheduling allowance. The
-/// first span is the longest publication budget. The second is the
-/// revalidation bound plus the lifetime of a direct transfer capability: a
-/// view up to the bound old can still issue a capability, and the capability
-/// outlives the view.
+/// Minimum age of an unreachable object before garbage collection or repair may
+/// remove it.
+///
+/// The value covers the longer of two spans, then provider operation time and
+/// the combined clock-error and scheduling allowance. The first span is the
+/// longest publication budget. The second is the revalidation bound plus the
+/// lifetime of a direct transfer capability: a view up to the bound old can
+/// still issue a capability, and the capability outlives the view.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS),
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS,
 ) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
     + GC_SAFETY_MARGIN_MS;
 
-/// Longest gap a reader may leave between the manifest probe it relies on
-/// and the successor check that confirms it. A successor published after the
-/// probe cannot be collected within this bound: collection waits the grace
-/// window, which reserves this bound plus the clock allowance.
+/// Longest gap a reader may leave between the manifest probe it relies on and
+/// the successor check that confirms it.
+///
+/// A successor published after the probe cannot be collected within this bound:
+/// collection waits the grace window, which reserves this bound plus the clock
+/// allowance.
 pub const READ_REVALIDATION_BOUND_MS: u64 =
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
         + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
 
 const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
 
-/// Minimum provider age of a metadata segment no manifest lists before
-/// garbage collection may delete it. A streaming compaction writes its
-/// output under `segments/` as it goes and publishes at the end, so its
-/// earliest segment is unreferenced for the whole run. One day is the bound
-/// on a run; the difference between this age and the grace window below is
-/// how long a job may keep merging before it gives up.
+const _: () = assert!(
+    3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS,
+    "3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS: \
+     the final part, precondition, and completion requests a streamed write sends after its \
+     last caller byte must land before an aborted upload's record can be removed"
+);
+
+/// Minimum provider age of a metadata segment no manifest lists before garbage
+/// collection may delete it.
+///
+/// A streaming compaction writes its output under `segments/` as it goes and
+/// publishes at the end, so its earliest segment is unreferenced for the whole
+/// run. One day is the bound on a run; the difference between this age and the
+/// grace window below is how long a job may keep merging before it gives up.
 pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Elapsed monotonic time after which a streaming compaction abandons
-/// instead of publishing. A job that starts its last publication attempt at
-/// this bound finishes within one grace window, which the minimum age above
-/// reserves after the budget. The subtraction fails to compile if the grace
-/// window ever exceeds the minimum age.
+/// Elapsed monotonic time after which a streaming compaction abandons instead
+/// of publishing.
+///
+/// A job that starts its last publication attempt at this bound finishes within
+/// one grace window, which the minimum age above reserves after the budget. The
+/// subtraction fails to compile if the grace window ever exceeds the minimum
+/// age.
 pub const METADATA_COMPACTION_BUDGET_MS: u64 =
     UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS;
 
@@ -159,10 +181,12 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// cover it.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
-/// Minimum retirement grace from the deletion call's clock. The tombstone put
-/// starts within the publication budget, and the provider applies it within
-/// its request bound. Outstanding reads and direct capabilities run from that
-/// landing, and the minimum grace window covers them.
+/// Minimum retirement grace from the deletion call's clock.
+///
+/// The tombstone put starts within the publication budget, and the provider
+/// applies it within its request bound. Outstanding reads and direct
+/// capabilities run from that landing, and the minimum grace window covers
+/// them.
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
@@ -204,11 +228,13 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
     COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS;
 
 /// Minimum age of unreferenced content from a completed upload before
-/// collection. The value covers the receipt window, receipt lifetime, and a
-/// final publication with the clock-error and scheduling allowance. Every mint
-/// checks the upload's receipt issuance window. Immediately before the WAL
-/// put-if-absent, content proofs are checked against the request clock plus the whole
-/// attempt's elapsed monotonic time.
+/// collection.
+///
+/// The value covers the receipt window, receipt lifetime, and a final
+/// publication with the clock-error and scheduling allowance. Every mint checks
+/// the upload's receipt issuance window. Immediately before the WAL
+/// put-if-absent, content proofs are checked against the request clock plus the
+/// whole attempt's elapsed monotonic time.
 pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 

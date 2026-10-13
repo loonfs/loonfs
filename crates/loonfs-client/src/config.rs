@@ -64,9 +64,11 @@ impl ClientConfig {
         Ok(config)
     }
 
-    /// Validates field invariants. [`Self::load`] and
-    /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
-    /// config and a directly built one cannot diverge in what they accept.
+    /// Validates field invariants.
+    ///
+    /// [`Self::load`] and [`Client::new`](crate::Client::new) both run this, so
+    /// a file-loaded config and a directly built one cannot diverge in what
+    /// they accept.
     pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {

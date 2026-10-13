@@ -551,11 +551,11 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
                             .update(&chunk);
                         return Ok(Some((chunk, (body, request_check, completion_allowed))));
                     }
-                    // No caller bytes remain. PROVIDER_OPERATION_DEADLINE,
-                    // PROVIDER_MAX_RETRY_BACKOFF, and PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
-                    // bound the remaining part, precondition, and completion requests.
-                    // A streamed write has one part in flight. These bounds fit
-                    // within GC_MIN_GRACE_WINDOW_MS before the aborted record is removed.
+                    // No caller bytes remain. A streamed write has one part in
+                    // flight, so only the final part, the precondition, and the
+                    // completion follow, each within one provider request bound.
+                    // Together they land inside the grace window, before an
+                    // upload aborted after this check can lose its record.
                     let _ = request_check.send(());
                     completion_allowed.await.map_err(|_| {
                         ObjectStoreError::transport(&object_key, "upload session check failed")

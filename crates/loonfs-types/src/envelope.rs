@@ -25,9 +25,10 @@ pub struct EnvelopeProbe {
     pub format_version: u32,
 }
 
-/// Failure vocabulary shared by every envelope codec. Messages are
-/// envelope-generic; the wrapping error names the object (and its key) the
-/// bytes came from.
+/// Failure vocabulary shared by every envelope codec.
+///
+/// Messages are envelope-generic; the wrapping error names the object (and its
+/// key) the bytes came from.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EnvelopeCodecError {
@@ -181,11 +182,13 @@ pub struct VerifiedEnvelope<T> {
 }
 
 impl<T> VerifiedEnvelope<T> {
-    /// Checksum of the exact stored payload bytes.
+    /// Returns the checksum of the exact stored payload bytes.
     pub fn payload_checksum(&self) -> &str {
         &self.payload_checksum
     }
-    /// Payload protected by this framing. Clone it to prepare a changed successor.
+    /// Returns the payload protected by this framing.
+    ///
+    /// Clone it to prepare a changed successor.
     pub fn payload(&self) -> &T {
         &self.payload
     }
@@ -212,11 +215,12 @@ impl<T> EncodedEnvelope<T> {
         self.document_bytes
     }
 
-    /// Envelope derived while encoding, without decoding or serializing again.
+    /// Returns the envelope derived while encoding, without decoding or serializing
+    /// again.
     pub fn envelope(&self) -> &VerifiedEnvelope<T> {
         &self.envelope
     }
-    /// Complete durable document, ready to write.
+    /// Returns the complete durable document, ready to write.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -263,7 +267,9 @@ pub fn encode_json_envelope<T: Serialize>(
 }
 
 /// Decodes one JSON-bodied envelope, then checks its kind, version, checksum,
-/// and payload. Unknown envelope fields are rejected for every durable family.
+/// and payload.
+///
+/// Unknown envelope fields are rejected for every durable family.
 ///
 /// `classify_kind` lets a family with a kind registry report unknown kinds
 /// distinctly from mismatched ones; families with one kind pass

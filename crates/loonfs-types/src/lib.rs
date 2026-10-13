@@ -4,6 +4,9 @@
 //! The crate defines validated identifiers and paths at its root, HTTP API
 //! shapes in [`api`], durable storage formats in [`format`](mod@format), and
 //! shared operation options in [`options`].
+//!
+//! I/O doesn't belong here: the crate defines shapes, validation, and codecs,
+//! and reads or writes no object.
 
 #![warn(missing_docs)]
 

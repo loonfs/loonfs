@@ -6,6 +6,9 @@
 //!
 //! External simulation drivers also use this public API, so some items have
 //! no callers in this repository.
+//!
+//! Scenarios don't belong here: the tests and external drivers that use these
+//! tools define them.
 
 pub mod clock;
 pub mod fault;

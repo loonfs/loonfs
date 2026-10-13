@@ -3,6 +3,9 @@
 //! The CLI supports embedded profiles that talk directly to object storage and
 //! remote profiles that talk to a LoonFS server. It keeps command output stable
 //! for humans and scripts.
+//!
+//! Storage and protocol logic don't belong here: commands call the `loonfs`
+//! runtime or the `loonfs-client` client and render what they return.
 
 // The embedded runtime's composed async graph keeps growing; even with
 // the boxed entrypoint, rustc's future-layout query depth needs headroom

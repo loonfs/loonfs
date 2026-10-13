@@ -138,6 +138,7 @@ impl PathEntryKind {
     }
 
     /// Returns the actor responsible for the current file revision.
+    ///
     /// Other kinds return `None`.
     pub const fn revision_committed_by(&self) -> Option<&ActorId> {
         match self {

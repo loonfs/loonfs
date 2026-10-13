@@ -42,8 +42,9 @@ const GCS_SIGNING_ALGORITHM: &str = "GOOG4-RSA-SHA256";
 /// own client libraries write, so a deployment never has to configure one.
 const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 
-/// Maximum GCS object size. GCS does not document a smaller limit for a
-/// single-request upload.
+/// Maximum GCS object size.
+///
+/// GCS does not document a smaller limit for a single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// Creates native GCS V4 signed URLs.

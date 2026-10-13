@@ -309,9 +309,11 @@ pub struct ServerConfig {
     pub store: StoreConfig,
 }
 
-/// The server's TLS identity: one certificate chain and its private key,
-/// both read at startup. A file that is missing, unreadable, or not the PEM
-/// it claims to be fails the process rather than degrading to plaintext.
+/// The server's TLS identity: one certificate chain and its private key, both
+/// read at startup.
+///
+/// A file that is missing, unreadable, or not the PEM it claims to be fails the
+/// process rather than degrading to plaintext.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {

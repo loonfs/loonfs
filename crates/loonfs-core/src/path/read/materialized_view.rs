@@ -750,7 +750,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             };
             (kept, next_cursor)
         };
-        // Convert the durable binding into its public API shape.
         let entries = deletions
             .into_iter()
             .map(|deletion| TrashEntry {

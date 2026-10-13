@@ -303,8 +303,6 @@ impl LoonFs<Writable> {
         self.close_admission();
         self.mode.publisher.drain().await
     }
-
-    // Namespace create and fork live in `fs/namespaces.rs`.
 }
 
 #[cfg(test)]
