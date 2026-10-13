@@ -26,8 +26,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext,
-    OperationKind, OperationSelector, RecordingStore,
+    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
+    NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
@@ -3278,72 +3278,14 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     assert_eq!(budget.stats(), crate::ExecutionBudgetStats::default());
 }
 
-/// Holds every metadata segment write for a moment, and records the most
-/// namespaces that had one in flight at the same time.
-#[derive(Debug)]
-struct SegmentWriteWatch {
-    inner: LocalFsStore,
-    writing: Mutex<std::collections::BTreeMap<String, usize>>,
-    peak_namespaces: AtomicUsize,
-}
-
-impl SegmentWriteWatch {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("store"),
-            writing: Mutex::default(),
-            peak_namespaces: AtomicUsize::new(0),
-        }
-    }
-
-    fn enter(&self, namespace: &str) {
-        let mut writing = self.writing.lock().expect("segment write lock");
-        *writing.entry(namespace.to_owned()).or_default() += 1;
-        self.peak_namespaces
-            .fetch_max(writing.len(), AtomicOrdering::SeqCst);
-    }
-
-    fn exit(&self, namespace: &str) {
-        let mut writing = self.writing.lock().expect("segment write lock");
-        let count = writing.get_mut(namespace).expect("an entered namespace");
-        *count -= 1;
-        if *count == 0 {
-            writing.remove(namespace);
-        }
-    }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a test-side pause on segment writes leaves other merges and folds time to start theirs"
-)]
-async fn hold_segment_write() {
-    tokio::time::sleep(Duration::from_millis(5)).await;
-}
-
-#[async_trait]
-impl ObjectStore for SegmentWriteWatch {
-    delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let namespace = key
-            .contains("/segments/")
-            .then(|| key.split('/').nth(1))
-            .flatten();
-        let Some(namespace) = namespace else {
-            return self.inner.put(key, bytes, mode).await;
-        };
-        self.enter(namespace);
-        hold_segment_write().await;
-        let put = self.inner.put(key, bytes, mode).await;
-        self.exit(namespace);
-        put
-    }
+/// Watches metadata segment writes, keyed by the namespace that owns them.
+fn segment_write_watch(root: &Path) -> NamespaceOverlapStore<LocalFsStore> {
+    NamespaceOverlapStore::new(LocalFsStore::new(root).expect("store"), |context| {
+        let key = context.key();
+        (OperationSelector::Put.matches(context.kind()) && key.contains("/segments/"))
+            .then(|| key.split('/').nth(1).map(str::to_owned))
+            .flatten()
+    })
 }
 
 mod fenced_session;

@@ -86,9 +86,11 @@ async fn probe_store_reports_every_check_for_a_working_local_store() {
     let config_path = write_config(dir.path(), "127.0.0.1:9400", &store_root);
 
     let config = loonfs_server::load_server_config(&config_path).expect("load config");
-    let report = loonfs_server::probe_store(&config)
-        .await
-        .expect("probe store through library boundary");
+    let report = loonfs_types::api::v0::StoreProbeResponse::from(
+        loonfs_server::probe_store(&config)
+            .await
+            .expect("probe store through library boundary"),
+    );
     let output = run_server(&config_path, &["--probe-store"]);
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");

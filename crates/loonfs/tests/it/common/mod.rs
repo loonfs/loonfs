@@ -5,14 +5,13 @@
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
-use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, ContentRef, DeleteOptions,
-    DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager, FoldWalResponse,
-    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, MaintainMetadataOptions,
-    Maintenance, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceId,
-    PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore, UploadId,
-    UploadSession, Writable,
+    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, CompleteUploadBody,
+    ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
+    FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
+    LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataMaintenanceResponse, Namespace,
+    NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
+    SharedObjectStore, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
@@ -206,6 +205,16 @@ pub(crate) struct TestRuntime {
     namespaces: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
 }
 
+/// Creates the `demo` namespace on `runtime` and returns its id.
+pub(crate) async fn namespace(runtime: &TestRuntime) -> NamespaceId {
+    let namespace_id = loonfs_test_support::ids::namespace_id("demo");
+    runtime
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    namespace_id
+}
+
 pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
     open_runtime(store(root), writer_id)
 }
@@ -394,9 +403,7 @@ impl TestRuntime {
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
-            .complete_upload_for_mode(upload_id, |_| {
-                Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
-            })
+            .complete_upload(upload_id, CompleteUploadBody::DirectPut { content })
             .await
             .map(|completed| completed.response)
     }
@@ -702,7 +709,7 @@ impl RuntimeTestExt for TestRuntime {
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.complete_upload(upload_id, ResolvedUploadCompletion::KnownContent))
+        block_on(namespace.complete_upload(upload_id, CompleteUploadBody::ServiceProxied {}))
             .map(|completed| completed.response)
     }
 

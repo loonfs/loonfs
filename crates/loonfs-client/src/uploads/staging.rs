@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 
 /// Minimum payload size for streaming and multipart uploads.
 ///
-/// This matches the provider multipart part size. Smaller payloads would use
-/// one part and gain nothing from multipart overhead. Payloads of unknown size
-/// also use the streaming path.
+/// Smaller payloads are sent in one request, where multipart would add
+/// requests and save nothing. Payloads of unknown size also use the
+/// streaming path.
 pub const MIN_STREAMING_PUT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum number of multipart payloads held in memory at once.
@@ -200,7 +200,7 @@ fn observed_direct_put_source(
     (source, observation)
 }
 
-/// Builds a presigned whole-object PUT request.
+/// Builds a presigned PUT request, for a whole object or for one part.
 pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<WireRequest> {
     let ObjectTransferAccess::PresignedUrl {
         method,

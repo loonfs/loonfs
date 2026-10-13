@@ -6,14 +6,11 @@ use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::{AbsolutePath, WriterId};
+use loonfs_types::AbsolutePath;
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
-    MutationContext {
-        writer_id: WriterId::parse("writer").expect("writer"),
-        now_ms: 1_000,
-    }
+    crate::test_support::mutation_context("writer", 1_000)
 }
 
 #[tokio::test]

@@ -836,11 +836,14 @@ async fn grep_error_disabled_manifest_is_not_materialized_and_core_reads_survive
     let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding, None);
+    let result = client
+        .grep(&namespace_id, &binding)
+        .page(loonfs_test_support::ids::first_page())
+        .await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
-        result.await,
+        result,
         501,
         ErrorCode::NotSupported,
         "not enabled",
@@ -865,11 +868,14 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
     let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding, None);
+    let result = client
+        .grep(&namespace_id, &binding)
+        .page(loonfs_test_support::ids::first_page())
+        .await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
-        result.await,
+        result,
         501,
         ErrorCode::NotSupported,
         "backfill has not completed",
@@ -896,11 +902,14 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     fault_store.fail_next(1);
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding, None);
+    let result = client
+        .grep(&namespace_id, &binding)
+        .page(loonfs_test_support::ids::first_page())
+        .await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
-        result.await,
+        result,
         500,
         ErrorCode::ServerError,
         "object-store request failed",
@@ -979,7 +988,8 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
         identity_mismatch,
     ] {
         let result = client
-            .grep(&namespace_id, &grep_error_request(), None)
+            .grep(&namespace_id, &grep_error_request())
+            .page(loonfs_test_support::ids::first_page())
             .await;
         assert_grep_api_error_and_core_read(
             client,
@@ -3975,8 +3985,8 @@ mod direct_download {
                 assert_eq!(code, ErrorCode::InvalidRequest.as_str());
                 assert_eq!(
                     message,
-                    "invalid upload content: completion request mode `direct_multipart` does not \
-                     match stored upload mode `direct_put`"
+                    "invalid upload content: completion mode `direct_multipart` does not match \
+                     stored upload mode `direct_put`"
                 );
             }
             other => panic!("expected a typed invalid_request, got {other:?}"),

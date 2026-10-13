@@ -39,7 +39,8 @@ use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_types::PinId;
 use loonfs_types::{
     AbsolutePath, AttributeKey, AttributeValue, ChangeSeq, Commit, DeleteDirectoryBehavior,
-    DestinationBehavior, EntryInodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
+    DestinationBehavior, EntryInodeKind, GrepResponse, ListPathEntriesResponse, NamespaceId,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -319,68 +320,52 @@ pub(crate) async fn run_filesystem_grep(
         .map(|path| parse_user_path_arg("--path-prefix", path, RootPath::Allowed))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let mut request = loonfs_types::GrepRequest {
+    let request = loonfs_types::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
         path_prefix,
         inode_id: None,
-        cursor: args.pagination.cursor.clone(),
+        cursor: None,
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
     };
-    let mut matches = Vec::new();
     let mut tail_scanned = true;
-    let mut plan = PagePlan::new(&args.pagination.page_limits);
-    let stdout = io::stdout();
-    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
-    let (namespace_id, head_seq, built_through_seq, next_cursor) = loop {
-        let response = context
-            .target
-            .client
-            .grep(context.namespace(), &request, plan.request_size())
-            .await
-            .map_err(|error| {
-                context.fail(kind, CliError::from(error).with_command_hint(kind, None))
-            })?;
-        let snapshot = (
-            response.namespace_id,
-            response.head_seq,
-            response.built_through_seq,
-        );
-        plan.record(response.matches.len());
-        if args.pagination.page_limits.jsonl {
-            write_jsonl_page(&mut stdout, &response.matches)
-                .map_err(CliError::io)
-                .map_err(|error| context.fail(kind, error))?;
-        } else {
-            matches.extend(response.matches);
-        }
-        tail_scanned &= response.tail_scanned;
-        let next_cursor = response.next_cursor;
-        if !plan.should_continue(next_cursor.is_some()) {
-            break (snapshot.0, snapshot.1, snapshot.2, next_cursor);
-        }
-        request.cursor.clone_from(&next_cursor);
-    };
-    if args.pagination.page_limits.jsonl {
+    let listing = collect_or_stream_pages(
+        PagePlan::new(&args.pagination.page_limits),
+        args.pagination.cursor.clone(),
+        args.pagination.page_limits.jsonl,
+        async |cursor, limit| {
+            context
+                .target
+                .client
+                .grep(context.namespace(), &request)
+                .page(page_request(cursor, limit)?)
+                .await
+                .map_err(|error| CliError::from(error).with_command_hint(kind, None))
+        },
+        |page: &GrepResponse| tail_scanned &= page.tail_scanned,
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
+    let PagedListing::Collected(response) = listing else {
         if !tail_scanned {
             crate::render::write_stderr_warning(
                 "recent commits were not scanned (allow_stale); results may be stale",
             );
         }
         return Ok(context.output(kind, CommandData::StreamedToStdout));
-    }
+    };
     Ok(context.output(
         kind,
         CommandData::GrepMatches {
             pattern: args.pattern,
-            namespace_id,
-            head_seq,
-            built_through_seq,
-            matches,
-            tail_scanned,
-            truncated: next_cursor.is_some(),
-            next_cursor,
+            namespace_id: response.namespace_id,
+            head_seq: response.head_seq,
+            built_through_seq: response.built_through_seq,
+            matches: response.matches,
+            tail_scanned: response.tail_scanned,
+            truncated: response.next_cursor.is_some(),
+            next_cursor: response.next_cursor,
         },
     ))
 }
@@ -464,13 +449,13 @@ pub(crate) async fn run_filesystem_get(
                 ))
             }
             Some(destination) => PathBuf::from(destination),
-            None => destination_path_for_get(spec.absolute_path().as_str(), None)
+            None => destination_path_for_get(spec.absolute_path(), None)
                 .map_err(|error| context.fail(kind, error))?,
         };
         return recursive::run_get_tree(
             kind,
             &context,
-            spec.absolute_path().as_str(),
+            spec.absolute_path(),
             &local_root,
             destination_behavior(args.force),
             runtime,
@@ -508,11 +493,9 @@ pub(crate) async fn run_filesystem_get(
     } else {
         DestinationName::Given
     };
-    let destination = destination_path_for_get(
-        spec.absolute_path().as_str(),
-        args.local_destination.as_deref(),
-    )
-    .map_err(|error| context.fail(kind, error))?;
+    let destination =
+        destination_path_for_get(spec.absolute_path(), args.local_destination.as_deref())
+            .map_err(|error| context.fail(kind, error))?;
     let (mut download, meta) = open_resumable_download(
         &context,
         &spec,
@@ -870,7 +853,7 @@ pub(crate) async fn run_filesystem_put(
             kind,
             &context,
             &local_path,
-            remote_root.as_str(),
+            &remote_root,
             destination_behavior(args.force),
             args.commit.message.clone(),
             runtime,
@@ -1553,8 +1536,8 @@ async fn run_filesystem_transfer(
             return recursive::run_copy_tree(
                 kind,
                 &context,
-                from.absolute_path().as_str(),
-                to.absolute_path().as_str(),
+                from.absolute_path(),
+                to.absolute_path(),
                 destination_behavior(args.force),
                 args.commit.message.clone(),
                 runtime,

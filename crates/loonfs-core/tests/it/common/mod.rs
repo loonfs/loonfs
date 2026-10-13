@@ -9,12 +9,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
-pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
-    MutationContext {
-        writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
-        now_ms,
-    }
-}
+pub(crate) use loonfs_core::test_support::mutation_context;
 
 pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
@@ -51,8 +46,6 @@ pub(crate) mod commit_split_support {
     use loonfs_objectstore::timing::StdMonotonicTimer;
 
     use super::{namespace_engine, read_context};
-    use async_trait::async_trait;
-    use bytes::Bytes;
     use loonfs_types::{
         AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, NamespaceId,
     };
@@ -65,13 +58,13 @@ pub(crate) mod commit_split_support {
     use loonfs_core::{CoreError, CreateNamespaceOptions, MutationContext};
 
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::ids::page_limit;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
     use std::collections::HashSet;
     use std::path::Path;
 
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         store: &S,
@@ -355,137 +348,6 @@ pub(crate) mod commit_split_support {
         namespace_engine(store, namespace_id, &mutation_context())
             .read_file(absolute_path, &context, None)
             .await
-    }
-
-    #[derive(Debug)]
-    pub(crate) struct InjectCreateFailureStore {
-        pub(crate) inner: LocalFsStore,
-        pub(crate) matcher: KeyMatcher,
-        pub(crate) failure: InjectedCreateFailure,
-        pub(crate) injected: Mutex<bool>,
-    }
-
-    impl InjectCreateFailureStore {
-        pub(crate) fn new(
-            inner: LocalFsStore,
-            matcher: KeyMatcher,
-            failure: InjectedCreateFailure,
-        ) -> Self {
-            Self {
-                inner,
-                matcher,
-                failure,
-                injected: Mutex::new(false),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    pub(crate) enum KeyMatcher {
-        Exact(String),
-        Prefix(String),
-    }
-
-    impl KeyMatcher {
-        pub(crate) fn matches(&self, key: &str) -> bool {
-            match self {
-                Self::Exact(expected) => key == expected,
-                Self::Prefix(prefix) => key.starts_with(prefix),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    pub(crate) enum InjectedCreateFailure {
-        Transport {
-            message: &'static str,
-        },
-        PermissionDenied {
-            message: &'static str,
-        },
-        PreconditionFailed {
-            write_attempted_object: bool,
-            additional_writes: Vec<(String, Vec<u8>)>,
-        },
-    }
-
-    impl InjectedCreateFailure {
-        pub(crate) async fn apply_before_error(
-            &self,
-            inner: &LocalFsStore,
-            attempted_key: &str,
-            attempted_bytes: Bytes,
-        ) -> Result<(), ObjectStoreError> {
-            match self {
-                Self::Transport { .. } | Self::PermissionDenied { .. } => Ok(()),
-                Self::PreconditionFailed {
-                    write_attempted_object,
-                    additional_writes,
-                } => {
-                    if *write_attempted_object {
-                        inner
-                            .put_overwrite(attempted_key, attempted_bytes.clone())
-                            .await?;
-                    }
-                    for (key, bytes) in additional_writes {
-                        inner
-                            .put_overwrite(key, Bytes::copy_from_slice(bytes))
-                            .await?;
-                    }
-                    Ok(())
-                }
-            }
-        }
-
-        pub(crate) fn error(&self, attempted_key: &str) -> ObjectStoreError {
-            match self {
-                Self::Transport { message } => {
-                    ObjectStoreError::transport(attempted_key, (*message).to_owned())
-                }
-                Self::PermissionDenied { message } => ObjectStoreError::PermissionDenied {
-                    object_key: attempted_key.to_owned(),
-                    message: (*message).to_owned(),
-                },
-                Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed {
-                    object_key: attempted_key.to_owned(),
-                },
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for InjectCreateFailureStore {
-        loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            if matches!(&mode, PutMode::CreateIfAbsent) && self.matcher.matches(key) {
-                let should_inject = {
-                    let mut injected = self
-                        .injected
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if *injected {
-                        false
-                    } else {
-                        *injected = true;
-                        true
-                    }
-                };
-                if should_inject {
-                    self.failure
-                        .apply_before_error(&self.inner, key, bytes.clone())
-                        .await?;
-                    return Err(self.failure.error(key));
-                }
-            }
-
-            self.inner.put(key, bytes, mode).await
-        }
     }
 
     pub(crate) fn mutation_context() -> MutationContext {

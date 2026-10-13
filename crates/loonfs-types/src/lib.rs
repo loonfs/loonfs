@@ -12,7 +12,9 @@ mod actor;
 mod attributes;
 mod base64_bytes;
 mod capability;
+mod civil_date;
 mod commit_identity;
+pub mod config;
 mod content;
 mod control;
 mod digest;
@@ -81,12 +83,13 @@ pub mod format {
 }
 
 pub use access::{
-    AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights, PrincipalId,
-    PrincipalIdValidationError, PrincipalScope, PrincipalScopeValidationError, PrincipalSet,
-    PrincipalSetError, Subject, SubjectId, SubjectIdValidationError,
-    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_SUBJECT_PRINCIPALS,
+    AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights,
+    AccessRightsError, PrincipalId, PrincipalIdValidationError, PrincipalScope,
+    PrincipalScopeValidationError, PrincipalSet, PrincipalSetError, Subject, SubjectId,
+    SubjectIdValidationError, SubjectPart, SubjectPartsError, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
+    MAX_ACCESS_GRANT_ENTRIES, MAX_SUBJECT_PRINCIPALS,
 };
-pub use actor::{ActorId, ActorIdValidationError};
+pub use actor::{ActorId, ActorIdValidationError, MAX_ACTOR_ID_BYTES};
 pub use attributes::{
     AttributeKey, AttributeKeyValidationError, AttributeValue, AttributeValueValidationError,
     Attributes, AttributesError, AttributesRevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES,
@@ -112,6 +115,7 @@ pub use capability::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
+pub use civil_date::{civil_from_days, CivilDate};
 pub use commit_identity::{
     semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
@@ -121,7 +125,7 @@ pub use content::{
     ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme, ResumedPrefixError,
     ResumedPrefixIncompleteError, StreamingChecksum,
 };
-pub use digest::sha256_digest;
+pub use digest::{sha256_digest, sha256_hex};
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
@@ -139,18 +143,18 @@ pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, encode_cursor, encode_token, DirectoryPageCursor, EffectiveLimit,
     FileRevisionsPageCursor, GrepPageCursor, LimitError, OpaqueToken, OpaqueTokenError, Page,
-    PageCursor, PageCursorError, PageRequest, PagedResponse, Pager, PaginationPolicy,
-    TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    PageCursor, PageRequest, PagedResponse, Pager, PaginationPolicy, TrashPageCursor,
+    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
     MAX_PATH_DEPTH,
 };
 pub use retry::{
-    transport_retry_backoff, MonotonicTimer, OperationDeadline, StdMonotonicTimer,
-    TransportRetryPolicy,
+    saturating_duration_ms, transport_retry_backoff, MonotonicTimer, OperationDeadline,
+    StdMonotonicTimer, TransportRetryOutcome, TransportRetryPolicy,
 };
-pub use secret::SecretString;
+pub use secret::{SecretString, REDACTED};
 pub use widths::usize_from_u64;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live

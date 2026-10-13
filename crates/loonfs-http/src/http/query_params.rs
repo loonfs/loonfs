@@ -3,7 +3,7 @@
 use super::error::ApiResponseError;
 use loonfs::ErrorCode;
 use loonfs_types::{
-    decode_cursor, GeneratedIdValidationError, LimitError, PageCursorError, PaginationPolicy,
+    decode_cursor, GeneratedIdValidationError, LimitError, OpaqueTokenError, PaginationPolicy,
     PublicOrdinalRangeError, RevisionNo,
 };
 use std::str::FromStr;
@@ -125,7 +125,7 @@ fn limit_response_error(error: LimitError) -> ApiResponseError {
     ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("limit")
 }
 
-fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
+fn page_cursor_response_error(error: OpaqueTokenError) -> ApiResponseError {
     ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("cursor")
 }
 

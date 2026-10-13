@@ -156,10 +156,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
-        MutationContext {
-            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
-            now_ms: 1,
-        }
+        crate::test_support::mutation_context("writer", 1)
     }
 
     async fn setup_namespace() -> (

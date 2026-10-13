@@ -83,9 +83,8 @@ pub use loonfs_core::{
     MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
-    Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
-    ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
-    UploadSessionStatus,
+    Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
+    ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
 };
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
@@ -175,7 +174,7 @@ pub mod content_tokens {
 pub mod uploads {
     pub use loonfs_core::{
         DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
-        MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
+        MultipartPartTargets, UploadSessionView,
     };
 }
 

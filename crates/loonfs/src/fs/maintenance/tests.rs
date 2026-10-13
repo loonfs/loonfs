@@ -17,6 +17,9 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{
+    Intercept, InterceptStore, Interceptor, OperationContext, OperationSelector,
+};
 use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
 };
@@ -782,27 +785,24 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
 /// sees while it has races left, so the compaction step that reaches its
 /// publication loses that race.
 #[derive(Debug)]
-struct RivalFoldStore {
-    inner: LocalFsStore,
+struct RivalFold {
+    rival: LocalFsStore,
     namespace_id: NamespaceId,
     races_left: std::sync::atomic::AtomicUsize,
     races_run: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for RivalFoldStore {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
+impl Interceptor for RivalFold {
     // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
     #[allow(deprecated)]
-    async fn put(
-        &self,
-        key: &str,
-        bytes: bytes::Bytes,
-        mode: loonfs_objectstore::PutMode,
-    ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
+    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
         use std::sync::atomic::Ordering::SeqCst;
-        if loonfs_objectstore::layout::manifest_no_of(key).is_some()
+        let kind = context.kind();
+        let writes =
+            OperationSelector::Put.matches(kind) || OperationSelector::CompareAndSwap.matches(kind);
+        if writes
+            && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
             && self
                 .races_left
                 .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
@@ -810,7 +810,7 @@ impl ObjectStore for RivalFoldStore {
         {
             self.races_run.fetch_add(1, SeqCst);
             loonfs_core::test_support::append_wal_objects(
-                &self.inner,
+                &self.rival,
                 &self.namespace_id,
                 1,
                 &loonfs_core::MutationContext {
@@ -821,7 +821,7 @@ impl ObjectStore for RivalFoldStore {
             .await
             .expect("the rival writes");
             loonfs_core::fold_wal_tail(
-                &self.inner,
+                &self.rival,
                 None,
                 &self.namespace_id,
                 None,
@@ -833,7 +833,7 @@ impl ObjectStore for RivalFoldStore {
             .await
             .expect("the rival folds");
         }
-        self.inner.put(key, bytes, mode).await
+        Intercept::Continue
     }
 }
 
@@ -842,12 +842,15 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
     use std::sync::atomic::Ordering::SeqCst;
     let temp_dir = tempdir().expect("tempdir");
     let namespace = namespace_id("losing-loop");
-    let store = Arc::new(RivalFoldStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_id: namespace.clone(),
-        races_left: 0.into(),
-        races_run: 0.into(),
-    });
+    let store = Arc::new(InterceptStore::with_interceptor(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        RivalFold {
+            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id: namespace.clone(),
+            races_left: 0.into(),
+            races_run: 0.into(),
+        },
+    ));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
@@ -866,7 +869,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .await
         .expect("claim the namespace before the races start");
 
-    store.races_left.store(5, SeqCst);
+    store.interceptor().races_left.store(5, SeqCst);
     assert_eq!(
         maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
@@ -875,12 +878,12 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         crate::MetadataMaintenanceOutcome::Due
     );
     assert_eq!(
-        store.races_run.load(SeqCst),
+        store.interceptor().races_run.load(SeqCst),
         3,
         "the loop gives up after three lost races in a row"
     );
 
-    store.races_left.store(0, SeqCst);
+    store.interceptor().races_left.store(0, SeqCst);
     LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()

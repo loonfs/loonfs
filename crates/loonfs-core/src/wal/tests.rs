@@ -27,10 +27,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn context(now_ms: u64) -> crate::MutationContext {
-    crate::MutationContext {
-        writer_id: WriterId::parse("writer").expect("writer"),
-        now_ms,
-    }
+    crate::test_support::mutation_context("writer", now_ms)
 }
 
 #[tokio::test]

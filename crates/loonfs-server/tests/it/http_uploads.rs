@@ -128,7 +128,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         "{}/v0/namespaces/{namespace}/uploads/{}/complete",
         harness.server_url, begin.upload_id
     );
-    let wrong = "completion request mode `direct_multipart` does not match stored upload mode \
+    let wrong = "completion mode `direct_multipart` does not match stored upload mode \
                  `service_proxied`";
     let result = raw_agent()
         .post(&completion_url)

@@ -1,5 +1,6 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::{ApiError, ErrorCode, ErrorDetails};
 use thiserror::Error;
 
@@ -16,20 +17,9 @@ pub enum ClientError {
     /// The client configuration could not be decoded.
     #[error("failed to decode config: {0}")]
     ConfigDecode(String),
-    /// A required client configuration field is missing.
-    #[error("missing `{field}`")]
-    MissingConfigField {
-        /// Name of the missing field.
-        field: &'static str,
-    },
-    /// A client configuration field contains an invalid value.
-    #[error("invalid `{field}`: {reason}")]
-    ConfigValidation {
-        /// Name of the field containing the invalid value.
-        field: &'static str,
-        /// Why the value is invalid.
-        reason: String,
-    },
+    /// A client configuration field is missing or invalid.
+    #[error(transparent)]
+    ConfigField(#[from] ConfigFieldError),
     /// A path is invalid or cannot be used with the requested namespace.
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),

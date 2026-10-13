@@ -4,7 +4,7 @@ use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READ_WAVE;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
@@ -93,11 +93,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         if payload.retention_floor_seq >= target {
             return Ok(ManifestChange::Finished(payload.retention_floor_seq));
         }
-        verify_manifest_segments_exist(store, &payload)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+        verify_manifest_segments_exist(store, &payload).await?;
         payload.retention_floor_seq = target;
         Ok(ManifestChange::Next(Box::new(payload), target))
     })

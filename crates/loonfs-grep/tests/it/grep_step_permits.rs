@@ -4,8 +4,6 @@
 //! How many grep steps hold file content or index segments at once.
 
 use crate::common::GrepHost;
-use async_trait::async_trait;
-use bytes::Bytes;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::keyspace::{parse_key, GrepKeyKind};
 use loonfs_grep::{
@@ -14,57 +12,26 @@ use loonfs_grep::{
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
-use loonfs_test_support::delegate_object_store;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
-use std::collections::BTreeMap;
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, NamespaceOverlapStore, OperationSelector,
+};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::time::timeout;
 
-/// Holds every content read and grep segment read or write for a moment,
-/// and records the most namespaces that had one in flight at the same time.
-#[derive(Debug)]
-struct ContentWatch {
-    inner: LocalFsStore,
-    holding: Mutex<BTreeMap<String, usize>>,
-    peak_namespaces: AtomicUsize,
-}
-
-impl ContentWatch {
-    fn new(inner: LocalFsStore) -> Self {
-        Self {
-            inner,
-            holding: Mutex::default(),
-            peak_namespaces: AtomicUsize::new(0),
-        }
-    }
-
-    async fn watch<T>(&self, key: &str, request: impl Future<Output = T>) -> T {
-        let Some(namespace) = content_namespace(key) else {
-            return request.await;
-        };
-        {
-            let mut holding = self.holding.lock().expect("holding lock");
-            *holding.entry(namespace.clone()).or_default() += 1;
-            self.peak_namespaces
-                .fetch_max(holding.len(), Ordering::SeqCst);
-        }
-        hold_request().await;
-        let result = request.await;
-        let mut holding = self.holding.lock().expect("holding lock");
-        let count = holding.get_mut(&namespace).expect("an entered namespace");
-        *count -= 1;
-        if *count == 0 {
-            holding.remove(&namespace);
-        }
-        result
-    }
+/// Watches content reads and writes and grep segment reads and writes,
+/// keyed by the namespace that owns them.
+fn content_watch(inner: LocalFsStore) -> NamespaceOverlapStore<LocalFsStore> {
+    NamespaceOverlapStore::new(inner, |context| {
+        let kind = context.kind();
+        (OperationSelector::Get.matches(kind) || OperationSelector::Put.matches(kind))
+            .then(|| content_namespace(context.key()))
+            .flatten()
+    })
 }
 
 /// The namespace of a content object or a grep segment.
@@ -77,48 +44,6 @@ fn content_namespace(key: &str) -> Option<String> {
     parse_key(key)
         .filter(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. }))
         .map(|parsed| parsed.namespace_id.to_string())
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a test-side pause on content requests leaves other steps time to start theirs"
-)]
-async fn hold_request() {
-    tokio::time::sleep(Duration::from_millis(5)).await;
-}
-
-#[async_trait]
-impl ObjectStore for ContentWatch {
-    delegate_object_store!(self => self.inner;
-        head,
-        checksum_algorithm,
-        create_multipart_upload,
-        complete_multipart_upload,
-        abort_multipart_upload,
-        get_with_metadata,
-        delete,
-        list_prefix_stream,
-        list_entries_from_stream,
-        list_prefix,
-        list_child_prefixes,
-    );
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.watch(key, self.inner.get(key, range)).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.watch(key, self.inner.put(key, bytes, mode)).await
-    }
 }
 
 /// A writer that stores every file as a content object, so a step's content
@@ -226,7 +151,7 @@ async fn drive_until_reported(
 #[tokio::test]
 async fn no_more_grep_steps_hold_content_than_the_limit() {
     let directory = tempdir().expect("directory");
-    let watch = Arc::new(ContentWatch::new(
+    let watch = Arc::new(content_watch(
         LocalFsStore::new(directory.path()).expect("store"),
     ));
     let store: SharedObjectStore = watch.clone();
@@ -244,7 +169,7 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
         max_delta_runs: NonZeroUsize::new(2).expect("two delta runs"),
         ..GramIndexBuildPolicy::default()
     };
-    watch.peak_namespaces.store(0, Ordering::SeqCst);
+    watch.reset_peak();
 
     let backfills = futures::future::try_join_all(
         namespaces
@@ -284,7 +209,7 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
         );
     }
     assert_eq!(
-        watch.peak_namespaces.load(Ordering::SeqCst),
+        watch.peak_namespaces(),
         1,
         "one step holds content at a time, across every namespace"
     );

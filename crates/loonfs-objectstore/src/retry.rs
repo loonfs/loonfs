@@ -2,7 +2,7 @@
 
 use crate::attempts::count_retry_attempt;
 use crate::{PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE};
-use loonfs_types::{transport_retry_backoff, OperationDeadline, TransportRetryPolicy};
+use loonfs_types::{OperationDeadline, TransportRetryOutcome, TransportRetryPolicy};
 use std::future::Future;
 use std::time::Duration;
 
@@ -26,19 +26,19 @@ pub(crate) fn next_retry_backoff(
     retries: &mut u32,
     deadline: Option<&OperationDeadline<'_>>,
 ) -> Option<Duration> {
-    if *retries >= policy.max_retries {
-        tracing::warn!(
-            object_key = key,
-            operation,
-            retry = *retries,
-            payload_bytes,
-            "object store write retry budget exhausted; not retrying",
-        );
-        return None;
-    }
-    let mut remaining = Duration::MAX;
-    if let Some(deadline) = deadline {
-        let Some(deadline_remaining) = deadline.remaining() else {
+    let backoff = match policy.next_backoff(retries, deadline) {
+        TransportRetryOutcome::Wait { backoff } => backoff,
+        TransportRetryOutcome::RetriesExhausted => {
+            tracing::warn!(
+                object_key = key,
+                operation,
+                retry = *retries,
+                payload_bytes,
+                "object store write retry budget exhausted; not retrying",
+            );
+            return None;
+        }
+        TransportRetryOutcome::DeadlinePassed => {
             tracing::warn!(
                 object_key = key,
                 operation,
@@ -47,18 +47,15 @@ pub(crate) fn next_retry_backoff(
                 "object store operation deadline exhausted; not retrying",
             );
             return None;
-        };
-        remaining = deadline_remaining;
-    }
-    *retries += 1;
+        }
+    };
     count_retry_attempt();
-    let backoff = transport_retry_backoff(policy, *retries).min(remaining);
     tracing::warn!(
         object_key = key,
         operation,
         retry = *retries,
         max_retries = policy.max_retries,
-        backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+        backoff_ms = loonfs_types::saturating_duration_ms(backoff),
         "transient object store write failure, backing off before retry",
     );
     Some(backoff)

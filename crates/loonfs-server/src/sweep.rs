@@ -16,6 +16,7 @@ use loonfs_http::{HeldNamespace, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStoreError;
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::EffectiveLimit;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -170,9 +171,11 @@ impl Sweep {
                     .grep
                     .worker_config()
                     .build_policy()
-                    .map_err(|error| ServerConfigError::InvalidField {
-                        field: "grep",
-                        reason: error.to_string(),
+                    .map_err(|error| {
+                        ServerConfigError::Field(ConfigFieldError::Invalid {
+                            field: "grep",
+                            reason: error.to_string(),
+                        })
                     })?;
                 Ok::<_, ServerConfigError>(GrepIndexing { worker, policy })
             })
@@ -463,7 +466,7 @@ impl Sweep {
 
     /// The wait after a call's first failure: one tick interval.
     fn first_backoff_ms(&self) -> u64 {
-        u64::try_from(self.inner.tick_interval.as_millis()).unwrap_or(u64::MAX)
+        loonfs_types::saturating_duration_ms(self.inner.tick_interval)
     }
 
     /// Runs one call on a namespace, and contains a panic in it. The panic

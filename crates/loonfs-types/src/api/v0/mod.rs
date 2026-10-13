@@ -38,8 +38,7 @@ pub use reads::{
 };
 pub use search::{GrepIndex, GrepIndexLifecycle, GrepMatch, GrepRequest, GrepResponse};
 pub use uploads::{
-    CompleteMultipartUploadRequest, CompleteUploadBody, CompletedUploadPart, ContentToken,
-    CreateUploadBody, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-    SignedUploadPart, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
-    UploadSessionStatus,
+    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,
+    SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentClaim,
+    UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };

@@ -914,3 +914,74 @@ fn classify_put_mode(mode: &PutMode) -> PutModeKind {
         PutMode::CompareAndSwap { .. } => PutModeKind::CompareAndSwap,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyClass, ObjectStoreOperation, ObjectStoreResultKind};
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+    use std::fmt::Debug;
+
+    fn assert_spelling<T>(value: T, spelling: &str)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + Debug,
+    {
+        let expected = serde_json::Value::from(spelling);
+        assert_eq!(
+            serde_json::to_value(&value).expect("serialize the value"),
+            expected,
+            "{value:?}"
+        );
+        assert_eq!(
+            serde_json::from_value::<T>(expected).expect("deserialize the spelling"),
+            value,
+            "{spelling}"
+        );
+    }
+
+    #[test]
+    fn every_metric_label_matches_its_serde_spelling() {
+        for operation in [
+            ObjectStoreOperation::Head,
+            ObjectStoreOperation::GetWithMetadata,
+            ObjectStoreOperation::Get,
+            ObjectStoreOperation::Put,
+            ObjectStoreOperation::PutStreamed,
+            ObjectStoreOperation::Assemble,
+            ObjectStoreOperation::Delete,
+            ObjectStoreOperation::CreateMultipartUpload,
+            ObjectStoreOperation::CompleteMultipartUpload,
+            ObjectStoreOperation::AbortMultipartUpload,
+            ObjectStoreOperation::ListPrefix,
+            ObjectStoreOperation::ListPrefixStream,
+        ] {
+            assert_spelling(operation, operation.as_str());
+        }
+        for result in [
+            ObjectStoreResultKind::Ok,
+            ObjectStoreResultKind::NotFound,
+            ObjectStoreResultKind::InvalidKey,
+            ObjectStoreResultKind::InvalidRequest,
+            ObjectStoreResultKind::PreconditionFailed,
+            ObjectStoreResultKind::PermissionDenied,
+            ObjectStoreResultKind::Unsupported,
+            ObjectStoreResultKind::StoredChecksumMissing,
+            ObjectStoreResultKind::Configuration,
+            ObjectStoreResultKind::RetryableTransport,
+            ObjectStoreResultKind::Other,
+        ] {
+            assert_spelling(result, result.as_str());
+        }
+        for class in [
+            KeyClass::Content,
+            KeyClass::Metadata,
+            KeyClass::WalObject,
+            KeyClass::NamespaceManifest,
+            KeyClass::MetadataSegment,
+            KeyClass::GcControl,
+            KeyClass::Unknown,
+        ] {
+            assert_spelling(class, class.as_str());
+        }
+    }
+}

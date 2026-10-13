@@ -1,10 +1,13 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use loonfs_client::{ClientConfig, ClientError};
-use loonfs_objectstore::StoreConfigError;
+use loonfs_client::ClientConfig;
+use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
-use loonfs_types::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
+use loonfs_types::{
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId, SubjectPart,
+    SubjectPartsError, REDACTED,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -212,7 +215,7 @@ impl ProfileConfig {
                 validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
                 store
                     .validate()
-                    .map_err(|error| profile_store_error(name, &error))
+                    .map_err(|error| profile_field_error(name, &error))
             }
             ProfileConfig::Remote {
                 server_url,
@@ -249,7 +252,7 @@ impl ProfileConfig {
             }
             store
                 .validate()
-                .map_err(|error| profile_store_error(name, &error))?;
+                .map_err(|error| profile_field_error(name, &error))?;
         }
         Ok(())
     }
@@ -296,20 +299,36 @@ impl ProfileConfig {
     }
 }
 
+/// Refuses a stored principal scope without principals, or principals
+/// without a scope.
+///
+/// This is the pairing half of what `Subject::from_parts` checks for a
+/// request. A profile may also store a subject id alone, because the subject
+/// is used only with principals, so the rest of that rule does not apply here.
+pub(crate) fn ensure_subject_pairing(
+    principal_scope: Option<&PrincipalScope>,
+    principals: Option<&[PrincipalId]>,
+) -> Result<(), SubjectPartsError> {
+    let (part, required_by) = match (principal_scope, principals) {
+        (Some(_), None) => (SubjectPart::Principals, SubjectPart::PrincipalScope),
+        (None, Some(_)) => (SubjectPart::PrincipalScope, SubjectPart::Principals),
+        (Some(_), Some(_)) | (None, None) => return Ok(()),
+    };
+    Err(SubjectPartsError::Missing { part, required_by })
+}
+
+/// Reports a stored subject's missing part under the profile's field names.
 fn validate_profile_subject(
     profile_name: &str,
     principal_scope: Option<&PrincipalScope>,
     principals: Option<&[PrincipalId]>,
 ) -> Result<(), CliError> {
-    match (principal_scope, principals) {
-        (Some(_), None) => Err(CliError::invalid_config(format!(
-            "`profiles.{profile_name}.principal_scope` requires `profiles.{profile_name}.principals`"
-        ))),
-        (None, Some(_)) => Err(CliError::invalid_config(format!(
-            "`profiles.{profile_name}.principal_scope` is required with `profiles.{profile_name}.principals`"
-        ))),
-        (Some(_), Some(_)) | (None, None) => Ok(()),
-    }
+    ensure_subject_pairing(principal_scope, principals).map_err(|error| match error {
+        SubjectPartsError::Missing { part, required_by } => CliError::invalid_config(format!(
+            "`profiles.{profile_name}.{part}` is required with `profiles.{profile_name}.{required_by}`"
+        )),
+        other => CliError::invalid_config(other.to_string()),
+    })
 }
 
 fn validate_profile_default_namespace(
@@ -322,16 +341,15 @@ fn validate_profile_default_namespace(
     Ok(())
 }
 
-/// Adds the profile name to a store validation error.
-fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
+/// Reports a store or client config field failure under the profile's path.
+fn profile_field_error(profile_name: &str, error: &ConfigFieldError) -> CliError {
+    let field = profile_field(profile_name, error.field());
     match error {
-        StoreConfigError::MissingField { field } => {
-            CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
+        ConfigFieldError::Missing { .. } => CliError::invalid_config(format!("missing `{field}`")),
+        ConfigFieldError::Invalid { reason, .. } => {
+            CliError::invalid_config(format!("invalid `{field}`: {reason}"))
         }
-        StoreConfigError::InvalidField { field, reason } => {
-            CliError::invalid_config(format!("invalid `{profile_name}.{field}`: {reason}"))
-        }
-        error => CliError::invalid_config(format!("invalid `{profile_name}.store`: {error}")),
+        error => CliError::invalid_config(format!("invalid `{field}`: {error}")),
     }
 }
 
@@ -402,7 +420,7 @@ fn default_config_location() -> Result<ConfigLocation, CliError> {
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
-    validate_non_empty("profile name", name)
+    Ok(validate_non_empty("profile name", name)?)
 }
 
 fn profile_field(name: &str, field: &str) -> String {
@@ -665,7 +683,7 @@ pub(crate) fn redacted_config_table(table: &toml::Table) -> toml::Table {
 
 fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value {
     if key.is_some_and(|key| SECRET_CONFIG_KEYS.contains(&key)) {
-        return toml::Value::String("<redacted>".to_owned());
+        return toml::Value::String(REDACTED.to_owned());
     }
     match value {
         toml::Value::Table(table) => toml::Value::Table(redacted_config_table(table)),
@@ -677,13 +695,6 @@ fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value 
         ),
         other => other.clone(),
     }
-}
-
-fn validate_non_empty(field: &str, value: &str) -> Result<(), CliError> {
-    if value.trim().is_empty() {
-        return Err(CliError::invalid_config(format!("missing `{field}`")));
-    }
-    Ok(())
 }
 
 fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> {
@@ -753,16 +764,9 @@ fn validate_stored_remote_client_config(
 }
 
 fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<(), CliError> {
-    config.validate().map_err(|error| match error {
-        ClientError::MissingConfigField { field } => {
-            CliError::invalid_config(format!("missing `{}`", profile_field(profile_name, field)))
-        }
-        ClientError::ConfigValidation { field, reason } => CliError::invalid_config(format!(
-            "invalid `{}`: {reason}",
-            profile_field(profile_name, field)
-        )),
-        error => CliError::invalid_config(error.to_string()),
-    })
+    config
+        .validate()
+        .map_err(|error| profile_field_error(profile_name, &error))
 }
 
 #[cfg(test)]

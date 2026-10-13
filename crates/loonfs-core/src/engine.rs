@@ -22,7 +22,7 @@ use crate::pin::{
 };
 use crate::protocol::{
     CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
-    ResolvedUploadCompletion, UploadSessionView,
+    UploadSessionView,
 };
 use crate::storage::content::{
     open_content_import_reader, ContentLocation, DurableContentValidationError, FileContentStream,
@@ -31,7 +31,7 @@ use crate::storage::content::{
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::api::v0::{
-    Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
+    Commit, CompleteUploadBody, ListChangesResponse, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptions, StatOptions};
@@ -361,18 +361,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
-impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
-    /// Creates a read-only engine bound to `namespace_id`.
-    pub fn reader(
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    fn new(
         store: S,
         namespace_id: NamespaceId,
         content_writes: Arc<tokio::sync::Semaphore>,
+        mode: M,
     ) -> Self {
         Self {
             store,
             namespace_id,
             content_writes,
-            mode: ReadOnly,
+            mode,
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
@@ -386,6 +386,17 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
     }
 }
 
+impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
+    /// Creates a read-only engine bound to `namespace_id`.
+    pub fn reader(
+        store: S,
+        namespace_id: NamespaceId,
+        content_writes: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self::new(store, namespace_id, content_writes, ReadOnly)
+    }
+}
+
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a writable engine bound to `namespace_id` and `writer_id`.
     pub fn writer(
@@ -394,21 +405,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         writer_id: WriterId,
         content_writes: Arc<tokio::sync::Semaphore>,
     ) -> Self {
-        Self {
-            store,
-            namespace_id,
-            content_writes,
-            mode: Writable { writer_id },
-            wall_clock: Arc::new(crate::time::SystemWallClock),
-            subject: None,
-            authorization_head: None,
-            run_policy: crate::manifest::MetadataRunPolicy::default(),
-            segment_cache: None,
-            #[cfg(any(test, feature = "test-support"))]
-            compaction_row_budget: None,
-            #[cfg(any(test, feature = "test-support"))]
-            segment_row_budget: None,
-        }
+        Self::new(store, namespace_id, content_writes, Writable { writer_id })
     }
 
     /// Returns the writer id used for epoch acquisition and commit publication.
@@ -1126,7 +1123,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         subject: Option<&Subject>,
-        completion: ResolvedUploadCompletion,
+        completion: CompleteUploadBody,
     ) -> Result<CompletedUpload> {
         self.own_catalog(catalog);
         crate::protocol::complete_upload(
@@ -1135,33 +1132,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             completion,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Completes an upload after its durable mode selects a request decoder.
-    ///
-    /// Server integrations use this to decode raw request bytes without a
-    /// second upload-session read. A resolver failure is classified as an
-    /// invalid upload request.
-    pub async fn complete_upload_for_mode<F>(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        resolve: F,
-    ) -> Result<CompletedUpload>
-    where
-        F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
-    {
-        self.own_catalog(catalog);
-        crate::protocol::complete_upload_for_mode(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            resolve,
             &self.mutation_context(),
         )
         .await

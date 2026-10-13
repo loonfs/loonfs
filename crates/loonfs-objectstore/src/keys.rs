@@ -10,6 +10,12 @@ pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/")
 }
 
+/// Builds the listing prefix containing every object one extension owns in
+/// one namespace.
+pub fn extension_prefix(namespace_id: &NamespaceId, name: &str) -> String {
+    format!("namespaces/{namespace_id}/extensions/{name}/")
+}
+
 /// Builds the immutable object key for a numbered WAL object.
 pub fn wal_object(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
     format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
@@ -138,7 +144,7 @@ mod tests {
     }
 
     fn namespace_id() -> NamespaceId {
-        NamespaceId::parse("ns-1").expect("valid namespace id")
+        loonfs_test_support::ids::namespace_id("ns-1")
     }
 
     fn pin_id() -> PinId {

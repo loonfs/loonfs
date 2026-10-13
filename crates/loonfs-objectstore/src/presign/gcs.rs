@@ -7,16 +7,19 @@
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
 };
+use crate::checksum_header::decode_base64_checksum;
+use crate::gcs::GcpGcsStoreConfig;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
+    percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
     V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumHex};
+use loonfs_types::format::hex::hex_encode_bytes;
+use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use std::collections::BTreeMap;
@@ -42,17 +45,6 @@ const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 /// Maximum GCS object size. GCS does not document a smaller limit for a
 /// single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
-
-/// Configuration for native GCS signed URLs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GcsPresignerConfig {
-    /// Bucket incorporated into the signed request target.
-    pub bucket: String,
-    /// Filesystem path to the service-account JSON whose private key signs.
-    pub service_account_key_path: String,
-    /// Logical prefix prepended before the object key is encoded and signed.
-    pub key_prefix: Option<String>,
-}
 
 /// Creates native GCS V4 signed URLs.
 pub struct GcsV4Presigner {
@@ -81,8 +73,8 @@ impl fmt::Debug for GcsV4Presigner {
         f.debug_struct("GcsV4Presigner")
             .field("bucket", &self.bucket)
             .field("key_prefix", &self.key_prefix)
-            .field("client_email", &"<redacted>")
-            .field("signing_key", &"<redacted>")
+            .field("client_email", &REDACTED)
+            .field("signing_key", &REDACTED)
             .finish()
     }
 }
@@ -99,7 +91,7 @@ impl GcsV4Presigner {
     /// Construction fails for an unusable key prefix, an unreadable or
     /// malformed key file, or a private key that is not an RSA key in PKCS#8
     /// form.
-    pub fn new(config: GcsPresignerConfig) -> Result<Self> {
+    pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
         let raw = std::fs::read(&config.service_account_key_path).map_err(|err| {
             ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
         })?;
@@ -125,7 +117,7 @@ impl GcsV4Presigner {
         })?;
 
         Ok(Self {
-            bucket: config.bucket,
+            bucket: config.bucket.clone(),
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             client_email: key.client_email,
             signing_key,
@@ -205,7 +197,7 @@ impl GcsV4Presigner {
                     "service account key could not sign the request".to_owned(),
                 )
             })?;
-        Ok(hex_lower(&signature))
+        Ok(hex_encode_bytes(&signature))
     }
 }
 
@@ -263,16 +255,9 @@ pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
         let Some(encoded) = pair.trim().strip_prefix("crc32c=") else {
             continue;
         };
-        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-            continue;
-        };
-        if raw.len() != ChecksumAlgorithm::Crc32c.value_bytes() {
-            continue;
+        if let Some(checksum) = decode_base64_checksum(ChecksumAlgorithm::Crc32c, encoded) {
+            return Some(checksum);
         }
-        return Some(Checksum {
-            algorithm: ChecksumAlgorithm::Crc32c,
-            value: ChecksumHex::encode(&raw),
-        });
     }
     None
 }
@@ -306,7 +291,8 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use super::{stored_crc32c, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use crate::gcs::GcpGcsStoreConfig;
     use crate::keyspace::{normalize_key_prefix, scope_object_key};
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
@@ -352,7 +338,7 @@ mod tests {
     fn presigner(key_prefix: Option<&str>) -> GcsV4Presigner {
         let (_key_dir, service_account_key_path) =
             gcs_fixture_service_account_key_file("gcs-presign");
-        GcsV4Presigner::new(GcsPresignerConfig {
+        GcsV4Presigner::new(&GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
             key_prefix: key_prefix.map(ToOwned::to_owned),
@@ -502,7 +488,7 @@ mod tests {
             let (_key_dir, service_account_key_path) =
                 gcs_fixture_service_account_key_file("gcs-presign-prefix");
             assert!(matches!(
-                GcsV4Presigner::new(GcsPresignerConfig {
+                GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
                     service_account_key_path: service_account_key_path.display().to_string(),
                     key_prefix: Some(raw_prefix.to_owned()),
@@ -599,7 +585,7 @@ mod tests {
         for path in [not_json, no_pem, missing] {
             assert!(
                 matches!(
-                    GcsV4Presigner::new(GcsPresignerConfig {
+                    GcsV4Presigner::new(&GcpGcsStoreConfig {
                         bucket: "bucket".to_owned(),
                         service_account_key_path: path.display().to_string(),
                         key_prefix: None,

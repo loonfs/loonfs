@@ -209,17 +209,6 @@ impl CompleteUploadBody {
     }
 }
 
-/// Information required to complete a `direct_multipart` upload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CompleteMultipartUploadRequest {
-    /// Expected length and checksum of the assembled object.
-    pub content: UploadContentClaim,
-    /// Uploaded parts in ascending part order.
-    pub parts: Vec<CompletedUploadPart>,
-}
-
 /// The current state of an upload session.
 ///
 /// A session starts as `Open` and permanently ends as `Completed` or `Aborted`.

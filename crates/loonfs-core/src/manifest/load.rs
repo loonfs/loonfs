@@ -13,7 +13,7 @@ use super::runs::{manifest_cache_heap_bytes, runs_newest_first};
 use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::block_cache::SegmentBlockKind;
-use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::error::CoreError;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
@@ -191,10 +191,7 @@ pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
         &reference.owner_namespace_id,
         &reference.manifest_no,
     )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
+    .await?;
     ensure_manifest_reference_matches(
         &format!(
             "namespace `{}` manifest reference",

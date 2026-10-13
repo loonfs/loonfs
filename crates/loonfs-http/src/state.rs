@@ -27,6 +27,12 @@ pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
 pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
+/// Builds the semaphore that admits `count` concurrent transfers, clamped to
+/// the most permits a semaphore holds.
+pub fn transfer_permits(count: usize) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(count.min(Semaphore::MAX_PERMITS)))
+}
+
 /// Which of two jobs a host does for one subsystem: serve its requests, do
 /// its background work, both, or neither.
 ///

@@ -1578,13 +1578,6 @@ mod tests {
     }
 
     #[test]
-    fn namespace_manifest_kind_string_matches_serde() {
-        let kind = super::NamespaceManifestKind::Manifest;
-        let serialized = serde_json::to_value(kind).expect("serialize kind");
-        assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
-    }
-
-    #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             activity: Default::default(),

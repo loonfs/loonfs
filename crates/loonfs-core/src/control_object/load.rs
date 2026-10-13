@@ -163,7 +163,7 @@ mod tests {
     }
 
     fn namespace(value: &str) -> NamespaceId {
-        NamespaceId::parse(value).expect("valid namespace id")
+        loonfs_test_support::ids::namespace_id(value)
     }
 
     fn encoded_hint(namespace_id: &NamespaceId) -> (HintPayload, Vec<u8>) {

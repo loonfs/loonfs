@@ -6,16 +6,14 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_core::{
-    CoreError, DirectPutUploadTarget, ErrorCode, MutationContext, ResolvedUploadCompletion,
-};
+use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
-use loonfs_types::api::v0::CompleteMultipartUploadRequest;
+use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::Checksum;
 use loonfs_types::{
     format::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
@@ -69,7 +67,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
             &catalog,
             upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .map(|completed| completed.response)
@@ -903,11 +901,8 @@ mod direct_multipart {
         parts
     }
 
-    fn complete_request(
-        session: &Session,
-        parts: Vec<CompletedUploadPart>,
-    ) -> CompleteMultipartUploadRequest {
-        CompleteMultipartUploadRequest {
+    fn complete_request(session: &Session, parts: Vec<CompletedUploadPart>) -> CompleteUploadBody {
+        CompleteUploadBody::DirectMultipart {
             content: session.claim.clone(),
             parts,
         }
@@ -917,18 +912,13 @@ mod direct_multipart {
         store: &S,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
+        request: &CompleteUploadBody,
         context: &MutationContext,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         let catalog =
             loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
         namespace_engine(store, namespace_id, context)
-            .complete_upload(
-                &catalog,
-                upload_id,
-                None,
-                ResolvedUploadCompletion::Multipart(request.clone()),
-            )
+            .complete_upload(&catalog, upload_id, None, request.clone())
             .await
             .map(|completed| completed.response)
     }
@@ -1144,9 +1134,8 @@ mod direct_multipart {
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
-        let request = complete_request(&session, upload_every_part(&store, &session));
-        let provider_parts = request
-            .parts
+        let parts = upload_every_part(&store, &session);
+        let provider_parts = parts
             .iter()
             .map(|part| loonfs_objectstore::MultipartPart {
                 part_number: part.part_number,
@@ -1162,18 +1151,19 @@ mod direct_multipart {
                 &session.object_key,
                 &session.provider_upload_id,
                 &provider_parts,
-                &request.content.checksum,
+                &session.claim.checksum,
             )
             .await
             .expect("provider assembly whose response was lost");
 
-        let conflicting = CompleteMultipartUploadRequest {
+        let conflicting = CompleteUploadBody::DirectMultipart {
             content: UploadContentClaim {
-                size_bytes: request.content.size_bytes,
+                size_bytes: session.claim.size_bytes,
                 checksum: Checksum::crc64nvme(&vec![b'x'; session.payload.len()]),
             },
-            parts: request.parts.clone(),
+            parts: parts.clone(),
         };
+        let request = complete_request(&session, parts);
         let error = complete_upload(
             &store,
             &session.namespace_id,

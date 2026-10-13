@@ -83,7 +83,7 @@ macro_rules! request_completion_event {
             method = %$method,
             route = $route,
             status = $status.as_u16(),
-            elapsed_ms = u64::try_from($started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms = loonfs_types::saturating_duration_ms($started.elapsed()),
             request_id = $request_id.as_str(),
             "request completed"
         )

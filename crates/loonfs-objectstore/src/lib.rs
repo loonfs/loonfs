@@ -13,6 +13,7 @@
 mod assembly;
 mod attempts;
 mod aws_credentials;
+mod checksum_header;
 mod configured;
 pub mod crypto;
 mod endpoint;
@@ -47,12 +48,13 @@ pub use object_store::{
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
-    PROVIDER_CONNECT_TIMEOUT, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_MIN_COPIED_PART_BYTES,
+    PROVIDER_CONNECT_TIMEOUT, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MAX_MULTIPART_PART_BYTES,
+    PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_MIN_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_PARTS_IN_FLIGHT, PROVIDER_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
     PROVIDER_PUBLICATION_REQUEST_BOUND, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use store_config::{
-    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, StoreConfigError,
-    ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, ACCESS_KEY_ID_ENV,
+    SECRET_ACCESS_KEY_ENV,
 };

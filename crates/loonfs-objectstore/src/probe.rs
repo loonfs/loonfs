@@ -30,18 +30,6 @@ pub struct StoreProbeReport {
     pub checks: Vec<StoreProbeCheck>,
 }
 
-impl StoreProbeReport {
-    /// Returns true when every check passed or reported an unsupported option.
-    pub fn all_passed(&self) -> bool {
-        self.checks.iter().all(|check| {
-            matches!(
-                check.outcome,
-                StoreProbeOutcome::Passed | StoreProbeOutcome::Unsupported
-            )
-        })
-    }
-}
-
 impl From<StoreProbeReport> for StoreProbeResponse {
     fn from(report: StoreProbeReport) -> Self {
         Self {
@@ -77,19 +65,6 @@ pub struct StoreProbeCheck {
     pub name: &'static str,
     /// Result of the check.
     pub outcome: StoreProbeOutcome,
-}
-
-impl StoreProbeCheck {
-    /// Formats the check as one report line.
-    pub fn check_line(&self) -> String {
-        match &self.outcome {
-            StoreProbeOutcome::Passed => format!("{}: passed", self.name),
-            StoreProbeOutcome::Unsupported => format!("{}: unsupported", self.name),
-            StoreProbeOutcome::Failed { message } => {
-                format!("{}: failed: {message}", self.name)
-            }
-        }
-    }
 }
 
 /// Result of a store contract check.
@@ -893,7 +868,7 @@ mod tests {
             .filter(|check| matches!(check.outcome, StoreProbeOutcome::Failed { .. }))
             .collect();
         assert!(failures.is_empty(), "unexpected failures: {failures:?}");
-        assert!(report.all_passed());
+        assert!(StoreProbeResponse::from(report).all_passed());
     }
 
     #[tokio::test]
@@ -1024,7 +999,7 @@ mod tests {
         let report = run_store_contract_probe(&store, "probe_test_broken_cas").await;
 
         assert!(accepted_a_stale_swap.load(Ordering::SeqCst));
-        assert!(!report.all_passed());
+        assert!(!StoreProbeResponse::from(report.clone()).all_passed());
         assert!(matches!(
             outcome(&report, "compare_and_swap_rejects_stale"),
             StoreProbeOutcome::Failed { message } if message.contains("does not enforce")
@@ -1174,7 +1149,7 @@ mod tests {
 
         let report = run_store_contract_probe(&store, "probe_test_epoch_stamp").await;
 
-        assert!(!report.all_passed());
+        assert!(!StoreProbeResponse::from(report.clone()).all_passed());
         assert!(matches!(
             outcome(&report, "head_reports_last_modified"),
             StoreProbeOutcome::Failed { message } if message.contains("unix epoch")
@@ -1194,6 +1169,6 @@ mod tests {
             outcome(&report, "stored_checksum_readback"),
             StoreProbeOutcome::Failed { .. }
         ));
-        assert!(!report.all_passed());
+        assert!(!StoreProbeResponse::from(report).all_passed());
     }
 }

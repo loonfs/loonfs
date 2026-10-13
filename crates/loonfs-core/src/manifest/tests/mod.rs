@@ -78,7 +78,8 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore, OperationSelector,
+    RecordingStore,
 };
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, lookup_keys, MetadataRow,
@@ -95,7 +96,7 @@ use loonfs_types::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
@@ -107,13 +108,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
     for family in MANIFEST_ROW_FAMILIES {
-        let mut rows = projection
-            .manifest_segments
-            .scan_prefix(family, "")
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+        let mut rows = projection.manifest_segments.scan_prefix(family, "").await?;
         let state = if family == ApiMetadataRowFamily::ActiveDeletions {
             &tail_state
         } else {
@@ -121,10 +116,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
         };
         rows.extend(manifest_rows_for_family(state, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
-        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)?;
     }
     drop(tail_state);
     Ok((projection.head, metadata_state.build()))
@@ -154,12 +146,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     .map(crate::pin::checkpoint_summary)
 }
 
-pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
-    MutationContext {
-        writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
-        now_ms,
-    }
-}
+pub(crate) use crate::test_support::mutation_context;
 
 pub(crate) async fn write_test_file<S: ObjectStore>(
     store: &S,
@@ -690,62 +677,6 @@ async fn write_file_and_checkpoint(
         .captured_seq
 }
 
-#[derive(Debug)]
-struct ConflictOnManifestCreateStore {
-    inner: LocalFsStore,
-    manifest_key: String,
-    replacement: Vec<u8>,
-    injected: Mutex<bool>,
-}
-
-impl ConflictOnManifestCreateStore {
-    fn new(inner: LocalFsStore, manifest_key: String, replacement_bytes: Vec<u8>) -> Self {
-        Self {
-            inner,
-            manifest_key,
-            replacement: replacement_bytes,
-            injected: Mutex::new(false),
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ConflictOnManifestCreateStore {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let manifest_matches = key == self.manifest_key
-            || ((self.manifest_key.ends_with('/') || self.manifest_key.ends_with('-'))
-                && key.starts_with(&self.manifest_key));
-        if manifest_matches && matches!(&mode, PutMode::CreateIfAbsent) {
-            let should_inject = {
-                let mut injected = self
-                    .injected
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let should_inject = !*injected;
-                if should_inject {
-                    *injected = true;
-                }
-                should_inject
-            };
-            if should_inject {
-                let replacement_bytes = Bytes::copy_from_slice(&self.replacement);
-                self.inner.put_overwrite(key, replacement_bytes).await?;
-                return Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                });
-            }
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-}
-
 use super::build::{
     build_manifest_delta_run_segments, debug_assert_manifest_segments_do_not_overlap,
 };
@@ -775,11 +706,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let head_seq = head.seq;
     let previous_manifest = match source.basis_manifest_no {
         Some(previous_id) => Some(
-            load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-                })?,
+            load_manifest_materialization_for_inspection(store, namespace_id, previous_id).await?,
         ),
         _ => None,
     };

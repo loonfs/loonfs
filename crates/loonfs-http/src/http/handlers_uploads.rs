@@ -2,7 +2,7 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::extractors::SubjectHeaders;
+use super::extractors::{decode_json, SubjectHeaders};
 use super::query_params::parse_path_id;
 use super::{
     AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
@@ -15,7 +15,6 @@ use loonfs::content_tokens::{
     mint_content_token, CompletedUploadEvidence, ContentToken, ContentTokenError,
 };
 use loonfs::publish::PreparedContent;
-use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{Namespace, Writable};
 use loonfs_objectstore::{
     presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
@@ -26,9 +25,8 @@ use loonfs_types::ApiError;
 use loonfs_types::ErrorCode;
 use loonfs_types::{
     api::v0::{
-        CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadMode,
-        UploadSession, UploadSessionStatus,
+        CompleteUploadBody, CreateUploadBody, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, UploadSession, UploadSessionStatus,
     },
     options::DirectMultipartUploadOptions,
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
@@ -579,7 +577,7 @@ pub(super) async fn complete_upload(
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let body = body.into_bytes();
+    let completion = decode_json::<CompleteUploadBody>(&body.into_bytes())?;
     let namespace = state
         .namespaces
         .open(&namespace_id)
@@ -588,7 +586,7 @@ pub(super) async fn complete_upload(
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let completed = namespace
-        .complete_upload_for_mode(&upload_id, |mode| decode_completion_body(mode, &body))
+        .complete_upload(&upload_id, completion)
         .await
         .map_err(ApiResponseError::for_namespace_writer(
             &state.namespaces,
@@ -600,31 +598,6 @@ pub(super) async fn complete_upload(
         completed.evidence.as_ref(),
         state.runtime.now_ms(),
     )?))
-}
-
-fn decode_completion_body(
-    mode: UploadMode,
-    body: &[u8],
-) -> std::result::Result<ResolvedUploadCompletion, String> {
-    let request = super::extractors::decode_json::<CompleteUploadBody>(body)
-        .map_err(|error| error.message().to_owned())?;
-    if request.mode() != mode {
-        return Err(format!(
-            "completion request mode `{}` does not match stored upload mode `{}`",
-            request.mode().as_str(),
-            mode.as_str()
-        ));
-    }
-
-    match request {
-        CompleteUploadBody::ServiceProxied {} => Ok(ResolvedUploadCompletion::KnownContent),
-        CompleteUploadBody::DirectPut { content } => {
-            Ok(ResolvedUploadCompletion::DirectPut { content })
-        }
-        CompleteUploadBody::DirectMultipart { content, parts } => Ok(
-            ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
-        ),
-    }
 }
 
 #[cfg_attr(
@@ -777,7 +750,7 @@ mod completion_body_tests {
             .await
             .expect("content");
         let completed = namespace
-            .complete_upload(&upload.upload_id, ResolvedUploadCompletion::KnownContent)
+            .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
             .await
             .expect("complete");
         let loonfs::uploads::UploadSessionView {
@@ -804,53 +777,42 @@ mod completion_body_tests {
     }
 
     #[test]
-    fn stored_mode_selects_a_precise_completion_schema_error() {
-        let multipart_body =
-            format!(r#"{{"mode":"direct_multipart","content":{CONTENT},"parts":[]}}"#);
-        let direct_put_error =
-            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes())
-                .expect_err("multipart mode does not match direct put");
+    fn completion_body_decoder_names_the_missing_field() {
+        let error =
+            decode_json::<CompleteUploadBody>(b"{}").expect_err("completion mode is required");
         assert_eq!(
-            direct_put_error,
-            "completion request mode `direct_multipart` does not match stored upload mode \
-             `direct_put`"
-        );
-
-        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}")
-            .expect_err("completion mode is required");
-        assert_eq!(
-            multipart_error,
+            error.message(),
             "invalid JSON request body: missing field `mode` at line 1 column 2"
         );
 
         let missing_parts = format!(r#"{{"mode":"direct_multipart","content":{CONTENT}}}"#);
-        let missing_parts_error =
-            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes())
-                .expect_err("multipart completion needs parts");
+        let error = decode_json::<CompleteUploadBody>(missing_parts.as_bytes())
+            .expect_err("multipart completion needs parts");
         assert_eq!(
-            missing_parts_error,
+            error.message(),
             "invalid JSON request body: missing field `parts`"
         );
     }
 
     #[test]
     fn completion_body_decoder_rejects_unknown_fields_and_trailing_data() {
-        let error = decode_completion_body(
-            UploadMode::ServiceProxied,
+        let error = decode_json::<CompleteUploadBody>(
             br#"{"mode":"service_proxied","unknown_field":true}"#,
         )
         .expect_err("unknown completion field");
-        assert!(error.contains("unknown field `unknown_field`"), "{error}");
-
-        let error = decode_completion_body(
-            UploadMode::ServiceProxied,
-            br#"{"mode":"service_proxied"}{}"#,
-        )
-        .expect_err("trailing data");
+        let message = error.message();
         assert!(
-            error.starts_with("invalid JSON request body:")
-                && error.contains("trailing characters"),
-            "wrong trailing-data error: {error}"
+            message.contains("unknown field `unknown_field`"),
+            "{message}"
+        );
+
+        let error = decode_json::<CompleteUploadBody>(br#"{"mode":"service_proxied"}{}"#)
+            .expect_err("trailing data");
+        let message = error.message();
+        assert!(
+            message.starts_with("invalid JSON request body:")
+                && message.contains("trailing characters"),
+            "wrong trailing-data error: {message}"
         );
     }
 

@@ -2,21 +2,26 @@
 
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
-use loonfs_types::format::wal::{WalCommitDelta, WalInlineContent};
+use loonfs_types::format::wal::{
+    cbor_map_bytes, cbor_string_bytes, WalCommitDelta, WalInlineContent,
+};
 use loonfs_types::{
     AbsolutePath, AccessRight, FilesystemOperation, NamespaceNaming,
-    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES,
-    MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
+    MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
+    MAX_NAME_KEY_BYTES,
 };
 
+// CBOR u64 values use at most nine bytes; u32 values use five.
 const INTEGER_BYTES: usize = 9;
 const INDEX_BYTES: usize = 5;
-const NAMES_BYTES: usize = string_bytes(MAX_NAME_KEY_BYTES) + string_bytes(MAX_DISPLAY_NAME_BYTES);
+const NAMES_BYTES: usize =
+    cbor_string_bytes(MAX_NAME_KEY_BYTES) + cbor_string_bytes(MAX_DISPLAY_NAME_BYTES);
 const CREATE_INODE_BYTES: usize = delta_bytes(
     "create_inode",
     &[
         ("inode_id", INTEGER_BYTES),
-        ("inode_kind", string_bytes("file".len())),
+        ("inode_kind", cbor_string_bytes("file".len())),
     ],
 );
 const BIND_BYTES: usize = delta_bytes(
@@ -26,8 +31,8 @@ const BIND_BYTES: usize = delta_bytes(
         ("name_key", 0),
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
-        ("child_kind", string_bytes("file".len())),
-        ("child_created_by", string_bytes(256)),
+        ("child_kind", cbor_string_bytes("file".len())),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
     ],
 );
@@ -38,12 +43,12 @@ const UNBIND_BYTES: usize = delta_bytes(
         ("name_key", 0),
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
-        ("child_kind", string_bytes("file".len())),
-        ("child_created_by", string_bytes(256)),
+        ("child_kind", cbor_string_bytes("file".len())),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
         (
             "target",
-            map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
+            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
         ),
     ],
 ) + NAMES_BYTES;
@@ -53,7 +58,7 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
         ("root_inode_id", INTEGER_BYTES),
         (
             "deleted_binding",
-            map_bytes(&[
+            cbor_map_bytes(&[
                 ("parent_inode_id", INTEGER_BYTES),
                 ("name_key", 0),
                 ("display_name", 0),
@@ -62,16 +67,16 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
     ],
 );
 const DELETE_BYTES: usize = UNBIND_BYTES + TOMBSTONE_BYTES;
-const CONTENT_REF_BYTES: usize = map_bytes(&[
-    ("kind", string_bytes("blob_v1".len())),
-    ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
-    ("content_id", string_bytes(MAX_ID_BYTES)),
+const CONTENT_REF_BYTES: usize = cbor_map_bytes(&[
+    ("kind", cbor_string_bytes("blob_v1".len())),
+    ("owner_namespace_id", cbor_string_bytes(MAX_ID_BYTES)),
+    ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("size_bytes", INTEGER_BYTES),
     (
         "checksum",
-        map_bytes(&[
-            ("algorithm", string_bytes("crc64nvme".len())),
-            ("value", string_bytes(16)),
+        cbor_map_bytes(&[
+            ("algorithm", cbor_string_bytes("crc64nvme".len())),
+            ("value", cbor_string_bytes(16)),
         ]),
     ),
 ]);
@@ -83,18 +88,18 @@ const REVISION_BYTES: usize = delta_bytes(
         ("content_ref", CONTENT_REF_BYTES),
     ],
 );
-const APPEND_PIECE_BYTES: usize = map_bytes(&[
-    ("content_id", string_bytes(MAX_ID_BYTES)),
+const APPEND_PIECE_BYTES: usize = cbor_map_bytes(&[
+    ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("offset", INTEGER_BYTES),
-    ("bytes", string_bytes(0)),
+    ("bytes", cbor_string_bytes(0)),
 ]);
-const EXTENT_BYTES: usize = map_bytes(&[
-    ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
-    ("content_id", string_bytes(MAX_ID_BYTES)),
+const EXTENT_BYTES: usize = cbor_map_bytes(&[
+    ("owner_namespace_id", cbor_string_bytes(MAX_ID_BYTES)),
+    ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     (
         "object",
-        map_bytes(&[
-            ("kind", string_bytes("whole".len())),
+        cbor_map_bytes(&[
+            ("kind", cbor_string_bytes("whole".len())),
             ("start", INTEGER_BYTES),
             ("end", INTEGER_BYTES),
         ]),
@@ -111,8 +116,8 @@ fn carried_layout_bytes(deltas: &[WalCommitDelta]) -> usize {
                 layout: Some(layout),
                 ..
             } => bytes
-                .saturating_add(string_bytes("layout".len()))
-                .saturating_add(map_bytes(&[("extents", 9)]))
+                .saturating_add(cbor_string_bytes("layout".len()))
+                .saturating_add(cbor_map_bytes(&[("extents", 9)]))
                 .saturating_add(layout.extents.len().saturating_mul(EXTENT_BYTES)),
             _ => bytes,
         })
@@ -159,37 +164,22 @@ const REVOKE_BYTES: usize = delta_bytes(
         ("root_inode_id", INTEGER_BYTES),
         (
             "target",
-            map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
+            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
         ),
     ],
 );
 
-// CBOR lengths and u64 values use at most nine bytes; u32 values use five.
-const fn string_bytes(length: usize) -> usize {
-    9 + length
-}
-
-const fn map_bytes(fields: &[(&str, usize)]) -> usize {
-    let mut bytes = 9;
-    let mut index = 0;
-    while index < fields.len() {
-        bytes += string_bytes(fields[index].0.len()) + fields[index].1;
-        index += 1;
-    }
-    bytes
-}
-
 const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
-    map_bytes(&[
+    cbor_map_bytes(&[
         ("semantic_operation_index", INDEX_BYTES),
         (
             "delta",
-            map_bytes(&[
-                ("kind", string_bytes(kind.len())),
+            cbor_map_bytes(&[
+                ("kind", cbor_string_bytes(kind.len())),
                 ("delta_index", INDEX_BYTES),
             ]),
         ),
-    ]) + map_bytes(fields)
+    ]) + cbor_map_bytes(fields)
         - 9
 }
 
@@ -197,21 +187,24 @@ pub(crate) fn estimated_wal_record_bytes(
     request: &CommitIntent,
     inline_content: &[InlineContent],
 ) -> usize {
-    let fixed_bytes = map_bytes(&[
+    let fixed_bytes = cbor_map_bytes(&[
         ("committed_seq", INTEGER_BYTES),
-        ("commit_id", string_bytes(request.commit_id.as_str().len())),
+        (
+            "commit_id",
+            cbor_string_bytes(request.commit_id.as_str().len()),
+        ),
         (
             "committed_by",
-            string_bytes(request.actor_id.as_str().len()),
+            cbor_string_bytes(request.actor_id.as_str().len()),
         ),
         (
             "semantic_commit_fingerprint",
-            string_bytes("v1:sha256:".len() + 64),
+            cbor_string_bytes("v1:sha256:".len() + 64),
         ),
         ("committed_at_ms", INTEGER_BYTES),
         (
             "message",
-            string_bytes(request.message.as_ref().map_or(0, String::len)),
+            cbor_string_bytes(request.message.as_ref().map_or(0, String::len)),
         ),
         ("deltas", 9),
     ]);
@@ -223,18 +216,19 @@ pub(crate) fn estimated_wal_record_bytes(
     let inline_bytes = if !carries_pieces {
         0
     } else {
-        inline_content
-            .iter()
-            .fold(string_bytes("inline_content".len()) + 9, |bytes, value| {
-                bytes.saturating_add(map_bytes(&[
+        inline_content.iter().fold(
+            cbor_string_bytes("inline_content".len()) + 9,
+            |bytes, value| {
+                bytes.saturating_add(cbor_map_bytes(&[
                     (
                         "content_id",
-                        string_bytes(value.content_ref().content_id.as_str().len()),
+                        cbor_string_bytes(value.content_ref().content_id.as_str().len()),
                     ),
                     ("offset", INTEGER_BYTES),
-                    ("bytes", string_bytes(value.bytes().len())),
+                    ("bytes", cbor_string_bytes(value.bytes().len())),
                 ]))
-            })
+            },
+        )
     };
     request.operations.iter().fold(
         fixed_bytes.saturating_add(inline_bytes),
@@ -316,8 +310,8 @@ fn create_path_bytes(path: &AbsolutePath) -> usize {
         bytes.saturating_add(
             CREATE_INODE_BYTES
                 + BIND_BYTES
-                + string_bytes(display_name.len())
-                + string_bytes(name_key_bytes),
+                + cbor_string_bytes(display_name.len())
+                + cbor_string_bytes(name_key_bytes),
         )
     })
 }

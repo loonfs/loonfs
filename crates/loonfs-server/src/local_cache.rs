@@ -23,6 +23,7 @@ use loonfs::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,
 };
+use loonfs_types::config::ConfigFieldError;
 use mixtrics::metrics::{
     BoxedCounter, BoxedCounterVec, BoxedGauge, BoxedGaugeVec, BoxedHistogram, BoxedHistogramVec,
     CounterOps, CounterVecOps, GaugeOps, GaugeVecOps, HistogramOps, HistogramVecOps, RegistryOps,
@@ -510,10 +511,10 @@ fn open_failure(directory: &Path, capacity: usize, reason: &str) -> ServerConfig
 }
 
 fn invalid_local_cache(reason: String) -> ServerConfigError {
-    ServerConfigError::InvalidField {
+    ServerConfigError::Field(ConfigFieldError::Invalid {
         field: "local_cache.path",
         reason,
-    }
+    })
 }
 
 fn create_directory(path: &Path) -> Result<(), ServerConfigError> {

@@ -3,6 +3,7 @@
 use crate::args::CommandKind;
 use crate::config::NAMESPACE_ENV;
 use loonfs_client::ClientError;
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::ErrorCode;
 use serde::{Deserialize, Serialize};
 
@@ -144,14 +145,6 @@ impl CliError {
         self
     }
 
-    pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
-        if self.code == ErrorCode::InvalidRequest.as_str() {
-            self.with_param(param)
-        } else {
-            self
-        }
-    }
-
     pub(crate) fn profile_not_found(name: &str) -> Self {
         Self::new(
             CliErrorCode::ProfileNotFound.as_str(),
@@ -247,18 +240,19 @@ impl CliError {
     }
 }
 
+impl From<ConfigFieldError> for CliError {
+    fn from(error: ConfigFieldError) -> Self {
+        Self::invalid_config(error.to_string())
+    }
+}
+
 impl From<ClientError> for CliError {
     fn from(error: ClientError) -> Self {
         match error {
             ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
                 Self::invalid_config(message)
             }
-            ClientError::MissingConfigField { field } => {
-                Self::invalid_config(format!("missing `{field}`"))
-            }
-            ClientError::ConfigValidation { field, reason } => {
-                Self::invalid_config(format!("invalid `{field}`: {reason}"))
-            }
+            ClientError::ConfigField(error) => error.into(),
             ClientError::InvalidNamespacePath(message) => Self::invalid_request(message),
             ClientError::Http(message)
             | ClientError::Json(message)

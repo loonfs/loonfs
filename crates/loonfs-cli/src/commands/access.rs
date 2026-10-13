@@ -57,14 +57,12 @@ fn parse_grants(grants: &[String]) -> Result<AccessGrants, CliError> {
         })?;
         let principal =
             PrincipalId::parse(principal).map_err(|error| invalid_grant(error.to_string()))?;
-        let mut rights = AccessRights::EMPTY;
-        for name in names.split(',') {
-            let right = AccessRight::ALL
-                .iter()
-                .find(|right| right.as_str() == name)
-                .ok_or_else(|| invalid_grant(format!("unknown access right {name:?}")))?;
-            rights.insert(*right);
-        }
+        let rights = names
+            .split(',')
+            .map(str::parse::<AccessRight>)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(AccessRights::from_distinct)
+            .map_err(|error| invalid_grant(error.to_string()))?;
         if entries.insert(principal, rights).is_some() {
             return Err(invalid_grant(format!(
                 "repeated principal in grant {grant:?}"

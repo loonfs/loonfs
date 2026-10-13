@@ -564,7 +564,7 @@ fn human_doctor(checks: &[DoctorCheck], mode: Option<&str>) -> String {
                 response
                     .checks
                     .iter()
-                    .map(|check| format!("  {}", store_probe_check_line(check))),
+                    .map(|check| format!("  {}", check.check_line())),
             );
         }
     }

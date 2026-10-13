@@ -3,6 +3,7 @@
 use crate::object_store::Result;
 use crate::{
     AssemblySource, ByteRange, ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError,
+    PROVIDER_MAX_MULTIPART_PART_BYTES, PROVIDER_MIN_MULTIPART_PART_BYTES,
 };
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
@@ -10,8 +11,6 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
 
 pub(crate) const READ_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
-const MIN_PART_BYTES: u64 = 5 * 1024 * 1024;
-const MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 pub(crate) fn source_range(source: &AssemblySource, size_bytes: u64) -> Result<ByteRange> {
     let range = source.range.clone().unwrap_or(ByteRange {
@@ -212,14 +211,14 @@ pub(crate) fn plan_parts(
         let (length, copied) = if sizing == PartSizing::Equal {
             let length = R2_PART_BYTES.min(total - offset);
             (length, remaining >= length)
-        } else if remaining >= MIN_PART_BYTES {
-            let length = remaining.div_ceil(remaining.div_ceil(MAX_PART_BYTES));
+        } else if remaining >= PROVIDER_MIN_MULTIPART_PART_BYTES {
+            let length = remaining.div_ceil(remaining.div_ceil(PROVIDER_MAX_MULTIPART_PART_BYTES));
             (length, true)
         } else {
             let length = if offset >= source_length {
                 READ_BYTES
             } else {
-                MIN_PART_BYTES
+                PROVIDER_MIN_MULTIPART_PART_BYTES
             };
             (length.min(total - offset), false)
         };

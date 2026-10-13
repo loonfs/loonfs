@@ -13,7 +13,6 @@ use loonfs_http::{
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::SecretString;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
 
 static CONTENT_TOKEN_SECRET: OnceLock<SecretString> = OnceLock::new();
@@ -52,8 +51,8 @@ pub(crate) fn client(
     });
     let state = BindingState {
         request_limit: None,
-        upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
-        download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
+        upload_permits: loonfs_http::transfer_permits(options.max_concurrent_uploads),
+        download_permits: loonfs_http::transfer_permits(options.max_concurrent_downloads),
         options,
         runtime: host.runtime.clone(),
         namespaces: Arc::new(Namespaces::new(host.runtime.clone())),

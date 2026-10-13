@@ -358,6 +358,16 @@ impl ObjectStoreError {
 /// Facade alias: signatures inside this crate use `Result<T>`.
 pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
+/// The capability a store names when it cannot run a client-driven
+/// multipart upload.
+const CLIENT_MULTIPART_UPLOAD: &str = "client-driven multipart upload";
+
+/// Returns the error for a store that cannot run a client-driven multipart
+/// upload.
+pub(crate) fn unsupported_multipart() -> ObjectStoreError {
+    ObjectStoreError::Unsupported(CLIENT_MULTIPART_UPLOAD)
+}
+
 /// Drains a byte stream into one buffer, for implementations that cannot
 /// write incrementally.
 pub(crate) async fn collect_stream(mut body: BoxStream<'_, Result<Bytes>>) -> Result<Bytes> {
@@ -399,9 +409,7 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// [`ObjectStoreError::Unsupported`].
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
         let _ = key;
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     /// Asks the provider to assemble `parts` into the object at `key`.
@@ -423,9 +431,7 @@ pub trait ObjectStore: Send + Sync + Debug {
         checksum: &Checksum,
     ) -> Result<()> {
         let (_, _, _, _) = (key, provider_upload_id, parts, checksum);
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     /// Abandons a provider multipart upload and the parts it accumulated.
@@ -436,9 +442,7 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// can run without first proving what state it is cleaning up.
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
         let _ = (key, provider_upload_id);
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     /// Reads complete bytes and identity metadata from one self-consistent observation.

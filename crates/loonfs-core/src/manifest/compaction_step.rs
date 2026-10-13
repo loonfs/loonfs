@@ -21,7 +21,8 @@ use super::runs::{
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::cache::ReadWorkingMemory;
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
+use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::time::{Deadline, StdMonotonicTimer};
@@ -35,10 +36,6 @@ use loonfs_types::CompactorEpoch;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-
-/// Maximum run fan-in for either execution path. Larger groups are merged in
-/// several publications, keeping decoded input blocks independent of history size.
-pub(super) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 
 /// A large run is rewritten only after newer input reaches one quarter its size.
 const COMPACTION_SIZE_RATIO: u64 = 4;
@@ -150,11 +147,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
         return Ok(CompactionStepOutcome::NotNeeded { delta_runs });
     };
     let selection =
-        select_compaction_input(&segments, group, policy, floor_seq, &compaction_policy)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+        select_compaction_input(&segments, group, policy, floor_seq, &compaction_policy).await?;
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
@@ -380,6 +373,15 @@ fn group_candidates(
     )
 }
 
+/// Returns the run fan-in one step may merge: the policy's knob, capped by
+/// the ceiling.
+fn effective_max_input_runs(policy: MetadataRunPolicy) -> usize {
+    policy
+        .max_input_runs_per_step
+        .get()
+        .min(MAX_COMPACTION_INPUT_RUNS)
+}
+
 /// Select the oldest eligible contiguous window. Never mix rows across an
 /// unselected gap: a base merge may drop history only when it includes a prefix.
 /// Sizes come from the manifest's block handles, so planning needs no data reads.
@@ -388,11 +390,12 @@ fn select_merge_window(
     group: MetadataFamilyGroup,
     policy: MetadataCompactionPolicy,
     small_run_bytes: u64,
+    max_input_runs: usize,
 ) -> Option<std::ops::Range<usize>> {
     for start in 0..candidates.len() {
         if start == 0
             && policy == MetadataCompactionPolicy::CompactImmediately
-            && candidates.len() > MAX_COMPACTION_INPUT_RUNS
+            && candidates.len() > max_input_runs
             && group_run_descriptors(candidates[0], group)
                 .map(segment_object_bytes)
                 .sum::<u64>()
@@ -400,7 +403,7 @@ fn select_merge_window(
         {
             continue;
         }
-        let end = candidates.len().min(start + MAX_COMPACTION_INPUT_RUNS);
+        let end = candidates.len().min(start + max_input_runs);
         if window_is_eligible(
             &candidates[start..end],
             group,
@@ -455,11 +458,13 @@ pub(super) async fn select_compaction_input<S: ObjectStore + ?Sized>(
     compaction_policy: &MetadataCompactionPolicy,
 ) -> std::result::Result<CompactionSelection, ManifestLoadError> {
     let candidates = group_candidates(segments.scan_runs.as_ref(), group);
+    let max_input_runs = effective_max_input_runs(policy);
     let Some(range) = select_merge_window(
         &candidates,
         group,
         *compaction_policy,
         policy.small_run_bytes.get() as u64,
+        max_input_runs,
     ) else {
         return Ok(CompactionSelection {
             plan: CompactionPlan::Nothing,
@@ -471,10 +476,7 @@ pub(super) async fn select_compaction_input<S: ObjectStore + ?Sized>(
     let budgets = CompactionBudgets {
         rows: policy.max_decoded_input_rows_per_step.get() as u64,
         bytes: policy.max_decoded_input_bytes_per_step.get() as u64,
-        runs: policy
-            .max_input_runs_per_step
-            .get()
-            .min(MAX_COMPACTION_INPUT_RUNS),
+        runs: max_input_runs,
     };
     let window = weigh_window(segments, selected, group, budgets).await?;
     let bottom_anchored = range.start == 0;
@@ -707,6 +709,7 @@ pub(super) fn select_family_group(
             group,
             compaction_policy,
             policy.small_run_bytes.get() as u64,
+            effective_max_input_runs(policy),
         )
         .is_none()
         {
@@ -835,6 +838,7 @@ mod planning_tests {
             MetadataFamilyGroup::Inodes,
             policy,
             8 * 1024 * 1024,
+            MAX_COMPACTION_INPUT_RUNS,
         )
     }
 
@@ -853,6 +857,7 @@ mod planning_tests {
                         MetadataFamilyGroup::Inodes,
                         policy,
                         8 * 1024 * 1024,
+                        MAX_COMPACTION_INPUT_RUNS,
                     ),
                     expected
                 );

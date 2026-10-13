@@ -1703,8 +1703,8 @@ impl NamespacePublisher {
             let Some(last_publish) = self.lock_state().last_publish.clone() else {
                 break;
             };
-            let remaining_ms =
-                duration_ms(self.min_publish_interval).saturating_sub(last_publish.age_ms());
+            let remaining_ms = loonfs_types::saturating_duration_ms(self.min_publish_interval)
+                .saturating_sub(last_publish.age_ms());
             if remaining_ms == 0 {
                 break;
             }
@@ -1924,10 +1924,6 @@ fn batch_result_label(results: &[CommitResult]) -> PublishOutcome {
 
 fn elapsed_ms_from(start: u64, end: u64) -> u64 {
     end.saturating_sub(start)
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[allow(clippy::disallowed_methods)]

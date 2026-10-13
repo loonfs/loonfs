@@ -5,7 +5,8 @@ use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{ExecutionBudget, MetadataCache};
 use loonfs_grep::GrepWorkerConfig;
-use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
+use loonfs_objectstore::ConfiguredObjectStore;
+use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
 use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
 use loonfs_types::{SecretString, WriterId};
 use serde::{Deserialize, Serialize};
@@ -346,7 +347,7 @@ fn default_max_download_bytes() -> u64 {
     // Mirrors the upload default so anything the proxy accepted, the proxy
     // will serve back. Content ingested past this through `direct_put`
     // needs a raised limit to be read through the server.
-    256 * 1024 * 1024
+    default_max_upload_bytes()
 }
 
 fn default_snapshot_max_ttl_ms() -> u64 {
@@ -499,10 +500,8 @@ pub enum ServerConfigError {
     Io(String),
     #[error("failed to decode config: {0}")]
     Decode(String),
-    #[error("missing `{field}`")]
-    MissingField { field: &'static str },
-    #[error("invalid `{field}`: {reason}")]
-    InvalidField { field: &'static str, reason: String },
+    #[error(transparent)]
+    Field(#[from] ConfigFieldError),
 }
 
 impl ServerConfig {
@@ -514,16 +513,12 @@ impl ServerConfig {
         auth_token_env: Option<String>,
         content_token_secret_env: Option<String>,
     ) {
-        if self
-            .auth_token
-            .as_ref()
-            .is_none_or(|token| token.expose().trim().is_empty())
-        {
+        if self.auth_token.as_ref().is_none_or(SecretString::is_blank) {
             if let Some(token) = non_blank(auth_token_env) {
                 self.auth_token = Some(SecretString::new(token));
             }
         }
-        if self.content_token_secret.expose().trim().is_empty() {
+        if self.content_token_secret.is_blank() {
             if let Some(secret) = non_blank(content_token_secret_env) {
                 self.content_token_secret = SecretString::new(secret);
             }
@@ -532,12 +527,12 @@ impl ServerConfig {
 
     /// Builds the object store selected by this server configuration.
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
-        self.store
-            .configured_object_store()
-            .map_err(|err| ServerConfigError::InvalidField {
+        self.store.configured_object_store().map_err(|err| {
+            ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "store",
                 reason: err.public_message().into_owned(),
             })
+        })
     }
 
     /// The line `loonfs-server --check-config` prints when the config loads.
@@ -568,14 +563,14 @@ impl ServerConfig {
         let bind = self.bind_addr()?;
 
         if let Some(token) = &self.auth_token {
-            if token.expose().trim().is_empty() {
-                return Err(ServerConfigError::InvalidField {
+            if token.is_blank() {
+                return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),
-                });
+                }));
             }
         } else if bind_serves_beyond_localhost(&bind) && !self.allow_unauthenticated_remote {
-            return Err(ServerConfigError::InvalidField {
+            return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "auth_token",
                 reason: format!(
                     "bind `{bind}` serves every endpoint to the network without \
@@ -583,13 +578,13 @@ impl ServerConfig {
                      or set `allow_unauthenticated_remote = true` to serve open \
                      on purpose"
                 ),
-            });
+            }));
         }
         if let Some(tls) = &self.tls {
             validate_non_empty("tls.cert_path", &tls.cert_path)?;
             validate_non_empty("tls.key_path", &tls.key_path)?;
         } else if bind_serves_beyond_localhost(&bind) && !self.allow_remote_without_tls {
-            return Err(ServerConfigError::InvalidField {
+            return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "tls",
                 reason: format!(
                     "bind `{bind}` serves the network in plaintext, exposing the \
@@ -598,7 +593,7 @@ impl ServerConfig {
                      or set `allow_remote_without_tls = true` when TLS terminates \
                      in front of this process"
                 ),
-            });
+            }));
         }
         for (field, value) in [
             ("max_upload_bytes", self.max_upload_bytes),
@@ -636,17 +631,17 @@ impl ServerConfig {
         ] {
             validate_positive(field, value as u64, None)?;
             if value > tokio::sync::Semaphore::MAX_PERMITS {
-                return Err(ServerConfigError::InvalidField {
+                return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                     field,
                     reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
-                });
+                }));
             }
         }
         if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
-            return Err(ServerConfigError::InvalidField {
+            return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "snapshot_max_ttl_ms",
                 reason: "must not exceed `snapshot_max_lifetime_ms`".to_owned(),
-            });
+            }));
         }
         for (field, value) in [
             (
@@ -680,7 +675,7 @@ impl ServerConfig {
             // nothing on disk, and says nothing about it. Refuse it here
             // instead.
             if local_cache.disk_bytes < MIN_DISK_BYTES {
-                return Err(ServerConfigError::InvalidField {
+                return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                     field: "local_cache.disk_bytes",
                     reason: format!(
                         "must be at least {MIN_DISK_BYTES}; the disk tier allocates whole \
@@ -688,14 +683,14 @@ impl ServerConfig {
                          for stable operation. Omit the `[local_cache]` table to run \
                          without a local cache"
                     ),
-                });
+                }));
             }
         }
         if let Err(error) = self.grep.worker_config().validate() {
-            return Err(ServerConfigError::InvalidField {
+            return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "grep",
                 reason: error.to_string(),
-            });
+            }));
         }
         validate_non_empty("content_token_secret", self.content_token_secret.expose())?;
         self.store.validate()?;
@@ -856,13 +851,13 @@ impl MemorySizing {
             self.terms()
                 .map(|(term, count)| format!("`{}` = {} x {count}", term.name, term.bytes)),
         );
-        Err(ServerConfigError::InvalidField {
+        Err(ServerConfigError::Field(ConfigFieldError::Invalid {
             field: "memory_limit_bytes",
             reason: format!(
                 "memory terms must fit the limit and managed memory must be at least {} bytes; limit = {}, headroom = {}, managed = {}, total = {}; {}",
                 256 * MIB, limit.bytes, self.headroom, self.managed, total, terms.join(", ")
             ),
-        })
+        }))
     }
 }
 
@@ -968,21 +963,6 @@ fn read_cgroup_memory_limit(paths: &[&Path]) -> Option<usize> {
     })
 }
 
-impl From<StoreConfigError> for ServerConfigError {
-    fn from(error: StoreConfigError) -> Self {
-        match error {
-            StoreConfigError::MissingField { field } => ServerConfigError::MissingField { field },
-            StoreConfigError::InvalidField { field, reason } => {
-                ServerConfigError::InvalidField { field, reason }
-            }
-            error => ServerConfigError::InvalidField {
-                field: "store",
-                reason: error.to_string(),
-            },
-        }
-    }
-}
-
 /// Loads and validates a server configuration from TOML.
 pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, ServerConfigError> {
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
@@ -1008,18 +988,6 @@ pub fn parse_server_config(source: &str) -> Result<ServerConfig, ServerConfigErr
     Ok(config)
 }
 
-fn non_blank(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
-fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
-    if value.trim().is_empty() {
-        Err(ServerConfigError::MissingField { field })
-    } else {
-        Ok(())
-    }
-}
-
 fn validate_positive(
     field: &'static str,
     value: u64,
@@ -1033,20 +1001,25 @@ fn validate_positive(
         reason.push_str("; ");
         reason.push_str(hint);
     }
-    Err(ServerConfigError::InvalidField { field, reason })
+    Err(ServerConfigError::Field(ConfigFieldError::Invalid {
+        field,
+        reason,
+    }))
 }
 
 fn validate_socket_addr(field: &'static str, value: &str) -> Result<SocketAddr, ServerConfigError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(ServerConfigError::MissingField { field });
+        return Err(ServerConfigError::Field(ConfigFieldError::Missing {
+            field,
+        }));
     }
-    trimmed
-        .parse::<SocketAddr>()
-        .map_err(|err| ServerConfigError::InvalidField {
+    trimmed.parse::<SocketAddr>().map_err(|err| {
+        ServerConfigError::Field(ConfigFieldError::Invalid {
             field,
             reason: err.to_string(),
         })
+    })
 }
 
 /// Whether a bind address accepts connections from other hosts: any
@@ -1062,8 +1035,9 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        load_server_config, InlineContentConfig, PublicationLimitsConfig, ServerConfigError,
-        AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
+        load_server_config, ConfigFieldError, InlineContentConfig, PublicationLimitsConfig,
+        ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES,
+        MIN_DISK_BYTES,
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
@@ -2612,10 +2586,10 @@ root = "/tmp/loonfs-server"
         let configured = load("max_concurrent_steps = 5").expect("load a step limit");
         assert_eq!(configured.grep.worker.max_concurrent_steps, 5);
         match load("max_concurrent_steps = 0") {
-            Err(ServerConfigError::InvalidField {
+            Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "grep",
                 reason,
-            }) => assert!(reason.contains("max_concurrent_steps"), "{reason}"),
+            })) => assert!(reason.contains("max_concurrent_steps"), "{reason}"),
             other => panic!("expected a zero step limit to be refused, got {other:?}"),
         }
     }
@@ -2835,14 +2809,18 @@ root = "/tmp/loonfs-server"
 
     fn assert_invalid_field(error: ServerConfigError, field: &'static str) {
         match error {
-            ServerConfigError::InvalidField { field: actual, .. } => assert_eq!(actual, field),
+            ServerConfigError::Field(ConfigFieldError::Invalid { field: actual, .. }) => {
+                assert_eq!(actual, field)
+            }
             other => panic!("expected invalid field error for {field}, got {other:?}"),
         }
     }
 
     fn assert_missing_field(error: ServerConfigError, field: &'static str) {
         match error {
-            ServerConfigError::MissingField { field: actual } => assert_eq!(actual, field),
+            ServerConfigError::Field(ConfigFieldError::Missing { field: actual }) => {
+                assert_eq!(actual, field)
+            }
             other => panic!("expected missing field error for {field}, got {other:?}"),
         }
     }

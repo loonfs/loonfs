@@ -96,21 +96,7 @@ impl Client {
         checksum: Checksum,
         bytes: Bytes,
     ) -> Result<CompletedUploadPart> {
-        let ObjectTransferAccess::PresignedUrl {
-            method,
-            url,
-            headers,
-            ..
-        } = access;
-        if method != "PUT" {
-            return Err(ClientError::Protocol(format!(
-                "unsupported presigned part method `{method}`"
-            )));
-        }
-        let mut request = WireRequest::presigned(http::Method::PUT, url);
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
+        let request = presigned_put_request(access)?;
         // A part upload is safe to repeat: it is not create-only, the
         // provider takes the last write, and the checksum rides the
         // signature either way.

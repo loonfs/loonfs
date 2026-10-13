@@ -21,7 +21,7 @@ impl MonotonicTimer for StdMonotonicTimer {
         static ORIGIN: OnceLock<Duration> = OnceLock::new();
         let now = monotonic_now();
         let origin = ORIGIN.get_or_init(|| now);
-        u64::try_from(now.saturating_sub(*origin).as_millis()).unwrap_or(u64::MAX)
+        saturating_duration_ms(now.saturating_sub(*origin))
     }
 }
 
@@ -70,6 +70,47 @@ pub struct TransportRetryPolicy {
     pub operation_deadline: Duration,
 }
 
+impl TransportRetryPolicy {
+    /// Grants one retry under the policy's retry count and the operation's
+    /// deadline, and counts it in `retries` when it is granted.
+    ///
+    /// The backoff never runs past the deadline.
+    pub fn next_backoff(
+        &self,
+        retries: &mut u32,
+        deadline: Option<&OperationDeadline<'_>>,
+    ) -> TransportRetryOutcome {
+        if *retries >= self.max_retries {
+            return TransportRetryOutcome::RetriesExhausted;
+        }
+        let remaining = match deadline {
+            Some(deadline) => match deadline.remaining() {
+                Some(remaining) => remaining,
+                None => return TransportRetryOutcome::DeadlinePassed,
+            },
+            None => Duration::MAX,
+        };
+        *retries += 1;
+        TransportRetryOutcome::Wait {
+            backoff: transport_retry_backoff(self, *retries).min(remaining),
+        }
+    }
+}
+
+/// How one retry decision under a [`TransportRetryPolicy`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportRetryOutcome {
+    /// The retry is granted after `backoff`.
+    Wait {
+        /// Delay before the retry.
+        backoff: Duration,
+    },
+    /// Every retry the policy allows has been used.
+    RetriesExhausted,
+    /// The operation deadline has passed.
+    DeadlinePassed,
+}
+
 /// Elapsed-time state for one logical operation's retry loop.
 pub struct OperationDeadline<'timer> {
     timer: &'timer dyn MonotonicTimer,
@@ -93,7 +134,7 @@ impl<'timer> OperationDeadline<'timer> {
             .timer
             .monotonic_now_ms()
             .saturating_sub(self.started_at_ms);
-        let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
+        let deadline_ms = saturating_duration_ms(self.deadline);
         if elapsed_ms >= deadline_ms {
             return None;
         }
@@ -104,6 +145,11 @@ impl<'timer> OperationDeadline<'timer> {
     pub fn deadline(&self) -> Duration {
         self.deadline
     }
+}
+
+/// Converts a duration to whole milliseconds, saturating at `u64::MAX`.
+pub fn saturating_duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Computes capped exponential backoff for a retry number starting at one.

@@ -1,7 +1,7 @@
 //! Lists files from the manifest pinned by a checkpoint.
 
 use super::read_basis::{load_user_pin_basis, PinBasis};
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
@@ -115,10 +115,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
                 upper_bound.as_deref(),
                 wave_rows,
             )
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+            .await?;
         let family_exhausted = rows.len() < wave_rows;
         // Resume after the last scanned row, including rows filtered out below.
         match rows.last() {

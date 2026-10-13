@@ -11,6 +11,7 @@ use crate::aws_credentials::{
     aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
 };
+use crate::checksum_header::decode_base64_checksum;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
@@ -18,15 +19,16 @@ use crate::presign::{
     base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
     PresignedGetRequest, PresignedPartRequest, PresignedUrl, S3CompatiblePresigner,
     S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
-    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };
 use crate::provider_object_store::{
     AbortUploadOnDrop, CompareToken, MultipartController, PartReader, StoredChecksumReader,
-    MAX_PROVIDER_MULTIPART_PARTS,
+    PROVIDER_MAX_MULTIPART_PARTS,
 };
 use crate::retry::{with_transport_retry, DEFAULT};
 use crate::signed_request::{
-    classify_signed_response, object_length_from_signed_head, send_signed, SignedResponse,
+    classify_signed_response, object_length_from_signed_head, send_signed, signing_time,
+    SignedResponse,
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
@@ -35,18 +37,15 @@ use crate::{
     ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
 };
 use async_trait::async_trait;
-use base64::Engine as _;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs_types::SecretString;
-use loonfs_types::{
-    Checksum, ChecksumAlgorithm, ChecksumHex, OperationDeadline, StreamingChecksum,
-};
+use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// Lifetime of the internally signed multipart control requests. Like the
 /// checksum head, each is issued immediately and never handed out.
@@ -247,15 +246,6 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
     Ok((store, direct_transfers))
 }
 
-impl S3RequestSigner {
-    #[allow(clippy::disallowed_methods)]
-    fn signing_time() -> SystemTime {
-        // A SigV4 signature is dated, so these internally issued requests
-        // enter wall time here. Nothing durable is derived from it.
-        SystemTime::now()
-    }
-}
-
 impl SignedResponse {
     fn text(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
@@ -292,7 +282,7 @@ impl StoredChecksumReader for S3RequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let signed = self
             .request_signer
-            .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         crate::signed_request::metadata_from_signed_head(
@@ -352,7 +342,7 @@ impl MultipartController for S3RequestSigner {
                 key,
                 provider_upload_id,
                 MULTIPART_CONTROL_TTL,
-                Self::signing_time(),
+                signing_time(),
             )
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
@@ -391,12 +381,12 @@ impl MultipartController for S3RequestSigner {
             .enumerate()
             .map(|(index, payload)| {
                 let payload = payload?;
-                if index >= MAX_PROVIDER_MULTIPART_PARTS {
+                if index >= PROVIDER_MAX_MULTIPART_PARTS as usize {
                     return Err(ObjectStoreError::transport(
                         key,
                         format!(
                             "payload needs more than the provider's \
-                             {MAX_PROVIDER_MULTIPART_PARTS}-part limit at this part size"
+                             {PROVIDER_MAX_MULTIPART_PARTS}-part limit at this part size"
                         ),
                     ));
                 }
@@ -452,7 +442,7 @@ impl S3RequestSigner {
     async fn create_upload(&self, key: &str) -> Result<String> {
         let signed = self
             .request_signer
-            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
+            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, signing_time())
             .await?;
         let response = self
             .send_checked(key, signed, HttpRequestBody::empty())
@@ -481,7 +471,7 @@ impl S3RequestSigner {
                         checksum: &checksum,
                         ttl: MULTIPART_CONTROL_TTL,
                     },
-                    Self::signing_time(),
+                    signing_time(),
                 )
                 .await?;
             let response = self
@@ -524,7 +514,7 @@ impl S3RequestSigner {
                     source,
                     source_etag,
                     MULTIPART_CONTROL_TTL,
-                    Self::signing_time(),
+                    signing_time(),
                 )
                 .await?;
             self.send_checked(key, signed, HttpRequestBody::empty())
@@ -535,7 +525,7 @@ impl S3RequestSigner {
         let etag = xml_etag(&text)
             .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no etag"))?;
         let checksum = xml_element(&text, "ChecksumCRC64NVME")
-            .and_then(|value| base64_checksum(ChecksumAlgorithm::Crc64nvme, &value));
+            .and_then(|value| decode_base64_checksum(ChecksumAlgorithm::Crc64nvme, &value));
         if self.kind != ConfiguredObjectStoreKind::CloudflareR2 && checksum.is_none() {
             return Err(ObjectStoreError::transport(
                 key,
@@ -558,12 +548,12 @@ impl S3RequestSigner {
                     range: range.clone(),
                     ttl: MULTIPART_CONTROL_TTL,
                 },
-                Self::signing_time(),
+                signing_time(),
             )
             .await?;
         signed
             .headers
-            .insert("if-match".to_owned(), etag.to_owned());
+            .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         checked_data(key, response).map(|response| response.body)
     }
@@ -572,7 +562,7 @@ impl S3RequestSigner {
     async fn head_object(&self, key: &str) -> Result<Option<(u64, String)>> {
         let signed = self
             .request_signer
-            .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         object_length_from_signed_head(key, &response)
@@ -612,7 +602,7 @@ impl S3RequestSigner {
                 checksum,
                 mode,
                 MULTIPART_CONTROL_TTL,
-                Self::signing_time(),
+                signing_time(),
             )
             .await?;
         let response = send_signed(
@@ -719,19 +709,8 @@ fn assembled_crc64nvme<'a>(
 }
 
 fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<Checksum> {
-    let value = headers.get("x-amz-checksum-crc64nvme")?.to_str().ok()?;
-    base64_checksum(ChecksumAlgorithm::Crc64nvme, value)
-}
-
-/// Decodes the base64 spelling the S3 family uses for a checksum.
-fn base64_checksum(algorithm: ChecksumAlgorithm, value: &str) -> Option<Checksum> {
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .ok()?;
-    (raw.len() == algorithm.value_bytes()).then(|| Checksum {
-        algorithm,
-        value: ChecksumHex::encode(&raw),
-    })
+    let value = headers.get(S3_CRC64NVME_CHECKSUM_HEADER)?.to_str().ok()?;
+    decode_base64_checksum(ChecksumAlgorithm::Crc64nvme, value)
 }
 
 /// Reads the ETag of a part copy or a completion, whose XML escapes the

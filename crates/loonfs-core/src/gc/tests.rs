@@ -250,7 +250,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         content_id: loonfs_types::ContentId::generate(),
         subject_id: None,
         mode: UploadSessionMode::ServiceProxied {
-            staging: ProxiedStaging::Idle,
+            staging: ProxiedStaging::Idle {},
         },
         status: loonfs_types::format::control::UploadSessionRecordStatus::Open {
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
@@ -744,7 +744,7 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         upload_id,
         None,
-        crate::protocol::ResolvedUploadCompletion::KnownContent,
+        loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
         context,
     )
     .await
@@ -801,7 +801,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
             &namespace_id,
             &upload_id,
             None,
-            crate::protocol::ResolvedUploadCompletion::KnownContent,
+            loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
             &inside,
         )
         .await;
@@ -847,7 +847,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         &namespace_id,
         &upload_id,
         None,
-        crate::protocol::ResolvedUploadCompletion::KnownContent,
+        loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
         &inside,
     );
     let abort = async {

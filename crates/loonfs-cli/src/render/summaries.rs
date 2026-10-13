@@ -6,18 +6,6 @@ pub(super) fn public_inode_id(inode_id: loonfs_types::InodeId) -> String {
     loonfs_types::public_inode_id::encode(inode_id)
 }
 
-/// Formats one object-store contract check.
-pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
-    match check.outcome {
-        StoreProbeCheckOutcome::Passed => format!("{}: passed", check.name),
-        StoreProbeCheckOutcome::Unsupported => format!("{}: unsupported", check.name),
-        StoreProbeCheckOutcome::Failed => match &check.message {
-            Some(message) => format!("{}: failed: {message}", check.name),
-            None => format!("{}: failed", check.name),
-        },
-    }
-}
-
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreProbeRunOutcome {
@@ -65,7 +53,11 @@ pub(crate) fn store_probe_summary_line(
 pub(super) fn store_probe_report_lines(
     response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> Vec<String> {
-    let mut lines: Vec<String> = response.checks.iter().map(store_probe_check_line).collect();
+    let mut lines: Vec<String> = response
+        .checks
+        .iter()
+        .map(StoreProbeCheckResult::check_line)
+        .collect();
     lines.push(store_probe_summary_line(response));
     lines
 }
@@ -235,16 +227,7 @@ pub(super) fn format_utc_ms(unix_ms: u64) -> String {
         (second_of_day % 3_600) / 60,
         second_of_day % 60,
     );
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
+    let loonfs_types::CivilDate { year, month, day } = loonfs_types::civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}Z")
 }
 

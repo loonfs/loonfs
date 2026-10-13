@@ -1,7 +1,7 @@
 //! File publication replays the same prepared content and commit ID.
 //! Inline retries replay by bytes; staged uploads retain their object identity.
 
-use crate::common::{open_runtime_async, open_runtime_with_async, store, TestRuntime};
+use crate::common::{namespace, open_runtime_async, open_runtime_with_async, store, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
@@ -62,15 +62,6 @@ async fn feed_message(
         .find(|change| change.committed_seq == seq)
         .expect("the committed change is on the feed")
         .message
-}
-
-async fn namespace(runtime: &TestRuntime) -> NamespaceId {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    namespace_id
 }
 
 /// Advances retention and rebuilds the metadata runs that held a commit receipt.

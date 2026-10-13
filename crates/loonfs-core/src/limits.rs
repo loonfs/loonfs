@@ -10,8 +10,15 @@
 //! a larger grace window, never a smaller one.
 
 use loonfs_objectstore::{
-    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_BOUND,
+    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MAX_MULTIPART_PART_BYTES,
+    PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_OPERATION_DEADLINE,
+    PROVIDER_PUBLICATION_REQUEST_BOUND,
 };
+
+/// Maximum run fan-in for either compaction execution path. Larger groups are
+/// merged in several publications, keeping decoded input blocks independent of
+/// history size.
+pub(crate) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 
 /// Caps each Bloom filter used by compaction and content collection.
 pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
@@ -146,7 +153,10 @@ pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 pub const METADATA_COMPACTION_BUDGET_MS: u64 =
     UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS;
 
-/// Lifetime of a direct download or upload capability.
+/// Lifetime of a direct download or direct put capability.
+///
+/// A part capability writes no object, so the grace window does not need to
+/// cover it.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
 /// Minimum retirement grace from the deletion call's clock. The tombstone put
@@ -167,15 +177,15 @@ const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 /// Most parts one direct multipart upload may cut into. This is the
 /// S3-compatible ceiling, so with the session's part size it fixes the
 /// largest object that session can carry: `part_size_bytes × 10_000`.
-pub const MAX_MULTIPART_PARTS: u32 = 10_000;
+pub const MAX_MULTIPART_PARTS: u32 = PROVIDER_MAX_MULTIPART_PARTS;
 
 /// Smallest part size a `direct_multipart` session may be opened with.
 /// Every supported provider refuses a non-final part below 5 MiB.
-pub const MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
+pub const MIN_MULTIPART_PART_BYTES: u64 = PROVIDER_MIN_MULTIPART_PART_BYTES;
 
 /// Largest part size a `direct_multipart` session may be opened with.
 /// Every supported provider refuses a part above 5 GiB.
-pub const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+pub const MAX_MULTIPART_PART_BYTES: u64 = PROVIDER_MAX_MULTIPART_PART_BYTES;
 
 /// Most part-upload capabilities one request may ask for. A client asks in
 /// waves as it works through a file, so this bounds one response rather than

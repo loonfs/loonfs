@@ -1805,6 +1805,18 @@ pub struct StoreProbeResponse {
     pub checks: Vec<StoreProbeCheckResult>,
 }
 
+impl StoreProbeResponse {
+    /// Returns true when every check passed or reported an unsupported option.
+    pub fn all_passed(&self) -> bool {
+        self.checks.iter().all(|check| {
+            matches!(
+                check.outcome,
+                StoreProbeCheckOutcome::Passed | StoreProbeCheckOutcome::Unsupported
+            )
+        })
+    }
+}
+
 /// One named contract check and what the store did with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1817,6 +1829,20 @@ pub struct StoreProbeCheckResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
+}
+
+impl StoreProbeCheckResult {
+    /// Formats the check as one report line.
+    pub fn check_line(&self) -> String {
+        match self.outcome {
+            StoreProbeCheckOutcome::Passed => format!("{}: passed", self.name),
+            StoreProbeCheckOutcome::Unsupported => format!("{}: unsupported", self.name),
+            StoreProbeCheckOutcome::Failed => match &self.message {
+                Some(message) => format!("{}: failed: {message}", self.name),
+                None => format!("{}: failed", self.name),
+            },
+        }
+    }
 }
 
 /// What one contract check concluded about the store.

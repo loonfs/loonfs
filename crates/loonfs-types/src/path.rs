@@ -229,11 +229,20 @@ impl AbsolutePath {
     /// Appends an already-validated display name without changing existing component spelling.
     ///
     /// The result is not checked against [`MAX_PATH_BYTES`] or
-    /// [`MAX_PATH_DEPTH`], which bound request paths only.
+    /// [`MAX_PATH_DEPTH`], which bound request paths only; a caller that
+    /// builds a request path this way checks it with
+    /// [`Self::validate_request_bounds`].
     pub fn join(&self, display_name: &DisplayName) -> Self {
         let mut components = self.components.clone();
         components.push(PathComponent(display_name.as_str().to_owned()));
         Self::from_components(components)
+    }
+
+    /// Checks the path against [`MAX_PATH_BYTES`] and [`MAX_PATH_DEPTH`], the
+    /// request bounds that [`Self::parse`] enforces and [`Self::join`] does
+    /// not.
+    pub fn validate_request_bounds(&self) -> Result<(), PathError> {
+        validate_path_bounds(self.normalized.len(), self.components.len())
     }
 
     fn from_components(components: Vec<PathComponent>) -> Self {

@@ -3,9 +3,8 @@
 use super::block_load::SessionBlockMemo;
 use super::data_block_load::load_segment_data_block_span;
 use super::index_block_load::load_segment_index_for_compaction;
-use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -293,7 +292,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
     ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
         load_segment_index_for_compaction(self.store, None, self.index_memo, &segment.descriptor)
             .await
-            .map_err(manifest_load_failure)
+            .map_err(CoreError::from)
     }
 
     async fn load_data_blocks(
@@ -303,14 +302,12 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
     ) -> Result<Vec<Arc<DecodedDataBlock>>> {
         let blocks =
             load_segment_data_block_span(self.store, None, None, &segment.descriptor, &entries)
-                .await
-                .map_err(manifest_load_failure)?;
+                .await?;
         validate_manifest_row_seq_range(
             &metadata_segment_object_key(&segment.descriptor),
             blocks.iter().flat_map(|block| block.rows.iter()),
             segment.max_seq,
-        )
-        .map_err(manifest_load_failure)?;
+        )?;
         Ok(blocks)
     }
 }

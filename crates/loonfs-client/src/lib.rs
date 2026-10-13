@@ -63,6 +63,7 @@ pub use config::ClientConfig;
 pub use error::ClientError;
 pub use maintenance::CheckpointsPager;
 pub use payload::{PayloadSource, PayloadStream};
+pub use query::GrepPager;
 pub use reads::{
     ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager,
     ListChangesOptions, PathEntriesPager, ReadFileOptions, SnapshotsPager, TrashPager,

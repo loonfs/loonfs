@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn namespace(value: &str) -> NamespaceId {
-        NamespaceId::parse(value).expect("valid namespace id")
+        loonfs_test_support::ids::namespace_id(value)
     }
 
     fn pin_id(value: &str) -> PinId {

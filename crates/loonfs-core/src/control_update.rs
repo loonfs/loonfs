@@ -153,7 +153,7 @@ where
         UploadSessionUpdate::Replace { mut next, outcome } => {
             if !matches!(next.status, UploadSessionRecordStatus::Open { .. }) {
                 if let UploadSessionMode::ServiceProxied { staging } = &mut next.mode {
-                    *staging = ProxiedStaging::Idle;
+                    *staging = ProxiedStaging::Idle {};
                 }
             }
             let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())

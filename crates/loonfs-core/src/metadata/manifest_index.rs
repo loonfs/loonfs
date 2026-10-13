@@ -7,9 +7,8 @@ use super::row_decode::{
     commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
     revision_from_manifest_row, tombstone_from_manifest_row,
 };
-use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result};
-use crate::manifest::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
+use crate::error::Result;
+use crate::manifest::{Readahead, VerifiedMetadataSegments};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
@@ -22,10 +21,6 @@ use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 
-pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
-    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-}
-
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
@@ -33,8 +28,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     let key = lookup_keys::inode_key(inode_id);
     segments
         .get_for_lookup(MetadataRowFamily::Inodes, &key, &key)
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .map(inode_from_manifest_row)
         .transpose()
 }
@@ -46,8 +40,7 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
     let key = lookup_keys::commit_row_key(seq);
     segments
         .get_for_lookup(MetadataRowFamily::Commits, &key, &key)
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .map(commit_from_manifest_row)
         .transpose()
 }
@@ -64,8 +57,7 @@ pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(lookup_keys::COMMIT_ROW_PREFIX).as_deref(),
             limit,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(commit_from_manifest_row)
         .collect()
@@ -100,8 +92,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
             upper_bound.as_deref(),
             limit,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(|(row_key, row)| {
             Ok(ManifestDirentryBindCandidate {
@@ -126,8 +117,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
             &filter_probe,
             Readahead::Disabled,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(direntry_binding_from_manifest_row)
         .collect()
@@ -146,8 +136,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
             &filter_probe,
             Readahead::Stored,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(direntry_binding_from_manifest_row)
         .collect()
@@ -199,8 +188,7 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
             1,
             &filter_probe,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .next()
         .map(revision_from_manifest_row)
@@ -236,8 +224,7 @@ pub(super) async fn revisions_by_inode_page_desc<S: ObjectStore + ?Sized>(
             limit,
             &filter_probe,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(revision_from_manifest_row)
         .collect()
@@ -260,8 +247,7 @@ pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
             upper_bound,
             limit,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(|(row_key, row)| Ok((row_key, active_deletion_from_manifest_row(row)?)))
         .collect()
@@ -280,8 +266,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
             &filter_probe,
             Readahead::Stored,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(tombstone_from_manifest_row)
         .collect()
@@ -315,8 +300,7 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
             CONTENT_LAYOUT_PAGE_ROWS,
             probe,
         )
-        .await
-        .map_err(manifest_error_to_core)?;
+        .await?;
     rows.into_iter()
         .next()
         .map(|(_, row)| super::row_decode::content_layout_from_manifest_row(row))
@@ -336,8 +320,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
             &filter_probe,
             Readahead::Disabled,
         )
-        .await
-        .map_err(manifest_error_to_core)?
+        .await?
         .into_iter()
         .map(commit_receipt_from_manifest_row)
         .collect::<Result<_>>()?;
@@ -412,8 +395,7 @@ where
                 WHOLE_STATE_RAW_SCAN_LIMIT,
                 &filter_probe,
             )
-            .await
-            .map_err(manifest_error_to_core)?;
+            .await?;
         let page_len = page.len();
         let last_row_key = page.last().map(|row| row.row_key_for_family(family));
         for row in page {

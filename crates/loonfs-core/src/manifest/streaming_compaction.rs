@@ -19,14 +19,13 @@ use super::compaction_retention::{KeptRow, RetentionRule};
 use super::compaction_step::{
     build_replacement_manifest, group_run_descriptors, MergePlacement, ReplacementOutput,
 };
-use super::error::ManifestLoadError;
 use super::index_block_load::segment_object_bytes;
 use super::load::load_manifest_segments;
 use super::publish::{publish_manifest, ManifestPublicationOutcome};
 use super::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::bloom_filter::BloomFilter;
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, StdMonotonicTimer};
@@ -86,7 +85,7 @@ impl MetadataCompactionSpec {
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
         assert!(
-            !inputs.is_empty() && inputs.len() <= super::compaction_step::MAX_COMPACTION_INPUT_RUNS,
+            !inputs.is_empty() && inputs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS,
             "a compaction plan must have bounded, nonempty input"
         );
         Self {
@@ -1173,12 +1172,6 @@ fn resolve_input_runs<S: ObjectStore + ?Sized>(
                 })
         })
         .collect()
-}
-
-/// The one mapper the compaction modules share: a manifest load failure is a
-/// metadata projection failure wherever it is read.
-pub(super) fn manifest_load_failure(error: ManifestLoadError) -> CoreError {
-    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
 }
 
 #[cfg(test)]
