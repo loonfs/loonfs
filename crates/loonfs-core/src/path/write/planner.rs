@@ -90,7 +90,13 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     let request = candidate.intent();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
-        .expect("the namespace sequence should stay below its limit");
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "the namespace head is at sequence {}, the largest sequence number, so no \
+                 commit can follow it",
+                head.seq
+            ))
+        })?;
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;

@@ -7,7 +7,7 @@ use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
-use loonfs_types::{AttributeInclusion, DirectoryPageCursor, PageRequest};
+use loonfs_types::{AttributeInclusion, DirectoryPageCursor, InodeKind, PageRequest};
 
 #[tokio::test]
 async fn a_cold_path_walk_reads_no_inode() {
@@ -605,4 +605,84 @@ async fn a_listing_reads_only_the_slot_binding_family() {
             ApiMetadataRowFamily::DirentryChildBinds
         ]
     );
+}
+
+#[tokio::test]
+async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_current_paths() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("binding-cycle").expect("namespace id");
+    let commit_id = CommitId::parse("c_binding_cycle").expect("commit id");
+    let mut builder = MetadataStateBuilder::default();
+    for inode_id in [InodeId(2), InodeId(3)] {
+        builder.push_inode(crate::metadata::InodeRecord {
+            inode_id,
+            inode_kind: InodeKind::Directory,
+            committed_seq: ChangeSeq(1),
+            commit_id: commit_id.clone(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 1_000,
+        });
+    }
+    // Each directory is bound under the other, which no commit can produce.
+    for (parent_inode_id, child_inode_id, name) in [
+        (InodeId(2), InodeId(3), "three"),
+        (InodeId(3), InodeId(2), "two"),
+    ] {
+        let display_name = loonfs_types::DisplayName::parse(name).expect("display name");
+        builder.push_direntry_binding(crate::metadata::DirentryBindingRecord {
+            parent_inode_id,
+            name_key: loonfs_types::NameKey::for_display_name(
+                loonfs_types::NamespaceNaming::CaseInsensitive,
+                &display_name,
+            ),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+            child_inode_id,
+            child_kind: InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 1_000,
+            committed_seq: ChangeSeq(1),
+            delta_index: 0,
+        });
+    }
+    let segments = build_manifest_segments(
+        &store,
+        &namespace_id,
+        &builder.build(),
+        &HashMap::new(),
+        MetadataRunPolicy::default(),
+    )
+    .await
+    .expect("build segments");
+    let manifest = publish_manifest_with_segments(
+        &store,
+        &namespace_id,
+        ManifestNo(1),
+        ChangeSeq(1),
+        flatten_manifest_segments(segments),
+    )
+    .await;
+    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
+        .await
+        .expect("load manifest segments");
+    let view = crate::metadata::MetadataView::over_manifest_segments(&verified, ChangeSeq(1));
+
+    let covered = view
+        .covering_subtree_tombstone(InodeId(2))
+        .await
+        .expect_err("a cycle is not an uncovered inode");
+    let cycle = view
+        .would_create_directory_cycle(InodeId(4), InodeId(2))
+        .await
+        .expect_err("a stored cycle is not a rename without a cycle");
+    let path = crate::path::read::resolve_visible_inode(
+        &mut view.session(),
+        &mut HashMap::new(),
+        InodeId(2),
+    )
+    .await
+    .expect_err("a cycle has no current path");
+    for error in [covered, cycle, path] {
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
+    }
 }

@@ -4,6 +4,7 @@
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
 mod attribution;
+mod handler_panics;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;

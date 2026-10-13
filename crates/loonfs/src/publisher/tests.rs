@@ -1354,7 +1354,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_publish_panic_ends_the_session() {
+async fn publisher_survives_publish_panic_and_keeps_serving() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
@@ -1371,7 +1371,8 @@ async fn a_publish_panic_ends_the_session() {
     );
     store.wait_until_blocked().await;
 
-    // Queued behind the in-flight batch, whose panic ends the session.
+    // Queued behind the in-flight batch: only a worker that survives the
+    // panic can ever publish this one.
     let queued = admit_commit(
         &publisher,
         &namespace_id,
@@ -1388,19 +1389,19 @@ async fn a_publish_panic_ends_the_session() {
         .expect_err("doomed commit did not complete");
     assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
 
-    let queued_error = queued
-        .await
-        .expect("queued waiter is answered, not abandoned")
-        .expect_err("the session ended before the queued commit published");
-    assert_eq!(queued_error.code(), ErrorCode::ServerError);
+    let queued_response = recv_commit(queued, "queued").await;
+    assert_eq!(queued_response.committed_seq, ChangeSeq(1));
 
-    let after_error = try_admit_commit(
+    // The publisher is fully serviceable after the panic.
+    let after = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("after", "after"),
-    )
-    .expect_err("an ended session admits nothing");
-    assert_eq!(after_error.code(), ErrorCode::ServerError);
+    );
+    assert_eq!(
+        recv_commit(after, "after").await.committed_seq,
+        ChangeSeq(2)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2076,7 +2077,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_publish_panic_fails_queued_work_and_the_drain_reports_it() {
+async fn worker_survives_panic_and_processes_later_queue_items() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
@@ -2104,7 +2105,8 @@ async fn a_publish_panic_fails_queued_work_and_the_drain_reports_it() {
     };
     store.wait_until_blocked().await;
 
-    // Queued behind the doomed batch, whose panic ends the session.
+    // Queued behind the doomed batch: only a worker that survives the panic
+    // publishes this one, and the drain must wait for it.
     let queued = {
         let namespace = namespace.clone();
         tokio::spawn(async move {
@@ -2126,19 +2128,21 @@ async fn a_publish_panic_fails_queued_work_and_the_drain_reports_it() {
         .expect("doomed submit task")
         .expect_err("doomed commit did not complete");
     assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
-    let queued_error = queued
+    let queued_response = queued
         .await
         .expect("queued submit task")
-        .expect_err("the session ended before the queued commit published");
-    assert_eq!(queued_error.code(), ErrorCode::ServerError);
+        .expect("the surviving worker publishes queued work");
+    assert_eq!(queued_response.committed_seq, ChangeSeq(1));
 
     let drain_error = writer
         .drain()
         .await
         .expect_err("drain surfaces the contained panic");
     assert!(
-        drain_error.to_string().contains("panicked"),
-        "drain reports panicked publisher tasks: {drain_error}"
+        drain_error
+            .to_string()
+            .contains("1 publisher task(s) panicked"),
+        "drain reports the count of panicked publisher tasks: {drain_error}"
     );
     assert_eq!(
         registry.shared.admission.used_requests(),
@@ -2150,123 +2154,6 @@ async fn a_publish_panic_fails_queued_work_and_the_drain_reports_it() {
         crate::ExecutionBudgetStats::default(),
         "panic and drain refund the budget"
     );
-}
-
-/// Panics on the first fold manifest put, the way a bug in fold code would.
-#[derive(Debug)]
-struct PanicFoldStore {
-    inner: LocalFsStore,
-    armed: std::sync::atomic::AtomicBool,
-}
-
-#[async_trait]
-impl ObjectStore for PanicFoldStore {
-    delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let folds = matches!(mode, PutMode::CreateIfAbsent)
-            && loonfs_types::format::manifest::decode_namespace_manifest_json(&bytes).is_ok_and(
-                |manifest| {
-                    manifest.payload().folded_wal_no.0 > 0
-                        && !manifest.payload().status.is_deleted()
-                },
-            );
-        if folds && self.armed.swap(false, AtomicOrdering::SeqCst) {
-            panic!("injected fold panic");
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-}
-
-/// A writer whose session for the returned namespace ended when its fold
-/// panicked.
-async fn session_ended_by_a_fold_panic() -> (
-    tempfile::TempDir,
-    crate::LoonFs<crate::Writable>,
-    crate::Namespace<crate::Writable>,
-    NamespaceId,
-) {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(PanicFoldStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        armed: std::sync::atomic::AtomicBool::new(true),
-    });
-    let namespace_id = NamespaceId::parse("fold-panic").expect("valid namespace id");
-    let writer = test_writer_with_interval(store.clone() as SharedStore, 0).await;
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("bootstrap");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    append_wal_objects(
-        store.as_ref(),
-        &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
-        &MutationContext {
-            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
-            now_ms: 1_000,
-        },
-    )
-    .await
-    .expect("seed the WAL tail below the fold threshold");
-    namespace
-        .commit_candidate(CommitCandidate::new(create_directory_request(
-            "cross-threshold",
-            "docs",
-        )))
-        .await
-        .expect("publish across the fold threshold");
-    namespace
-        .wait_for_fold()
-        .await
-        .expect("the fold task contains its panic");
-    (temp_dir, writer, namespace, namespace_id)
-}
-
-#[tokio::test]
-async fn a_fold_panic_ends_the_session_and_fails_the_next_commit() {
-    let (_temp_dir, writer, namespace, _namespace_id) = session_ended_by_a_fold_panic().await;
-
-    let error = namespace
-        .commit_candidate(CommitCandidate::new(create_directory_request(
-            "after-panic",
-            "after",
-        )))
-        .await
-        .expect_err("an ended session admits nothing");
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    let drain_error = writer
-        .drain()
-        .await
-        .expect_err("drain surfaces the contained panic");
-    assert!(
-        drain_error.to_string().contains("panicked"),
-        "drain reports panicked publisher tasks: {drain_error}"
-    );
-}
-
-#[tokio::test]
-async fn a_session_opened_after_a_fold_panic_publishes() {
-    let (_temp_dir, writer, namespace, namespace_id) = session_ended_by_a_fold_panic().await;
-    namespace.close().await.expect("close the ended session");
-
-    let reopened = writer
-        .open_namespace(&namespace_id)
-        .expect("a new open starts a new session");
-    reopened
-        .commit_candidate(CommitCandidate::new(create_directory_request(
-            "after-reopen",
-            "after",
-        )))
-        .await
-        .expect("the new session publishes");
 }
 
 #[tokio::test]

@@ -216,10 +216,12 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    /// Concurrent writers changed a control object on every compare-and-swap
-    /// attempt this operation was allowed. Retrying can succeed.
+    /// A compare-and-swap loop on a control object used every attempt it was
+    /// allowed. Concurrent writers changed the object, or, on snapshot
+    /// renewal, a transport failure left an attempt's outcome unconfirmed.
+    /// Retrying can succeed.
     #[error(
-        "`{object_key}` lost all {} compare-and-swap attempts to concurrent writers",
+        "`{object_key}` reached the limit of {} compare-and-swap attempts",
         crate::limits::MAX_CONTENTION_ATTEMPTS
     )]
     StoreContention { object_key: String },
@@ -358,7 +360,6 @@ pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
         | ObjectStoreErrorKind::Configuration
         | ObjectStoreErrorKind::RetryableTransport
         | ObjectStoreErrorKind::Other => ErrorCode::ServerError,
-        _ => ErrorCode::ServerError,
     }
 }
 

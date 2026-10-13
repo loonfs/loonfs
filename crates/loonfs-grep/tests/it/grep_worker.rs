@@ -5,7 +5,6 @@
 
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
-use futures::FutureExt;
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
     PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
@@ -37,7 +36,6 @@ use loonfs_types::{
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -402,7 +400,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 }
 
 #[tokio::test]
-async fn exhausted_run_numbers_panic_without_writing_the_manifest() {
+async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -480,33 +478,27 @@ async fn exhausted_run_numbers_panic_without_writing_the_manifest() {
         .await
         .expect("list segments before failure");
 
-    for panicked in [
-        AssertUnwindSafe(worker.build_step(&namespace_id, GramIndexBuildPolicy::default()))
-            .catch_unwind()
+    for error in [
+        worker
+            .build_step(&namespace_id, GramIndexBuildPolicy::default())
             .await
-            .map(drop)
             .expect_err("a build cannot allocate a run above the public maximum"),
-        AssertUnwindSafe(worker.reorganize_step(
-            &namespace_id,
-            GramIndexBuildPolicy {
-                max_delta_runs: NonZeroUsize::MIN,
-                ..GramIndexBuildPolicy::default()
-            },
-        ))
-        .catch_unwind()
-        .await
-        .map(drop)
-        .expect_err("a reorganization cannot allocate above the public maximum"),
+        worker
+            .reorganize_step(
+                &namespace_id,
+                GramIndexBuildPolicy {
+                    max_delta_runs: NonZeroUsize::MIN,
+                    ..GramIndexBuildPolicy::default()
+                },
+            )
+            .await
+            .expect_err("a reorganization cannot allocate above the public maximum"),
     ] {
-        let message = panicked
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panicked.downcast_ref::<&str>().copied())
-            .unwrap_or_default();
-        assert!(
-            message.contains("the run number should stay below its limit"),
-            "{message}"
-        );
+        assert_eq!(error.code(), ErrorCode::IndexCorrupt);
+        assert!(matches!(
+            error,
+            GrepError::IndexCorrupt { message } if message.contains("largest run number")
+        ));
     }
 
     let after = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())

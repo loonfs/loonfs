@@ -35,5 +35,5 @@ pub(crate) fn snapshot_summary(
     record: loonfs_types::format::control::PinPayload,
 ) -> loonfs_types::SnapshotSummary {
     loonfs_types::SnapshotSummary::from_checkpoint(checkpoint_summary(record))
-        .expect("a snapshot pin record should have a snapshot owner with an expiry")
+        .expect("a pin created with, or loaded as, a snapshot owner should have one")
 }

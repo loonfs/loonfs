@@ -790,7 +790,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let run_no = previous_manifest
         .as_ref()
         .map_or(RunNo(0), |previous| previous.manifest.payload().next_run_no);
-    let mut next_run_no = next_run_no_after(run_no);
+    let mut next_run_no = next_run_no_after(run_no)?;
     let runs = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
             let run_segments = build_manifest_segments(

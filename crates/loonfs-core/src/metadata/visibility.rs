@@ -21,7 +21,7 @@ use std::future::Future;
 /// visibility rules and may be overridden only for equivalent cached or
 /// indexed paths.
 pub(crate) trait MetadataVisibilityReads {
-    type Error;
+    type Error: From<VisiblePathError>;
 
     /// The inode record created at or before the read seq, if any.
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
@@ -188,8 +188,9 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
 }
 
 /// The first active subtree tombstone rooted at `inode_id` or at any of its
-/// current ancestors (following current parent bindings upward). The visited
-/// set terminates the walk instead of looping on parent-binding cycles.
+/// current ancestors (following current parent bindings upward). A walk that
+/// revisits an inode found a parent-binding cycle, which is corrupt stored
+/// metadata: answering "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
@@ -199,7 +200,10 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
 
     while let Some(candidate_inode_id) = current {
         if !visited.insert(candidate_inode_id.0) {
-            break;
+            return Err(VisiblePathError::ParentBindingCycle {
+                inode_id: candidate_inode_id,
+            }
+            .into());
         }
         if let Some(tombstone) = reads
             .find_active_subtree_tombstone(candidate_inode_id)
@@ -218,7 +222,7 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
 
 /// Whether binding `inode_id` under `new_parent_inode_id` would make the
 /// directory graph cyclic: true iff `inode_id` is `new_parent_inode_id` or
-/// one of its current ancestors. Same ancestor walk (and cycle guard) as
+/// one of its current ancestors. Same ancestor walk (and cycle error) as
 /// [`covering_subtree_tombstone`], visiting for identity instead of
 /// tombstones.
 pub(crate) async fn would_create_directory_cycle<R: MetadataVisibilityReads>(
@@ -231,7 +235,10 @@ pub(crate) async fn would_create_directory_cycle<R: MetadataVisibilityReads>(
 
     while let Some(candidate_inode_id) = current {
         if !visited.insert(candidate_inode_id.0) {
-            break;
+            return Err(VisiblePathError::ParentBindingCycle {
+                inode_id: candidate_inode_id,
+            }
+            .into());
         }
         if candidate_inode_id == inode_id {
             return Ok(true);

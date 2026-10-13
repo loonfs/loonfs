@@ -227,12 +227,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = prepare_wal_object(
+    let wal = match prepare_wal_object(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
         &view.head,
         &accepted_commits,
-    );
+    ) {
+        Ok(wal) => wal,
+        Err(error) => return abort_batch(slots, &error),
+    };
     let resulting_head = view.head.after_wal_object(wal.envelope().payload());
     let elapsed_ms = clock.batch.elapsed_ms();
     let publication_now_ms = context
@@ -363,7 +366,6 @@ mod tests {
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
-    use futures::FutureExt;
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -461,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_exhaustion_panics_before_writing_wal_or_hint() {
+    async fn sequence_exhaustion_writes_neither_wal_nor_hint() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -504,34 +506,27 @@ mod tests {
             },
         ));
         let batch = Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default()));
-        let content_writes = tokio::sync::Semaphore::new(32);
-        let panicked =
-            std::panic::AssertUnwindSafe(publish_namespace_commits_batch_against_publish_view(
-                &store,
-                &namespace_id,
-                &[candidate],
-                &context,
-                &view,
-                PublicationClock {
-                    batch: &batch,
-                    attempt: batch.observe(),
-                    tip: batch.observe(),
-                },
-                &content_writes,
-            ))
-            .catch_unwind()
-            .await
-            .map(drop)
-            .expect_err("an exhausted sequence should panic");
-        let message = panicked
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panicked.downcast_ref::<&str>().copied())
-            .unwrap_or_default();
-        assert!(
-            message.contains("the namespace sequence should stay below its limit"),
-            "{message}"
-        );
+        let result = publish_namespace_commits_batch_against_publish_view(
+            &store,
+            &namespace_id,
+            &[candidate],
+            &context,
+            &view,
+            PublicationClock {
+                batch: &batch,
+                attempt: batch.observe(),
+                tip: batch.observe(),
+            },
+            &tokio::sync::Semaphore::new(32),
+        )
+        .await;
+
+        let error = result.results[0]
+            .as_ref()
+            .expect_err("exhausted sequence must reject the commit");
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+        assert!(error.to_string().contains("largest sequence number"));
+        assert!(matches!(result.effect, PublishViewEffect::Unchanged));
         assert_eq!(
             store
                 .get(&hint_key, None)

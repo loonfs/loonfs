@@ -234,7 +234,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 });
             }
         }
-        let manifest_no = next_manifest_no(current.as_ref());
+        let manifest_no = next_manifest_no(current.as_ref())?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next_run_no = current.as_ref().map_or(RunNo(0), |manifest| {
             manifest.manifest_state().index().next_run_no
@@ -286,7 +286,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
-            next_manifest_no(Some(&current)),
+            next_manifest_no(Some(&current))?,
             GrepIndexStatus::Disabled {},
             GrepIndexState {
                 reorganize: None,
@@ -294,7 +294,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             Vec::new(),
         )
-        .expect("the next grep manifest state should be valid");
+        .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
@@ -471,7 +471,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
-        let manifest_no = next_manifest_no(Some(current));
+        let manifest_no = next_manifest_no(Some(current))?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next = backfilling_manifest(
             namespace_id,
@@ -520,9 +520,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next_run_no = if rows.is_empty() {
             current_run_no
         } else {
-            next_run_no_after(current_run_no)
+            next_index_run_no(current_run_no)?
         };
-        let manifest_no = next_manifest_no(Some(&current));
+        let manifest_no = next_manifest_no(Some(&current))?;
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -583,7 +583,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             segments,
         )
-        .expect("the next grep manifest state should be valid");
+        .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
@@ -676,20 +676,25 @@ impl IncrementalCursor {
         event_index: usize,
         event_count: usize,
         after_event: bool,
-    ) {
+    ) -> Result<()> {
         if !after_event && event_index == 0 {
-            return;
+            return Ok(());
         }
         let next_index = event_index
             .checked_add(usize::from(after_event))
-            .expect("an index into a commit's events should not overflow");
+            .expect("an index below a commit's event count should not overflow");
         let next_event_index = if next_index < event_count {
-            u32::try_from(next_index)
-                .expect("an index into one commit's events should fit in `u32`")
+            u32::try_from(next_index).map_err(|_| {
+                CoreError::NamespaceCorrupt(format!(
+                    "commit {change_seq} records {event_count} events, more than a grep \
+                     cursor can address"
+                ))
+            })?
         } else {
             0
         };
         self.resume = ChangeFeedResume::new(change_seq, next_event_index);
+        Ok(())
     }
 
     fn finish_change(&mut self, change_seq: ChangeSeq) {
@@ -841,7 +846,7 @@ async fn plan_incremental_unit(
                 && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), false);
+                cursor.stop_at(change.committed_seq, event_index, events.len(), false)?;
                 break 'changes;
             }
             examined_files += 1;
@@ -858,7 +863,7 @@ async fn plan_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), true);
+                cursor.stop_at(change.committed_seq, event_index, events.len(), true)?;
                 break 'changes;
             }
         }
@@ -1069,7 +1074,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         output_level,
                         run_no: current_run_no,
                     },
-                    next_run_no_after(current_run_no),
+                    next_index_run_no(current_run_no)?,
                 )
             }
         };
@@ -1099,7 +1104,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .await?;
         let rows = gram_postings_rows(merged.postings);
-        let manifest_no = next_manifest_no(Some(&current));
+        let manifest_no = next_manifest_no(Some(&current))?;
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -1138,7 +1143,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             segments,
         )
-        .expect("the next grep manifest state should be valid");
+        .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
                 merged_rows: merged.rows,
@@ -1305,11 +1310,28 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
     }
 }
 
-fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> ManifestNo {
-    current.map_or(ManifestNo(1), |current| {
-        current
-            .manifest_no()
-            .successor()
-            .expect("the grep manifest number should stay below its limit")
+fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> Result<ManifestNo> {
+    let Some(current) = current else {
+        return Ok(ManifestNo(1));
+    };
+    current
+        .manifest_no()
+        .successor()
+        .map_err(|_| GrepError::IndexCorrupt {
+            message: format!(
+                "the current grep manifest is number {}, the largest manifest number, so no \
+                 manifest can follow it",
+                current.manifest_no()
+            ),
+        })
+}
+
+/// The run number after the grep manifest's `current` one.
+fn next_index_run_no(current: RunNo) -> Result<RunNo> {
+    next_run_no_after(current).map_err(|_| GrepError::IndexCorrupt {
+        message: format!(
+            "the grep manifest's next run number is {current}, the largest run number, so no \
+             run can follow it"
+        ),
     })
 }

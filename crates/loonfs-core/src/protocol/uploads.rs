@@ -536,7 +536,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let staging = proxied_staging(&mut state.mode);
+            let staging = proxied_staging(&mut state.mode, &upload_id)?;
             match staging {
                 ProxiedStaging::Idle => {
                     *staging = ProxiedStaging::Claimed;
@@ -598,12 +598,20 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
 ///
 /// A session's mode is set when it is created, and every staging step runs
 /// after `read_open_proxied_session` checked that the mode is service-proxied.
-fn proxied_staging(mode: &mut UploadSessionMode) -> &mut ProxiedStaging {
+/// Each compare-and-swap attempt reloads the session from the store, so a
+/// reloaded record in another mode is corrupt.
+fn proxied_staging<'a>(
+    mode: &'a mut UploadSessionMode,
+    upload_id: &UploadId,
+) -> Result<&'a mut ProxiedStaging> {
     match mode {
-        UploadSessionMode::ServiceProxied { staging } => Some(staging),
-        _ => None,
+        UploadSessionMode::ServiceProxied { staging } => Ok(staging),
+        other => Err(CoreError::NamespaceCorrupt(format!(
+            "upload session `{upload_id}` was service-proxied when staging began, but its \
+             stored mode is now `{}`",
+            upload_mode(other).as_str()
+        ))),
     }
-    .expect("a staging step should run only on a service-proxied session")
 }
 
 async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
@@ -827,7 +835,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
         let staged = staged.clone();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let staging = proxied_staging(&mut state.mode);
+            let staging = proxied_staging(&mut state.mode, &upload_id)?;
             if already_present {
                 return Err(CoreError::UploadContentConflict { upload_id });
             }

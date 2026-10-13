@@ -2,12 +2,12 @@
 //! and the totals of the execution budget it shares.
 
 use super::{CoreError, NamespaceId, PreparedCandidate};
-use crate::execution_budget::BudgetPermit;
+use crate::execution_budget::{AdmissionChange, BudgetPermit};
 use crate::{ExecutionBudget, PublicationPolicy};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
 
 /// Admits one runtime's publication requests against its per-namespace
@@ -99,23 +99,33 @@ impl PublicationAdmission {
         let estimated_bytes = estimated_request_bytes
             .saturating_add(512)
             .saturating_add(namespace_id.as_str().len());
-        let mut namespaces = self.lock_namespaces();
-        let empty = RequestWeight::default();
-        let namespace = namespaces.get(namespace_id).unwrap_or(&empty);
-        if namespace.requests >= self.limits.max_requests_per_namespace.get()
-            || estimated_bytes
-                > self
-                    .limits
-                    .max_estimated_bytes_per_namespace
-                    .get()
-                    .saturating_sub(namespace.estimated_bytes)
-        {
+        let change = {
+            let mut namespaces = self.lock_namespaces();
+            let empty = RequestWeight::default();
+            let namespace = namespaces.get(namespace_id).unwrap_or(&empty);
+            if namespace.requests >= self.limits.max_requests_per_namespace.get()
+                || estimated_bytes
+                    > self
+                        .limits
+                        .max_estimated_bytes_per_namespace
+                        .get()
+                        .saturating_sub(namespace.estimated_bytes)
+            {
+                return Err(CoreError::CommitQueueFull);
+            }
+            let change = self.budget.charge_admission(estimated_bytes);
+            if matches!(change, AdmissionChange::Admitted(_)) {
+                let namespace = namespaces.entry(namespace_id.clone()).or_default();
+                namespace.requests += 1;
+                namespace.estimated_bytes += estimated_bytes;
+            }
+            change
+        };
+        // The recorder is caller code, so it runs after both locks are released.
+        self.budget.report_admission(change);
+        if matches!(change, AdmissionChange::Rejected) {
             return Err(CoreError::CommitQueueFull);
         }
-        self.budget.charge_admission(estimated_bytes)?;
-        let namespace = namespaces.entry(namespace_id.clone()).or_default();
-        namespace.requests += 1;
-        namespace.estimated_bytes += estimated_bytes;
         Ok(Arc::new(AdmissionPermit {
             admission: Arc::clone(self),
             namespace_id: namespace_id.clone(),
@@ -172,18 +182,28 @@ impl AdmissionPermit {
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
-        let mut namespaces = self.admission.lock_namespaces();
-        if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
-            namespace.requests -= 1;
-            namespace.estimated_bytes -= self.estimated_bytes;
-            namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
-            if namespace.requests == 0 {
-                namespaces.remove(&self.namespace_id);
+        let change = {
+            // A drop can run while a panic unwinds, and a second panic then
+            // aborts the process, so this recovers a poisoned lock instead of
+            // panicking. The critical section only updates counts.
+            let mut namespaces = self
+                .admission
+                .namespaces
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
+                namespace.requests -= 1;
+                namespace.estimated_bytes -= self.estimated_bytes;
+                namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
+                if namespace.requests == 0 {
+                    namespaces.remove(&self.namespace_id);
+                }
             }
-        }
-        // Refunded under this runtime's lock, as it was charged, so this
-        // runtime never sees its namespace refunded while the total is not.
-        self.admission.budget.refund_admission(self.estimated_bytes);
+            // Refunded under this runtime's lock, as it was charged, so this
+            // runtime never sees its namespace refunded while the total is not.
+            self.admission.budget.refund_admission(self.estimated_bytes)
+        };
+        self.admission.budget.report_admission(change);
     }
 }
 

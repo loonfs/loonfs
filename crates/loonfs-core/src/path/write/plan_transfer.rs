@@ -331,7 +331,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             if expected_destination.is_some() {
                 return Err(CoreError::PathNotFound(destination_path.to_owned()));
             }
-            let child_inode_id = allocation.allocate();
+            let child_inode_id = allocation.allocate()?;
             ops.push(CommitOperation::CreateFile {
                 child_inode_id,
                 parent_inode_id: target_parent,

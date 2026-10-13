@@ -345,21 +345,11 @@ impl RuntimeInstruments {
         let Some(installed) = &self.installed else {
             return;
         };
-        let operation = sample.operation.as_str();
-        let instruments = {
-            let mut registry = installed
-                .object_store
-                .lock()
-                .expect("the object-store instrument lock should not be poisoned");
-            let instruments = registry.entry(operation).or_insert_with(|| {
-                ObjectStoreOperationInstruments::register(installed.recorder.as_ref(), operation)
-            });
-            instruments.reading(
-                installed.recorder.as_ref(),
-                sample.result.as_str(),
-                sample.key_class.as_str(),
-            )
-        };
+        let instruments = installed.object_store_reading(
+            sample.operation.as_str(),
+            sample.result.as_str(),
+            sample.key_class.as_str(),
+        );
         instruments.outcome.increment(1);
         instruments
             .seconds
@@ -373,6 +363,52 @@ impl RuntimeInstruments {
         instruments
             .retries
             .increment(u64::from(sample.attempts.saturating_sub(1)));
+    }
+}
+
+impl Installed {
+    /// Returns the handles one object-store sample reports through. A missing
+    /// handle is registered before the registry lock is taken, because the
+    /// recorder is caller code. When two first samples race, the handle
+    /// stored first is kept.
+    fn object_store_reading(
+        &self,
+        operation: &'static str,
+        result: &'static str,
+        key_class: &'static str,
+    ) -> ObjectStoreReading {
+        let operation_registered = match self.lock_object_store().get(operation) {
+            Some(instruments) => match instruments.reading(result, key_class) {
+                Some(reading) => return reading,
+                None => true,
+            },
+            None => false,
+        };
+        let recorder = self.recorder.as_ref();
+        let registered = (!operation_registered)
+            .then(|| ObjectStoreOperationInstruments::register(recorder, operation));
+        let outcome = ObjectStoreOperationInstruments::register_outcome(
+            recorder, operation, result, key_class,
+        );
+        let mut registry = self.lock_object_store();
+        let instruments = registry.entry(operation).or_insert_with(|| {
+            registered.expect("an operation found unregistered should be registered here")
+        });
+        instruments
+            .outcomes
+            .entry((result, key_class))
+            .or_insert(outcome);
+        instruments
+            .reading(result, key_class)
+            .expect("the outcome counter should be stored by now")
+    }
+
+    fn lock_object_store(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<&'static str, ObjectStoreOperationInstruments>> {
+        self.object_store
+            .lock()
+            .expect("the object-store instrument lock should not be poisoned")
     }
 }
 
@@ -423,7 +459,6 @@ impl ObjectStoreMetricsRecorder for FanOutRecorder {
 /// The instruments one object-store operation reports, plus the counters for
 /// each outcome and key class that operation has seen.
 struct ObjectStoreOperationInstruments {
-    operation: &'static str,
     seconds: Arc<dyn HistogramHandle>,
     bytes_in: Arc<dyn CounterHandle>,
     bytes_out: Arc<dyn CounterHandle>,
@@ -445,7 +480,6 @@ impl ObjectStoreOperationInstruments {
     fn register(recorder: &dyn MetricsRecorder, operation: &'static str) -> Self {
         let labels = [("operation", operation)];
         Self {
-            operation,
             seconds: recorder.register_histogram(
                 "loonfs.object_store.operation_seconds",
                 "Object-store call latency in seconds, including provider retries",
@@ -471,35 +505,34 @@ impl ObjectStoreOperationInstruments {
         }
     }
 
-    fn reading(
-        &mut self,
+    fn register_outcome(
         recorder: &dyn MetricsRecorder,
+        operation: &'static str,
         result: &'static str,
         key_class: &'static str,
-    ) -> ObjectStoreReading {
-        let operation = self.operation;
-        let outcome = self
-            .outcomes
-            .entry((result, key_class))
-            .or_insert_with(|| {
-                recorder.register_counter(
-                    "loonfs.object_store.operations",
-                    "Object-store calls by operation, outcome, and key class",
-                    &[
-                        ("operation", operation),
-                        ("result", result),
-                        ("key_class", key_class),
-                    ],
-                )
-            })
-            .clone();
-        ObjectStoreReading {
-            outcome,
+    ) -> Arc<dyn CounterHandle> {
+        recorder.register_counter(
+            "loonfs.object_store.operations",
+            "Object-store calls by operation, outcome, and key class",
+            &[
+                ("operation", operation),
+                ("result", result),
+                ("key_class", key_class),
+            ],
+        )
+    }
+
+    /// The handles for one outcome and key class, or `None` before that
+    /// pair's counter is stored.
+    fn reading(&self, result: &'static str, key_class: &'static str) -> Option<ObjectStoreReading> {
+        let outcome = self.outcomes.get(&(result, key_class))?;
+        Some(ObjectStoreReading {
+            outcome: Arc::clone(outcome),
             seconds: Arc::clone(&self.seconds),
             bytes_in: Arc::clone(&self.bytes_in),
             bytes_out: Arc::clone(&self.bytes_out),
             retries: Arc::clone(&self.retries),
-        }
+        })
     }
 }
 

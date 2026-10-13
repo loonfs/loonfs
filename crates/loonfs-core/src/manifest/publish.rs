@@ -60,7 +60,7 @@ where
             ManifestChange::Finished(result) => return Ok((result, current, hint)),
             ManifestChange::Again => continue,
         };
-        payload.manifest_no = super::fold::next_manifest_no_after(predecessor);
+        payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
         let manifest = encode_manifest(payload);
         let manifest_bytes = manifest.as_bytes().len() as u64;
         let (outcome, raised) =

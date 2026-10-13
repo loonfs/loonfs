@@ -2,6 +2,7 @@
 
 use super::PreparedWalObject;
 use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
+use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
 use loonfs_types::{NamespaceId, WriterEpoch};
@@ -11,7 +12,7 @@ pub(crate) fn prepare_wal_object(
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
     records: &[PreparedCommit],
-) -> PreparedWalObject {
+) -> Result<PreparedWalObject> {
     assert!(
         records
             .iter()
@@ -24,10 +25,13 @@ pub(crate) fn prepare_wal_object(
         .collect();
     let payload = WalObjectPayload {
         namespace_id,
-        wal_no: head
-            .wal_no
-            .successor()
-            .expect("the WAL number should stay below its limit"),
+        wal_no: head.wal_no.successor().map_err(|_| {
+            CoreError::NamespaceCorrupt(format!(
+                "the WAL tip is at number {}, the largest WAL number, so no WAL object can \
+                 follow it",
+                head.wal_no
+            ))
+        })?,
         writer_epoch,
         head_seq: payload_records
             .last()
@@ -41,5 +45,5 @@ pub(crate) fn prepare_wal_object(
         .expect("a WAL object this process built should encode");
     super::replay::validate_wal_object_for_replay(head.seq, object.envelope())
         .expect("a WAL object this process built should pass replay validation");
-    object
+    Ok(object)
 }

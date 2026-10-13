@@ -830,7 +830,7 @@ async fn fence_publication_enforces_the_wal_budget_before_the_put() {
         1_000,
         loonfs_test_support::test_actor(),
     );
-    let fence = super::prepare_wal_object(namespace_id, WriterEpoch(1), &head, &[]);
+    let fence = super::prepare_wal_object(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
     let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let expired = crate::time::Observation::now(timer.clone());
     timer.advance_ms(1);
@@ -869,7 +869,8 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
         1_000,
         loonfs_test_support::test_actor(),
     );
-    let fence = super::prepare_wal_object(namespace_id.clone(), WriterEpoch(1), &head, &[]);
+    let fence =
+        super::prepare_wal_object(namespace_id.clone(), WriterEpoch(1), &head, &[]).expect("fence");
     let error = super::publish_wal_object(&store, &fence, &tip)
         .await
         .expect_err("late put must not acknowledge publication");

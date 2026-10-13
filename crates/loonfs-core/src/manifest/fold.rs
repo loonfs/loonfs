@@ -282,7 +282,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
 ) -> Result<TryFoldWalOutcome> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let manifest_no = next_manifest_no_after(projection.basis.manifest_no());
+    let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
     let manifest = build_namespace_manifest_for_projection(
         store,
         namespace_id,
@@ -494,18 +494,24 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     })
 }
 
-pub(super) fn next_manifest_no_after(current: ManifestNo) -> ManifestNo {
-    current
-        .successor()
-        .expect("the manifest number should stay below its limit")
+pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {
+    current.successor().map_err(|_| {
+        CoreError::NamespaceCorrupt(format!(
+            "the current manifest is number {current}, the largest manifest number, so no \
+             manifest can follow it"
+        ))
+    })
 }
 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
-pub fn next_run_no_after(current: RunNo) -> RunNo {
-    current
-        .successor()
-        .expect("the run number should stay below its limit")
+pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+    current.successor().map_err(|_| {
+        CoreError::NamespaceCorrupt(format!(
+            "the manifest's next run number is {current}, the largest run number, so no \
+             run can follow it"
+        ))
+    })
 }
 
 async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
@@ -550,7 +556,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         .await?,
                 ),
             }],
-            next_run_no_after(run_no),
+            next_run_no_after(run_no)?,
         )
     } else {
         let previous_manifest = projection.manifest_segments.manifest();
@@ -576,7 +582,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                     .await?,
                 ),
             });
-            next_run_no = next_run_no_after(run_no);
+            next_run_no = next_run_no_after(run_no)?;
         }
         (runs, next_run_no)
     };
@@ -600,13 +606,19 @@ mod ordinal_tests {
     use loonfs_types::MAX_PUBLIC_INTEGER;
 
     #[test]
-    #[should_panic(expected = "the manifest number should stay below its limit")]
-    fn manifest_no_advancement_accepts_the_maximum_and_panics_past_it() {
+    fn manifest_no_advancement_accepts_the_maximum_and_rejects_the_next_value() {
         assert_eq!(
-            next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER - 1)),
+            next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER - 1))
+                .expect("advance to public maximum"),
             ManifestNo(MAX_PUBLIC_INTEGER)
         );
-        next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER));
+
+        let error = next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER))
+            .expect_err("manifest number must not exceed the public maximum");
+        assert!(matches!(
+            error,
+            CoreError::NamespaceCorrupt(message) if message.contains("largest manifest number")
+        ));
     }
 }
 

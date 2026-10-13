@@ -166,10 +166,12 @@ async fn append_to<S: ObjectStore + ?Sized>(
         && head_size == base.size_bytes
         && base.size_bytes > 0;
     let added = bytes.len() as u64;
-    let size_bytes = base
-        .size_bytes
-        .checked_add(added)
-        .expect("an appended file size should fit in `u64` bytes");
+    let size_bytes = base.size_bytes.checked_add(added).ok_or_else(|| {
+        CoreError::NamespaceCorrupt(format!(
+            "content `{}` records a size of {} bytes, too large to append {added} bytes to",
+            base.content_id, base.size_bytes
+        ))
+    })?;
     let algorithm = store.checksum_algorithm();
     if base.checksum.algorithm != algorithm {
         return Err(CoreError::NamespaceCorrupt(format!(

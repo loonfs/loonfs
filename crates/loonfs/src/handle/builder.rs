@@ -340,6 +340,13 @@ impl CoreConfig {
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
     fn open(self) -> Result<RuntimeCore> {
+        if !loonfs_core::time::system_clock_reads_after_epoch() {
+            return Err(Error::Config(
+                "the system clock reads before the unix epoch; LoonFS stamps unix milliseconds \
+                 into durable state"
+                    .to_owned(),
+            ));
+        }
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = config.kind();

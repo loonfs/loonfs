@@ -205,7 +205,6 @@ pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
 
 /// A provider-independent category for an object-store error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub enum ObjectStoreErrorKind {
     /// A required object was absent.
     NotFound,

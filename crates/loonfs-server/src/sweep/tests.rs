@@ -493,8 +493,8 @@ async fn a_sweep_survives_a_failing_namespace() {
         InjectedError::Transport("injected for one namespace".to_owned()),
     ));
     store.fail_all();
-    let server =
-        SweepServer::start(store.clone(), &sweep_config(None), now_ms + 20 * MINUTE_MS).await;
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
 
     assert_eq!(
         server
@@ -516,6 +516,7 @@ async fn a_sweep_survives_a_failing_namespace() {
         1
     );
 
+    server.clock.advance_ms(config.tick_interval_ms);
     server
         .sweep
         .run_pass(GarbageCollection::Skip)
@@ -524,118 +525,194 @@ async fn a_sweep_survives_a_failing_namespace() {
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "the next pass tries the failed namespace again"
+        "a pass after the backoff tries the failed namespace again"
     );
 }
 
-#[tokio::test]
-async fn a_corrupt_namespace_is_counted_and_skipped_by_later_passes() {
-    let directory = tempdir().expect("tempdir");
-    let store: SharedObjectStore = local_store(directory.path());
-    let names = ["healthy", "corrupt"].map(namespace_id);
-    let (writer, now_ms) = seed_writer(&store).await;
-    for namespace_id in &names {
-        seed_unfolded_tail(&writer, namespace_id).await;
-    }
-    writer.shutdown().await.expect("stop the writer");
-    let manifests = keys_under(
-        store.as_ref(),
-        &loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
-    )
-    .await;
-    let mut originals = Vec::new();
-    for key in &manifests {
-        originals.push(
-            store
-                .get(key, None)
-                .await
-                .expect("read a manifest")
-                .expect("the manifest exists"),
-        );
-        store
-            .put_overwrite(key, bytes::Bytes::from_static(b"not a manifest"))
-            .await
-            .expect("corrupt a manifest");
-    }
-    let config = sweep_config(None);
-    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
-    let skipped = || {
-        server.counter(
-            "loonfs.maintenance.sweep_visit_skipped",
-            &[("call", "metadata")],
-        )
-    };
-
-    server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
-    assert_eq!(skipped(), 1);
-    for (key, bytes) in manifests.iter().zip(originals) {
-        store
-            .put_overwrite(key, bytes)
-            .await
-            .expect("restore a manifest");
-    }
-
-    server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
-    assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
-    assert!(
-        server.wal_tail_objects(&names[1]).await > 0,
-        "a later pass does not visit a namespace a terminal failure took out"
-    );
-    assert_eq!(skipped(), 1);
-
-    let namespaces = &server.sweep.inner.namespaces;
-    drop(namespaces.open(&names[1]).await.expect("hold the session"));
-    server
-        .tick_after(config.idle_session_close_after_ms + 1)
-        .await;
-    assert!(
-        namespaces.held_ids().is_empty(),
-        "a skipped namespace's idle session still closes"
-    );
-}
-
-#[tokio::test]
-async fn a_stale_head_failure_is_retried_by_the_next_pass() {
-    let directory = tempdir().expect("tempdir");
-    let store: SharedObjectStore = local_store(directory.path());
-    let namespace_id = namespace_id("raced");
-    let (writer, now_ms) = seed_writer(&store).await;
+/// A server over one seeded namespace whose store calls fail until cleared,
+/// with an idle WAL tail that a visit folds.
+async fn failing_namespace_server(
+    directory: &std::path::Path,
+) -> (Arc<FailStore<LocalFsStore>>, SweepServer, NamespaceId) {
+    let base: SharedObjectStore = local_store(directory);
+    let namespace_id = namespace_id("failing");
+    let (writer, now_ms) = seed_writer(&base).await;
     seed_unfolded_tail(&writer, &namespace_id).await;
     writer.shutdown().await.expect("stop the writer");
+    let failing_prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
+    let store = Arc::new(FailStore::matching(
+        LocalFsStore::new(directory).expect("local store"),
+        move |operation| operation.key().starts_with(&failing_prefix),
+        InjectedError::PermissionDenied("expired credentials".to_owned()),
+    ));
     let server =
         SweepServer::start(store.clone(), &sweep_config(None), now_ms + 20 * MINUTE_MS).await;
+    (store, server, namespace_id)
+}
 
-    server.sweep.record_failure(
-        &namespace_id,
-        super::SweepCall::Metadata,
-        loonfs::ErrorCode::StaleHead,
-        &"a racing publication moved the head",
+impl SweepServer {
+    fn metadata_failures(&self) -> u64 {
+        self.counter(
+            "loonfs.maintenance.sweep_visit_failures",
+            &[("call", "metadata")],
+        )
+    }
+
+    fn backoff_attempts(&self, namespace_id: &NamespaceId) -> Option<u32> {
+        super::lock(&self.sweep.inner.backoff)
+            .get(&(namespace_id.clone(), super::SweepCall::Metadata))
+            .map(|backoff| backoff.attempts)
+    }
+
+    async fn pass_after(&self, elapsed_ms: u64) {
+        self.clock.advance_ms(elapsed_ms);
+        self.sweep
+            .run_pass(GarbageCollection::Skip)
+            .await
+            .expect("list namespaces");
+    }
+}
+
+#[tokio::test]
+async fn a_failing_call_backs_off_and_is_retried_after_its_delay() {
+    let directory = tempdir().expect("tempdir");
+    let (store, server, namespace_id) = failing_namespace_server(directory.path()).await;
+    let first_ms = sweep_config(None).tick_interval_ms;
+    store.fail_all();
+
+    server.pass_after(0).await;
+    assert_eq!(server.metadata_failures(), 1);
+    assert_eq!(server.backoff_attempts(&namespace_id), Some(1));
+    server.pass_after(first_ms - 1).await;
+    assert_eq!(
+        server.metadata_failures(),
+        1,
+        "the call waits out its backoff"
     );
-    server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
+    server.pass_after(1).await;
+    assert_eq!(
+        server.metadata_failures(),
+        2,
+        "the call is retried after it"
+    );
+    assert_eq!(server.backoff_attempts(&namespace_id), Some(2));
 
+    server.pass_after(first_ms).await;
+    assert_eq!(
+        server.metadata_failures(),
+        2,
+        "a second failure doubles the wait"
+    );
+    server.pass_after(first_ms).await;
+    assert_eq!(server.metadata_failures(), 3);
+
+    store.clear();
+    server.pass_after(4 * first_ms).await;
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
-        "the next pass visits a namespace whose failure can clear"
+        "a permission failure is retried, not skipped for good"
     );
+}
+
+#[tokio::test]
+async fn a_success_clears_the_backoff() {
+    let directory = tempdir().expect("tempdir");
+    let (store, server, namespace_id) = failing_namespace_server(directory.path()).await;
+    let first_ms = sweep_config(None).tick_interval_ms;
+    let entries = || match server
+        .recorder
+        .snapshot()
+        .by_name("loonfs.maintenance.sweep_backoff_entries")
+        .next()
+        .map(|entry| entry.value.clone())
+    {
+        Some(MetricValue::Gauge(value)) => value,
+        other => panic!("expected the backoff gauge, found {other:?}"),
+    };
+    store.fail_all();
+    server.pass_after(0).await;
+    server.pass_after(first_ms).await;
+    assert_eq!(server.backoff_attempts(&namespace_id), Some(2));
+    assert_eq!(entries(), 1);
+
+    store.clear();
+    server.pass_after(2 * first_ms).await;
+    assert_eq!(server.backoff_attempts(&namespace_id), None);
+    assert_eq!(entries(), 0);
+
+    store.fail_all();
+    server.pass_after(0).await;
     assert_eq!(
-        server.counter(
-            "loonfs.maintenance.sweep_visit_skipped",
-            &[("call", "metadata")]
-        ),
-        0
+        server.backoff_attempts(&namespace_id),
+        Some(1),
+        "a failure after a success starts a new backoff"
+    );
+}
+
+#[tokio::test]
+async fn the_backoff_map_evicts_the_earliest_retry_at_its_cap() {
+    let directory = tempdir().expect("tempdir");
+    let server = SweepServer::start(local_store(directory.path()), &sweep_config(None), 0).await;
+    let fail = |name: &str| {
+        server.sweep.record_failure(
+            &namespace_id(name),
+            super::SweepCall::Metadata,
+            loonfs::ErrorCode::ServerError,
+            &"injected",
+        );
+    };
+    fail("earliest");
+    server.clock.advance_ms(1);
+    for index in 1..super::MAX_SWEEP_BACKOFF_ENTRIES {
+        fail(&format!("later-{index}"));
+    }
+    assert_eq!(server.backoff_attempts(&namespace_id("earliest")), Some(1));
+
+    fail("newest");
+    let entries = super::lock(&server.sweep.inner.backoff);
+    assert_eq!(entries.len(), super::MAX_SWEEP_BACKOFF_ENTRIES);
+    let key = |name: &str| (namespace_id(name), super::SweepCall::Metadata);
+    assert!(!entries.contains_key(&key("earliest")));
+    assert!(entries.contains_key(&key("newest")));
+}
+
+#[tokio::test]
+async fn a_backed_off_namespace_still_closes_its_idle_session() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(FailStore::matching(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        |_| true,
+        InjectedError::PermissionDenied("expired credentials".to_owned()),
+    ));
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespace_id = namespace_id("held-failing");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create the namespace");
+    let namespaces = &server.sweep.inner.namespaces;
+    let held = namespaces
+        .open(&namespace_id)
+        .await
+        .expect("hold the session");
+    held.put_file("/tail.txt", b"unfolded", &test_actor())
+        .await
+        .expect("write the tail");
+    drop(held);
+    store.fail_all();
+
+    server.tick_after(config.tick_interval_ms).await;
+    assert_eq!(server.metadata_failures(), 1);
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
+    server.tick_after(config.tick_interval_ms).await;
+    assert!(
+        namespaces.held_ids().is_empty(),
+        "a failing call doesn't keep an idle session open"
     );
 }
 

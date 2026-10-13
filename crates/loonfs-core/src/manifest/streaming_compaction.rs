@@ -481,7 +481,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
                 placement: spec.placement,
             },
             spec.frozen_floor_seq(),
-        );
+        )?;
 
         // The last check before the swap that makes this output reader
         // truth. Everything above it is reads and objects nothing references.
@@ -864,16 +864,23 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         row_key: &str,
     ) -> Result<()> {
         if let Some(previous) = self.last_input_key_by_family.get(&family) {
-            assert!(
-                row_key >= previous.as_str(),
-                "the metadata merge should read row key `{row_key}` after `{previous}` in \
-                 family `{family:?}`, not before it"
-            );
-            if row_key == previous {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "metadata family `{family:?}` contains duplicate row key `{row_key}`; \
-                     refusing to merge it into a run"
-                )));
+            // A segment's decode checks key order within each block and the
+            // block index's last keys, but not one block's first key against
+            // the previous block's last, so stored bytes can go backwards here.
+            match row_key.cmp(previous.as_str()) {
+                std::cmp::Ordering::Greater => {}
+                std::cmp::Ordering::Equal => {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "metadata family `{family:?}` contains duplicate row key `{row_key}`; \
+                         refusing to merge it into a run"
+                    )));
+                }
+                std::cmp::Ordering::Less => {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "metadata family `{family:?}` row key went backwards: `{row_key}` \
+                         follows `{previous}`; refusing to merge it into a run"
+                    )));
+                }
             }
         }
         self.last_input_key_by_family

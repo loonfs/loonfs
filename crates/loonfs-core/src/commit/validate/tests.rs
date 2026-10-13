@@ -277,7 +277,7 @@ async fn build_commit_plan(
         };
         if let Some(assigned) = assigned {
             assert_eq!(
-                allocation.allocate(),
+                allocation.allocate().expect("test inode allocation"),
                 assigned,
                 "test create operations must carry their planned inode ids"
             );

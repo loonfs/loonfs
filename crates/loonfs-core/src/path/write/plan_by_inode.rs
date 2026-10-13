@@ -46,7 +46,7 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
             existing_display_name: Some(existing.display_name),
         });
     }
-    let child_inode_id = allocation.allocate();
+    let child_inode_id = allocation.allocate()?;
     let op = match child {
         NewChild::Directory => CommitOperation::CreateDirectory {
             child_inode_id,

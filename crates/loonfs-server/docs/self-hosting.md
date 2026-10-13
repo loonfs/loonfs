@@ -309,8 +309,8 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs.publisher.sessions_open` | Gauge | Open writer sessions, and sessions whose admitted work is still finishing. A fenced session stops being counted once its work ends. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` if it listed every namespace, or `error` if the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run when the server starts and every `full_sweep_interval_ms`. |
-| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again, unless the failure is one that a retry can't clear. |
-| `loonfs.maintenance.sweep_visit_skipped` | Counter, `call` label | A call failed with an error that a retry can't clear, such as `namespace_corrupt`, `storage_permission_denied`, or `writer_fenced`, so the sweep stops visiting the namespace. The skip lasts until the server restarts. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The sweep tries the call again after a backoff. |
+| `loonfs.maintenance.sweep_backoff_entries` | Gauge | The calls that failed on a namespace and are waiting for their next try. Each pair of a namespace and a call counts once, up to 10,000. |
 | `loonfs.maintenance.sweep_namespaces` | Gauge | The number of namespaces that the last finished full sweep pass listed, including deleted namespaces. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
@@ -569,9 +569,11 @@ All the interval and idle-close settings must be positive.
 
 Grep queries stay correct while the index is behind. A query scans the commits after the index, and if it goes past its scan budget, it fails with `index_lagging` unless `allow_stale` is set.
 
-When a call fails on one namespace, the server logs the namespace ID and the call name, counts the failure in `loonfs.maintenance.sweep_visit_failures`, and tries the call again on the next eligible pass. The failure doesn't stop the visits to other namespaces.
+When a call fails on one namespace, the server counts the failure in `loonfs.maintenance.sweep_visit_failures` and waits before it tries that call on that namespace again. The other calls on the namespace and the visits to other namespaces continue. The first wait is one tick interval, and each failure in a row doubles it, up to one hour. For example, with the default 5-second tick interval, a call that keeps failing is tried again after 5 seconds, 10 seconds, 20 seconds, and so on, and then once an hour. A success ends the wait. `loonfs.maintenance.sweep_backoff_entries` counts the calls that are waiting. The server tracks at most 10,000 of them, and at that limit a new failure replaces the entry whose next try is soonest.
 
-A failure that a retry can't clear is handled differently. When the error's kind is data corruption, unauthorized, forbidden, storage permission denied, not supported, or invalid request, or the code is `writer_fenced`, the server logs the failure at error level, counts it in `loonfs.maintenance.sweep_visit_skipped`, and skips the namespace in every later pass and tick. The skip lasts until the server restarts, so an operator clears it by fixing the cause and restarting the server.
+The server logs the first failure at error level, each later failure at warning level, and the first success after a failure at info level. Each of these events has `namespace_id`, `call`, `code`, and `attempts` fields. A held session still closes when it's idle while one of its calls is waiting, and the next full pass tries the call again.
+
+Why doesn't the server stop maintaining a corrupt or forbidden namespace? Some failures that look permanent clear without a restart. Expired credentials and clock skew both return a permission error, a rolling deploy fences the old writer for a while, and an operator can repair a namespace in place. The doubling wait keeps a failing namespace from filling the logs or costing many store requests, and the namespace is maintained again as soon as the cause is fixed.
 
 If listing the namespaces fails, the pass doesn't start any new visits. The visits already running finish, the pass ends with a warning, and the next full pass lists the namespaces again.
 

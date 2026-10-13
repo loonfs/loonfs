@@ -134,15 +134,29 @@ pub fn current_time_ms() -> u64 {
     unix_ms(SystemTime::now())
 }
 
-/// Converts a wall-clock instant to unix milliseconds. A pre-epoch clock
-/// panics instead of stamping timestamp zero into durable state, because
-/// LoonFS can't run in that environment.
+/// Whether the system clock reads after the unix epoch. A runtime builder
+/// checks this once and refuses to start otherwise, so [`current_time_ms`]
+/// can stay infallible: LoonFS stamps unix milliseconds into durable state
+/// and can't run on a clock that reads before 1970.
+#[allow(clippy::disallowed_methods)]
+pub fn system_clock_reads_after_epoch() -> bool {
+    reads_after_epoch(SystemTime::now())
+}
+
+fn reads_after_epoch(now: SystemTime) -> bool {
+    now.duration_since(UNIX_EPOCH).is_ok()
+}
+
+/// Converts a wall-clock instant to unix milliseconds.
 fn unix_ms(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .map(|elapsed| {
             u64::try_from(elapsed.as_millis()).expect("unix milliseconds should fit u64")
         })
-        .expect("the system clock should be after the unix epoch")
+        .expect(
+            "the system clock should read after the unix epoch, which the runtime builder \
+             checks with `system_clock_reads_after_epoch` before it starts",
+        )
 }
 
 #[cfg(test)]
@@ -165,8 +179,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the system clock should be after the unix epoch")]
-    fn pre_epoch_clock_panics_instead_of_stamping_timestamp_zero() {
-        unix_ms(UNIX_EPOCH - Duration::from_secs(1));
+    fn the_startup_clock_check_refuses_a_pre_epoch_clock() {
+        assert!(!reads_after_epoch(UNIX_EPOCH - Duration::from_secs(1)));
+        assert!(reads_after_epoch(UNIX_EPOCH + Duration::from_millis(1)));
+        assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }

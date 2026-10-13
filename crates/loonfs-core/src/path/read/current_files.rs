@@ -6,7 +6,9 @@
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
-use crate::metadata::{DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath};
+use crate::metadata::{
+    DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath, VisiblePathError,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::{HashMap, HashSet};
@@ -154,7 +156,8 @@ fn missing(inode_id: InodeId, readable: bool) -> CurrentFileState {
 
 /// Derives an inode's path by following parent bindings to the root.
 ///
-/// Returns `None` for a cycle or a chain that does not reach the root.
+/// Returns `None` for a chain that does not reach the root, and
+/// `namespace_corrupt` for a parent-binding cycle.
 async fn current_path<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
@@ -171,7 +174,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
             break known.clone();
         }
         if !visited.insert(current) {
-            return Ok(None);
+            return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
         }
         let Some(binding) = session.current_parent_binding_for_child(current).await? else {
             return Ok(None);

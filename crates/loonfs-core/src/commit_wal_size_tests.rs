@@ -267,7 +267,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             inline_content: candidate.inline_content().to_vec(),
         };
         let encoded =
-            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared]);
+            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
+                .expect("encode");
         assert!(
             encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",

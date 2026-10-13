@@ -73,21 +73,8 @@ impl HttpMetrics {
         elapsed_seconds: f64,
     ) -> &'static str {
         let route = self.route_label(matched_route);
-        let (seconds, served) = {
-            let mut requests = self
-                .requests
-                .lock()
-                .expect("the request metrics lock should not be poisoned");
-            let instruments = requests
-                .entry(route)
-                .or_insert_with(|| RequestInstruments::register(self.recorder.as_ref(), route));
-            instruments.served(
-                self.recorder.as_ref(),
-                route,
-                method_label(method),
-                status_class_label(status),
-            )
-        };
+        let (seconds, served) =
+            self.request_handles(route, method_label(method), status_class_label(status));
         served.increment(1);
         seconds.record(elapsed_seconds);
         route
@@ -109,6 +96,47 @@ impl HttpMetrics {
 
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.recorder.snapshot()
+    }
+
+    /// Returns the handles one served request reports through. A missing
+    /// handle is registered before the request-metrics lock is taken, so the
+    /// recorder never runs under it. When two first requests race, the
+    /// handle stored first is kept.
+    fn request_handles(
+        &self,
+        route: &'static str,
+        method: &'static str,
+        status_class: &'static str,
+    ) -> (Arc<dyn HistogramHandle>, Arc<dyn CounterHandle>) {
+        let route_registered = match self.lock_requests().get(route) {
+            Some(instruments) => match instruments.served(method, status_class) {
+                Some(handles) => return handles,
+                None => true,
+            },
+            None => false,
+        };
+        let recorder = self.recorder.as_ref();
+        let registered = (!route_registered).then(|| RequestInstruments::register(recorder, route));
+        let counter = RequestInstruments::register_served(recorder, route, method, status_class);
+        let mut requests = self.lock_requests();
+        let instruments = requests.entry(route).or_insert_with(|| {
+            registered.expect("a route found unregistered should be registered here")
+        });
+        instruments
+            .served
+            .entry((method, status_class))
+            .or_insert(counter);
+        instruments
+            .served(method, status_class)
+            .expect("the served counter should be stored by now")
+    }
+
+    fn lock_requests(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<&'static str, RequestInstruments>> {
+        self.requests
+            .lock()
+            .expect("the request metrics lock should not be poisoned")
     }
 
     fn route_label(&self, matched_route: Option<&str>) -> &'static str {
@@ -136,29 +164,32 @@ impl RequestInstruments {
         }
     }
 
-    fn served(
-        &mut self,
+    fn register_served(
         recorder: &dyn MetricsRecorder,
         route: &'static str,
         method: &'static str,
         status_class: &'static str,
-    ) -> (Arc<dyn HistogramHandle>, Arc<dyn CounterHandle>) {
-        let counter = self
-            .served
-            .entry((method, status_class))
-            .or_insert_with(|| {
-                recorder.register_counter(
-                    "loonfs.server.requests",
-                    "Requests served, by matched route, method, and status class",
-                    &[
-                        ("route", route),
-                        ("method", method),
-                        ("status_class", status_class),
-                    ],
-                )
-            })
-            .clone();
-        (Arc::clone(&self.seconds), counter)
+    ) -> Arc<dyn CounterHandle> {
+        recorder.register_counter(
+            "loonfs.server.requests",
+            "Requests served, by matched route, method, and status class",
+            &[
+                ("route", route),
+                ("method", method),
+                ("status_class", status_class),
+            ],
+        )
+    }
+
+    /// The handles for one method and status class, or `None` before that
+    /// pair's counter is stored.
+    fn served(
+        &self,
+        method: &'static str,
+        status_class: &'static str,
+    ) -> Option<(Arc<dyn HistogramHandle>, Arc<dyn CounterHandle>)> {
+        let counter = self.served.get(&(method, status_class))?;
+        Some((Arc::clone(&self.seconds), Arc::clone(counter)))
     }
 }
 

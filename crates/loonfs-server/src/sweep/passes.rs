@@ -1,6 +1,6 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, GarbageCollection, RunningSweep, Sweep};
+use super::{lock, GarbageCollection, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
 use tokio::time::MissedTickBehavior;
@@ -66,19 +66,24 @@ impl Sweep {
                                 .saturating_sub(inner.metadata_retry_interval_ms)
                                 < fold_due_at_ms
                     });
-            let due = if self.skipped(&namespace_id) {
-                Due::Close
-            } else if !metadata_caught_up && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
+            let due = if !metadata_caught_up
+                && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
+                && !self.backed_off(&namespace_id, SweepCall::Metadata)
             {
                 Due::Metadata
-            } else if inner.grep.is_some() && (held.index_dirty || held.indexed_seq != seq) {
+            } else if inner.grep.is_some()
+                && (held.index_dirty || held.indexed_seq != seq)
+                && !self.backed_off(&namespace_id, SweepCall::GrepIndex)
+            {
                 Due::Index
             } else if seq.is_some()
                 && seq != held.collected_seq
                 && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
+                && !self.backed_off(&namespace_id, SweepCall::Gc)
+                && !self.backed_off(&namespace_id, SweepCall::GrepGc)
             {
                 Due::Collection
-            } else if metadata_caught_up {
+            } else if metadata_caught_up || self.failing(&namespace_id, SweepCall::Metadata) {
                 Due::Close
             } else {
                 return;
@@ -117,16 +122,21 @@ impl Sweep {
                 seq,
                 inner.idle_session_close_after_ms,
                 |held| {
-                    self.skipped(namespace_id)
-                        || held.handle.metadata_caught_up()
-                            && (inner.grep.is_none()
-                                || (!held.index_dirty && held.indexed_seq == seq))
-                            && (held.collected_seq == seq
-                                || inner
-                                    .namespaces
-                                    .now_ms()
-                                    .saturating_sub(held.collected_at_ms)
-                                    < inner.collection_interval_ms)
+                    // A call that keeps failing doesn't keep an idle session
+                    // open; the next full pass retries it.
+                    (held.handle.metadata_caught_up()
+                        || self.failing(namespace_id, SweepCall::Metadata))
+                        && (inner.grep.is_none()
+                            || (!held.index_dirty && held.indexed_seq == seq)
+                            || self.failing(namespace_id, SweepCall::GrepIndex))
+                        && (held.collected_seq == seq
+                            || inner
+                                .namespaces
+                                .now_ms()
+                                .saturating_sub(held.collected_at_ms)
+                                < inner.collection_interval_ms
+                            || self.failing(namespace_id, SweepCall::Gc)
+                            || self.failing(namespace_id, SweepCall::GrepGc))
                 },
             )
             .await

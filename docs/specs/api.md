@@ -264,7 +264,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `writer_session_closed` | 503 | This node has no open writer session for the namespace. The request wasn't admitted. Retry on the node that the namespace is assigned to. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for requests, proxied upload bodies, or proxied content reads. Back off and retry. |
 | `shutting_down` | 503 | The serving process stopped admitting requests because it's shutting down. Work that was admitted earlier still finishes. Retry against a live instance. |
-| `store_contention` | 503 | Concurrent writers changed one of the namespace's control objects on every compare-and-swap attempt the write was allowed, so retry the request. |
+| `store_contention` | 503 | A write to one of the namespace's control objects used every compare-and-swap attempt it was allowed, usually because concurrent writers changed the object, so retry the request. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit might still take effect after this response, so reconcile it by commit ID before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but this deployment can't write its pending content pieces for a direct download. Read through the proxied content route, or retry after a fold writes the pieces. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the pin exists but its manifest is gone, pin creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
