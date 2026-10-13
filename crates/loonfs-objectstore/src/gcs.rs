@@ -7,8 +7,7 @@ use crate::configured::ConfiguredObjectStoreKind;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::{
-    percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsPresignerConfig,
-    GcsV4Presigner, CHECKSUM_HEAD_TTL,
+    percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsV4Presigner, CHECKSUM_HEAD_TTL,
 };
 use crate::provider_object_store::{
     map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController, PartReader,
@@ -66,11 +65,7 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
 pub(crate) fn gcp_gcs_with_issuers(
     config: GcpGcsStoreConfig,
 ) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
-    let request_signer = Arc::new(GcsV4Presigner::new(GcsPresignerConfig {
-        bucket: config.bucket.clone(),
-        service_account_key_path: config.service_account_key_path.clone(),
-        key_prefix: config.key_prefix.clone(),
-    })?);
+    let request_signer = Arc::new(GcsV4Presigner::new(&config)?);
     let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
 
     let io_runtime = StoreIoRuntime::new()?;
@@ -466,7 +461,7 @@ mod tests {
             let requests = UploadRequests::default();
             let signer = GcsRequestSigner {
                 request_signer: Arc::new(
-                    GcsV4Presigner::new(GcsPresignerConfig {
+                    GcsV4Presigner::new(&GcpGcsStoreConfig {
                         bucket: "bucket".to_owned(),
                         service_account_key_path: path.display().to_string(),
                         key_prefix: None,
@@ -523,7 +518,7 @@ mod tests {
         let requests = UploadRequests::default();
         let signer = GcsRequestSigner {
             request_signer: Arc::new(
-                GcsV4Presigner::new(GcsPresignerConfig {
+                GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
                     service_account_key_path: path.display().to_string(),
                     key_prefix: None,

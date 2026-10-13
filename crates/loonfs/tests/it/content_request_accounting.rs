@@ -6,10 +6,9 @@ use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitIntent, ContentPreparationError,
     FilesystemOperation, PreparedContent,
 };
-use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    CommitId, CoreError, DestinationBehavior, Error, ErrorCode, LoonFs, NamespaceId,
-    PutFileOptions, RevisionNo, SharedObjectStore, Writable, CONTENT_READ_CHUNK_BYTES,
+    CommitId, CompleteUploadBody, CoreError, DestinationBehavior, Error, ErrorCode, LoonFs,
+    NamespaceId, PutFileOptions, RevisionNo, SharedObjectStore, Writable, CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -544,7 +543,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     harness.recording.reset();
 
     let completed = namespace
-        .complete_upload(&begin.upload_id, ResolvedUploadCompletion::KnownContent)
+        .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload with proof");
     let prepared = completed.prepared;
@@ -593,14 +592,15 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     harness.recording.reset();
 
     let completed = namespace
-        .complete_upload_for_mode(&begin.session.upload_id, |_| {
-            Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
+        .complete_upload(
+            &begin.session.upload_id,
+            CompleteUploadBody::DirectPut {
                 content: loonfs::UploadContentClaim {
                     size_bytes: bytes.len() as u64,
                     checksum: loonfs_types::Checksum::crc64nvme(bytes),
                 },
-            })
-        })
+            },
+        )
         .await
         .expect("complete direct put with proof");
     let content_ref = completed

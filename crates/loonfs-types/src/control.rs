@@ -233,47 +233,18 @@ pub fn genesis_commit_id() -> CommitId {
 }
 
 /// Staging progress for a service-proxied upload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProxiedStaging {
     /// No request owns the staging slot and no staged reference is retained.
-    Idle,
+    Idle {},
     /// One request owns the staging slot.
-    Claimed,
+    Claimed {},
     /// Content that passed validation and was recorded by the session.
     Staged {
         /// Verified reference to the staged object.
         content_ref: ContentRef,
     },
-}
-
-impl Serialize for ProxiedStaging {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
-        enum Shape<'a> {
-            Idle {},
-            Claimed {},
-            Staged { content_ref: &'a ContentRef },
-        }
-
-        match self {
-            Self::Idle => Shape::Idle {}.serialize(serializer),
-            Self::Claimed => Shape::Claimed {}.serialize(serializer),
-            Self::Staged { content_ref } => Shape::Staged { content_ref }.serialize(serializer),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ProxiedStaging {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictProxiedStaging::deserialize(deserializer).map(Into::into)
-    }
 }
 
 /// Upload mode and its mode-specific state. The mode never changes.
@@ -522,98 +493,8 @@ struct StrictUploadSessionPayload {
     content_id: ContentId,
     #[serde(default)]
     subject_id: Option<SubjectId>,
-    mode: StrictUploadSessionMode,
-    status: StrictUploadSessionRecordStatus,
-}
-
-/// Strict upload-mode shape used while decoding a session record.
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StrictUploadSessionMode {
-    ServiceProxied {
-        staging: StrictProxiedStaging,
-    },
-    DirectPut {
-        checksum_algorithm: ChecksumAlgorithm,
-    },
-    DirectMultipart {
-        provider_upload_id: String,
-        part_size_bytes: NonZeroU64,
-        checksum_algorithm: ChecksumAlgorithm,
-    },
-}
-
-impl From<StrictUploadSessionMode> for UploadSessionMode {
-    fn from(mode: StrictUploadSessionMode) -> Self {
-        match mode {
-            StrictUploadSessionMode::ServiceProxied { staging } => Self::ServiceProxied {
-                staging: staging.into(),
-            },
-            StrictUploadSessionMode::DirectPut { checksum_algorithm } => {
-                Self::DirectPut { checksum_algorithm }
-            }
-            StrictUploadSessionMode::DirectMultipart {
-                provider_upload_id,
-                part_size_bytes,
-                checksum_algorithm,
-            } => Self::DirectMultipart {
-                provider_upload_id,
-                part_size_bytes,
-                checksum_algorithm,
-            },
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StrictProxiedStaging {
-    Idle {},
-    Claimed {},
-    Staged { content_ref: ContentRef },
-}
-
-impl From<StrictProxiedStaging> for ProxiedStaging {
-    fn from(staging: StrictProxiedStaging) -> Self {
-        match staging {
-            StrictProxiedStaging::Idle {} => Self::Idle,
-            StrictProxiedStaging::Claimed {} => Self::Claimed,
-            StrictProxiedStaging::Staged { content_ref } => Self::Staged { content_ref },
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StrictUploadSessionRecordStatus {
-    Open {
-        expires_at_ms: u64,
-    },
-    Completed {
-        completed_at_ms: u64,
-        content_ref: ContentRef,
-    },
-    Aborted {
-        aborted_at_ms: u64,
-    },
-}
-
-impl From<StrictUploadSessionRecordStatus> for UploadSessionRecordStatus {
-    fn from(status: StrictUploadSessionRecordStatus) -> Self {
-        match status {
-            StrictUploadSessionRecordStatus::Open { expires_at_ms } => Self::Open { expires_at_ms },
-            StrictUploadSessionRecordStatus::Completed {
-                completed_at_ms,
-                content_ref,
-            } => Self::Completed {
-                completed_at_ms,
-                content_ref,
-            },
-            StrictUploadSessionRecordStatus::Aborted { aborted_at_ms } => {
-                Self::Aborted { aborted_at_ms }
-            }
-        }
-    }
+    mode: UploadSessionMode,
+    status: UploadSessionRecordStatus,
 }
 
 impl<'de> Deserialize<'de> for UploadSessionPayload {
@@ -630,8 +511,8 @@ impl<'de> Deserialize<'de> for UploadSessionPayload {
             upload_id: record.upload_id,
             content_id: record.content_id,
             subject_id: record.subject_id,
-            mode: record.mode.into(),
-            status: record.status.into(),
+            mode: record.mode,
+            status: record.status,
         };
         session.validate().map_err(serde::de::Error::custom)?;
         Ok(session)
@@ -737,10 +618,10 @@ mod tests {
         };
         let modes = [
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle,
+                staging: ProxiedStaging::Idle {},
             },
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed,
+                staging: ProxiedStaging::Claimed {},
             },
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged {

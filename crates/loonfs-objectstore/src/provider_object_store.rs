@@ -5,7 +5,7 @@ use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
     unscope_listed_key,
 };
-use crate::object_store::{collect_stream, Result};
+use crate::object_store::{collect_stream, unsupported_multipart, Result};
 use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -190,9 +190,7 @@ pub(crate) trait StoredChecksumReader: Send + Sync {
 pub(crate) trait MultipartController: Send + Sync {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
         let _ = key;
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     async fn complete_multipart_upload(
@@ -203,16 +201,12 @@ pub(crate) trait MultipartController: Send + Sync {
         checksum: &Checksum,
     ) -> Result<()> {
         let _ = (key, provider_upload_id, parts, checksum);
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
         let _ = (key, provider_upload_id);
-        Err(ObjectStoreError::Unsupported(
-            "client-driven multipart upload",
-        ))
+        Err(unsupported_multipart())
     }
 
     /// Writes `head` and then every part of `rest` to `key` only while `key`
@@ -783,9 +777,7 @@ impl ObjectStore for ProviderObjectStore {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
         match &self.multipart_controller {
             Some(controller) => controller.create_multipart_upload(key).await,
-            None => Err(ObjectStoreError::Unsupported(
-                "client-driven multipart upload",
-            )),
+            None => Err(unsupported_multipart()),
         }
     }
 
@@ -802,9 +794,7 @@ impl ObjectStore for ProviderObjectStore {
                     .complete_multipart_upload(key, provider_upload_id, parts, checksum)
                     .await
             }
-            None => Err(ObjectStoreError::Unsupported(
-                "client-driven multipart upload",
-            )),
+            None => Err(unsupported_multipart()),
         }
     }
 
@@ -815,9 +805,7 @@ impl ObjectStore for ProviderObjectStore {
                     .abort_multipart_upload(key, provider_upload_id)
                     .await
             }
-            None => Err(ObjectStoreError::Unsupported(
-                "client-driven multipart upload",
-            )),
+            None => Err(unsupported_multipart()),
         }
     }
 

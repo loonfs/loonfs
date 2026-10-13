@@ -7,7 +7,7 @@ mod limits;
 mod s3_compatible;
 mod v4;
 
-pub use gcs::{GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+pub use gcs::{GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
 pub use issuer::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, DirectTransferIssuers,
     PresignedGetRequest, PresignedPartRequest, PresignedPutRequest, PresignedUrl,

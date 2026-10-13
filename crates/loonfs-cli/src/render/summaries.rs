@@ -6,18 +6,6 @@ pub(super) fn public_inode_id(inode_id: loonfs_types::InodeId) -> String {
     loonfs_types::public_inode_id::encode(inode_id)
 }
 
-/// Formats one object-store contract check.
-pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
-    match check.outcome {
-        StoreProbeCheckOutcome::Passed => format!("{}: passed", check.name),
-        StoreProbeCheckOutcome::Unsupported => format!("{}: unsupported", check.name),
-        StoreProbeCheckOutcome::Failed => match &check.message {
-            Some(message) => format!("{}: failed: {message}", check.name),
-            None => format!("{}: failed", check.name),
-        },
-    }
-}
-
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreProbeRunOutcome {
@@ -65,7 +53,11 @@ pub(crate) fn store_probe_summary_line(
 pub(super) fn store_probe_report_lines(
     response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> Vec<String> {
-    let mut lines: Vec<String> = response.checks.iter().map(store_probe_check_line).collect();
+    let mut lines: Vec<String> = response
+        .checks
+        .iter()
+        .map(StoreProbeCheckResult::check_line)
+        .collect();
     lines.push(store_probe_summary_line(response));
     lines
 }

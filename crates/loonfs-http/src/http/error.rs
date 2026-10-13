@@ -82,6 +82,7 @@ impl ApiResponseError {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn message(&self) -> &str {
         &self.body.message
     }

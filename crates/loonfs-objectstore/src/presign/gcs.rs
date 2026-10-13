@@ -7,6 +7,7 @@
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
 };
+use crate::gcs::GcpGcsStoreConfig;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
@@ -42,17 +43,6 @@ const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 /// Maximum GCS object size. GCS does not document a smaller limit for a
 /// single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
-
-/// Configuration for native GCS signed URLs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GcsPresignerConfig {
-    /// Bucket incorporated into the signed request target.
-    pub bucket: String,
-    /// Filesystem path to the service-account JSON whose private key signs.
-    pub service_account_key_path: String,
-    /// Logical prefix prepended before the object key is encoded and signed.
-    pub key_prefix: Option<String>,
-}
 
 /// Creates native GCS V4 signed URLs.
 pub struct GcsV4Presigner {
@@ -99,7 +89,7 @@ impl GcsV4Presigner {
     /// Construction fails for an unusable key prefix, an unreadable or
     /// malformed key file, or a private key that is not an RSA key in PKCS#8
     /// form.
-    pub fn new(config: GcsPresignerConfig) -> Result<Self> {
+    pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
         let raw = std::fs::read(&config.service_account_key_path).map_err(|err| {
             ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
         })?;
@@ -125,7 +115,7 @@ impl GcsV4Presigner {
         })?;
 
         Ok(Self {
-            bucket: config.bucket,
+            bucket: config.bucket.clone(),
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             client_email: key.client_email,
             signing_key,
@@ -306,7 +296,8 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use super::{stored_crc32c, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use crate::gcs::GcpGcsStoreConfig;
     use crate::keyspace::{normalize_key_prefix, scope_object_key};
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
@@ -352,7 +343,7 @@ mod tests {
     fn presigner(key_prefix: Option<&str>) -> GcsV4Presigner {
         let (_key_dir, service_account_key_path) =
             gcs_fixture_service_account_key_file("gcs-presign");
-        GcsV4Presigner::new(GcsPresignerConfig {
+        GcsV4Presigner::new(&GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
             key_prefix: key_prefix.map(ToOwned::to_owned),
@@ -502,7 +493,7 @@ mod tests {
             let (_key_dir, service_account_key_path) =
                 gcs_fixture_service_account_key_file("gcs-presign-prefix");
             assert!(matches!(
-                GcsV4Presigner::new(GcsPresignerConfig {
+                GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
                     service_account_key_path: service_account_key_path.display().to_string(),
                     key_prefix: Some(raw_prefix.to_owned()),
@@ -599,7 +590,7 @@ mod tests {
         for path in [not_json, no_pem, missing] {
             assert!(
                 matches!(
-                    GcsV4Presigner::new(GcsPresignerConfig {
+                    GcsV4Presigner::new(&GcpGcsStoreConfig {
                         bucket: "bucket".to_owned(),
                         service_account_key_path: path.display().to_string(),
                         key_prefix: None,

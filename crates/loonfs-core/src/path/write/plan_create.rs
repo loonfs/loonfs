@@ -13,6 +13,7 @@ use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
+use loonfs_types::options::UndeleteDestination;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, ChangeSeq, ContentRef, DestinationBehavior,
     DisplayName, ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
@@ -54,60 +55,47 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     Ok(CompiledFilesystemOperation::new(ops))
 }
 
-/// Where an undelete binds the entry it restores.
-pub(super) enum UndeleteDestination<'a> {
-    /// The parent and name the deletion recorded.
-    Recorded,
-    Path(&'a AbsolutePath),
-    Name {
-        parent_inode_id: InodeId,
-        display_name: &'a DisplayName,
-    },
-}
-
-impl<'a> UndeleteDestination<'a> {
-    /// Reads the request's destination fields, which name at most one
-    /// destination.
-    pub(super) fn from_request(
-        path: Option<&'a AbsolutePath>,
-        parent_inode_id: Option<InodeId>,
-        display_name: Option<&'a DisplayName>,
-    ) -> Result<Self> {
-        let (field, message) = match (path, parent_inode_id, display_name) {
-            (None, None, None) => return Ok(Self::Recorded),
-            (Some(path), None, None) => return Ok(Self::Path(path)),
-            (None, Some(parent_inode_id), Some(display_name)) => {
-                return Ok(Self::Name {
-                    parent_inode_id,
-                    display_name,
-                })
-            }
-            (Some(_), _, _) => (
-                "destination_path",
-                "`destination_path` cannot be combined with `destination_parent_inode_id` \
-                 or `destination_display_name`",
-            ),
-            (None, Some(_), None) => (
-                "destination_display_name",
-                "`destination_parent_inode_id` requires `destination_display_name`",
-            ),
-            (None, None, Some(_)) => (
-                "destination_parent_inode_id",
-                "`destination_display_name` requires `destination_parent_inode_id`",
-            ),
-        };
-        Err(CoreError::InvalidCommitField {
-            field,
-            message: message.to_owned(),
-            precondition_index: None,
-        })
-    }
+/// Reads an undelete request's destination fields, which name at most one
+/// destination.
+pub(super) fn undelete_destination(
+    path: Option<&AbsolutePath>,
+    parent_inode_id: Option<InodeId>,
+    display_name: Option<&DisplayName>,
+) -> Result<UndeleteDestination> {
+    let (field, message) = match (path, parent_inode_id, display_name) {
+        (None, None, None) => return Ok(UndeleteDestination::Recorded),
+        (Some(path), None, None) => return Ok(UndeleteDestination::Path(path.clone())),
+        (None, Some(parent_inode_id), Some(display_name)) => {
+            return Ok(UndeleteDestination::Name {
+                parent_inode_id,
+                display_name: display_name.clone(),
+            })
+        }
+        (Some(_), _, _) => (
+            "destination_path",
+            "`destination_path` cannot be combined with `destination_parent_inode_id` \
+             or `destination_display_name`",
+        ),
+        (None, Some(_), None) => (
+            "destination_display_name",
+            "`destination_parent_inode_id` requires `destination_display_name`",
+        ),
+        (None, None, Some(_)) => (
+            "destination_parent_inode_id",
+            "`destination_display_name` requires `destination_parent_inode_id`",
+        ),
+    };
+    Err(CoreError::InvalidCommitField {
+        field,
+        message: message.to_owned(),
+        precondition_index: None,
+    })
 }
 
 pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-    destination: UndeleteDestination<'_>,
+    destination: UndeleteDestination,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let active = view.view.active_subtree_tombstone(inode_id).await?;
@@ -137,10 +125,10 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     .await?;
     let (parent_inode_id, display_name) = match destination {
         UndeleteDestination::Path(absolute_path) => {
-            ensure_mutation_path(absolute_path)?;
+            ensure_mutation_path(&absolute_path)?;
             let parent_inode_id = resolve_parent_directory(
                 view,
-                absolute_path,
+                &absolute_path,
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
@@ -150,10 +138,10 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-            ensure_vacant_path(view, absolute_path).await?;
+            ensure_vacant_path(view, &absolute_path).await?;
             view.authorize_relocation(inode_id, saved_parent, parent_inode_id)
                 .await?;
-            (parent_inode_id, final_component(absolute_path)?.clone())
+            (parent_inode_id, final_component(&absolute_path)?.clone())
         }
         UndeleteDestination::Name {
             parent_inode_id,
@@ -173,16 +161,16 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 });
             }
             if let Some(existing) =
-                resolve_visible_child(view, parent_inode_id, display_name).await?
+                resolve_visible_child(view, parent_inode_id, &display_name).await?
             {
                 return Err(CoreError::DestinationExists {
-                    path: parent.absolute_path.join(display_name).to_string(),
+                    path: parent.absolute_path.join(&display_name).to_string(),
                     existing_display_name: Some(existing.display_name),
                 });
             }
             view.authorize_relocation(inode_id, saved_parent, parent_inode_id)
                 .await?;
-            (parent_inode_id, display_name.clone())
+            (parent_inode_id, display_name)
         }
         UndeleteDestination::Recorded => {
             view.authorize(

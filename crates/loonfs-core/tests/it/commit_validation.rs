@@ -13,12 +13,13 @@ use loonfs_core::content::{
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{CoreError, ErrorCode, ResolvedUploadCompletion};
+use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::{
     api::v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -156,7 +157,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             &catalog,
             &upload.upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");
@@ -283,7 +284,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
             &catalog,
             &upload.upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");
@@ -1085,7 +1086,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
             &catalog,
             &upload.upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");

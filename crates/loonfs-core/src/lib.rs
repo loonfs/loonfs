@@ -205,7 +205,7 @@ pub use pin::{
 };
 pub use protocol::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
-    ResolvedUploadCompletion, UploadSessionView,
+    UploadSessionView,
 };
 pub use write_waves::write_segments_in_waves;
 // The streaming read `loonfs`'s namespace handle returns, and the chunk size it

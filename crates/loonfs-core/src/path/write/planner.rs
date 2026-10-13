@@ -10,7 +10,7 @@ use super::plan_by_inode::{
     plan_put_file_revision_by_inode, NewChild,
 };
 use super::plan_create::{
-    plan_create_directory, plan_put_file_content_ref, plan_undelete, UndeleteDestination,
+    plan_create_directory, plan_put_file_content_ref, plan_undelete, undelete_destination,
 };
 use super::plan_delete::plan_delete_path;
 use super::plan_restore::{plan_restore_revision, plan_restore_revision_by_inode};
@@ -460,7 +460,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             destination_parent_inode_id,
             destination_display_name,
         } => {
-            let destination = UndeleteDestination::from_request(
+            let destination = undelete_destination(
                 destination_path.as_ref(),
                 *destination_parent_inode_id,
                 destination_display_name.as_ref(),

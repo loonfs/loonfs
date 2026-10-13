@@ -22,7 +22,7 @@ use crate::pin::{
 };
 use crate::protocol::{
     CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
-    ResolvedUploadCompletion, UploadSessionView,
+    UploadSessionView,
 };
 use crate::storage::content::{
     open_content_import_reader, ContentLocation, DurableContentValidationError, FileContentStream,
@@ -31,7 +31,7 @@ use crate::storage::content::{
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::api::v0::{
-    Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
+    Commit, CompleteUploadBody, ListChangesResponse, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptions, StatOptions};
@@ -1126,7 +1126,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         subject: Option<&Subject>,
-        completion: ResolvedUploadCompletion,
+        completion: CompleteUploadBody,
     ) -> Result<CompletedUpload> {
         self.own_catalog(catalog);
         crate::protocol::complete_upload(
@@ -1135,33 +1135,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             completion,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Completes an upload after its durable mode selects a request decoder.
-    ///
-    /// Server integrations use this to decode raw request bytes without a
-    /// second upload-session read. A resolver failure is classified as an
-    /// invalid upload request.
-    pub async fn complete_upload_for_mode<F>(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        resolve: F,
-    ) -> Result<CompletedUpload>
-    where
-        F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
-    {
-        self.own_catalog(catalog);
-        crate::protocol::complete_upload_for_mode(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            resolve,
             &self.mutation_context(),
         )
         .await

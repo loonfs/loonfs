@@ -9,7 +9,6 @@ use crate::limits::{
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
     begin_service_proxied_upload, complete_upload, upload_content, CompletedUpload,
-    ResolvedUploadCompletion,
 };
 use crate::test_support::ops::create;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
@@ -17,6 +16,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
 };
+use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
@@ -60,7 +60,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         &upload.upload_id,
         None,
-        ResolvedUploadCompletion::KnownContent,
+        CompleteUploadBody::ServiceProxied {},
         context,
     )
     .await

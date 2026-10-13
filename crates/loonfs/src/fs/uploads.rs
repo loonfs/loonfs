@@ -2,13 +2,12 @@
 
 use crate::content_tokens::CompletedUpload;
 use crate::uploads::{
-    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
-    ResolvedUploadCompletion, UploadSessionView,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets, UploadSessionView,
 };
 use crate::ByteStream;
 use crate::Result;
+use crate::{CompleteUploadBody, UploadSession};
 use crate::{Namespace, Writable};
-use crate::{UploadMode, UploadSession};
 use loonfs_types::api::v0::UploadPartChecksumClaim;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::UploadId;
@@ -196,7 +195,7 @@ impl Namespace<Writable> {
     pub async fn complete_upload(
         &self,
         upload_id: &UploadId,
-        completion: ResolvedUploadCompletion,
+        completion: CompleteUploadBody,
     ) -> Result<CompletedUpload> {
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
@@ -205,39 +204,6 @@ impl Namespace<Writable> {
         Ok(self
             .engine()
             .complete_upload(&catalog, upload_id, self.core.subject.as_ref(), completion)
-            .await?)
-    }
-
-    /// Completes an upload after decoding its request for the stored mode.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.complete_upload_for_mode",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "complete_upload_for_mode",
-            namespace_id = %self.namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn complete_upload_for_mode<F>(
-        &self,
-        upload_id: &UploadId,
-        resolve: F,
-    ) -> Result<CompletedUpload>
-    where
-        F: FnOnce(
-            UploadMode,
-        ) -> std::result::Result<crate::uploads::ResolvedUploadCompletion, String>,
-    {
-        self.core.record_trace_context(&tracing::Span::current());
-        let catalog = self
-            .load_namespace_catalog_for_content_preparation()
-            .await?;
-        Ok(self
-            .engine()
-            .complete_upload_for_mode(&catalog, upload_id, self.core.subject.as_ref(), resolve)
             .await?)
     }
 

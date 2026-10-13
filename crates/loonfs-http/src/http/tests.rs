@@ -3975,8 +3975,8 @@ mod direct_download {
                 assert_eq!(code, ErrorCode::InvalidRequest.as_str());
                 assert_eq!(
                     message,
-                    "invalid upload content: completion request mode `direct_multipart` does not \
-                     match stored upload mode `direct_put`"
+                    "invalid upload content: completion mode `direct_multipart` does not match \
+                     stored upload mode `direct_put`"
                 );
             }
             other => panic!("expected a typed invalid_request, got {other:?}"),

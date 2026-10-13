@@ -6,10 +6,9 @@
 use crate::common::*;
 use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
-use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, MetadataCache, NamespaceId,
-    PutFileOptions, SharedObjectStore, UploadMode,
+    ChangeSeq, CommitId, CompleteUploadBody, DestinationBehavior, ErrorCode, MetadataCache,
+    NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
 use loonfs_objectstore::keys::hint;
 use loonfs_types::api::v0::{UploadContentClaim, UploadSessionStatus};
@@ -482,7 +481,7 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
                 .await
                 .expect("upload content");
             let completed = namespace_writer
-                .complete_upload(&begin.upload_id, ResolvedUploadCompletion::KnownContent)
+                .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
                 .await
                 .expect("complete upload");
             prepared_contents.push(

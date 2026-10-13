@@ -36,7 +36,7 @@ use loonfs_objectstore::{
     ByteStream, MultipartPart, ObjectMetadata, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
 };
 use loonfs_types::api::v0::{
-    CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim, UploadMode,
+    CompleteUploadBody, CompletedUploadPart, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_types::format::control::{
@@ -69,29 +69,6 @@ pub struct DirectMultipartUploadTarget {
     pub object_key: String,
     pub part_size_bytes: u64,
     pub checksum_algorithm: ChecksumAlgorithm,
-}
-
-/// Completion data after the request has been decoded for the stored upload
-/// mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedUploadCompletion {
-    /// The session already contains all required content information.
-    KnownContent,
-    /// Content claim supplied when a direct PUT completes.
-    DirectPut { content: UploadContentClaim },
-    /// Multipart content information supplied at completion.
-    Multipart(CompleteMultipartUploadRequest),
-}
-
-impl ResolvedUploadCompletion {
-    /// Returns the upload mode this completion describes.
-    pub fn mode(&self) -> UploadMode {
-        match self {
-            Self::KnownContent => UploadMode::ServiceProxied,
-            Self::DirectPut { .. } => UploadMode::DirectPut,
-            Self::Multipart(_) => UploadMode::DirectMultipart,
-        }
-    }
 }
 
 /// One part a server integration is about to sign.
@@ -374,7 +351,7 @@ impl NewUploadSession {
         Self {
             content_id: ContentId::generate(),
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle,
+                staging: ProxiedStaging::Idle {},
             },
         }
     }
@@ -538,14 +515,14 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
             ensure_session_open(&state, now_ms)?;
             let staging = proxied_staging(&mut state.mode, &upload_id)?;
             match staging {
-                ProxiedStaging::Idle => {
-                    *staging = ProxiedStaging::Claimed;
+                ProxiedStaging::Idle {} => {
+                    *staging = ProxiedStaging::Claimed {};
                     Ok(UploadSessionUpdate::Replace {
                         next: Box::new(state),
                         outcome: StagingSlot::Claimed,
                     })
                 }
-                ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
+                ProxiedStaging::Claimed {} => Err(CoreError::UploadContentConflict { upload_id }),
                 staged @ ProxiedStaging::Staged { .. } => Ok(UploadSessionUpdate::Noop(
                     StagingSlot::AlreadyStaged(staged.clone()),
                 )),
@@ -573,10 +550,10 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
         let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
             return Ok(UploadSessionUpdate::Noop(()));
         };
-        if !matches!(staging, ProxiedStaging::Claimed) {
+        if !matches!(staging, ProxiedStaging::Claimed {}) {
             return Ok(UploadSessionUpdate::Noop(()));
         }
-        *staging = ProxiedStaging::Idle;
+        *staging = ProxiedStaging::Idle {};
         Ok(UploadSessionUpdate::Replace {
             next: Box::new(state),
             outcome: (),
@@ -777,7 +754,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                     namespace_id,
                     upload_id,
                     &loaded.content_id,
-                    ProxiedStaging::Claimed,
+                    ProxiedStaging::Claimed {},
                     now_ms,
                 )
                 .await
@@ -849,7 +826,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 ProxiedStaging::Staged { .. } => {
                     return Err(CoreError::UploadContentConflict { upload_id });
                 }
-                ProxiedStaging::Idle | ProxiedStaging::Claimed => {}
+                ProxiedStaging::Idle {} | ProxiedStaging::Claimed {} => {}
             }
             *staging = staged;
             let response = session_response(&state, store.checksum_algorithm());
@@ -873,34 +850,9 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     subject: Option<&Subject>,
-    completion: ResolvedUploadCompletion,
+    completion: CompleteUploadBody,
     context: &MutationContext,
 ) -> Result<CompletedUpload> {
-    complete_upload_for_mode(
-        store,
-        namespace_id,
-        upload_id,
-        subject,
-        |_| Ok(completion),
-        context,
-    )
-    .await
-}
-
-/// Loads the session, decodes completion data for its mode, and completes the
-/// upload. Decoding happens before provider access or durable writes.
-pub(crate) async fn complete_upload_for_mode<S, F>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    resolve: F,
-    context: &MutationContext,
-) -> Result<CompletedUpload>
-where
-    S: ObjectStore + ?Sized,
-    F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
-{
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let now_ms = context.now_ms;
@@ -910,7 +862,6 @@ where
         ensure_session_open(&loaded, now_ms)?;
     }
     let mode = upload_mode(&loaded.mode);
-    let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
     if let Some(completed) = replay_terminal_completion(
         &loaded.status,
@@ -1057,7 +1008,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
             catalog.namespace_id(),
             &session.upload_id,
             &session.content_id,
-            ProxiedStaging::Idle,
+            ProxiedStaging::Idle {},
             context.now_ms,
         ),
     )
@@ -1473,15 +1424,15 @@ fn upload_mode(mode: &UploadSessionMode) -> UploadMode {
 /// Validates a completion request against the session mode.
 fn completion_plan<'a>(
     session: &'a UploadSessionPayload,
-    completion: &'a ResolvedUploadCompletion,
+    completion: &'a CompleteUploadBody,
 ) -> Result<CompletionPlan<'a>> {
     match (&session.mode, completion) {
-        (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
+        (UploadSessionMode::ServiceProxied { staging }, CompleteUploadBody::ServiceProxied {}) => {
             Ok(CompletionPlan::Proxied { staging })
         }
         (
             UploadSessionMode::DirectPut { checksum_algorithm },
-            ResolvedUploadCompletion::DirectPut { content },
+            CompleteUploadBody::DirectPut { content },
         ) => Ok(CompletionPlan::DirectPut {
             requested: claimed_content_ref(
                 session.namespace_id.clone(),
@@ -1496,7 +1447,7 @@ fn completion_plan<'a>(
                 checksum_algorithm,
                 ..
             },
-            ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
+            CompleteUploadBody::DirectMultipart { content, parts },
         ) => Ok(CompletionPlan::DirectMultipart {
             requested: claimed_content_ref(
                 session.namespace_id.clone(),
@@ -1676,7 +1627,7 @@ mod tests {
         assert!(matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed
+                staging: ProxiedStaging::Claimed {}
             }
         ));
     }
@@ -1728,7 +1679,7 @@ mod tests {
         assert!(matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed
+                staging: ProxiedStaging::Claimed {}
             }
         ));
     }
@@ -1839,7 +1790,7 @@ mod tests {
             namespace_id,
             upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
             context,
         )
         .await
@@ -1942,7 +1893,7 @@ mod tests {
         assert_eq!(
             state.mode,
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle,
+                staging: ProxiedStaging::Idle {},
             }
         );
         assert_eq!(
@@ -2037,7 +1988,7 @@ mod tests {
             assert_eq!(
                 state.mode,
                 UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Idle
+                    staging: ProxiedStaging::Idle {}
                 }
             );
         }
@@ -2134,7 +2085,7 @@ mod tests {
             &namespace_id,
             &begin.session.upload_id,
             None,
-            ResolvedUploadCompletion::DirectPut {
+            CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
                     checksum: Checksum::crc32c(BYTES),
@@ -2164,7 +2115,7 @@ mod tests {
             )
             .await
             .expect("write direct-put bytes");
-        let completion = ResolvedUploadCompletion::DirectPut {
+        let completion = CompleteUploadBody::DirectPut {
             content: UploadContentClaim {
                 size_bytes: BYTES.len() as u64,
                 checksum: Checksum::crc64nvme(BYTES),
@@ -2288,7 +2239,7 @@ mod tests {
             &namespace_id,
             &begin.session.upload_id,
             None,
-            ResolvedUploadCompletion::DirectPut {
+            CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
                     checksum: Checksum::crc64nvme(BYTES),
@@ -2317,7 +2268,7 @@ mod tests {
             &namespace_id,
             &begin.session.upload_id,
             None,
-            ResolvedUploadCompletion::DirectPut {
+            CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: written.len() as u64,
                     checksum: Checksum::crc64nvme(&written),

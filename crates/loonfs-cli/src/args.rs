@@ -414,7 +414,7 @@ pub(crate) enum ProfileCreateCommand {
     Remote(ProfileCreateRemoteArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct ProfileCreateActorArgs {
     /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
     #[arg(long, value_hint = ValueHint::Other)]
@@ -427,10 +427,8 @@ pub(crate) struct ProfileCreateActorArgs {
     pub principals: Option<String>,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateS3Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct ProfileS3Args {
     /// S3 bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -452,20 +450,13 @@ pub(crate) struct ProfileCreateS3Args {
     /// Optional static session token.
     #[arg(long, value_hint = ValueHint::Other)]
     pub session_token: Option<String>,
-    /// Use path-style S3 addressing.
-    #[arg(long)]
-    pub force_path_style: bool,
     /// Optional object-key prefix.
     #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateR2Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct ProfileR2Args {
     /// R2 bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -487,14 +478,10 @@ pub(crate) struct ProfileCreateR2Args {
     /// Optional object-key prefix.
     #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateGcsArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct ProfileGcsArgs {
     /// GCS bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -504,6 +491,54 @@ pub(crate) struct ProfileCreateGcsArgs {
     /// Optional object-key prefix.
     #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct ProfileLocalArgs {
+    /// Local filesystem store root.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    pub root: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct ProfileRemoteArgs {
+    /// Remote LoonFS server URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub server_url: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateS3Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: ProfileS3Args,
+    /// Use path-style S3 addressing.
+    #[arg(long)]
+    pub force_path_style: bool,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateR2Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: ProfileR2Args,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateGcsArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: ProfileGcsArgs,
     #[command(flatten)]
     pub actor: ProfileCreateActorArgs,
 }
@@ -512,12 +547,8 @@ pub(crate) struct ProfileCreateGcsArgs {
 pub(crate) struct ProfileCreateLocalArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// Local filesystem store root.
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub root: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub store: ProfileLocalArgs,
     #[command(flatten)]
     pub actor: ProfileCreateActorArgs,
 }
@@ -526,9 +557,8 @@ pub(crate) struct ProfileCreateLocalArgs {
 pub(crate) struct ProfileCreateRemoteArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// Remote LoonFS server URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub server_url: Option<String>,
+    #[command(flatten)]
+    pub server: ProfileRemoteArgs,
     /// Remote bearer token to store. A profile without one uses LOONFS_AUTH_TOKEN at request time.
     #[arg(long, value_hint = ValueHint::Other)]
     pub auth_token: Option<String>,
@@ -553,7 +583,7 @@ pub(crate) enum ProfileUpdateCommand {
     Remote(ProfileUpdateRemoteArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct ProfileUpdateActorArgs {
     /// Actor ID to save in the profile.
     #[arg(long)]
@@ -570,33 +600,11 @@ pub(crate) struct ProfileUpdateActorArgs {
 pub(crate) struct ProfileUpdateS3Args {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// S3 bucket name.
-    #[arg(long)]
-    pub bucket: Option<String>,
-    /// AWS region.
-    #[arg(long)]
-    pub region: Option<String>,
-    /// AWS credential source.
-    #[arg(long, value_name = "ambient|static")]
-    pub credential_source: Option<String>,
-    /// Static access key ID.
-    #[arg(long)]
-    pub access_key_id: Option<String>,
-    /// Static secret access key.
-    #[arg(long)]
-    pub secret_access_key: Option<String>,
-    /// Custom S3 endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
-    /// Optional static AWS session token.
-    #[arg(long)]
-    pub session_token: Option<String>,
+    #[command(flatten)]
+    pub store: ProfileS3Args,
     /// Use path-style bucket addressing. Omit to keep the stored value.
     #[arg(long)]
     pub force_path_style: Option<bool>,
-    /// Optional object-key prefix.
-    #[arg(long)]
-    pub key_prefix: Option<String>,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
 }
@@ -605,27 +613,8 @@ pub(crate) struct ProfileUpdateS3Args {
 pub(crate) struct ProfileUpdateR2Args {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// R2 bucket name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub bucket: Option<String>,
-    /// R2 credential source.
-    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
-    pub credential_source: Option<String>,
-    /// Static access key ID.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub access_key_id: Option<String>,
-    /// Static secret access key.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub secret_access_key: Option<String>,
-    /// R2 endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
-    /// Cloudflare account ID.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub account_id: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub store: ProfileR2Args,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
 }
@@ -634,15 +623,8 @@ pub(crate) struct ProfileUpdateR2Args {
 pub(crate) struct ProfileUpdateGcsArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// GCS bucket name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub bucket: Option<String>,
-    /// Path to a GCP service-account key.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub service_account_key_path: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub store: ProfileGcsArgs,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
 }
@@ -651,12 +633,8 @@ pub(crate) struct ProfileUpdateGcsArgs {
 pub(crate) struct ProfileUpdateLocalArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// Local filesystem store root.
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub root: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub store: ProfileLocalArgs,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
 }
@@ -665,8 +643,8 @@ pub(crate) struct ProfileUpdateLocalArgs {
 pub(crate) struct ProfileUpdateRemoteArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub server_url: Option<String>,
+    #[command(flatten)]
+    pub server: ProfileRemoteArgs,
     /// Remote bearer token to store. An empty value clears the stored token.
     #[arg(long)]
     pub auth_token: Option<String>,

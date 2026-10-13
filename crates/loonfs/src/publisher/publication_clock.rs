@@ -53,7 +53,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
             &catalog,
             &upload.upload_id,
             None,
-            loonfs_core::ResolvedUploadCompletion::KnownContent,
+            loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");

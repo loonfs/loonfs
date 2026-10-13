@@ -798,7 +798,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle,
+                staging: ProxiedStaging::Idle {},
             },
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
@@ -896,7 +896,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_44444444444444444444444444444444"),
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed,
+                staging: ProxiedStaging::Claimed {},
             },
             status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
@@ -913,7 +913,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_11111111111111111111111111111111"),
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle,
+                staging: ProxiedStaging::Idle {},
             },
             status: UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: 5_000,
@@ -1264,7 +1264,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                 content_id: content_id("con_11111111111111111111111111111111"),
                 subject_id: None,
                 mode: UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Idle,
+                    staging: ProxiedStaging::Idle {},
                 },
                 status: UploadSessionRecordStatus::Aborted {
                     aborted_at_ms: 5_000,

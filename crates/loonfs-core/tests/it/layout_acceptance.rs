@@ -10,12 +10,13 @@ use loonfs_core::publish::{
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcOptions};
-use loonfs_core::{CreateNamespaceOptions, MutationContext, ResolvedUploadCompletion};
+use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::AbsolutePath;
 use loonfs_types::{ChangeSeq, NamespaceId};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ async fn reads_commits_and_change_feed_never_list() {
             &catalog,
             &staged.upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");
@@ -219,7 +220,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
             &catalog,
             &staged.upload_id,
             None,
-            ResolvedUploadCompletion::KnownContent,
+            CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("second upload complete");

@@ -16,6 +16,7 @@ use loonfs_objectstore::s3_compatible::{
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStoreError};
 use loonfs_objectstore::{AwsS3Credentials, ByteRange, ObjectStore};
 use loonfs_test_support::ids::page_limit;
+use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
 use tempfile::TempDir;
 
@@ -593,7 +594,7 @@ async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
 }
 
 fn probe_report_lines(report: &StoreProbeReport) -> String {
-    report
+    StoreProbeResponse::from(report.clone())
         .checks
         .iter()
         .map(|check| format!("  {}", check.check_line()))

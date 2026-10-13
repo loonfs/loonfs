@@ -453,9 +453,9 @@ pub fn encode_token<T: OpaqueToken>(
 }
 
 /// Encodes a cursor as the opaque string clients round-trip.
-pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, PageCursorError> {
+pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, OpaqueTokenError> {
     encode_token(cursor, PAGE_CURSOR_FORMAT_VERSION)
-        .map_err(|error| PageCursorError::InvalidJson(error.to_string()))
+        .map_err(|error| OpaqueTokenError::InvalidJson(error.to_string()))
 }
 
 /// Version and endpoint, read before the body so a cursor from another
@@ -493,36 +493,8 @@ pub fn decode_token<T: OpaqueToken>(
 }
 
 /// Decodes a cursor issued by [`encode_cursor`] for the same endpoint.
-pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
-    decode_token(value, PAGE_CURSOR_FORMAT_VERSION).map_err(PageCursorError::from)
-}
-
-/// Invalid opaque page cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum PageCursorError {
-    /// The cursor was not hex-encoded JSON.
-    #[error("invalid page cursor encoding")]
-    InvalidEncoding,
-    /// The cursor JSON did not match a supported cursor shape.
-    #[error("invalid page cursor JSON: {0}")]
-    InvalidJson(String),
-    /// The cursor was valid, but for a different paginated endpoint.
-    #[error("page cursor kind `{actual}` cannot be used as `{expected}` cursor")]
-    WrongKind {
-        /// Cursor kind accepted by the endpoint doing the decoding.
-        expected: &'static str,
-        /// Cursor kind recovered from the caller's opaque token.
-        actual: String,
-    },
-    /// The cursor format version is not supported by this build.
-    #[error("unsupported page cursor version `{actual}`; expected `{expected}`")]
-    UnsupportedVersion {
-        /// Cursor format version this build can decode.
-        expected: u8,
-        /// Version embedded in the caller's opaque token.
-        actual: u8,
-    },
+pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, OpaqueTokenError> {
+    decode_token(value, PAGE_CURSOR_FORMAT_VERSION)
 }
 
 /// Invalid opaque token encoding, version, kind, or body.
@@ -551,21 +523,6 @@ pub enum OpaqueTokenError {
         /// Version embedded in the encoded value.
         actual: u8,
     },
-}
-
-impl From<OpaqueTokenError> for PageCursorError {
-    fn from(error: OpaqueTokenError) -> Self {
-        match error {
-            OpaqueTokenError::InvalidEncoding => Self::InvalidEncoding,
-            OpaqueTokenError::InvalidJson(message) => Self::InvalidJson(message),
-            OpaqueTokenError::WrongKind { expected, actual } => {
-                Self::WrongKind { expected, actual }
-            }
-            OpaqueTokenError::UnsupportedVersion { expected, actual } => {
-                Self::UnsupportedVersion { expected, actual }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -799,7 +756,7 @@ mod tests {
 
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded),
-            Err(PageCursorError::WrongKind {
+            Err(OpaqueTokenError::WrongKind {
                 expected: "directory",
                 actual: "file_revisions".to_owned(),
             })
@@ -810,7 +767,7 @@ mod tests {
     fn malformed_cursor_is_invalid_encoding() {
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>("not-hex"),
-            Err(PageCursorError::InvalidEncoding)
+            Err(OpaqueTokenError::InvalidEncoding)
         );
     }
 
@@ -831,7 +788,7 @@ mod tests {
 
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded),
-            Err(PageCursorError::UnsupportedVersion {
+            Err(OpaqueTokenError::UnsupportedVersion {
                 expected: PAGE_CURSOR_FORMAT_VERSION,
                 actual: PAGE_CURSOR_FORMAT_VERSION + 1,
             })
