@@ -12,7 +12,7 @@ use super::{
     ObjectStoreMetricsRecorder, SMALL_COUNT_BOUNDARIES,
 };
 use crate::metrics::{
-    LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
+    KeyClass, LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
 };
 use crate::{GcResponse, MetadataCompactionJobOutcome};
 use loonfs_core::cache::DecodedBlockCacheObserver;
@@ -552,6 +552,9 @@ struct InstalledCache {
     metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
     head_state: Arc<HeadStateCacheInstruments>,
+    object: Arc<ObjectCacheInstruments>,
+    wal_object: Arc<ObjectLookupInstruments>,
+    content_object: Arc<ObjectLookupInstruments>,
 }
 
 impl MetadataCacheInstruments {
@@ -565,6 +568,15 @@ impl MetadataCacheInstruments {
                     recorder,
                 )),
                 head_state: Arc::new(HeadStateCacheInstruments::register(recorder)),
+                object: Arc::new(ObjectCacheInstruments::register(recorder)),
+                wal_object: Arc::new(ObjectLookupInstruments::register(
+                    recorder,
+                    KeyClass::WalObject,
+                )),
+                content_object: Arc::new(ObjectLookupInstruments::register(
+                    recorder,
+                    KeyClass::Content,
+                )),
             }),
         }
     }
@@ -602,6 +614,29 @@ impl MetadataCacheInstruments {
     /// across head anchors and WAL-tail projections, if metrics are enabled.
     pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
         let observer = Arc::clone(&self.installed.as_ref()?.head_state);
+        Some(observer)
+    }
+
+    /// Returns the observer for evictions and retained bytes across WAL
+    /// objects and content objects, if metrics are enabled.
+    pub(crate) fn object_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.object);
+        Some(observer)
+    }
+
+    /// Returns the observer for WAL object lookups and inserts, if metrics
+    /// are enabled.
+    pub(crate) fn wal_object_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.wal_object);
+        Some(observer)
+    }
+
+    /// Returns the observer for content object lookups and inserts, if
+    /// metrics are enabled.
+    pub(crate) fn content_object_cache_observer(
+        &self,
+    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.content_object);
         Some(observer)
     }
 }
@@ -785,6 +820,18 @@ struct HeadStateCacheInstruments {
     rejections: Arc<dyn CounterHandle>,
     rejected_decoded_bytes: Arc<dyn CounterHandle>,
     retained_decoded_bytes: Arc<dyn GaugeHandle>,
+}
+
+struct ObjectCacheInstruments {
+    evictions: Arc<dyn CounterHandle>,
+    retained_decoded_bytes: Arc<dyn GaugeHandle>,
+}
+
+/// Lookups and inserts of one kind of object in the object cache.
+struct ObjectLookupInstruments {
+    hits: Arc<dyn CounterHandle>,
+    misses: Arc<dyn CounterHandle>,
+    inserts: Arc<dyn CounterHandle>,
 }
 
 impl ViewReadInstruments {
@@ -973,6 +1020,71 @@ impl DecodedBlockCacheObserver for HeadStateCacheInstruments {
 
     fn retained(&self, decoded_bytes: usize) {
         self.retained_decoded_bytes.set(metric_level(decoded_bytes));
+    }
+}
+
+impl ObjectCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        Self {
+            evictions: recorder.register_counter(
+                "loonfs.object_cache.evictions",
+                "WAL objects and content objects evicted to stay within the object budget",
+                &[],
+            ),
+            retained_decoded_bytes: recorder.register_gauge(
+                "loonfs.object_cache.retained_decoded_bytes",
+                "Decoded bytes currently retained as WAL objects and content objects",
+                &[],
+            ),
+        }
+    }
+}
+
+impl DecodedBlockCacheObserver for ObjectCacheInstruments {
+    fn evict(&self, _decoded_bytes: usize) {
+        self.evictions.increment(1);
+    }
+
+    fn retained(&self, decoded_bytes: usize) {
+        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
+    }
+}
+
+impl ObjectLookupInstruments {
+    /// Registers the instruments of one kind of object, labeled with the
+    /// key class the object-store metrics use for the same objects.
+    fn register(recorder: &dyn MetricsRecorder, key_class: KeyClass) -> Self {
+        let key_class = key_class.as_str();
+        let get = |result| {
+            recorder.register_counter(
+                "loonfs.object_cache.gets",
+                "Object cache lookups, by key class and outcome",
+                &[("key_class", key_class), ("result", result)],
+            )
+        };
+        Self {
+            hits: get(RESULT_HIT),
+            misses: get(RESULT_MISS),
+            inserts: recorder.register_counter(
+                "loonfs.object_cache.inserts",
+                "Objects inserted into the object cache, by key class",
+                &[("key_class", key_class)],
+            ),
+        }
+    }
+}
+
+impl DecodedBlockCacheObserver for ObjectLookupInstruments {
+    fn hit(&self) {
+        self.hits.increment(1);
+    }
+
+    fn miss(&self) {
+        self.misses.increment(1);
+    }
+
+    fn insert(&self) {
+        self.inserts.increment(1);
     }
 }
 

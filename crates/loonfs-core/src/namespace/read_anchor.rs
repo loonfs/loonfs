@@ -6,6 +6,7 @@ use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{load_current_manifest_with_hint, LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
+use crate::object_cache::ObjectCache;
 use crate::wal::{
     discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };
@@ -41,7 +42,27 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
     observed: crate::time::Observation,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
     let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
-    load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await
+    load_read_anchor_from_manifest(store, None, namespace_id, manifest, hint, observed).await
+}
+
+/// Loads the read anchor, and reads each WAL object from `object_cache`
+/// before the store.
+pub async fn load_read_anchor_cached<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_cache: &ObjectCache,
+    namespace_id: &NamespaceId,
+    observed: crate::time::Observation,
+) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
+    let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
+    load_read_anchor_from_manifest(
+        store,
+        Some(object_cache),
+        namespace_id,
+        manifest,
+        hint,
+        observed,
+    )
+    .await
 }
 
 /// Loads the read anchor of a namespace that is not deleted.
@@ -57,13 +78,14 @@ pub async fn load_live_read_anchor<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
     store: &S,
+    object_cache: Option<&ObjectCache>,
     namespace_id: &NamespaceId,
     mut manifest: LoadedManifest,
     mut hint: LoadedHint,
     mut observed: crate::time::Observation,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
     for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
-        match discover_tail(store, namespace_id, &manifest).await {
+        match discover_tail(store, object_cache, namespace_id, &manifest).await {
             Ok(DiscoveredTail { head: state, tail }) => {
                 if !state.status.is_deleted() {
                     let successor = manifest_has_successor(

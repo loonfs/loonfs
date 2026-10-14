@@ -17,6 +17,7 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
         basis,
         segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+        object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
     }
 }
 
@@ -116,12 +117,12 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     assert!(target.location.is_resident());
                     if method == "speculative" {
                         engine
-                            .read_speculative_file_content(&target)
+                            .read_speculative_file_content(&target, &context.object_cache)
                             .await
                             .expect("speculative read")
                     } else {
                         engine
-                            .read_resolved_file_content(&target)
+                            .read_resolved_file_content(&target, &context.object_cache)
                             .await
                             .expect("resolved read")
                     }
@@ -594,7 +595,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect("bad object");
     let expected = ContentLocation::whole(&corrupt_ref)
         .expect("object location")
-        .read_bytes(&store, &corrupt_ref)
+        .read_bytes(&store, None, &corrupt_ref)
         .await
         .expect_err("object mismatch");
     assert_matches!(

@@ -3,9 +3,9 @@
 use crate::metrics::{MetadataCacheInstruments, MetricsRecorder};
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
-    CacheScope, CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache,
+    CacheScope, CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache, ObjectCache,
     ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions, SharedHeadState,
-    SharedSegmentBlocks, StoredMetadataBlockCache,
+    SharedObjects, SharedSegmentBlocks, StoredMetadataBlockCache,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -21,6 +21,10 @@ pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 16 MiB (enough for about
 /// 110,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 16 * 1024 * 1024;
+/// Default limit for decoded WAL objects and small content objects: 128 MiB.
+pub const DEFAULT_MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;
+/// Default size of the largest content object the cache keeps: 1 MiB.
+pub const DEFAULT_MAX_CACHED_OBJECT_BYTES: u64 = 1024 * 1024;
 
 /// Whether a cache lookup found its entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,21 +37,22 @@ pub(crate) enum CacheLookup {
 
 /// Decoded metadata that one or more runtimes read through.
 ///
-/// The cache stores segment blocks, manifests, namespace head anchors,
-/// WAL-tail projections, and the completed upload sessions that garbage
-/// collection reuses between passes.
+/// The cache keeps segment blocks, manifests, namespace head anchors,
+/// WAL-tail projections, WAL objects, small content objects, and the
+/// completed upload sessions that garbage collection reuses between passes.
 ///
 /// Runtimes built with the cache over clones of one [`SharedObjectStore`]
-/// share the decoded segment blocks and manifests in the cache. Runtimes over
-/// different object stores never read each other's blocks, even when two
-/// object stores contain objects under the same keys. Two runtimes built
-/// from the same [`StoreConfig`](crate::StoreConfig) each create their own
-/// object-store client, so they don't share blocks. Each
+/// share the decoded segment blocks, manifests, WAL objects, and content
+/// objects in the cache. Runtimes over different object stores never read
+/// each other's entries, even when two object stores contain objects under
+/// the same keys. Two runtimes built from the same
+/// [`StoreConfig`](crate::StoreConfig) each create their own object-store
+/// client, so they don't share entries. Each
 /// [`LoonFs`](crate::LoonFs) keeps its own head anchors, WAL-tail
 /// projections, and completed upload sessions. The limits bound the whole
 /// cache, and the least recently used entry is evicted first, whichever
-/// runtime it belongs to. (Completed upload sessions are the exception. When
-/// an insert takes them over their limit, the cache drops all of them.)
+/// runtime it belongs to. Completed upload sessions are the exception: when
+/// an insert takes them over their limit, the cache drops all of them.
 /// Clones share the cache. A runtime built without one creates a private
 /// cache with the default limits.
 #[derive(Clone)]
@@ -59,6 +64,7 @@ struct MetadataCacheInner {
     segment_blocks: Arc<SharedSegmentBlocks>,
     head_state: Arc<SharedHeadState>,
     completed_upload_sessions: Arc<SharedCompletedUploadSessions>,
+    objects: Arc<SharedObjects>,
     next_runtime_scope: AtomicU64,
     object_store_scopes: Mutex<ObjectStoreScopes>,
     head_anchor_hits: AtomicUsize,
@@ -89,6 +95,8 @@ impl MetadataCache {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
             max_head_state_bytes: DEFAULT_MAX_HEAD_STATE_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
             metrics_recorder: None,
         }
     }
@@ -98,6 +106,7 @@ impl MetadataCache {
     pub fn stats(&self) -> MetadataCacheStats {
         let segments = self.inner.segment_blocks.stats();
         let head_state = self.inner.head_state.stats();
+        let objects = self.inner.objects.stats();
         MetadataCacheStats {
             segment_hits: segments.hits,
             segment_misses: segments.misses,
@@ -114,12 +123,20 @@ impl MetadataCache {
             head_state_evictions: head_state.evictions,
             head_state_rejections: head_state.rejections,
             head_state_bytes: head_state.cached_decoded_bytes,
+            wal_object_hits: objects.wal_hits,
+            wal_object_misses: objects.wal_misses,
+            wal_object_inserts: objects.wal_inserts,
+            content_object_hits: objects.content_hits,
+            content_object_misses: objects.content_misses,
+            content_object_inserts: objects.content_inserts,
+            object_evictions: objects.evictions,
+            object_bytes: objects.cached_decoded_bytes,
         }
     }
 
-    /// Returns one runtime's views of the cache, with segment blocks under
-    /// the scope of `store`, and head state and completed upload sessions
-    /// under a new scope for the runtime.
+    /// Returns one runtime's views of the cache, with segment blocks, WAL
+    /// objects, and content objects under the scope of `store`, and head
+    /// state and completed upload sessions under a new scope for the runtime.
     pub(crate) fn bind(
         &self,
         store: &SharedObjectStore,
@@ -147,6 +164,7 @@ impl MetadataCache {
                 Arc::clone(&self.inner.completed_upload_sessions),
                 runtime_scope,
             ),
+            objects: ObjectCache::new(Arc::clone(&self.inner.objects), object_store_scope),
         }
     }
 
@@ -173,10 +191,12 @@ pub(crate) struct MetadataCacheBinding {
     pub(crate) segment_blocks: MetadataSegmentCache,
     pub(crate) head_state: HeadStateCache,
     pub(crate) completed_upload_sessions: CompletedUploadSessionCache,
+    pub(crate) objects: ObjectCache,
 }
 
 /// The object stores of the runtimes that read through the cache, each with
-/// the scope of its segment blocks and manifests.
+/// the scope of its segment blocks, manifests, WAL objects, and content
+/// objects.
 ///
 /// An object store is identified by the address of its allocation. Each
 /// entry keeps a weak reference to the object store, so the allocation can't
@@ -215,6 +235,8 @@ pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
     max_head_state_bytes: usize,
     max_completed_upload_session_bytes: usize,
+    max_object_bytes: usize,
+    max_cached_object_bytes: u64,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
@@ -252,6 +274,25 @@ impl MetadataCacheBuilder {
         self
     }
 
+    /// Sets the decoded bytes of WAL objects and small content objects the
+    /// cache keeps. Reads look for both kinds of object here before the
+    /// store, and a read that loads a WAL object or verifies a small content
+    /// object from the store adds it. Defaults to
+    /// [`DEFAULT_MAX_OBJECT_BYTES`]; zero keeps none. An object heavier than
+    /// the whole limit is not kept.
+    pub fn max_object_bytes(mut self, max_object_bytes: usize) -> Self {
+        self.max_object_bytes = max_object_bytes;
+        self
+    }
+
+    /// Sets the size of the largest content object the cache keeps. A read
+    /// of a larger object goes to the store. Defaults to
+    /// [`DEFAULT_MAX_CACHED_OBJECT_BYTES`].
+    pub fn max_cached_object_bytes(mut self, max_cached_object_bytes: u64) -> Self {
+        self.max_cached_object_bytes = max_cached_object_bytes;
+        self
+    }
+
     /// Installs the metrics recorder the cache reports its lookups,
     /// evictions, and occupancy to (see [`crate::metrics`]). The cache
     /// registers its instruments once, when it is built. A cache built
@@ -277,6 +318,13 @@ impl MetadataCacheBuilder {
                 )),
                 completed_upload_sessions: Arc::new(SharedCompletedUploadSessions::new(
                     self.max_completed_upload_session_bytes,
+                )),
+                objects: Arc::new(SharedObjects::new(
+                    self.max_object_bytes,
+                    self.max_cached_object_bytes,
+                    instruments.object_cache_observer(),
+                    instruments.wal_object_cache_observer(),
+                    instruments.content_object_cache_observer(),
                 )),
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),
@@ -325,4 +373,21 @@ pub struct MetadataCacheStats {
     pub head_state_rejections: usize,
     /// Decoded bytes of head anchors and WAL-tail projections held now.
     pub head_state_bytes: usize,
+    /// WAL object lookups that found the object in the cache.
+    pub wal_object_hits: usize,
+    /// WAL object lookups that went to the store.
+    pub wal_object_misses: usize,
+    /// WAL objects inserted.
+    pub wal_object_inserts: usize,
+    /// Content object lookups that found the requested bytes in the cache.
+    pub content_object_hits: usize,
+    /// Content object lookups that went to the store.
+    pub content_object_misses: usize,
+    /// Content objects inserted.
+    pub content_object_inserts: usize,
+    /// WAL objects and content objects evicted to stay within the object
+    /// limit.
+    pub object_evictions: usize,
+    /// Decoded bytes of WAL objects and content objects in the cache now.
+    pub object_bytes: usize,
 }

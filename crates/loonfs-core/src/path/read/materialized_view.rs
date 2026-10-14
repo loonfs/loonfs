@@ -19,6 +19,7 @@ use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::object_cache::ObjectCache;
 use crate::path::mutation_path::parse_absolute_path_for_core;
 use crate::storage::content::ContentLocation;
 use crate::storage::content_location::extent_object_key;
@@ -49,6 +50,7 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     basis: &'anchor MetadataBasis,
     segment_cache: Option<&'cache MetadataSegmentCache>,
     head_state: Option<&'cache HeadStateCache>,
+    object_cache: Option<&'cache ObjectCache>,
 }
 
 impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
@@ -57,12 +59,14 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
         basis: &'anchor MetadataBasis,
         segment_cache: Option<&'cache MetadataSegmentCache>,
         head_state: Option<&'cache HeadStateCache>,
+        object_cache: Option<&'cache ObjectCache>,
     ) -> Self {
         Self {
             head,
             basis,
             segment_cache,
             head_state,
+            object_cache,
         }
     }
 }
@@ -117,7 +121,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
     let basis = loaded.basis();
-    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None);
+    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None);
     load_metadata_view(store, namespace_id, context).await
 }
 
@@ -184,6 +188,8 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     wal_tail: Arc<ProjectedWalTail>,
     anchor: ReadAnchor,
+    /// Where file reads look for content objects before the store.
+    object_cache: Option<&'a ObjectCache>,
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
@@ -241,13 +247,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     segments,
                     wal_tail,
                     anchor,
+                    object_cache: load_context.object_cache,
                 });
             }
         }
-        let replayed =
-            load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
-                .await
-                .map_err(CoreError::MetadataProjection)?;
+        let replayed = load_replayed_wal_tail(
+            store,
+            load_context.object_cache,
+            &manifest_head,
+            &head,
+            &loaded_basis.base_state,
+        )
+        .await
+        .map_err(CoreError::MetadataProjection)?;
         let wal_tail = Arc::new(replayed.projected_tail);
         if let Some(cache) = load_context.head_state {
             cache.insert_tail(cache_key, Arc::clone(&wal_tail));
@@ -258,6 +270,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             segments,
             wal_tail,
             anchor,
+            object_cache: load_context.object_cache,
         })
     }
 
@@ -366,7 +379,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(store, &content_ref)
+            .read_bytes(store, self.object_cache, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -865,7 +878,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(store, &content_ref)
+            .read_bytes(store, self.object_cache, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -885,7 +898,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(self
             .resolve_content_location(&revision.content_ref)
             .await?
-            .read_bytes(store, &revision.content_ref)
+            .read_bytes(store, self.object_cache, &revision.content_ref)
             .await?)
     }
 

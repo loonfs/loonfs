@@ -4,6 +4,7 @@
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
 use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub(crate) type PreparedWalObject =
@@ -52,11 +53,11 @@ pub(super) struct WalTailLoadRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedWalObject {
     object_key: String,
-    envelope: WalObjectEnvelope,
+    envelope: Arc<WalObjectEnvelope>,
 }
 
 impl ValidatedWalObject {
-    pub(super) fn new(object_key: String, envelope: WalObjectEnvelope) -> Self {
+    pub(super) fn new(object_key: String, envelope: Arc<WalObjectEnvelope>) -> Self {
         Self {
             object_key,
             envelope,
@@ -100,7 +101,7 @@ impl ValidatedWalTail {
         let payload = envelope.payload();
         let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);
         self.objects
-            .push(ValidatedWalObject::new(object_key, envelope));
+            .push(ValidatedWalObject::new(object_key, Arc::new(envelope)));
     }
 }
 

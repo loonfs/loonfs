@@ -1,13 +1,16 @@
 //! One metadata cache shared by runtimes over one store and over different
-//! stores: scoping, one capacity, binding lifetimes, per-binding policy, and
-//! metrics.
+//! stores: scoping, one capacity, binding lifetimes, per-binding policy,
+//! metrics, and the object reads the cache saves.
 
 use super::MetadataCache;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, MemoryStore, OperationSelector, RecordingStore};
+use loonfs_test_support::stores::{
+    KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
+};
 use loonfs_types::ChecksumAlgorithm;
 use std::path::Path;
 use std::sync::Arc;
@@ -486,11 +489,13 @@ async fn read_policy_stays_with_each_binding() {
     );
 }
 
-const CACHE_METRICS: [&str; 4] = [
+const CACHE_METRICS: [&str; 6] = [
     "loonfs.metadata_segment_cache.retained_decoded_bytes",
     "loonfs.head_state_cache.retained_decoded_bytes",
     "loonfs.wal_tail_projection_cache.gets",
     "loonfs.namespace_head_cache.gets",
+    "loonfs.object_cache.retained_decoded_bytes",
+    "loonfs.object_cache.gets",
 ];
 
 fn registered(snapshot: &MetricsSnapshot, name: &str) -> bool {
@@ -665,5 +670,192 @@ async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
             "loonfs.execution_budget.read_working_bytes"
         ),
         0
+    );
+}
+
+/// Creates a writer whose namespace exists, over a store that records every
+/// request.
+async fn recorded_writer(
+    cache: MetadataCache,
+) -> (
+    LoonFs<Writable>,
+    Arc<RecordingStore<LocalFsStore>>,
+    tempfile::TempDir,
+) {
+    let root = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(root.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id("object-cache-writer"))
+        .metadata_cache(cache)
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&demo(), &test_actor())
+        .await
+        .expect("create namespace");
+    (writer, store, root)
+}
+
+/// Counts the recorded GETs that returned an object of `family`.
+fn object_gets(operations: &[RecordedOperation], family: DurableObjectFamily) -> usize {
+    operations
+        .iter()
+        .filter(|operation| match operation {
+            RecordedOperation::Get {
+                key, result_bytes, ..
+            } => {
+                *result_bytes > 0
+                    && parse_object_key(key).is_some_and(|parsed| parsed.family() == family)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// Checks that the first read after a compaction reloads the namespace's
+/// anchor without reading the unfolded WAL objects from the store again.
+#[tokio::test]
+async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
+    for max_object_bytes in [crate::DEFAULT_MAX_OBJECT_BYTES, 0] {
+        let cache = MetadataCache::builder()
+            .max_object_bytes(max_object_bytes)
+            .build();
+        let (writer, store, _root) = recorded_writer(cache.clone()).await;
+        let namespace = writer.open_namespace(&demo()).expect("open namespace");
+        let maintenance = writer.maintenance(writer_id("object-cache-maintenance"));
+        for index in 0..3 {
+            namespace
+                .put_file(&format!("/folded-{index}"), b"folded", &test_actor())
+                .await
+                .expect("put a folded file");
+            maintenance.fold_wal(&demo()).await.expect("fold");
+        }
+        for index in 0..3 {
+            namespace
+                .put_file(&format!("/tail-{index}"), b"tail", &test_actor())
+                .await
+                .expect("put a file whose bytes stay in the WAL");
+        }
+        // The publish seeded the anchor, so this read loads the unfolded WAL
+        // objects from the store only after the anchor is dropped.
+        writer.core.invalidate_namespace_read_cache(&demo());
+        assert_eq!(
+            namespace.read_file("/tail-0").await.expect("read").bytes,
+            b"tail"
+        );
+        let compaction = maintenance
+            .compact_metadata(&demo(), &crate::MaintenanceCancellation::new())
+            .await
+            .expect("compact");
+        assert_eq!(
+            compaction.compaction,
+            crate::MetadataCompactionOutcome::BoundedMergePublished
+        );
+
+        store.reset();
+        assert_eq!(
+            namespace.read_file("/tail-2").await.expect("read").bytes,
+            b"tail"
+        );
+        let operations = store.snapshot();
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.key().contains("/manifests/")),
+            "the read reloads the anchor: {operations:?}"
+        );
+        let wal_gets = object_gets(&operations, DurableObjectFamily::WalObject);
+        if max_object_bytes == 0 {
+            assert_eq!(wal_gets, 3, "without the cache, the reload reads the tail");
+        } else {
+            assert_eq!(wal_gets, 0, "{:?}", cache.stats());
+            assert_eq!(cache.stats().wal_object_hits, 3);
+        }
+    }
+}
+
+/// Checks that a second read of a small content object finds its bytes in
+/// the object cache, and that every read of an object over the size cap goes
+/// to the store.
+#[tokio::test]
+async fn small_content_objects_are_read_from_the_store_once() {
+    for (size, content_gets) in [(1024, 1), (2 * 1024 * 1024, 2)] {
+        for read in ["buffered", "stream"] {
+            let (writer, store, _root) = recorded_writer(MetadataCache::default()).await;
+            let namespace = writer.open_namespace(&demo()).expect("open namespace");
+            let bytes = vec![7; size];
+            namespace
+                .put_file(FOLDED, &bytes, &test_actor())
+                .await
+                .expect("put file");
+            // A fold writes inline bytes to a content object.
+            writer
+                .maintenance(writer_id("object-cache-maintenance"))
+                .fold_wal(&demo())
+                .await
+                .expect("fold");
+            store.reset();
+            for _ in 0..2 {
+                let read_bytes = match read {
+                    "buffered" => namespace.read_file(FOLDED).await.expect("read").bytes,
+                    _ => {
+                        let mut stream = namespace.read_file_stream(FOLDED).await.expect("open");
+                        let mut read_bytes = Vec::new();
+                        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+                            read_bytes.extend_from_slice(&chunk);
+                        }
+                        read_bytes
+                    }
+                };
+                assert_eq!(read_bytes, bytes, "{read} read of {size} bytes");
+            }
+            assert_eq!(
+                object_gets(&store.take(), DurableObjectFamily::ContentBlob),
+                content_gets,
+                "{read} reads of {size} bytes"
+            );
+        }
+    }
+}
+
+/// Checks that a second runtime over the same object store reads the WAL
+/// objects and the content object that the first runtime read, without a
+/// GET of its own.
+#[tokio::test]
+async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
+    let recording = Arc::new(RecordingStore::new(
+        MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    // The writer reads through a cache of its own, so the first reader
+    // starts cold.
+    same_shape_store(&store, &MetadataCache::default(), b"file").await;
+    let cache = MetadataCache::default();
+    let (first, second) = (reader(&store, &cache).await, reader(&store, &cache).await);
+    let mut object_gets_by_runtime = Vec::new();
+    for runtime in [&first, &second] {
+        recording.reset();
+        assert_reads(runtime, b"file").await;
+        let operations = recording.take();
+        object_gets_by_runtime.push((
+            object_gets(&operations, DurableObjectFamily::WalObject),
+            object_gets(&operations, DurableObjectFamily::ContentBlob),
+        ));
+    }
+    let (wal_gets, content_gets) = object_gets_by_runtime[0];
+    assert!(
+        wal_gets > 0 && content_gets > 0,
+        "the first runtime reads cold"
+    );
+    assert_eq!(
+        object_gets_by_runtime[1],
+        (0, 0),
+        "the second runtime reads the objects the first runtime read: {:?}",
+        cache.stats()
     );
 }

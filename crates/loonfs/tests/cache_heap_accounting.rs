@@ -451,6 +451,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             MetadataCache::builder()
                 .max_segment_bytes(SEGMENT_BUDGET_BYTES)
                 .max_head_state_bytes(0)
+                .max_object_bytes(0)
                 .build(),
             |reader| list_every_directory(shape, reader),
         )
@@ -466,6 +467,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             MetadataCache::builder()
                 .max_segment_bytes(0)
                 .max_head_state_bytes(max_head_state_bytes)
+                .max_object_bytes(0)
                 .build()
         };
         let (with_head_state, reader) = retained_heap(

@@ -3,6 +3,7 @@
 use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::object_cache::ObjectCache;
 use crate::wal::ProjectedContent;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -152,9 +153,26 @@ impl ContentLocation {
     pub(crate) fn pieces(&self) -> &[Bytes] {
         &self.pieces
     }
+
+    /// The key of the object this location reads from that object's first
+    /// byte, when the location reads one object and no WAL pieces. A read
+    /// of the whole reference then reads exactly the first bytes of that
+    /// object.
+    pub(crate) fn single_object_key(&self) -> Option<&str> {
+        match self.extents.as_slice() {
+            [located] if located.extent.offset == 0 && self.pieces.is_empty() => {
+                Some(&located.object_key)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads `[start, end)` of the reference, from `object_cache` where it
+    /// has the first bytes of an object and from the store otherwise.
     pub(crate) async fn read_range<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
+        object_cache: Option<&ObjectCache>,
         start: u64,
         end: u64,
     ) -> std::result::Result<Bytes, DurableContentValidationError> {
@@ -175,6 +193,14 @@ impl ContentLocation {
         // of the requested range.
         let mut parts: Vec<Bytes> = stream::iter(requests)
             .map(|(object_key, range)| async move {
+                if let Some(cached) = object_cache
+                    .and_then(|cache| cache.get_content(&object_key, range.end_exclusive))
+                {
+                    return Ok(cached.slice(
+                        loonfs_types::usize_from_u64(range.start_inclusive)
+                            ..loonfs_types::usize_from_u64(range.end_exclusive),
+                    ));
+                }
                 let expected = range.end_exclusive - range.start_inclusive;
                 let bytes = store
                     .get(&object_key, Some(range))
@@ -213,17 +239,25 @@ impl ContentLocation {
         })
     }
 
+    /// Reads and verifies the whole reference. When the reference is the
+    /// first bytes of one object, `object_cache` keeps the verified bytes.
     pub(crate) async fn read_bytes<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
+        object_cache: Option<&ObjectCache>,
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
-        let bytes = self.read_range(store, 0, content_ref.size_bytes).await?;
+        let bytes = self
+            .read_range(store, object_cache, 0, content_ref.size_bytes)
+            .await?;
         super::content::validate_loaded_content_bytes(
             self.object_key.clone(),
             content_ref,
             &bytes,
         )?;
+        if let Some((object_cache, object_key)) = object_cache.zip(self.single_object_key()) {
+            object_cache.insert_content(object_key, &bytes);
+        }
         Ok(bytes.to_vec())
     }
 }

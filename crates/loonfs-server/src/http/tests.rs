@@ -109,6 +109,9 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
         "loonfs_head_state_cache_evicted_decoded_bytes_total",
         "loonfs_head_state_cache_rejections_total",
         "loonfs_head_state_cache_rejected_decoded_bytes_total",
+        "loonfs_object_cache_gets_total",
+        "loonfs_object_cache_inserts_total",
+        "loonfs_object_cache_evictions_total",
         "loonfs_grep_block_cache_gets_total",
         "loonfs_grep_block_cache_inserts_total",
         "loonfs_grep_block_cache_evictions_total",
@@ -118,10 +121,15 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
             "missing counter `{name}`"
         );
     }
-    assert!(
-        rendered.contains("# TYPE loonfs_head_state_cache_retained_decoded_bytes gauge\n"),
-        "missing the head-state gauge"
-    );
+    for name in [
+        "loonfs_head_state_cache_retained_decoded_bytes",
+        "loonfs_object_cache_retained_decoded_bytes",
+    ] {
+        assert!(
+            rendered.contains(&format!("# TYPE {name} gauge\n")),
+            "missing gauge `{name}`"
+        );
+    }
     assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
 }
 

@@ -3,7 +3,8 @@
 use crate::common::{default_page_limit, is_content_object, page_limit, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, SharedObjectStore,
+    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
+    SharedObjectStore,
 };
 use loonfs_grep::codec::MAX_INDEX_GRAMS_FILE_BYTES;
 use loonfs_grep::{
@@ -770,7 +771,13 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-fault-maintenance").await;
+    // The test deletes bravo's content object after a healthy query, so the
+    // reader must not keep that object in its object cache, or the second
+    // query would read the cached bytes instead of failing.
+    let host = GrepHost::with_reader(&store, "grams-fault-maintenance", |builder| {
+        builder.metadata_cache(MetadataCache::builder().max_object_bytes(0).build())
+    })
+    .await;
 
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -883,7 +890,12 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-oversized-maintenance").await;
+    // The test counts content GETs at the store, so the reader runs without
+    // the object cache, which would otherwise serve the small candidates.
+    let host = GrepHost::with_reader(&store, "grams-oversized-maintenance", |builder| {
+        builder.metadata_cache(MetadataCache::builder().max_object_bytes(0).build())
+    })
+    .await;
 
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())

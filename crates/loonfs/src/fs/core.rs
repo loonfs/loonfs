@@ -9,7 +9,9 @@ use crate::{
     MetadataCache, NamespaceId, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
-use loonfs_core::cache::{CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache};
+use loonfs_core::cache::{
+    CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache, ObjectCache,
+};
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
@@ -46,6 +48,7 @@ pub(crate) struct RuntimeCoreInner {
     /// The completed upload sessions that garbage collection keeps between
     /// passes, under the same scope as the head-state view.
     pub(crate) completed_upload_sessions: CompletedUploadSessionCache,
+    pub(crate) object_cache: Arc<ObjectCache>,
     /// Publication, collection, completed-compaction, and view-read metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
 }
@@ -98,6 +101,7 @@ impl RuntimeCore {
                 metadata_segment_cache: Arc::new(metadata_cache.segment_blocks),
                 head_state: Arc::new(metadata_cache.head_state),
                 completed_upload_sessions: metadata_cache.completed_upload_sessions,
+                object_cache: Arc::new(metadata_cache.objects),
                 instruments,
             }),
         }

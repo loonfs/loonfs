@@ -5,6 +5,7 @@ pub(crate) use super::content_location::ContentLocation;
 use crate::error::{CoreError, Result};
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
+use crate::object_cache::ObjectCache;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
@@ -92,7 +93,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> std::result::Result<(), DurableContentValidationError> {
     ContentLocation::whole(content_ref)?
-        .read_bytes(store, content_ref)
+        .read_bytes(store, None, content_ref)
         .await
         .map(drop)
 }
@@ -281,6 +282,11 @@ pub struct FileContentStream<S> {
     /// Start offset of the next ranged read.
     next_offset: u64,
     verifier: ContentVerifier,
+    /// Where ranged reads look for content objects before the store.
+    object_cache: Option<Arc<ObjectCache>>,
+    /// A whole reference read in one chunk, kept until the stream verifies
+    /// it so that `object_cache` can keep the verified bytes.
+    unverified_object: Option<Bytes>,
 }
 
 impl<S: ObjectStore> FileContentStream<S> {
@@ -294,7 +300,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     ) -> std::result::Result<Self, DurableContentValidationError> {
         if location.is_resident() {
             let bytes = location
-                .read_range(&store, 0, content_ref.size_bytes)
+                .read_range(&store, None, 0, content_ref.size_bytes)
                 .await?;
             validate_loaded_content_bytes(location.object_key().to_owned(), &content_ref, &bytes)?;
         }
@@ -307,7 +313,16 @@ impl<S: ObjectStore> FileContentStream<S> {
             chunk_bytes,
             next_offset: start_offset,
             verifier,
+            object_cache: None,
+            unverified_object: None,
         })
+    }
+
+    /// Reads content objects from `object_cache` before the store, and keeps
+    /// a small object there once the stream verifies all of its bytes.
+    pub(crate) fn with_object_cache(mut self, object_cache: Arc<ObjectCache>) -> Self {
+        self.object_cache = Some(object_cache);
+        self
     }
 
     /// Adds already-downloaded prefix bytes to a resumed read's checksum.
@@ -360,7 +375,16 @@ impl<S: ObjectStore> FileContentStream<S> {
         &mut self,
     ) -> std::result::Result<Option<Bytes>, DurableContentValidationError> {
         if self.next_offset == self.content_ref.size_bytes {
-            return self.completion().map(|()| None);
+            self.completion()?;
+            if let Some(((object_cache, object_key), bytes)) = self
+                .object_cache
+                .as_deref()
+                .zip(self.location.single_object_key())
+                .zip(self.unverified_object.take())
+            {
+                object_cache.insert_content(object_key, &bytes);
+            }
+            return Ok(None);
         }
         let end_exclusive = self
             .next_offset
@@ -368,7 +392,12 @@ impl<S: ObjectStore> FileContentStream<S> {
             .min(self.content_ref.size_bytes);
         let bytes = self
             .location
-            .read_range(&self.store, self.next_offset, end_exclusive)
+            .read_range(
+                &self.store,
+                self.object_cache.as_deref(),
+                self.next_offset,
+                end_exclusive,
+            )
             .await?;
         // A range ending past the object is truncated, so a short answer is
         // an object that ended earlier than its reference says it does.
@@ -382,6 +411,9 @@ impl<S: ObjectStore> FileContentStream<S> {
         self.verifier.update(&bytes).expect(
             "a chunk below the content size arrives before `completion` finishes the verifier",
         );
+        if self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes {
+            self.unverified_object = self.object_cache.as_ref().map(|_| bytes.clone());
+        }
         self.next_offset += bytes.len() as u64;
         Ok(Some(bytes))
     }
@@ -423,6 +455,7 @@ pub(crate) const MAX_SPECULATIVE_CONTENT_BYTES: u64 = 64 * 1024;
 
 pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
+    object_cache: &ObjectCache,
     location: &ContentLocation,
     content_ref: &ContentRef,
 ) -> Result<Vec<u8>> {
@@ -430,7 +463,9 @@ pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
         content_ref.size_bytes,
         Some(MAX_SPECULATIVE_CONTENT_BYTES),
     )?;
-    Ok(location.read_bytes(store, content_ref).await?)
+    Ok(location
+        .read_bytes(store, Some(object_cache), content_ref)
+        .await?)
 }
 
 pub(crate) fn content_object_key_for_ref(
@@ -711,7 +746,7 @@ mod tests {
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
         ContentLocation::whole(content_ref)?
-            .read_bytes(store, content_ref)
+            .read_bytes(store, None, content_ref)
             .await
     }
 

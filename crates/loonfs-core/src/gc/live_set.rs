@@ -89,7 +89,8 @@ impl LiveSet {
             .await?;
         }
         let anchor =
-            load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await?;
+            load_read_anchor_from_manifest(store, None, namespace_id, manifest, hint, observed)
+                .await?;
         let head = anchor.manifest.state.envelope.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
