@@ -10,6 +10,7 @@
 mod access_change_reload;
 mod access_namespace;
 mod access_reads;
+mod append_read_extents;
 mod attributes;
 mod attribution_rows;
 mod binding_version;

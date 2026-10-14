@@ -2,8 +2,10 @@
 
 use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::error::{CoreError, Result};
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::wal::ProjectedContent;
 use bytes::Bytes;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -156,7 +158,7 @@ impl ContentLocation {
         start: u64,
         end: u64,
     ) -> std::result::Result<Bytes, DurableContentValidationError> {
-        let mut parts = Vec::new();
+        let mut requests = Vec::new();
         let mut offset = 0;
         for located in &self.extents {
             let extent_end = offset + located.extent.length;
@@ -165,28 +167,37 @@ impl ContentLocation {
                     start_inclusive: located.extent.offset + start.max(offset) - offset,
                     end_exclusive: located.extent.offset + end.min(extent_end) - offset,
                 };
+                requests.push((located.object_key.clone(), range));
+            }
+            offset = extent_end;
+        }
+        // `buffered` keeps the parts in extent order, which is the byte order
+        // of the requested range.
+        let mut parts: Vec<Bytes> = stream::iter(requests)
+            .map(|(object_key, range)| async move {
                 let expected = range.end_exclusive - range.start_inclusive;
                 let bytes = store
-                    .get(&located.object_key, Some(range))
+                    .get(&object_key, Some(range))
                     .await
                     .map_err(|error| DurableContentValidationError::Store {
-                        object_key: located.object_key.clone(),
+                        object_key: object_key.clone(),
                         message: error.public_message().into_owned(),
                     })?
                     .ok_or_else(|| DurableContentValidationError::MissingContentObject {
-                        object_key: located.object_key.clone(),
+                        object_key: object_key.clone(),
                     })?;
                 if bytes.len() as u64 != expected {
                     return Err(DurableContentValidationError::ContentLengthMismatch {
-                        object_key: located.object_key.clone(),
+                        object_key,
                         expected,
                         actual: bytes.len() as u64,
                     });
                 }
-                parts.push(bytes);
-            }
-            offset = extent_end;
-        }
+                Ok(bytes)
+            })
+            .buffered(STORE_READS_IN_FLIGHT)
+            .try_collect()
+            .await?;
         for piece in &self.pieces {
             let piece_end = offset + piece.len() as u64;
             if offset < end && piece_end > start {
