@@ -5,7 +5,7 @@ use super::options::GcOptions;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::in_flight::STORE_WRITES_IN_FLIGHT;
+use crate::in_flight::{STORE_READS_IN_FLIGHT, STORE_WRITES_IN_FLIGHT};
 use crate::limits::{
     CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
@@ -3927,7 +3927,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
     create(store.inner(), &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    for _ in 0..2 {
+    for _ in 0..=STORE_READS_IN_FLIGHT {
         complete_upload_for_gc(store.inner(), &namespace_id, b"unpublished\n", &setup).await;
     }
 
@@ -3958,9 +3958,61 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
                 )
         })
         .count();
-    assert_eq!(
-        session_reads, 1,
-        "the pass stopped at the first record it could not hold"
+    assert!(
+        session_reads <= STORE_READS_IN_FLIGHT,
+        "the pass stopped within one window of reads, after {session_reads}"
     );
     assert_eq!(memory.in_use(), 0);
+}
+
+/// Checks that one pass reads each completed upload session record once,
+/// with more than one read and at most `STORE_READS_IN_FLIGHT` reads in
+/// flight.
+#[tokio::test]
+async fn a_pass_reads_each_completed_session_record_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let sessions = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
+    let store = RecordingStore::new(
+        ConcurrencyWatchStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::prefix(&sessions),
+        ),
+        KeyPredicate::prefix(&sessions),
+    );
+    let setup = store.inner().inner();
+    let early = context(1_000);
+    let late = context(early.now_ms + GRACE_MS);
+    create(setup, &namespace_id, &early)
+        .await
+        .expect("bootstrap");
+    for completed in [&early, &late] {
+        for _ in 0..20 {
+            complete_upload_for_gc(setup, &namespace_id, b"unpublished\n", completed).await;
+        }
+    }
+
+    let report = gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options(),
+        &context(early.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("gc pass");
+
+    assert_eq!(report.deleted.upload_sessions, 20);
+    assert_eq!(report.retained.upload_session_window, 20);
+    let reads = store.inner().reads();
+    assert_eq!(reads.total, 40, "one read for each of the 40 records");
+    assert!(reads.peak_in_flight > 1);
+    assert!(reads.peak_in_flight <= STORE_READS_IN_FLIGHT);
+    let mut reads_by_key = std::collections::BTreeMap::<String, usize>::new();
+    for key in store.take_get_keys() {
+        *reads_by_key.entry(key).or_default() += 1;
+    }
+    assert_eq!(reads_by_key.len(), 40);
+    assert!(reads_by_key.values().all(|&reads| reads == 1));
 }
