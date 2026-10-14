@@ -14,7 +14,7 @@
 
 ## LoonFS
 
-LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives virtually unlimited storage and a high throughput ceiling. It uses a single-writer, multi-reader model and can be used across sessions and clients as an embedded engine or through a remote server connection.
+LoonFS is a durable filesystem built on object storage. It can be used to store, organize, index, search, and read files and directories. Object storage is the only durable dependency for LoonFS, so the capacity and throughput of namespaces is virtually unlimited. It uses a single-writer, multi-reader model, and applications can embed the LoonFS engine directly or connect to a LoonFS server over HTTP.
 
 ## Download
 
@@ -36,7 +36,7 @@ cp ./target/release/loonfs ~/.local/bin/loonfs    # copy it to somewhere in your
 
 ## Quickstart
 
-This example uses S3 in embedded mode, where the CLI talks directly to the bucket without a LoonFS server. Provider credentials are read from the standard environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` if you use one):
+This example uses S3 in embedded mode, where the CLI reads and writes directly to the bucket, without a LoonFS server. Provider credentials are read from the standard environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` if you use one):
 
 ```bash
 export AWS_ACCESS_KEY_ID={access_key_id}
@@ -48,6 +48,28 @@ loonfs namespace create {namespace_id}
 loonfs use {namespace_id}
 ```
 
+Then write a file and read it:
+
+```bash
+loonfs put ./notes.txt /notes.txt
+loonfs ls /
+loonfs cat /notes.txt
+```
+
+The CLI also works with Cloudflare R2 (`profile create r2`), Google Cloud Storage (`gcs`), and a LoonFS server (`remote`). The [CLI reference](crates/loonfs-cli/README.md) lists every command.
+
+## SDKs and libraries
+
+The Go, Python, and TypeScript SDKs talk to a LoonFS server over HTTP.
+
+| Language | Package | Install |
+| --- | --- | --- |
+| Rust (embedded) | `loonfs` | `cargo add loonfs` |
+| Rust (HTTP client) | `loonfs-client` | `cargo add loonfs-client` |
+| Go | [`loonfs-sdk-go`](https://github.com/loonfs/loonfs-sdk-go) | `go get github.com/loonfs/loonfs-sdk-go@latest` |
+| Python | [`loonfs`](https://github.com/loonfs/loonfs-sdk-python) | `pip install loonfs` |
+| TypeScript | [`@loonfs/sdk`](https://github.com/loonfs/loonfs-sdk-typescript) | `npm install @loonfs/sdk` |
+
 ## Server deployment
 
 See [Self-hosting LoonFS](crates/loonfs-server/docs/self-hosting.md) for the complete deployment guide.
@@ -58,24 +80,19 @@ See the [documentation](docs/specs/README.md) for the architecture, storage form
 
 ## Core concepts
 
-LoonFS is designed with a core set of foundational ideas.
+- **Each namespace is an isolated filesystem with a serialized WAL and native version history.** Every change is recorded as a numbered commit in the namespace's write-ahead log (WAL), every file change is recorded as a new revision, and the change feed replays every commit back to a retention floor.
 
-- **Object storage is the only required durable substrate.** LoonFS stores immutable file content, manifests, numbered WAL objects, and metadata segments in object storage. Pins retain immutable manifests until released; snapshot expiry can be extended. Caches, queues, workers, and local state are rebuildable from the object store.
+- **All durable state is stored in object storage and only object storage.** LoonFS stores immutable file content, manifests, numbered WAL objects, and metadata segments in object storage. Caches, workers, and other local state can all be rebuilt from the object store.
 
-- **A namespace is an independently addressable filesystem with its own history.** Forks share content and metadata under durable pins, so a namespace's storage is not confined to its own prefix.
+- **An item's identity is inode based, and paths are mutable views.** A file or directory is identified by `(namespace_id, inode_id)`. A path points to an inode, so renaming or moving an item changes its path but not its inode.
 
-- **Inodes are identity, paths are views.** The identity of a filesystem item is `(namespace_id, inode_id)`. Paths are "views" that point to inodes, and may change over time without changing the item’s identity.
+- **A commit applies one or more changes atomically.** The operations in a commit are serialized in order, and preconditions add optimistic concurrency control. 
 
-- **Commits are the unit of transactional change.** File bytes are durable no later than the commit that references them. Uploaded bytes are stored before the commit, and small files can carry their bytes in the commit itself ([format section 1.5](docs/specs/format.md#15-file-contents-and-ownership)). Metadata changes are recorded as logical commits, and a commit becomes visible when put-if-absent creates its numbered WAL object.
+- **Forks and snapshots are copy-on-write.** Every stored object is immutable, so a fork shares the source namespace's metadata segments and content objects instead of copying them. Within a namespace, a snapshot is a pin that keeps one manifest readable until the snapshot expires.
 
-- **Numbered manifests and WAL objects are authoritative.** The current manifest records namespace identity, status, and writer authority. Later WAL objects record committed changes. `hint.json` is advisory and starts discovery of numbered manifests.
 
 ## Design philosophy
 
 LoonFS is built around a correctness-first protocol where the object store is the only source of truth.
 
-- **Correctness is the primary feature.** LoonFS favors designs with fewer valid states, explicit invariants, named failure modes, and deterministic tests. 
-
-- **Durability and visibility are separate.** LoonFS may durably store file content and metadata before a change appears in the filesystem. Changes are acknowledged after their numbered WAL object is created.
-
-- **Serialize commits, scale everything else.** Every change is executed through a transactional core with an ordered WAL. LoonFS keeps expensive work (uploading and downloading, compaction, garbage collection, indexing) off the write path so it can scale independently.
+- **Correctness is the primary feature.** For system design decisions, LoonFS weighs correctness first, then simplicity, then performance. The [style guide](docs/STYLE.md) lists the full set of rules.
