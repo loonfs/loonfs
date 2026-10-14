@@ -1,10 +1,10 @@
-# LoonFS Object Storage Provider Reference
+# LoonFS object-storage provider reference
 
 This document lists provider limits and performance data points that inform LoonFS design work, and the requirements that a bucket's configuration and a LoonFS provider adapter MUST meet. It isn't a substitute for provider conformance tests.
 
 The key word MUST in this document is to be interpreted as described in BCP 14 ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, it appears in capitals.
 
-## 1. Frequently Used Data Points
+## 1. Frequently used data points
 
 This section lists the provider data points that come up most often in LoonFS design work.
 
@@ -12,7 +12,7 @@ This section lists the provider data points that come up most often in LoonFS de
 - Don't assume that an `ETag` is a portable content hash. ETags aren't consistent across providers, especially for multipart uploads.
 - A HEAD request usually takes around 30 ms, and a full GET of a small object (with content) should be assumed to take about 200 ms. A HEAD request (or a GET with if-none-match) is a useful way to check control objects faster.
 
-## 2. Provider Matrix
+## 2. Provider matrix
 
 This section compares the providers feature by feature. The paragraphs after the table describe listing timestamps and ambient AWS credentials.
 
@@ -49,7 +49,7 @@ Cloudflare R2 doesn't use this chain. R2 ambient credentials are read from `AWS_
 
 This section describes which providers support direct transfers, in which a client sends bytes to the provider instead of through the server.
 
-Direct PUT is enabled only when the provider can do both of these things:
+Direct PUT is enabled only when the provider can do both of the following:
 
 1. Enforce a create-only upload, so a client can't replace an existing content object.
 2. Return a durable checksum for the stored object.
@@ -123,7 +123,7 @@ Azure Blob Storage isn't supported yet. A native adapter MUST:
 
 Creates use `If-None-Match: *`. Uploads are proxied only, because a SAS (shared access signature) can't require a checksum header.
 
-## 5. Local Filesystem Provider
+## 5. Local filesystem provider
 
 This section describes the local filesystem provider, which is a development and test provider supported on Unix-family platforms.
 
@@ -131,15 +131,7 @@ The local provider writes each replacement to a staging file in the destination 
 
 For a HEAD request, the local provider computes the file's CRC-64/NVME. Its ETag is `local-fs-v1:crc64nvme:<hex>`. An assembly reads source ranges in chunks of at most 8 MiB, and writes the ordered tail pieces into a staging file. It computes the CRC-64/NVME while it writes, and it checks the expected checksum before it publishes the file with a create-only link. Each HEAD request or assembly buffers at most one read chunk.
 
-## 6. LoonFS Design Implications
-
-This section lists what the provider data above means for LoonFS's design.
-
-1. **WAL and head flush cadence.** One update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable WAL objects, and update several sharded heads or a batched manifest.
-2. **Immutable content path.** Content-addressed or monotonic keys can scale through multipart upload and distributed prefixes.
-3. **Checksums.** LoonFS should be responsible for end-to-end integrity. Provider checksums help validate transport and storage, but ETag and checksum semantics differ sharply across providers and multipart modes.
-
-## 7. Sources
+## 6. Sources
 
 The footnotes in this document cite these sources.
 

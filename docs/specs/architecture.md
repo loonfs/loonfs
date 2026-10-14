@@ -87,7 +87,7 @@ later numbered WAL -> committed changes ---+            |
 
 A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
 
-LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records the namespace that owns the content, a content ID, a size, and a checksum. The owner and content ID determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
+LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records the content's owner namespace, a content ID, a size, and a checksum. The owner and content ID determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
 
 Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
 

@@ -139,11 +139,11 @@ This section defines every feature key and the operations it gates. The registry
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
-| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
+| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
 `maintenance.grep.index` is the only feature key in `maintenance/v0`. Every other operation in that API group is required.
 
-Listing namespaces is intentionally not supported in v0. Callers MUST address namespaces by ID until LoonFS has a scalable design for a namespace catalog or index.
+Listing namespaces isn't supported in v0, so callers MUST address namespaces by ID.
 
 ### 2.3 Data-dependent features
 
@@ -346,7 +346,7 @@ Each public embedded read takes one slot from the runtime's `ExecutionBudget` be
 Reads take and release slots as follows:
 
 - Each pager page takes and releases its own slot.
-- Capturing a `ReadView` takes one slot. The view keeps no slot between calls, and each read through it takes one.
+- Capturing a `ReadView` takes one slot. The view keeps no slot between calls, and each read through it takes its own slot.
 - Nested snapshot stat and list calls reuse the outer read's slot.
 - A buffered content read keeps its slot until it completes.
 - A streamed or ranged content read releases its slot after the metadata and content lookup, before it returns the body. The existing transfer limits bound how the body is consumed.
@@ -654,7 +654,7 @@ While the sweep closes a session:
 The server also drops a session when the namespace is deleted, when a request finds that the namespace doesn't exist, or when the session is fenced. When a session is fenced:
 
 - The request that finds the fence fails with `writer_fenced`, and the server doesn't resubmit it.
-- The session is dead, including every clone of it that a request still in flight is using.
+- The session can't be used again, including every clone of it that a request still in flight is using.
 - A later request opens a new session, and that session's first publish takes the namespace back. Until the old session's work ends, an open can return `writer_session_closed` (503). A later request can open a session after that work ends.
 - A fence on one namespace doesn't affect the sessions for other namespaces.
 - Each dropped fenced session produces a warning with the namespace, and with the winning writer ID when the error includes it. The host table keeps a cumulative count of these drops. Typed hosts call `Namespaces::forget_if_fenced` after a failure, and they read `Namespaces::fenced_sessions_dropped` for the count.
@@ -784,7 +784,7 @@ For example:
 {"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
-So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of chasing a head that keeps moving.
+So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
 
 #### Jobs and outcomes
 
@@ -828,7 +828,7 @@ In a `metadata` result, `compaction.outcome` reports the bounded compaction step
 
 The bounded step in a `metadata` run never runs a streaming compaction. Only the `metadata_compaction` job does.
 
-A `metadata_compaction` run compacts one unit. If the selected window fits in one step, the unit is a bounded merge, and otherwise it's one streaming compaction of a family group. To compact every eligible group, a caller repeats the run for as long as it publishes.
+A `metadata_compaction` run compacts one unit. If the selected window fits in one step, the unit is a bounded merge, and otherwise it's one streaming compaction of a family group. To compact every eligible group, a caller repeats the run until a run publishes nothing.
 
 In a `metadata_compaction` result, `compaction.outcome` has six values:
 
@@ -971,7 +971,7 @@ An ordinary operation that finds that its namespace was deleted returns `namespa
 
 [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content) defines how its content is reclaimed. Purging the namespace's tombstone and hint is outside the scope of this API.
 
-Retention is coarse. A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
+A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
 
 In an active namespace, GC reclaims a content object once it's older than the grace window and nothing references it. A content object is referenced by:
 
@@ -1201,8 +1201,6 @@ For example, this commit request puts the uploaded content at `/docs/report.pdf`
 }
 ```
 
-Long-running transfers can also expose session resources. Implementations can expose workflow helper resources too, but those helpers aren't part of the core semantics. Once a multi-request interaction begins, the identifier that the server issued identifies that interaction for as long as it's in progress.
-
 ### Creating and forking namespaces
 
 Creating a namespace uses the namespace ID directly. In v0, there are no namespace aliases or separate display names. A representative create request looks like this:
@@ -1390,7 +1388,7 @@ The namespace root has no name, so its entry omits `parent_inode_id`, `display_n
 
 The inode route accepts `snapshot_id` and returns the same entry shape, including the `path` at the selected sequence. The path limits in [Names and paths](format.md#14-names-and-paths) apply to request paths. A derived `path` can exceed them, and inode-addressed reads still return it. Renaming an entry changes its path and name, but not its inode ID or metadata. An unknown or hidden inode returns `inode_not_found`, and for the root inode, the route returns the path `/`. `include_attributes` behaves the same way as it does on the path entry route.
 
-Why are the attribute fields prefixed siblings? Clients read the revision number on its own, and pass it as `expected_attributes_revision_no` on their next write without touching the values. That's the prefixed-sibling case, not the consumed-as-a-unit case that the entry-kind enum uses.
+Why are the attribute fields siblings of the entry's other fields, instead of one nested object? Clients read the revision number on its own, and pass it as `expected_attributes_revision_no` on their next write, without reading the values.
 
 ### 6.5 `GET /filesystem/entries` and `GET /inodes/{inode_id}/children`
 
@@ -1406,7 +1404,7 @@ A cursor is normally an opaque resume position in the listing order, not a snaps
 
 Each page is internally consistent at its own head, but a multi-page listing spans whatever heads its pages were read at. So an entry created behind the resume position is missed, an entry deleted behind it was already returned, and a rename can appear as a duplicate or be missed. A client that needs one consistent cut re-issues the listing when `head_seq` changes between pages.
 
-Drift tolerance runs forward, never backward. Every read confirms its head when it starts, so a cursor issued ahead of the serving head wasn't issued for this view, and it returns `invalid_request`. A malformed cursor, or one replayed against a different target, also returns `invalid_request`.
+A cursor tolerates a head that moved forward, but not one that moved backward. Every read confirms its head when it starts, so a cursor issued ahead of the serving head wasn't issued for this view, and it returns `invalid_request`. A malformed cursor, or one replayed against a different target, also returns `invalid_request`.
 
 A directory cursor issued with `snapshot_id` is the exception. It's bound to that snapshot's immutable view, and the client MUST repeat the same `snapshot_id` on every page. If a page request omits it or supplies another snapshot, the server returns `invalid_request` instead of combining rows from different views. An unrecognized cursor version is also rejected with `invalid_request`.
 
@@ -1917,7 +1915,7 @@ Before an operation's conflict checks, LoonFS checks the subject's effective rig
 | undelete | `remove` on the saved parent and `create` on the recovery parent, including when recovering in place. |
 | update_access, update_access_by_inode | Authority for the changes, as described below. |
 
-A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. Entry rights are enough when the move confers nothing. A boundary folder can move anywhere with entry rights, because its inherited rights don't change. Root administrator principals don't contribute gains. An undelete that relocates the entry follows the same rule.
+A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. Entry rights are enough when the move confers nothing. A boundary directory can move anywhere with entry rights, because its inherited rights don't change. Root administrator principals don't contribute gains. An undelete that relocates the entry follows the same rule.
 
 For `update_access`, changing the root's set of administrator principals requires an administrator. Otherwise, `manage` permits any update. A subject without `manage` MUST have `share`, leave the boundary unchanged, and have every right that it adds to or removes from any principal's direct grant.
 
@@ -2018,9 +2016,9 @@ Each state also has these rules:
 - An open session accepts `PUT /content`, part signing, and `complete` while the server clock reads before its `expires_at_ms`. From that instant on, each of them returns `upload_not_found`, as for an aborted session, and upload collection aborts the session later. `GET` still reports the session as `open`, and `abort` still ends it.
 - An aborted session returns `upload_not_found` from `PUT /content`, from part signing, and from `complete`. That's the same response the server returns after the session is later physically removed, so the response doesn't change when cleanup runs. It's also what a completion receives when server-side cleanup aborted the session first. If the completion is recorded first instead, the cleanup's conditional write fails, and the completed session is kept.
 
-A client uploads a large payload in one pass. It reads its source once, in order, and never keeps the whole payload in memory. The transport never requires more than that, and each step of the flow is designed so that the client doesn't need to do more. To upload in one pass, a client:
+A client uploads a large payload in one pass. It reads its source once, in order, and never keeps the whole payload in memory. To upload in one pass, a client:
 
-1. Begins a `direct_multipart` session. The begin request declares no length and no digest, so a source that can't report its length can start uploading immediately. The response settles how the payload is split into parts, and nothing else.
+1. Begins a `direct_multipart` session. The begin request declares no length and no digest, so a source that can't report its length can start uploading immediately. The response sets the part size.
 2. Reads the source one part at a time. For each part, it computes the part's `crc64nvme` for the URL the server signs, and it adds the same bytes to a running `crc64nvme` of the whole object, so one pass produces both checksums.
 3. Asks for part URLs in waves instead of all at once (a signing request can list at most 1,000 parts), uploads each wave's parts, and records each part's `{part_number, etag, crc64nvme}`. The client keeps track of its own parts, exactly as it would with the provider's own multipart API.
 4. Keeps no more than a bounded window of parts in memory at a time. That window is all the memory the upload uses, and its size doesn't depend on the payload's length. To retry a failed part, the client asks for its URL again. If a part is uploaded more than once, the provider keeps the last upload.
@@ -2401,7 +2399,7 @@ The pattern uses the Rust `regex` crate's dialect (no backreferences or lookarou
 3. Scans every revision committed after `built_through_seq`.
 4. Verifies every candidate against the real pattern.
 
-Because every candidate is verified, index staleness affects cost, never results. Matches are ordered by `(inode_id, byte_offset)`, and one match is reported per line.
+Every candidate is verified, so a stale index makes a query slower, but it doesn't change the results. Matches are ordered by `(inode_id, byte_offset)`, and one match is reported per line.
 
 Two budgets bound a page: the match limit, and a per-page budget of verified candidates. So a page can return fewer matches than its limit and still include a cursor. Each page is evaluated against the namespace head at page time, and it reports that head in `head_seq`. The cursor resumes strictly after the last candidate that the issuing page finished scanning, and it's bound to that request, so replaying it with different criteria is rejected as `invalid_request`.
 
@@ -2419,7 +2417,7 @@ The `path_prefix` value is a complete absolute path, not a partial prefix of a p
 
 `inode_id` selects the scope by inode instead, and limits results to the inode's descendants wherever the inode is bound. A request can include `path_prefix` or `inode_id`, but not both. A request with both returns `invalid_request` with `param` set to `inode_id`. An inode that isn't visible returns `inode_not_found`.
 
-If the data half is missing, the request returns `not_supported` with the `feature` field set to `query.grep`, the same key that capability discovery advertises the serving half under (see [Data-dependent features](#23-data-dependent-features)).
+If the namespace has no active grep index, the request returns `not_supported` with the `feature` field set to `query.grep`, the same key that the capability document uses to advertise grep (see [Data-dependent features](#23-data-dependent-features)).
 
 ### 6.14 `GET /metrics`
 
@@ -2453,7 +2451,7 @@ A conforming server MUST:
 8. Map sibling names to name keys by each namespace's naming mode, and apply each mode's rule exactly (see [Names and paths](format.md#14-names-and-paths)).
 9. Keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed.
 10. Preserve per-commit idempotency, ordering, and change-feed identity, even when it physically batches logical commits in one WAL object.
-11. Advertise its API groups and features truthfully in the capability document, and never advertise an API group whose required ops aren't implemented.
+11. Advertise its API groups and features truthfully in the capability document, and never advertise an API group whose required operations aren't implemented.
 12. Respond to unimplemented or disabled parts of the API with `not_supported` (and its `feature` name), never with undefined behavior.
 
 ### 7.2 Writer and client requirements
@@ -2476,7 +2474,7 @@ This section describes common client patterns. A pattern is defined by the part 
 
 ### 8.1 Path-oriented client
 
-A path-oriented client uses the path-oriented surface of the API.
+A path-oriented client addresses files and directories by path.
 
 Typical behavior:
 
@@ -2486,8 +2484,6 @@ Typical behavior:
 - Large or recursive commands can be implemented as sequences of ordinary logical commits.
 
 This client doesn't need a sync database or a full local mirror. An implementation can still keep durable local state when that improves usability, restart safety, or resumability. Examples include auth and session state, retry journals, pinned snapshot IDs, and inode context learned from earlier responses.
-
-The reference CLI loads defaults only when reading its config metadata returns a not-found error. Any other metadata error returns an invalid-config error that includes the path, and the CLI leaves the file unchanged.
 
 ### 8.2 Sync client
 
@@ -2621,7 +2617,7 @@ This section describes where LoonFS can be extended.
 
 The preferred extension point is the committed change feed. Downstream systems (such as indexers, notification services, preview builders, or policy engines) should consume committed changes instead of becoming part of the core mutation path.
 
-New client-visible operations are added to this document as API group ops or as features in the [Feature registry](#22-feature-registry). New durable state is added to `format.md`. New scheduling machinery is up to each implementation. Cross-store discovery (naming authority, search, ownership, and quotas) is out of scope for this specification.
+New client-visible operations are added to this document as API group operations or as features in the [Feature registry](#22-feature-registry). New durable state is added to `format.md`. New scheduling machinery is up to each implementation. Cross-store discovery (naming authority, search, ownership, and quotas) is out of scope for this specification.
 
 ### SDK streaming downloads
 
