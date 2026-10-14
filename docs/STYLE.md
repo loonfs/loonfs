@@ -1,6 +1,6 @@
 # LoonFS style
 
-This guide describes how LoonFS code is written. Each rule is a design decision, recorded with a short explanation. When you run into a case that no rule covers, use the closest decision and its explanation to decide, instead of guessing.
+This guide describes how LoonFS code is written. Each rule is a design decision, recorded with a short explanation.
 
 The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide.
 
@@ -12,21 +12,17 @@ Three rules apply everywhere:
 
 - **Use one pattern for each decision**, so that a reader can rely on it. A convention applies to new code and to code that a change already touches, but an existing departure isn't, on its own, a reason for a change.
 
-- **Remove the old design in the same change that adds a new one.** A compatibility layer keeps two designs alive, and every later reader has to learn both.
+- **Remove the old design in the same change that adds a new one.** A compatibility layer retains conflicting design decisions, and every developer has to learn both without an established preference.
 
-- **Don't ship shortcuts.** A deliberate shortcut still has to be redone later, and by then other code usually depends on it.
+- **Don't ship shortcuts.** A deliberate shortcut still has to be rewritten later, and by then other code usually depends on it.
 
 ## Simplicity
 
-- **Design types so that an invalid state can't exist**, instead of checking for it at runtime. A runtime check has to run everywhere the state is created, and a missed check is a bug.
+- **Design all types so that an invalid state can't be represented**, instead of checking for invalid states at runtime. A runtime check has to run everywhere the state is created, and a missed check is a bug.
 
-- **Remove code before you add a layer.** Use few abstractions, and only ones that match a concept in the domain.
+- **Fix the root cause of a bug, not the symptom.** A check that catches the symptom leaves the cause available to occur again.
 
-- **Fix a bug by removing the wrong rule, not by adding a guard.** A guard leaves the wrong rule in place for the next change to run into.
-
-- **Count the costs before you design.** Count the round trips, bytes, and states that a design needs for the largest namespace the limits allow, and count requests first, because one GET to object storage takes tens of milliseconds.
-
-- **Measure a performance problem before and after you change it.** Without the first measurement, a change can add code without making anything faster.
+- **Estimate the back-of-the-envelope costs across scales before you commit to a design.** Estimate the round trips, bytes, and states that the design needs, up to the largest namespace the limits allow. Start with round trips, because one GET to object storage takes tens of milliseconds.
 
 ## Correctness
 
@@ -34,23 +30,19 @@ Three rules apply everywhere:
 
 Three kinds of failure can happen, and the code responds to each kind differently:
 
-- **A bug in the process.** The process reached a state that the code assumes can't happen, so the code panics.
-- **Bad bytes in object storage.** An object that LoonFS read breaks a rule of the format, so the code returns a corruption error scoped to the namespace that contains the object.
-- **A condition that stops the request.** Nothing is broken, but the request can't succeed as written, or can't succeed right now, so the code returns the error code that describes the condition.
+**A bug in the process.** The process reached a state that the code assumes can't happen, so the code panics.
 
-These rules apply the three responses:
+**Bad bytes in object storage.** An object that LoonFS read breaks a rule of the format, so the code returns a corruption error scoped to the namespace that contains the object.
 
-- **Check each assumption with `assert!`, or with `expect` and a message that says what should be true.** Check it in its most direct form, at the point where it's true, and keep the check on in release builds. Don't return `CoreError::Internal` instead of panicking.
+**An expected error.** Nothing is broken, but the request is invalid (a path doesn't exist, or a precondition fails) or can't succeed right now (a conflict, or a timeout). The code returns its assigned error, and the caller can decide what to do.
+
+- **Check each assumption with `assert!`, or with `expect` and a message that says what should be true.** Correctness comes first, so when an assumption breaks, the process stops instead of continuing in a state the code wasn't written for. Keep the checks on in release builds.
 
 - **Don't use `unsafe`, `unwrap`, `panic!`, `todo!`, `unimplemented!`, or `unreachable!` in production code.** The lints reject them, so every panic is an assertion that states an invariant.
 
-- **Check bytes when they're decoded, and rely on that check afterward.** Later code that depends on the check uses `expect`, because by then a failure would be a bug. Don't match on a corruption error to recover from it.
-
-- **Use `expect` when you encode a value that the process built**, because a failure there would be a bug.
-
 - **Return the error for a terminal state, without retry or recovery code.** A fenced writer, a corrupt namespace, and a permission failure can't change on a retry. Retry a transient transport failure, with a count and a deadline.
 
-- **Contain a panic only on purpose, with a test that shows what happens next.** A contained panic is counted, and the writer session stays open, because a panic is a bug, and the same bug would panic again in a new session.
+- **Catch a panic only where the code is designed to continue after one, and test what happens next.** When background work panics, LoonFS records the panic in a metric for operators and keeps the writer session open. Ending the session wouldn't help, because the same bug would panic again in a new session.
 
 - **Treat a poisoned lock as a bug**, with `expect`, unless the component contains panics by design. (A mutex is poisoned when a thread panics with the mutex locked.)
 
@@ -58,7 +50,7 @@ These rules apply the three responses:
 
 - **Never cap a decoded value below the limit the writer enforces**, because then LoonFS could write an object that it can't read back.
 
-Why does a bug panic instead of returning an error? If the code kept going after it found a bug in its own state, it could corrupt durable state in object storage, because it can't trust anything else it computes. Tokio contains a panic to the task that panicked, so a panic doesn't always stop the process, and that's why each place that contains a panic has a test.
+Why does a bug panic instead of returning an error? If the code kept going after it found a bug in its own state, it could corrupt durable state in object storage, because it can't trust anything else it computes. Tokio contains a panic to the task that panicked, so a panic doesn't always stop the process, and that's why each place that catches a panic has a test.
 
 Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared object storage, so a restarted process would load the same object and panic again, and so would every other process that opens the namespace. An error scoped to the namespace reports the problem, and the process keeps serving its other namespaces.
 
@@ -66,7 +58,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Keep one registry of wire error codes**, `ErrorCode` in `loonfs-types`. Clients match on the strings, so a code can't be renamed or removed after a release includes it. Group codes with `ErrorCode::kind()`, and derive the HTTP status from the kind in one function.
 
-- **Add a `code()` method to every error that can reach the wire.** Errors from the vocabulary and storage crates don't have one, and the code that calls them maps them to a code.
+- **Add a `code()` method to every error that can reach the wire.** Errors from the vocabulary and storage crates don't have one, and their callers map each error to a code.
 
 - **Define one error type for each crate, and match its name to the crate**, such as `CoreError` in `loonfs-core`. Each crate exports `pub type Result<T>`.
 
@@ -74,7 +66,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Mark the public error enums and the registry's enums in a published crate `#[non_exhaustive]`**, so a variant can be added without breaking callers. Keep other public enums exhaustive, so the compiler finds every `match` that a new variant affects. A wire enum that a client decodes ends in an `Unknown` variant, so a newer server can't break an older client.
 
-- **Define an error enum in the file of its subject**, or in a directory's `error.rs` when the directory's files share it.
+- **Define an error enum in the same file where the error-generating code is written.** When several files in a module generate the same error, define the enum in the module's `error.rs`.
 
 - **Derive `Clone` on core errors**, so one failure can be returned to every caller waiting on the same batch.
 
@@ -82,13 +74,13 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 ### State and types
 
-- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (such as `u64::MAX`) allows combinations that don't mean anything. A value that the format or the protocol defines isn't a sentinel.
+- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (such as `u64::MAX`) allows combinations that can't exist.
 
-- **Pass a choice across a module boundary as a two-variant enum, not a bool**, so a call site says what it's asking for. A private helper can take a bool, and so can a field whose name says what `true` means. Don't combine two choices into one enum when the code that reads it ignores one of them.
+- **Pass a choice across a module boundary as a two-variant enum, not a bool**, so the meaning of the argument is clear at the call site. A private helper can take a bool, and so can a field whose name says what `true` means. Keep two independent settings as two fields, not one enum of their combinations, when most code reads only one of them.
 
-- **Make a handle's mode part of its type.** Handles are generic over `ReadOnly` or `Writable`, so a write on a read-only handle doesn't compile. Store data that one mode needs in the handle, typed by the mode, not in an `Option` that's read with `expect`.
+- **Make read-only and writable handles different types**, so that calling a write method on a read-only handle doesn't compile.
 
-- **Put a durable status's transition rules on its enum**, so the rule for legal moves is written once.
+- **Put a durable status's transition rules on its enum**, so the rule for legal moves is recorded in a single place.
 
 - **Group optional response fields that go together** with `#[serde(flatten)] Option<Group>`, which doesn't change the JSON.
 
@@ -110,7 +102,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Take paths as `&str` in the embedded handles**, and report an invalid path as the operation's own error.
 
-- **Represent a time as a `u64` number of milliseconds**, with the unit in its name, or as a `Duration` where an API takes one. A value that's stored, or that needs more precision, keeps its own unit.
+- **Represent a time as a `u64` number of milliseconds, with the unit in the name (`_ms`).** Use a `Duration` only to pass a time to a library function that expects a `Duration`.
 
 Why this ID alphabet? It leaves out `i`, `l`, and `o`, which are easy to confuse with `1` and `0`, and `u`, which makes it less likely that an ID spells a word by accident. A version 4 UUID is random, so generating one doesn't read the clock, and the ID doesn't reveal when it was created.
 
@@ -124,7 +116,7 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Don't use recursion in protocol code**, because a stack overflow aborts the process. A parser can recurse when it limits the depth.
 
-- **Put each limit where its scope is.** A process-wide budget goes in `ExecutionBudget`, a bound on what a surface accepts goes in the host's config, and an extension defines its own budget. A constant goes in `limits.rs` when more than one module uses it, or when a spec or a proof refers to it. Otherwise, it stays next to the code that uses it.
+- **Define a limit next to the applicable code.** A process-wide budget goes in `ExecutionBudget`, a limit on incoming requests goes in the host's config, and an extension defines its own budget. A constant shared by more than one module, a spec, or a proof goes in `limits.rs`.
 
 - **Tie related limits together with `const` assertions**, so that changing one without the other fails to compile.
 
@@ -163,7 +155,7 @@ These span words are the easiest to confuse:
 
 - **Apply a result only if the attempt that produced it is still current**, so that a slow attempt can't overwrite a newer one.
 
-- **Use `#[async_trait]` only on a trait with more than one implementation**, because it boxes every future.
+- **Use `#[async_trait]` only on a trait with more than one implementation**, because every call then allocates its future on the heap, and a native async function doesn't.
 
 - **Use `std::sync::Mutex` by default, and unlock it before any `.await`**, because a task suspended with it locked can deadlock another task on the same thread. Use `tokio::sync::Mutex` only when a lock has to stay locked across an `.await`, with a comment that says why.
 
@@ -179,15 +171,13 @@ These span words are the easiest to confuse:
 
 Design and measure in round trips to object storage first, then bytes, then CPU.
 
-- **Make each decision with one round trip.** A record refers directly to everything it doesn't contain, so that a reader never has to follow a chain of earlier records.
+- **Make each decision with one round trip.** When a record depends on data stored somewhere else, include a direct reference to that data, so that a reader doesn't have to look back through earlier records. For example, a file revision includes the layout of its bytes.
 
-- **Read what a provider supports from the store**, never from a constant in core, because providers differ.
+- **Don't hard-code a provider's capabilities in core**, such as its checksum algorithm or its largest object size. Get them from the provider's `ObjectStore` implementation, because providers differ.
 
 - **Fail configuration instead of emulating a missing provider feature**, because a fallback would change an operation's cost or guarantees without the operator knowing.
 
-- **Use what a listing returns, instead of making a request per object.**
-
-- **Batch requests**, such as commits into one WAL object and deletes into a bounded window.
+- **Batch requests where possible**, such as commits into one WAL object and deletes into a bounded window.
 
 - **Keep the commit path small.** Commits are serialized through one ordered WAL, so anything on that path slows every commit.
 
@@ -236,7 +226,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `validate` | Check the shape of input |
   | `verify` | Check bytes or durable state against stored evidence |
   | `ensure` | Check a precondition on state, returning `Result<()>` |
-  | `resolve` | Turn a reference into what it refers to |
+  | `resolve` | Turn a reference into the referenced object |
   | `effective_*` | Merge defaults |
 
 - **Order the parts of a handle method's name** as the verb, the object, the form (`_stream` or `_prepared`), the address (`_by_inode`), the time (`_at_snapshot` or `_at_checkpoint`), and `_with_options`, and leave out any part that doesn't apply, as in `read_file_stream_by_inode_with_options`. A method doesn't repeat its receiver's noun, and an accessor doesn't start with `get_`.
@@ -275,11 +265,11 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 ### Code shape
 
-- **Define a type in the lowest crate whose vocabulary it belongs to**, and re-export it from higher crates instead of defining a copy.
+- **Define each type once, in the lowest crate where it's needed**, and re-export it from the crates above.
 
-- **Implement each rule, constant, mapping, and helper once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies on purpose. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
+- **Implement each rule, constant, mapping, and helper only once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies on purpose. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
 
-- **Put only docs and re-exports in `mod.rs`**, so that a file's name says what's in it.
+- **Don't put code in `mod.rs`.** Every module has one, so the file name doesn't tell a reader what's inside. Put code in a file whose name describes its contents, and use `mod.rs` for docs and re-exports.
 
 - **Keep a module under about 500 non-test lines, and a function under about 100.** Move branches up into the parent function and loops down into helpers, so that the parent keeps the state and the helpers compute results.
 
@@ -291,7 +281,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 ### Comments and docs
 
-- **Use comments to explain why the code is written the way it is**, in full sentences, such as a surprising invariant, a deliberate departure from a rule, or a safety argument. Don't narrate the next line, mark a section, or record a follow-up, because those comments go stale.
+- **Write a comment only when the code can't explain itself**, such as a surprising invariant, a deliberate departure from a rule, or a safety argument. Write it in full sentences, and say why, not what. Don't narrate the next line, mark a section, or record a follow-up, because those comments go stale.
 
 - **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and a type's doc starts with a noun phrase. Link to the spec instead of restating durable or API behavior. A `ToSchema` doc is part of `openapi.json`, so editing one is an API change.
 
@@ -307,11 +297,11 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Check an error with `assert_matches!`**, with `assert!(matches!(..))` when the value isn't `Debug`, or with `expect_err` followed by a check of the specific error. Don't use `assert!(result.is_err())`, because when it fails, it doesn't show which error the code returned.
 
-- **Put a helper that two test files use in `loonfs-test-support`**, unless it needs a higher crate's own types, in which case it stays in that crate.
+- **Put shared test helpers in `loonfs-test-support`**, except a helper that needs types from a higher crate, which stays in that crate.
 
 - **Keep a test under about 100 lines**, and split a longer one by scenario.
 
-- **Use bare `#[tokio::test]` by default**, `multi_thread` only where a harness needs it (with a comment that says why), and `start_paused` for timer logic.
+- **Use bare `#[tokio::test]` by default**, `multi_thread` only where a harness requires multiple threads (with a comment that says why), and `start_paused` for timer logic.
 
 ### Observability
 
@@ -327,7 +317,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 ### Tooling and dependencies
 
-- **Configure lints once**, in the workspace `[lints]` table and `clippy.toml`, and use the default rustfmt settings. Pin the toolchain to an exact version, which is also the MSRV, and update it in its own change.
+- **Configure lints once**, in the workspace `[lints]` table and `clippy.toml`, and use the default rustfmt settings. Pin Rust to an exact version in `rust-toolchain.toml`, and update the pin in its own pull request.
 
 - **Use one crate for each job**, and replace a dependency that fifty lines of code could replace. Explain a dependency in a comment in the workspace table when its name doesn't say why it's there. `cargo deny check bans` allows a duplicate version only with a `skip` entry that says which crates pull it in.
 
