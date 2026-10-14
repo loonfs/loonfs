@@ -301,10 +301,18 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         state: loonfs_core::publish::ResultingReadState,
     ) {
-        let (cached_check, validation) = self
-            .inner
-            .head_state
-            .peek_anchor(namespace_id)
+        let cached = self.inner.head_state.peek_anchor(namespace_id);
+        // A publisher plans on its basis until a successor check moves it, so
+        // its seed can name a manifest older than one a read here already
+        // loaded. The newer anchor stays: its WAL probe finds this publish,
+        // while the older basis would make the next read reload everything.
+        if cached
+            .as_ref()
+            .is_some_and(|cached| cached.basis.manifest_no() > state.basis.manifest_no())
+        {
+            return;
+        }
+        let (cached_check, validation) = cached
             .map(|cached| {
                 // The cached check also confirms the seeded view only if it checked
                 // the same basis and the seeded tip is not behind the cached one.
