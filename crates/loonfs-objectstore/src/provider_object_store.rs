@@ -973,17 +973,26 @@ impl ObjectStore for ProviderObjectStore {
                 object_key: key.to_owned(),
                 source,
             })?;
-        match self.head(key).await {
-            Ok(Some(existing)) => {
-                return crate::immutable_write::verify_stored_checksum(key, expected, existing)
+        // Below the threshold the create is one conditional PUT, and only an
+        // occupied key costs a HEAD, after the conflict. A multipart assembly
+        // checks first, so a retry copies nothing, and so that it never
+        // completes over an object it saw on a provider whose conditional
+        // completion is unconfirmed (R2).
+        if crate::assembly::assembled_size_bytes(sources, &tail)
+            >= PROVIDER_MULTIPART_THRESHOLD_BYTES
+        {
+            match self.head(key).await {
+                Ok(Some(existing)) => {
+                    return crate::immutable_write::verify_stored_checksum(key, expected, existing)
+                }
+                Err(source) => {
+                    return Err(crate::ImmutableWriteError::Transport {
+                        object_key: key.to_owned(),
+                        source,
+                    })
+                }
+                Ok(None) => {}
             }
-            Err(source) => {
-                return Err(crate::ImmutableWriteError::Transport {
-                    object_key: key.to_owned(),
-                    source,
-                })
-            }
-            Ok(None) => {}
         }
         let created = self
             .multipart_controller

@@ -26,10 +26,7 @@ use crate::provider_object_store::{
     PROVIDER_MAX_MULTIPART_PARTS,
 };
 use crate::retry::{with_transport_retry, RetryWarnings, StoreRetry, DEFAULT};
-use crate::signed_request::{
-    classify_signed_response, object_length_from_signed_head, send_signed, signing_time,
-    SignedResponse,
-};
+use crate::signed_request::{classify_signed_response, send_signed, signing_time, SignedResponse};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
@@ -569,16 +566,6 @@ impl S3RequestSigner {
         checked_data(key, response).map(|response| response.body)
     }
 
-    /// The length and ETag of the object at `key`, or `None` when absent.
-    async fn head_object(&self, key: &str) -> Result<Option<(u64, String)>> {
-        let signed = self
-            .request_signer
-            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
-            .await?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        object_length_from_signed_head(key, &response)
-    }
-
     /// Sends one signed request and fails on any provider error, including
     /// one reported in the body of a success response.
     async fn send_checked(
@@ -874,20 +861,22 @@ mod tests {
                 http::Method::HEAD => {
                     assert_eq!(request.headers()["x-amz-checksum-mode"], "ENABLED");
                     let bytes = if request.uri().path().ends_with(BASE_KEY) {
-                        Bytes::copy_from_slice(&self.base)
+                        Some(Bytes::copy_from_slice(&self.base))
                     } else {
-                        self.objects.lock().expect("objects")[request.uri().path()].clone()
+                        self.objects.lock().expect("objects").get(request.uri().path()).cloned()
                     };
-                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes))
-                        .expect("checksum");
-                    (
-                        "head",
-                        response
+                    let response = match bytes {
+                        Some(bytes) => response
                             .header(http::header::CONTENT_LENGTH, bytes.len())
                             .header(http::header::ETAG, "\"base\"")
-                            .header("x-amz-checksum-crc64nvme", checksum)
+                            .header(
+                                "x-amz-checksum-crc64nvme",
+                                base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum"),
+                            )
                             .body(Bytes::new()),
-                    )
+                        None => response.status(http::StatusCode::NOT_FOUND).body(Bytes::new()),
+                    };
+                    ("head", response)
                 }
                 http::Method::GET => {
                     let (first, last) = request.headers()[http::header::RANGE]
@@ -1041,11 +1030,53 @@ mod tests {
         }
     }
 
+    fn scripted_store(
+        kind: ConfiguredObjectStoreKind,
+        provider: &ScriptedProvider,
+    ) -> crate::ProviderObjectStore {
+        let client = Arc::new(
+            object_store::aws::AmazonS3Builder::new()
+                .with_bucket_name("bucket")
+                .with_region("us-east-1")
+                .with_access_key_id("test-access")
+                .with_secret_access_key("test-secret")
+                .with_endpoint("http://provider.invalid")
+                .with_allow_http(true)
+                .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
+                .with_http_connector(provider.clone())
+                .build()
+                .expect("client"),
+        );
+        let signer = Arc::new(scripted_signer(kind, provider));
+        crate::ProviderObjectStore::new(
+            client.clone(),
+            client.clone(),
+            client.clone(),
+            client,
+            crate::ProviderObjectStoreConfig { key_prefix: None },
+            kind,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
+            signer.clone(),
+            signer,
+        )
+        .expect("store")
+    }
+
+    /// The base object as a caller's HEAD reports it to the scripted provider.
+    fn base_metadata(provider: &ScriptedProvider) -> crate::ObjectMetadata {
+        crate::ObjectMetadata {
+            etag: Some("\"base\"".to_owned()),
+            version: None,
+            size_bytes: provider.base.len() as u64,
+            last_modified_at_ms: None,
+            checksum: Some(Checksum::crc64nvme(&provider.base)),
+        }
+    }
+
     #[tokio::test]
     async fn verified_put_and_assembly_accept_the_same_stored_checksum() {
-        use crate::{
-            ImmutableWriteError, ObjectStore, ProviderObjectStore, ProviderObjectStoreConfig,
-        };
+        use crate::{ImmutableWriteError, ObjectStore};
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
             ConfiguredObjectStoreKind::CloudflareR2,
@@ -1058,33 +1089,7 @@ mod tests {
                 objects: Arc::default(),
                 parts: Arc::default(),
             };
-            let client = Arc::new(
-                object_store::aws::AmazonS3Builder::new()
-                    .with_bucket_name("bucket")
-                    .with_region("us-east-1")
-                    .with_access_key_id("test-access")
-                    .with_secret_access_key("test-secret")
-                    .with_endpoint("http://provider.invalid")
-                    .with_allow_http(true)
-                    .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
-                    .with_http_connector(provider.clone())
-                    .build()
-                    .expect("client"),
-            );
-            let signer = Arc::new(scripted_signer(kind, &provider));
-            let store = ProviderObjectStore::new(
-                client.clone(),
-                client.clone(),
-                client.clone(),
-                client,
-                ProviderObjectStoreConfig { key_prefix: None },
-                kind,
-                loonfs_types::ChecksumAlgorithm::Crc64nvme,
-                crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
-                signer.clone(),
-                signer,
-            )
-            .expect("store");
+            let store = scripted_store(kind, &provider);
             let bytes = Bytes::from_static(b"source tail");
             let expected = Checksum::crc64nvme(&bytes);
             store
@@ -1095,6 +1100,7 @@ mod tests {
                 key: BASE_KEY.to_owned(),
                 range: None,
                 checksum: Checksum::crc64nvme(b"source"),
+                metadata: base_metadata(&provider),
             }];
             let accepted = store
                 .assemble(KEY, &sources, vec![Bytes::from_static(b" tail")], &expected)
@@ -1110,9 +1116,14 @@ mod tests {
                         &Checksum::crc64nvme(b"source other")
                     )
                     .await,
-                Err(ImmutableWriteError::DifferentObject { .. })
+                Err(ImmutableWriteError::DifferentObject { object_key }) if object_key == KEY
             );
-            assert_eq!(provider.operations(), ["put", "head", "head"]);
+            // Each assembly learns of the occupied key from its create, and
+            // then checks the stored checksum with one HEAD.
+            assert_eq!(
+                provider.operations(),
+                ["put", "get", "put", "head", "get", "put", "head"]
+            );
         }
     }
 
@@ -1143,6 +1154,7 @@ mod tests {
                         } else {
                             Checksum::crc64nvme(b"wrong")
                         },
+                        metadata: base_metadata(&provider),
                     };
                     2
                 ];
@@ -1155,10 +1167,10 @@ mod tests {
                 let result = signer.assemble(KEY, &sources, vec![tail], &expected).await;
                 if correct {
                     assert_eq!(result.expect("assembly").checksum, Some(expected));
-                    assert_eq!(provider.operations(), ["head", "head", "get", "get", "put"]);
+                    assert_eq!(provider.operations(), ["get", "get", "put"]);
                 } else {
                     assert_matches!(result, Err(ObjectStoreError::ChecksumMismatch { .. }));
-                    assert_eq!(provider.operations(), ["head", "head", "get"]);
+                    assert_eq!(provider.operations(), ["get"]);
                 }
             }
         }
@@ -1198,6 +1210,7 @@ mod tests {
                         key: BASE_KEY.to_owned(),
                         range: None,
                         checksum: checksum.clone(),
+                        metadata: base_metadata(&provider),
                     },
                     AssemblySource {
                         key: BASE_KEY.to_owned(),
@@ -1206,6 +1219,7 @@ mod tests {
                             end_exclusive: 3,
                         }),
                         checksum: Checksum::crc64nvme(&base[..3]),
+                        metadata: base_metadata(&provider),
                     },
                 ];
                 let claim = if correct {
@@ -1223,16 +1237,14 @@ mod tests {
                     .await;
                 if correct {
                     assert_eq!(result.expect("assembly").checksum, Some(expected.clone()));
-                    let mut operations = vec![
-                        "head", "head", "create", "copy", "get", "upload", "complete",
-                    ];
+                    let mut operations = vec!["create", "copy", "get", "upload", "complete"];
                     if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                         operations.push("head");
                     }
                     assert_eq!(provider.operations(), operations);
                 } else {
                     assert_matches!(result, Err(ObjectStoreError::ChecksumMismatch { .. }));
-                    let mut operations = vec!["head", "head", "create", "copy", "get", "upload"];
+                    let mut operations = vec!["create", "copy", "get", "upload"];
                     if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                         // R2 verifies after completion and leaves the rejected
                         // object for collection; no writer deletes it.
@@ -1248,6 +1260,105 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Heads `BASE_KEY` the way a fold heads each merged extent, and returns
+    /// the sources with the checksum their stored checksums combine to.
+    async fn headed_sources(
+        store: &crate::ProviderObjectStore,
+        count: usize,
+    ) -> (Vec<AssemblySource>, Checksum) {
+        use crate::ObjectStore;
+        let mut sources = Vec::new();
+        let mut combined = Checksum::crc64nvme(&[]);
+        for _ in 0..count {
+            let metadata = store.head(BASE_KEY).await.expect("head").expect("source");
+            let checksum = metadata.checksum.clone().expect("stored checksum");
+            combined = combined
+                .crc_combine(&checksum, metadata.size_bytes)
+                .expect("combine");
+            sources.push(AssemblySource {
+                key: BASE_KEY.to_owned(),
+                range: None,
+                checksum,
+                metadata,
+            });
+        }
+        (sources, combined)
+    }
+
+    #[tokio::test]
+    async fn a_small_assembly_sends_one_put_after_one_head_and_one_get_per_source() {
+        use crate::ObjectStore;
+        for kind in [
+            ConfiguredObjectStoreKind::AwsS3,
+            ConfiguredObjectStoreKind::CloudflareR2,
+        ] {
+            for count in 0..=3 {
+                let provider = ScriptedProvider {
+                    kind,
+                    base: Arc::new(b"source".to_vec()),
+                    operations: Arc::default(),
+                    aborted: Arc::default(),
+                    objects: Arc::default(),
+                    parts: Arc::default(),
+                };
+                let store = scripted_store(kind, &provider);
+                let (sources, combined) = headed_sources(&store, count).await;
+                let tail = Bytes::from_static(b"tail");
+                let expected = combined
+                    .crc_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
+                    .expect("tail");
+                let written = store
+                    .assemble(KEY, &sources, vec![tail], &expected)
+                    .await
+                    .expect("assembly");
+                assert_eq!(written.checksum, Some(expected));
+                // A fresh value is one PUT. A merged source costs the
+                // caller's HEAD and one GET, and the destination costs no HEAD.
+                let mut operations = vec!["head"; count];
+                operations.extend(vec!["get"; count]);
+                operations.push("put");
+                assert_eq!(provider.operations(), operations, "{count} sources");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_multipart_assembly_checks_its_key_once_before_copying() {
+        use crate::ObjectStore;
+        let kind = ConfiguredObjectStoreKind::AwsS3;
+        let provider = ScriptedProvider {
+            kind,
+            base: Arc::new(vec![
+                b'a';
+                loonfs_types::usize_from_u64(
+                    crate::assembly::READ_BYTES
+                )
+            ]),
+            operations: Arc::default(),
+            aborted: Arc::default(),
+            objects: Arc::default(),
+            parts: Arc::default(),
+        };
+        let store = scripted_store(kind, &provider);
+        let (sources, combined) = headed_sources(&store, 1).await;
+        let tail = Bytes::from_static(b"tail");
+        let expected = combined
+            .crc_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
+            .expect("tail");
+        for operations in [
+            vec!["head", "create", "copy", "upload", "complete"],
+            vec!["head"],
+        ] {
+            provider.operations.lock().expect("operations").clear();
+            let written = store
+                .assemble(KEY, &sources, vec![tail.clone()], &expected)
+                .await
+                .expect("multipart assembly");
+            assert_eq!(written.checksum, Some(expected.clone()));
+            assert_eq!(provider.operations(), operations);
         }
     }
 

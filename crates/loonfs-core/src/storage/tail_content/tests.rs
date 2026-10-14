@@ -155,6 +155,15 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
         RecordedOperation::Assemble { sources, expected, .. }
         if sources.len() == 2 && expected == &reference.checksum
     );
+    if let RecordedOperation::Assemble { sources, .. } = &operations[2] {
+        for source in sources {
+            assert_eq!(
+                store.head(&source.key).await.expect("head"),
+                Some(source.metadata.clone()),
+                "each source carries its HEAD, so the provider sends none"
+            );
+        }
+    }
     let key = extent_object_key(extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));

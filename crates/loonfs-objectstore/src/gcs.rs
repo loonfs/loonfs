@@ -542,6 +542,13 @@ mod tests {
                 key: "source".to_owned(),
                 range: None,
                 checksum: expected.clone(),
+                metadata: ObjectMetadata {
+                    etag: Some("1".to_owned()),
+                    version: Some("1".to_owned()),
+                    size_bytes: 5,
+                    last_modified_at_ms: None,
+                    checksum: Some(expected.clone()),
+                },
             }],
         ] {
             requests.0.lock().expect("requests").clear();
@@ -556,9 +563,9 @@ mod tests {
                 .expect("assembly");
             assert_eq!(metadata.checksum, Some(expected.clone()));
             let requests = requests.0.lock().expect("requests");
-            assert_eq!(requests.len(), 2 * sources.len() + 1);
+            assert_eq!(requests.len(), sources.len() + 1);
             if !sources.is_empty() {
-                assert!(requests[1].0.contains("alt=media&generation=1"));
+                assert!(requests[0].0.contains("alt=media&generation=1"));
             }
             let (url, headers, bytes) = requests.last().expect("create");
             assert!(url.contains("uploadType=media&ifGenerationMatch=0"));

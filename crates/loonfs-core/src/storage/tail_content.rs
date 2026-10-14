@@ -316,6 +316,7 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
         }
         let checksum = stored
             .checksum
+            .clone()
             .filter(|checksum| checksum.algorithm == store.checksum_algorithm())
             .ok_or_else(corrupt)?;
         expected = expected
@@ -325,6 +326,7 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
             key: source_key.clone(),
             range: None,
             checksum,
+            metadata: stored,
         });
     }
     let expected = expected

@@ -59,6 +59,10 @@ pub struct AssemblySource {
     pub range: Option<ByteRange>,
     /// Checksum of exactly the selected bytes in the store's algorithm.
     pub checksum: Checksum,
+    /// The object as the caller's [`ObjectStore::head`] observed it. An
+    /// adapter takes the object's length and version from here instead of
+    /// sending a HEAD of its own, and reads or copies only that version.
+    pub metadata: ObjectMetadata,
 }
 
 /// One part of a client-driven multipart upload, as the client observed the
