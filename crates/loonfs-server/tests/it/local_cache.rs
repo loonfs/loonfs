@@ -51,13 +51,13 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     let namespace = namespace_id("warm");
     let listing = NamespacePath::parse("warm", "/docs").expect("parse path");
 
-    // The writing server serves its own reads from the state its batches
-    // seeded, so a server that starts after the writes is what fills the
-    // local cache.
-    let writer = start_graceful_server(test_config_with_local_cache(
-        &store_dir.path().join("store"),
-        cache_dir.path(),
+    // The writing server runs without the local cache. Its checkpoint folds
+    // the WAL and would fill the cache with the segments it writes, so a
+    // server that starts after the writes is what fills the local cache.
+    let writer = start_graceful_server(test_config(
+        store_dir.path().join("store"),
         "local-cache-writer",
+        "local-cache",
     ))
     .await;
     writer
