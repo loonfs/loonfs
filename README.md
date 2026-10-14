@@ -80,7 +80,7 @@ See the [documentation](docs/specs/README.md) for the architecture, storage form
 
 ## Core concepts
 
-- **Each namespace is an isolated filesystem with a serialized WAL and native version history.** Every change is recorded as a numbered commit in the namespace’s write-ahead log (WAL), every file change is recorded as a new revision, and the change feed replays every commit back to a retention floor.
+- **Each namespace is an isolated filesystem with a serialized WAL and native version history.** Every change is recorded as a numbered commit in the namespace's write-ahead log (WAL), every file change is recorded as a new revision, and the change feed replays every commit back to a retention floor.
 
 - **All durable state is stored in object storage and only object storage.** LoonFS stores immutable file content, manifests, numbered WAL objects, and metadata segments in object storage. Caches, workers, and other local state can all be rebuilt from the object store.
 
@@ -88,7 +88,7 @@ See the [documentation](docs/specs/README.md) for the architecture, storage form
 
 - **A commit applies one or more changes atomically.** The operations in a commit are serialized in order, and preconditions add optimistic concurrency control. 
 
-- **Forks and snapshots are copy-on-write.** Every stored object is immutable, so a fork shares the source namespace’s metadata segments and content objects instead of copying them. Within a namespace, a snapshot is a pin that keeps one manifest readable until the snapshot expires.
+- **Forks and snapshots are copy-on-write.** Every stored object is immutable, so a fork shares the source namespace's metadata segments and content objects instead of copying them. Within a namespace, a snapshot is a pin that keeps one manifest readable until the snapshot expires.
 
 
 ## Design philosophy
