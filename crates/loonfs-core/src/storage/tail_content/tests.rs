@@ -160,7 +160,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
             assert_eq!(
                 store.head(&source.key).await.expect("head"),
                 Some(source.metadata.clone()),
-                "each source carries its HEAD, so the provider sends none"
+                "each source includes the metadata returned by the caller's HEAD request"
             );
         }
     }
