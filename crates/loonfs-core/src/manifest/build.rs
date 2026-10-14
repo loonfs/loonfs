@@ -1,6 +1,8 @@
 //! Segments metadata rows into runs and writes the immutable metadata
 //! segments a manifest references.
 
+use super::cache::MetadataSegmentCache;
+use super::index_block_load::insert_written_segment;
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::Result;
@@ -29,6 +31,7 @@ const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
@@ -36,6 +39,7 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
+        segment_cache,
         namespace_id,
         |family| {
             with_layouts(
@@ -74,6 +78,7 @@ pub(super) fn debug_assert_manifest_segments_do_not_overlap(
 
 pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
@@ -82,6 +87,7 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
+        segment_cache,
         namespace_id,
         |family| {
             with_layouts(
@@ -104,6 +110,7 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
 )]
 pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     mut rows_for_family: RowsForFamily,
     policy: MetadataRunPolicy,
@@ -112,7 +119,7 @@ where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(MetadataRowFamily) -> Vec<MetadataRow>,
 {
-    let mut puts = MetadataSegmentPuts::new(store);
+    let mut puts = MetadataSegmentPuts::new(store, segment_cache);
     let mut segments_by_family = Vec::with_capacity(MANIFEST_ROW_FAMILIES.len());
     for family in MANIFEST_ROW_FAMILIES {
         let mut writer = MetadataSegmentWriter::new(family, namespace_id);
@@ -168,16 +175,19 @@ fn prepare_manifest_segment(
 
 /// The segment puts in flight for one fold or compaction, bounded by
 /// `STORE_WRITES_IN_FLIGHT` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
+/// When a put succeeds, LoonFS inserts that segment into `segment_cache`.
 pub(super) struct MetadataSegmentPuts<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
     pending_bytes: usize,
 }
 
 impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
-    pub(super) fn new(store: &'a S) -> Self {
+    pub(super) fn new(store: &'a S, segment_cache: Option<&'a MetadataSegmentCache>) -> Self {
         Self {
             store,
+            segment_cache,
             pending: FuturesUnordered::new(),
             pending_bytes: 0,
         }
@@ -220,8 +230,15 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
         self.wait_for_capacity(byte_count).await?;
         let store = self.store;
         let object_key = metadata_segment_object_key(descriptor);
+        let written = self
+            .segment_cache
+            .map(|cache| (cache, descriptor.clone(), bytes.clone()));
         let mut put = async move {
             store.put_immutable_verified(&object_key, bytes).await?;
+            if let Some((cache, descriptor, bytes)) = written {
+                // A segment this process can't decode must not be published in a manifest.
+                insert_written_segment(cache, &descriptor, &bytes)?;
+            }
             Ok(byte_count)
         }
         .boxed();
@@ -355,7 +372,7 @@ mod tests {
             let concurrency =
                 ConcurrencyWatchStore::new(&blocked, KeyPredicate::metadata_segment());
             let store = BufferWatchStore::new(&concurrency, KeyPredicate::metadata_segment());
-            let mut puts = MetadataSegmentPuts::new(&store);
+            let mut puts = MetadataSegmentPuts::new(&store, None);
             blocked.arm();
             for size in &initial_sizes {
                 puts.put(&descriptor(&namespace_id), Bytes::from(vec![0; *size]))

@@ -74,6 +74,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
 
     let segments = build_manifest_segments(
         &store,
+        None,
         &namespace_id,
         &state,
         &HashMap::new(),
@@ -151,6 +152,7 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
     let visible_seq = ChangeSeq(10);
     let segments = build_manifest_segments(
         &store,
+        None,
         &namespace_id,
         &state,
         &HashMap::new(),

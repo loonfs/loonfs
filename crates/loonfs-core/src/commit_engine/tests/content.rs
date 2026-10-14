@@ -605,7 +605,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
                 ..MetadataRunPolicy::default()
             },
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await

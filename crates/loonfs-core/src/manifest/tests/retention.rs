@@ -1016,7 +1016,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         acquired,
         &context,
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-        Arc::default(),
+        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -1301,7 +1301,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -1390,7 +1390,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         loonfs_types::CompactorEpoch(0),
         tiny_byte_policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -1423,7 +1423,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -1496,7 +1496,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -1578,7 +1578,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -1824,7 +1824,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -1849,7 +1849,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -1960,7 +1960,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         &namespace_id,
         &overrun,
         MetadataRunPolicy::default(),
-        Arc::default(),
+        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -2060,7 +2060,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         merge_everything,
         MetadataCompactionPolicy::default(),
         &overrun,
-        Arc::default(),
+        None,
     )
     .await
     .expect_err("over-budget compaction must abort");
@@ -2082,7 +2082,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         loonfs_types::CompactorEpoch(0),
         merge_everything,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -2553,7 +2553,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -2640,7 +2640,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 loonfs_types::CompactorEpoch(0),
                 policy,
                 MetadataCompactionPolicy::default(),
-                Arc::default(),
+                None,
                 crate::test_support::std_timer(),
             )
             .await

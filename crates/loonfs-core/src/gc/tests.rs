@@ -1222,7 +1222,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
             loonfs_types::CompactorEpoch(0),
             Default::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -2050,7 +2050,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             loonfs_types::CompactorEpoch(0),
             merge_policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await

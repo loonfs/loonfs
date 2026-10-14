@@ -835,7 +835,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
                 loonfs_types::CompactorEpoch(0),
                 Default::default(),
                 MetadataCompactionPolicy::CompactImmediately,
-                Arc::default(),
+                None,
                 crate::test_support::std_timer()
             )
             .await

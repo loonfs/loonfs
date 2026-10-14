@@ -430,7 +430,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self
     }
 
-    /// Uses the runtime's metadata cache for folds during pin creation.
+    /// Uses the runtime's metadata segment cache for this engine's folds,
+    /// compactions, pins, and retention floor advances.
     pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
         self
@@ -1431,7 +1432,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             &crate::time::Deadline::start(Arc::clone(&self.timer)),
             self.effective_run_policy(),
-            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            self.segment_cache.as_deref(),
             &self.content_writes,
         )
         .await
@@ -1455,7 +1456,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             compactor_epoch,
             self.effective_run_policy(),
             compaction_policy,
-            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            self.segment_cache.as_deref(),
             Arc::clone(&self.timer),
         )
         .await
@@ -1470,6 +1471,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<crate::manifest::MetadataCompactionJobOutcome> {
         crate::manifest::run_metadata_compaction_job(
             &self.store,
+            self.segment_cache.as_deref(),
             &self.namespace_id,
             compactor_epoch,
             spec,

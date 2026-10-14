@@ -100,7 +100,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         selected.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -215,7 +215,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 writer,
                 &context,
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-                Arc::default(),
+                None,
                 &tokio::sync::Semaphore::new(32),
             )
             .await

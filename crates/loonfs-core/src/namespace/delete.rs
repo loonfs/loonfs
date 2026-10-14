@@ -13,7 +13,7 @@ use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "deletion carries both shared memory pools through its fold"
+    reason = "deletion passes the segment cache and the content write permits to its fold"
 )]
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -22,12 +22,11 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
-    pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,
+    segment_cache: Option<&crate::cache::MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
-        let pool = std::sync::Arc::clone(&pool);
         async move {
             let anchor = load_read_anchor(store, namespace_id, deadline.observe()).await?;
             let head = &anchor.read_state;
@@ -49,7 +48,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                     namespace_id,
                     deadline,
                     crate::manifest::MetadataRunPolicy::default(),
-                    pool,
+                    segment_cache,
                     content_writes,
                 )
                 .await?;

@@ -52,7 +52,7 @@ fn stored_block_key(
 }
 
 /// Returns the stored-block cache associated with the decoded segment cache.
-/// Maintenance reads pass no segment cache and therefore use neither cache.
+/// A compaction reads its input with no segment cache, so it uses neither cache.
 fn stored_block_cache(
     segment_cache: Option<&MetadataSegmentCache>,
 ) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
@@ -209,10 +209,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     want: SegmentBlockKind,
 ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
     let object_key = metadata_segment_object_key(descriptor);
-    let filter_handle = descriptor.filter_block;
-    let index_handle = descriptor.index_block;
     let object_bytes = segment_object_bytes(descriptor);
-    let fetch_whole_object = object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
     let fetch_offset = match want {
         SegmentBlockKind::Data | SegmentBlockKind::Manifest => {
             return Err(segment_codec_error(
@@ -220,9 +217,9 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 "segment section fetch supports only filter and index blocks",
             ));
         }
-        _ if fetch_whole_object => 0,
-        SegmentBlockKind::Filter => filter_handle.offset,
-        SegmentBlockKind::Index => index_handle.offset,
+        _ if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES => 0,
+        SegmentBlockKind::Filter => descriptor.filter_block.offset,
+        SegmentBlockKind::Index => descriptor.index_block.offset,
     };
     let bytes = load_section_bytes(
         store,
@@ -231,6 +228,55 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         object_bytes - fetch_offset,
     )
     .await?;
+    let (index_block, filter_block) =
+        publish_segment_sections(segment_cache, memo, descriptor, &bytes, fetch_offset)?;
+    let wanted = match want {
+        SegmentBlockKind::Filter => filter_block,
+        _ => index_block,
+    };
+    wanted.ok_or_else(|| {
+        segment_codec_error(
+            &object_key,
+            "requested section outside the segment object bounds",
+        )
+    })
+}
+
+/// Inserts the sections of a segment that this process wrote into
+/// `segment_cache`, and offers them to its node-local tier. These are the
+/// sections that the first fetch of the segment would insert: the index and
+/// filter blocks, and the data blocks of a segment small enough to fetch whole.
+/// Returns an error if a section of the segment doesn't decode.
+pub(super) fn insert_written_segment(
+    segment_cache: &MetadataSegmentCache,
+    descriptor: &MetadataSegmentRef,
+    bytes: &[u8],
+) -> Result<(), ManifestLoadError> {
+    publish_segment_sections(Some(segment_cache), None, descriptor, bytes, 0)?;
+    Ok(())
+}
+
+/// Decodes and publishes the index and filter sections in `bytes`, which
+/// start at `fetch_offset` in the segment object, and the data sections too
+/// when `bytes` is the whole of a small object. Returns the index and filter
+/// blocks, or `None` for a section outside `bytes`.
+fn publish_segment_sections(
+    segment_cache: Option<&MetadataSegmentCache>,
+    memo: Option<&SessionBlockMemo>,
+    descriptor: &MetadataSegmentRef,
+    bytes: &[u8],
+    fetch_offset: u64,
+) -> Result<
+    (
+        Option<DecodedMetadataSegmentBlock>,
+        Option<DecodedMetadataSegmentBlock>,
+    ),
+    ManifestLoadError,
+> {
+    let object_key = metadata_segment_object_key(descriptor);
+    let filter_handle = descriptor.filter_block;
+    let index_handle = descriptor.index_block;
+    let fetch_whole_object = segment_object_bytes(descriptor) <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
         let end = start.checked_add(handle.stored_bytes as usize)?;
@@ -322,16 +368,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         }
     }
 
-    let wanted = match want {
-        SegmentBlockKind::Filter => filter_block,
-        _ => index_entries,
-    };
-    wanted.ok_or_else(|| {
-        segment_codec_error(
-            &object_key,
-            "requested section outside the segment object bounds",
-        )
-    })
+    Ok((index_entries, filter_block))
 }
 
 fn filter_cache_block(filter: SegmentFilter) -> DecodedMetadataSegmentBlock {

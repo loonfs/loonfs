@@ -11,6 +11,7 @@
 
 use super::block_load::SessionBlockMemo;
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
+use super::cache::MetadataSegmentCache;
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
@@ -209,6 +210,7 @@ pub(super) struct MetadataMergeReport {
 pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     index_memo: Option<&SessionBlockMemo>,
+    output_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     runs: &[MetadataRunManifest],
@@ -219,6 +221,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     let merge = GroupMerge::new(
         basis,
         index_memo,
+        output_cache,
         namespace_id,
         group,
         placement,
@@ -241,6 +244,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
 /// from the manifest used to create the specification.
 pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
+    output_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     policy: MetadataRunPolicy,
@@ -249,6 +253,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     let merge = GroupMerge::new(
         segments,
         None,
+        output_cache,
         namespace_id,
         spec.group,
         spec.placement,
@@ -283,8 +288,13 @@ pub enum MetadataCompactionJobOutcome {
     Fenced,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one job's inputs, listed instead of grouped into a second struct"
+)]
 pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     compactor_epoch: CompactorEpoch,
     spec: &MetadataCompactionSpec,
@@ -326,27 +336,35 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         "streaming metadata compaction started"
     );
 
-    let outcome =
-        match run_metadata_compaction(&segments, namespace_id, spec, policy, cancellation).await? {
-            Ok(result) => {
-                drop(segments);
-                finalize_metadata_compaction(
-                    store,
-                    namespace_id,
-                    spec,
-                    &input_keys,
-                    result,
-                    cancellation,
-                    &CompactionPublication {
-                        compactor_epoch,
-                        compaction,
-                        publication: Deadline::start(timer),
-                    },
-                )
-                .await?
-            }
-            Err(stopped) => stopped,
-        };
+    let outcome = match run_metadata_compaction(
+        &segments,
+        segment_cache,
+        namespace_id,
+        spec,
+        policy,
+        cancellation,
+    )
+    .await?
+    {
+        Ok(result) => {
+            drop(segments);
+            finalize_metadata_compaction(
+                store,
+                namespace_id,
+                spec,
+                &input_keys,
+                result,
+                cancellation,
+                &CompactionPublication {
+                    compactor_epoch,
+                    compaction,
+                    publication: Deadline::start(timer),
+                },
+            )
+            .await?
+        }
+        Err(stopped) => stopped,
+    };
     log_metadata_compaction_outcome(namespace_id, spec, &outcome);
     Ok(outcome)
 }
@@ -664,6 +682,9 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
 struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     index_memo: Option<&'a SessionBlockMemo>,
+    /// The cache that receives the segments the merge writes. The merge
+    /// reads its input without any cache.
+    output_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
     /// Where the output stands in the group and whether rows may be dropped.
@@ -729,6 +750,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     fn new(
         basis: &'a VerifiedMetadataSegments<'_, S>,
         index_memo: Option<&'a SessionBlockMemo>,
+        output_cache: Option<&'a MetadataSegmentCache>,
         namespace_id: &'a NamespaceId,
         group: MetadataFamilyGroup,
         placement: MergePlacement,
@@ -751,6 +773,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .map(|manifest| manifest.payload().next_run_no),
             chain_filter: ChainFilter::NotNeeded,
             index_memo,
+            output_cache,
             namespace_id,
             group,
             placement,
@@ -776,7 +799,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         if let Some(stop) = self.load_chain_filter(control).await? {
             return Ok(Err(stop));
         }
-        let mut puts = MetadataSegmentPuts::new(self.store);
+        let mut puts = MetadataSegmentPuts::new(self.store, self.output_cache);
         for cluster in retention_clusters(self.group) {
             if let Some(stopped) = self.run_cluster(cluster, control, &mut puts).await? {
                 return Ok(Err(stopped));

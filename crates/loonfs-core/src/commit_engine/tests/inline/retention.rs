@@ -48,7 +48,7 @@ async fn compact_and_check_pair(
             loonfs_types::CompactorEpoch(0),
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await

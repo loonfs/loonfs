@@ -677,6 +677,7 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
     }
     let segments = build_manifest_segments(
         &store,
+        None,
         &namespace_id,
         &builder.build(),
         &HashMap::new(),

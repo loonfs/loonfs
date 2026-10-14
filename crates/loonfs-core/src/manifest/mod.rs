@@ -2,6 +2,25 @@
 //!
 //! A namespace manifest references the immutable metadata segment runs for one
 //! namespace state. Folding, compaction, and retention publish manifests.
+//!
+//! # Segment cache policy
+//!
+//! LoonFS decodes segment blocks into a [`MetadataSegmentCache`], and it uses
+//! that cache the same way for each kind of segment traffic:
+//!
+//! - Reads and folds read segments through the cache.
+//! - A compaction reads its input segments without the cache. The merge reads
+//!   each input block once, and the manifest it publishes no longer lists the
+//!   input segments, so caching their blocks would evict blocks that reads of
+//!   the current manifest still use.
+//! - LoonFS inserts each segment that a fold or a compaction writes into the
+//!   cache after the segment's PUT succeeds, and before the manifest that
+//!   lists the segment is published. These are the blocks that the first
+//!   fetch of the segment would insert: the index and filter blocks, and the
+//!   data blocks of a segment of 256 KiB or less. LoonFS also offers the same
+//!   blocks to the node-local block cache when one is configured. The first
+//!   read after a fold or a compaction then finds those blocks in the cache
+//!   instead of reading them from object storage.
 
 mod block_load;
 mod build;
@@ -54,7 +73,6 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
-pub(crate) use self::cache::read_working_memory;
 pub(crate) use self::compaction_step::compaction_step;
 pub use self::compaction_step::metadata_compaction_due;
 pub(crate) use self::compactor::claim_compactor;
