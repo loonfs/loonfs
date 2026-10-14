@@ -7,6 +7,7 @@
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
+mod access_change_reload;
 mod access_namespace;
 mod access_reads;
 mod attributes;
