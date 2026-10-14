@@ -44,12 +44,12 @@ impl CacheScope {
     }
 }
 
-/// The scope under which a shared cache keeps the segment blocks and
-/// manifests read from one object store.
+/// The scope under which a shared cache keeps the segment blocks, manifests,
+/// WAL objects, and content objects read from one object store.
 ///
 /// The cache mints one scope per object store, and every runtime over that
 /// object store reads under that scope. Runtimes over one object store can
-/// share these entries because segments and manifests are immutable, and
+/// share these entries because all of these objects are immutable, and
 /// each object key identifies one object within one object store. Two object
 /// stores can contain different objects under the same key (for example, the
 /// first manifest of a namespace with the same ID), so the cache keys every

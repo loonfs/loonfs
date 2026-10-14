@@ -76,6 +76,7 @@ mod heap_bytes;
 mod in_flight;
 mod manifest;
 mod namespace;
+mod object_cache;
 mod options;
 mod pin;
 mod protocol;
@@ -121,6 +122,7 @@ pub mod cache {
         DecodedBlockCacheStats, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
+    pub use crate::object_cache::{ObjectCache, ObjectCacheStats, SharedObjects};
     pub use crate::read_working_memory::{ReadWorkingMemory, ReadWorkingMemoryObserver};
     pub use crate::recency::Recency;
     pub use crate::wal::ProjectedWalTail;
@@ -154,8 +156,8 @@ pub mod control {
         LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
-        load_live_read_anchor, load_read_anchor, manifest_has_successor, project_anchor_tail,
-        NamespaceReadAnchor,
+        load_live_read_anchor, load_read_anchor, load_read_anchor_cached, manifest_has_successor,
+        project_anchor_tail, NamespaceReadAnchor,
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;

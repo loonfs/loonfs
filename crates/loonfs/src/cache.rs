@@ -8,8 +8,9 @@ use crate::{CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
-    load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
-    project_anchor_tail, CheckpointReadBasis, NamespaceReadAnchor, VerifiedNamespaceCatalogEntry,
+    load_checkpoint_read_basis, load_read_anchor_cached, load_snapshot_read_basis,
+    manifest_has_successor, project_anchor_tail, CheckpointReadBasis, NamespaceReadAnchor,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
@@ -152,7 +153,12 @@ impl RuntimeCore {
             }
         }
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let loaded = load_read_anchor(self.store(), namespace_id, observed.clone())
+        let loaded = load_read_anchor_cached(
+            self.store(),
+            &self.inner.object_cache,
+            namespace_id,
+            observed.clone(),
+        )
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
@@ -192,6 +198,7 @@ impl RuntimeCore {
             basis: anchor.basis.clone(),
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             head_state: Arc::clone(&self.inner.head_state),
+            object_cache: Arc::clone(&self.inner.object_cache),
         }
     }
 

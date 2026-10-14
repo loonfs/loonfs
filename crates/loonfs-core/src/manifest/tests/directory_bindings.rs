@@ -342,7 +342,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         let pinned = load_metadata_view(
             &store,
             &namespace_id,
-            ReadLoadContext::pinned_head(&anchor.read_state, &basis, None, None),
+            ReadLoadContext::pinned_head(&anchor.read_state, &basis, None, None, None),
         )
         .await
         .expect("pinned manifest");

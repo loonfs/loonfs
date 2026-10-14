@@ -2,7 +2,7 @@
 //! uploads, checkpoints, and maintenance.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
-use crate::cache::{HeadStateCache, MetadataSegmentCache};
+use crate::cache::{HeadStateCache, MetadataSegmentCache, ObjectCache};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -63,6 +63,7 @@ pub struct RuntimeReadContext {
     pub basis: MetadataBasis,
     pub segment_cache: Arc<MetadataSegmentCache>,
     pub head_state: Arc<HeadStateCache>,
+    pub object_cache: Arc<ObjectCache>,
 }
 
 /// Owned metadata for one buffered read, without retaining its metadata view.
@@ -97,6 +98,7 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
         &context.basis,
         Some(&context.segment_cache),
         Some(&context.head_state),
+        Some(&context.object_cache),
     )
 }
 
@@ -601,29 +603,34 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         })
     }
 
-    /// Verifies at most 64 KiB of speculative content.
+    /// Verifies at most 64 KiB of speculative content, reading it from
+    /// `object_cache` before the store.
     /// These bytes alone do not establish current path visibility.
     pub async fn read_speculative_file_content(
         &self,
         target: &ResolvedFileContent,
+        object_cache: &ObjectCache,
     ) -> Result<Vec<u8>> {
         crate::storage::content::get_speculative_content_bytes(
             &self.store,
+            object_cache,
             &target.location,
             &target.content_ref,
         )
         .await
     }
 
-    /// Fetches and verifies content after `resolve_file_content` authorizes it.
+    /// Fetches and verifies content after `resolve_file_content` authorizes it,
+    /// reading it from `object_cache` before the store.
     /// A cached target must first be validated against the current view.
     pub async fn read_resolved_file_content(
         &self,
         target: &ResolvedFileContent,
+        object_cache: &ObjectCache,
     ) -> Result<Vec<u8>> {
         Ok(target
             .location
-            .read_bytes(&self.store, &target.content_ref)
+            .read_bytes(&self.store, Some(object_cache), &target.content_ref)
             .await?)
     }
 
@@ -667,7 +674,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             chunk_bytes,
             start_offset,
         )
-        .await?)
+        .await?
+        .with_object_cache(Arc::clone(&context.object_cache)))
     }
 
     /// Streams inode content: one retained revision without requiring a
@@ -708,7 +716,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             chunk_bytes,
             start_offset,
         )
-        .await?)
+        .await?
+        .with_object_cache(Arc::clone(&context.object_cache)))
     }
 
     /// Prepares a file's content object for a direct download.
@@ -891,7 +900,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = view.resolve_content_location(content_ref).await?;
         location
-            .read_bytes(&self.store, content_ref)
+            .read_bytes(&self.store, Some(&context.object_cache), content_ref)
             .await
             .map_err(|error| match error {
                 DurableContentValidationError::MissingContentObject { .. } => {
@@ -1561,6 +1570,7 @@ mod tests {
             head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
             head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+            object_cache: Arc::new(ObjectCache::unshared(0, 0)),
         };
         let changes = reader
             .list_changes_after(

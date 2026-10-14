@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache};
+use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, ObjectCache};
 use loonfs_core::control::load_read_anchor;
 use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
 use loonfs_objectstore::ObjectStore;
@@ -40,6 +40,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         head: anchor.read_state,
         segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+        object_cache: Arc::new(ObjectCache::unshared(0, 0)),
     }
 }
 
