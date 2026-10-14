@@ -1,4 +1,5 @@
-//! Storage requests and access checks when the publisher uses an older manifest.
+//! Storage requests and access checks for reads after a compaction publishes
+//! a newer manifest.
 
 use loonfs::{
     AccessState, AttributeChanges, CreateNamespaceOptions, LoonFs, Maintenance,
@@ -57,6 +58,7 @@ fn matter(user_granted: bool) -> AccessState {
 
 struct Fixture {
     recording: Arc<RecordingStore<MemoryStore>>,
+    clock: Arc<ManualClock>,
     namespace_id: NamespaceId,
     actor: ActorId,
     admin: Namespace<Writable>,
@@ -68,8 +70,15 @@ struct Fixture {
 ///
 /// The first compaction also records a compactor claim without updating the
 /// publisher's cached position. A read can then load the newer manifest
-/// while the publisher continues to use the older manifest.
-async fn fixture(name: &str) -> Fixture {
+/// while the publisher continues to use the older manifest. When
+/// `claim_compactor` is true, the fixture runs that first compaction during
+/// setup. A test's compaction then publishes one manifest, and the
+/// publisher's cached position moves to that manifest.
+async fn fixture(
+    name: &str,
+    manifest_revalidation_interval_ms: u64,
+    claim_compactor: bool,
+) -> Fixture {
     let recording = Arc::new(RecordingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
         KeyPredicate::any(),
@@ -79,8 +88,8 @@ async fn fixture(name: &str) -> Fixture {
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
-        .manifest_revalidation_interval_ms(0)
-        .monotonic_timer(clock)
+        .manifest_revalidation_interval_ms(manifest_revalidation_interval_ms)
+        .monotonic_timer(clock.clone())
         .build()
         .await
         .expect("writer");
@@ -99,6 +108,7 @@ async fn fixture(name: &str) -> Fixture {
         .expect("namespace");
     let fixture = Fixture {
         recording,
+        clock,
         admin: writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
@@ -128,6 +138,11 @@ async fn fixture(name: &str) -> Fixture {
             .fold_wal(&fixture.namespace_id)
             .await
             .expect("fold");
+        // The folds after this compaction write the runs that a test's
+        // compaction merges.
+        if claim_compactor && index == 4 {
+            fixture.compact().await;
+        }
     }
     // Folding clears the publisher's cached position. The next commit reloads
     // that position.
@@ -212,7 +227,7 @@ const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "reg
 /// Checks that later commits keep the newer manifest in the read cache.
 #[tokio::test]
 async fn commits_on_an_older_basis_keep_the_reads_newer_manifest() {
-    let fixture = fixture("anchor-seed-guard").await;
+    let fixture = fixture("anchor-seed-guard", 0, false).await;
     fixture.compact().await;
     fixture.commit("put_file", 0).await;
     fixture.user.stat("/m/doc").await.expect("reload");
@@ -222,5 +237,46 @@ async fn commits_on_an_older_basis_keep_the_reads_newer_manifest() {
         let read = fixture.user.stat("/m/doc").await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
+    }
+}
+
+/// Checks that reads after a compaction on the same runtime don't reload
+/// metadata.
+///
+/// The revalidation interval is zero, so every read checks for a newer
+/// manifest, as reads more than a second apart do with the default interval.
+#[tokio::test]
+async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
+    let fixture = fixture("own-compaction-every-read", 0, true).await;
+    fixture.compact().await;
+    for round in 0..2 {
+        for kind in COMMIT_KINDS {
+            let user_granted = fixture.commit(kind, round).await;
+            fixture.recording.reset();
+            let read = fixture.user.stat("/m/doc").await;
+            assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
+            fixture.assert_no_reload(&format!("round {round}, user after {kind}"));
+        }
+    }
+}
+
+/// Checks that reads after a compaction on the same runtime don't reload
+/// metadata with the default one-second revalidation interval.
+///
+/// A read checks for a newer manifest when the last check is more than a
+/// second old, so the test moves the clock past that interval before some
+/// commits.
+#[tokio::test]
+async fn reads_past_the_revalidation_interval_reload_nothing_after_a_compaction() {
+    let fixture = fixture("own-compaction-interval", 1_000, true).await;
+    fixture.compact().await;
+    for (round, advance_ms) in [0, 1_100, 0, 1_100, 30_000].into_iter().enumerate() {
+        fixture.clock.advance_ms(advance_ms);
+        let kind = if round % 2 == 0 { "revoke" } else { "regrant" };
+        let user_granted = fixture.commit(kind, round).await;
+        fixture.recording.reset();
+        let read = fixture.user.stat("/m/doc").await;
+        assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
+        fixture.assert_no_reload(&format!("+{advance_ms} ms, user after {kind}"));
     }
 }

@@ -38,6 +38,7 @@ use loonfs_core::publish::{
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_types::api::v0::Commit;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
 use std::collections::{HashMap, VecDeque};
@@ -370,6 +371,21 @@ impl PublisherRegistry {
     pub(crate) async fn record_fold_outcome(&self, namespace_id: &NamespaceId) {
         if let Some(publisher) = self.live_publisher(namespace_id) {
             publisher.engine.lock().await.record_fold_outcome(None);
+        }
+    }
+
+    /// Moves the cached position of the namespace's commit engine to a
+    /// manifest that a compaction published, so that later commits seed the
+    /// read cache with that manifest.
+    pub(crate) async fn record_metadata_compaction(
+        &self,
+        namespace_id: &NamespaceId,
+        published: ManifestRef,
+    ) {
+        if let Some(publisher) = self.live_publisher(namespace_id) {
+            if let Some(engine) = publisher.engine.lock().await.engine.as_mut() {
+                engine.record_metadata_compaction(published);
+            }
         }
     }
 

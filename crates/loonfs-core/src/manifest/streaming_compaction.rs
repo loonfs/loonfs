@@ -31,9 +31,10 @@ use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::CompactorEpoch;
-use loonfs_types::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
+use loonfs_types::{ChangeSeq, MetadataCompactionId, NamespaceId, RunNo};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -267,7 +268,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
 pub enum MetadataCompactionJobOutcome {
     /// The rebuilt group replaced its input in a published manifest.
     Published {
-        manifest_no: ManifestNo,
+        manifest: ManifestRef,
         rows_read: u64,
         rows_written: u64,
         input_bytes: u64,
@@ -357,7 +358,7 @@ fn log_metadata_compaction_outcome(
 ) {
     match outcome {
         MetadataCompactionJobOutcome::Published {
-            manifest_no,
+            manifest,
             rows_read,
             rows_written,
             input_bytes,
@@ -372,7 +373,7 @@ fn log_metadata_compaction_outcome(
             input_bytes,
             output_bytes,
             output_segments,
-            manifest_no = manifest_no.0,
+            manifest_no = manifest.manifest_no.0,
             "streaming metadata compaction published"
         ),
         MetadataCompactionJobOutcome::Cancelled => tracing::info!(
@@ -493,13 +494,12 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         publication
             .publication
             .ensure_metadata_publication_budget(namespace_id)?;
-        let manifest_no = manifest.envelope().payload().manifest_no;
         let published = publish_manifest(store, manifest, &publication.publication).await?;
         drop(segments);
         let lost_to = match published {
-            ManifestPublicationOutcome::Published(_) => {
+            ManifestPublicationOutcome::Published(current) => {
                 return Ok(MetadataCompactionJobOutcome::Published {
-                    manifest_no,
+                    manifest: current.manifest(),
                     rows_read,
                     rows_written,
                     input_bytes,

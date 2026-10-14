@@ -902,24 +902,31 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
     );
 }
 
-#[tokio::test]
-async fn a_quiet_writer_reloads_after_its_own_compaction() {
+/// Creates a writer that folds three times and moves its position after
+/// each fold, and then runs a bounded compaction that publishes the next
+/// manifest.
+async fn writer_after_own_compaction(
+    store: &GatedStore,
+    namespace_id: &NamespaceId,
+) -> (
+    NamespaceCommitEngine,
+    Arc<loonfs_test_support::clock::ManualClock>,
+    MutationContext,
+    ManifestRef,
+) {
     use crate::manifest::{
         compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
     };
 
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    // Re-anchor after this session's folds, just as the publisher does.
+    let (mut engine, timer, writer) = writer_after_one_publish(store, namespace_id).await;
+    // Move the position after each fold, as the publisher does.
     for name in ["beta", "gamma", "delta"] {
-        publish_one(&mut engine, &store, &writer, name).await;
+        publish_one(&mut engine, store, &writer, name).await;
         let input = engine.begin_wal_fold().expect("retained tail");
         let folded = fold_wal_tail(
-            &store,
+            store,
             None,
-            &namespace_id,
+            namespace_id,
             Some(input),
             &Deadline::start(timer.clone()),
             &tokio::sync::Semaphore::new(32),
@@ -929,12 +936,12 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         engine.record_wal_fold(Some(&folded));
     }
     let before = engine.wal_fold_input().expect("re-anchored tail");
-    let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+    let current = crate::namespace::control::load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");
     let compacted = compaction_step(
-        &store,
-        &namespace_id,
+        store,
+        namespace_id,
         current.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
@@ -943,16 +950,16 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
     )
     .await
     .expect("own compaction");
-    let manifest_no = match compacted {
-        CompactionStepOutcome::UnitPublished { manifest_no, .. } => Some(manifest_no),
+    let manifest = match compacted {
+        CompactionStepOutcome::UnitPublished { manifest, .. } => Some(manifest),
         _ => None,
     }
     .expect("compaction publishes a successor");
     assert_eq!(
-        manifest_no,
+        manifest.manifest_no,
         before.basis.manifest_no().successor().expect("successor")
     );
-    let after = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+    let after = load_namespace_read_state(store, namespace_id, crate::test_support::std_timer())
         .await
         .expect("head");
     assert_eq!(
@@ -960,6 +967,16 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         "compaction leaves the tip unchanged"
     );
     assert_eq!(after.writer_epoch, before.head.writer_epoch);
+    (engine, timer, writer, manifest)
+}
+
+#[tokio::test]
+async fn a_quiet_writer_reloads_after_its_own_compaction() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, writer, manifest) =
+        writer_after_own_compaction(&store, &namespace_id).await;
 
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     store.reset();
@@ -974,7 +991,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
             .expect("landed")
             .basis
             .manifest_no(),
-        manifest_no
+        manifest.manifest_no
     );
     let operations = store.take();
     assert!(is_head_under(&operations[0], &wal_prefix(&namespace_id)));
@@ -985,6 +1002,69 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
     assert!(operations[2..]
         .iter()
         .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)));
+}
+
+/// Checks that a bounded compaction publishes a manifest with the same
+/// `NamespaceReadState` as the manifest it replaces, and that both manifests
+/// list runs.
+///
+/// `PublishTailPosition::reanchor_after_compaction` depends on both facts to
+/// keep the cached WAL tail after a compaction.
+#[tokio::test]
+async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
+    use crate::manifest::load_namespace_manifest_envelope;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (engine, _timer, _writer, compacted) =
+        writer_after_own_compaction(&store, &namespace_id).await;
+    let replaced = engine.wal_fold_input().expect("position").basis;
+
+    let replaced = load_namespace_manifest_envelope(&store, &namespace_id, &replaced.manifest_no())
+        .await
+        .expect("replaced manifest");
+    let compacted = load_namespace_manifest_envelope(&store, &namespace_id, &compacted.manifest_no)
+        .await
+        .expect("compacted manifest");
+    assert_eq!(
+        NamespaceReadState::from(compacted.payload()),
+        NamespaceReadState::from(replaced.payload())
+    );
+    assert!(!replaced.payload().runs.is_empty());
+    assert!(!compacted.payload().runs.is_empty());
+}
+
+/// Checks that a writer moved to its own compaction's manifest publishes on
+/// that manifest without reading the WAL tail or the hint again.
+#[tokio::test]
+async fn a_writer_moved_after_its_own_compaction_keeps_its_cached_tail() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, _timer, writer, manifest) =
+        writer_after_own_compaction(&store, &namespace_id).await;
+
+    engine.record_metadata_compaction(manifest.clone());
+    store.reset();
+    let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
+    assert_eq!(
+        published.wal_tail.map(|tail| tail.source),
+        Some(TailSource::Cached)
+    );
+    assert_eq!(
+        published.resulting_read_state.expect("put succeeded").basis,
+        MetadataBasis(manifest)
+    );
+    let operations = store.take();
+    assert!(
+        operations.iter().all(|operation| {
+            operation.key() != loonfs_objectstore::keys::hint(&namespace_id)
+                && !(operation.key().starts_with(&wal_prefix(&namespace_id))
+                    && matches!(operation, RecordedOperation::Get { .. }))
+        }),
+        "the publish reads neither the WAL tail nor the hint: {operations:?}"
+    );
 }
 
 #[tokio::test]

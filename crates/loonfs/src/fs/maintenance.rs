@@ -19,6 +19,7 @@ use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
 use loonfs_core::control::NamespaceReadAnchor;
 use loonfs_core::CheckpointPageCursor;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
 use std::sync::Arc;
@@ -71,14 +72,14 @@ fn metadata_compaction_response(
 ) -> MetadataCompactionResponse {
     let compaction = match outcome {
         loonfs_core::MetadataCompactionJobOutcome::Published {
-            manifest_no,
+            manifest,
             rows_read,
             rows_written,
             input_bytes,
             output_bytes,
             output_segments,
         } => MetadataCompactionOutcome::Published {
-            manifest_no,
+            manifest_no: manifest.manifest_no,
             rows_read,
             rows_written,
             input_bytes,
@@ -121,6 +122,16 @@ impl Maintenance {
 
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
+    }
+
+    /// Moves this runtime's publisher to a manifest that a compaction
+    /// published, and invalidates the namespace's read cache, which still
+    /// refers to the old manifest.
+    async fn record_metadata_compaction(&self, namespace_id: &NamespaceId, published: ManifestRef) {
+        self.publisher
+            .record_metadata_compaction(namespace_id, published)
+            .await;
+        self.invalidate_namespace(namespace_id);
     }
 
     fn finish_namespace_mutation<T>(
@@ -559,10 +570,11 @@ impl Maintenance {
                 input_runs,
                 decoded_input_rows,
                 decoded_input_bytes,
+                manifest,
                 bottom_anchored_merge_blocked,
-                ..
             } => {
-                self.invalidate_namespace(namespace_id);
+                self.record_metadata_compaction(namespace_id, manifest)
+                    .await;
                 tracing::info!(
                     families = ?group.families(),
                     merged_delta_rows,
@@ -710,9 +722,9 @@ impl Maintenance {
             .instruments()
             .compaction_finished(&outcome, elapsed_ms);
         match &outcome {
-            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. }) => {
-                // Compaction changed the manifest, so cached views are stale.
-                self.invalidate_namespace(namespace_id);
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { manifest, .. }) => {
+                self.record_metadata_compaction(namespace_id, manifest.clone())
+                    .await;
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(

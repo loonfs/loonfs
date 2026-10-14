@@ -24,6 +24,7 @@ use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
@@ -849,6 +850,29 @@ impl NamespaceCommitEngine {
             }
             _ => self.invalidate_projection(),
         }
+    }
+
+    /// Moves the position to a manifest that a compaction published, as
+    /// [`Self::record_wal_fold`] does after a fold.
+    ///
+    /// Later commits then plan against the new manifest and seed the read
+    /// cache with it, so a read doesn't find the new manifest as a successor
+    /// and reload. The cached WAL tail is stored again under the new
+    /// manifest's number. The time of the last manifest check stays the
+    /// same. That check found no successor of the old manifest, so it
+    /// happened before the compaction published the new manifest, and no
+    /// manifest after the new one existed then either.
+    pub fn record_metadata_compaction(&mut self, published: ManifestRef) {
+        let Some(mut projection) = self.take_cached_projection() else {
+            return;
+        };
+        if projection
+            .position
+            .reanchor_after_compaction(MetadataBasis(published))
+        {
+            self.insert_tail(&projection.position, projection.tail_state);
+        }
+        self.publish_tail = Some(projection.position);
     }
 
     /// Returns the session's writer epoch, acquiring it on first use. A fenced

@@ -1467,7 +1467,13 @@ mod tests {
 
         instruments.compaction_finished(
             &Ok(MetadataCompactionJobOutcome::Published {
-                manifest_no: loonfs_types::ManifestNo(1),
+                manifest: loonfs_types::format::control::ManifestRef {
+                    owner_namespace_id: loonfs_types::NamespaceId::parse("demo")
+                        .expect("valid namespace id"),
+                    manifest_no: loonfs_types::ManifestNo(1),
+                    head_seq: loonfs_types::ChangeSeq(1),
+                    payload_checksum: String::new(),
+                },
                 rows_read: 20,
                 rows_written: 10,
                 input_bytes: 2_000,
