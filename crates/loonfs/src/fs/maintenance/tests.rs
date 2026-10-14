@@ -1174,6 +1174,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     let first = loonfs_core::gc_namespace(
         store.as_ref(),
         None,
+        None,
         &namespace_id,
         &crate::GcOptions::default(),
         &context,
@@ -1193,6 +1194,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     store.reset();
     let repeated = loonfs_core::gc_namespace(
         store.as_ref(),
+        None,
         None,
         &namespace_id,
         &crate::GcOptions::default(),

@@ -355,6 +355,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 40%, or 50% without grep. 256 MiB without a memory limit | Decoded metadata blocks and manifests | Steady |
 | Grep cache | `grep.max_cache_bytes` | Derived: 10%. 256 MiB without a memory limit | Decoded grep blocks and manifests when serving queries | Steady |
 | Head state | `metadata_cache.max_head_state_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached namespace heads and WAL tails, for reads and for writer sessions, for any number of namespaces | Steady |
+| Completed upload sessions | None | 16 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
 | Publication queue | `publication.max_estimated_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |

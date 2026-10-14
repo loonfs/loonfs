@@ -19,6 +19,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     let waiting = gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options(),
         &context(deadline.now_ms - 1),
@@ -31,6 +32,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     assert_eq!(waiting.deleted.retired_content_objects, 0);
     let reclaimed = gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options(),
@@ -116,6 +118,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let first = gc_namespace(
         &store,
         None,
+        None,
         &target,
         &options(),
         &context(setup.now_ms + retirement_ms()),
@@ -156,6 +159,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let repeated = gc_namespace(
         &store,
         None,
+        None,
         &target,
         &options(),
         &context(expired_at_ms),
@@ -167,6 +171,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     let finished = gc_namespace(
         &store,
+        None,
         None,
         &target,
         &options(),
@@ -248,6 +253,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let report = gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options,
         &context(clock.now_ms()),
@@ -265,6 +271,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let before = gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options,
         &context(clock.now_ms()),
@@ -278,6 +285,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     clock.advance_ms(1);
     gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options,
@@ -299,6 +307,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options,
         &context(clock.now_ms()),
@@ -311,6 +320,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     clock.advance_ms(options.grace_window_ms);
     let reaped = gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options,
@@ -368,6 +378,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     store.reset();
     let error = gc_namespace(
         &store,
+        None,
         None,
         &source,
         &options(),

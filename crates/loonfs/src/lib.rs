@@ -221,7 +221,8 @@ pub use handle::{
     Writable,
 };
 pub use metadata_cache::{
-    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_HEAD_STATE_BYTES,
+    MetadataCache, MetadataCacheBuilder, MetadataCacheStats,
+    DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES, DEFAULT_MAX_HEAD_STATE_BYTES,
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{

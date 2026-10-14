@@ -57,6 +57,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     let report = gc_namespace(
         &aged,
         None,
+        None,
         &namespace_id,
         &options,
         &MutationContext {

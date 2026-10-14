@@ -19,6 +19,7 @@ async fn collect_aged_wal(
     gc_namespace(
         &aged,
         None,
+        None,
         namespace_id,
         &options,
         &MutationContext {

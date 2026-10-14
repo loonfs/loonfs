@@ -184,6 +184,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     let report = crate::gc::gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options,
         &aged,
@@ -749,6 +750,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         crate::gc::gc_namespace(
             store.inner(),
             None,
+            None,
             &namespace_id,
             &options,
             &aged,
@@ -1136,6 +1138,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             store_clock.advance_ms(options.grace_window_ms + 1);
             let report = crate::gc::gc_namespace(
                 blocked.inner(),
+                None,
                 None,
                 &namespace_id,
                 &options,

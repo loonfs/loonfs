@@ -318,6 +318,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             crate::gc::gc_namespace(
                 store.inner(),
                 None,
+                None,
                 &namespace_id,
                 &options,
                 &aged,
@@ -345,6 +346,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     };
     crate::gc::gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options,

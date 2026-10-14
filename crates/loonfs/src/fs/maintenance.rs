@@ -771,6 +771,7 @@ impl Maintenance {
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             Some(segment_cache.as_ref()),
+            Some(&self.core.inner.completed_upload_sessions),
             namespace_id,
             options,
             &self.core.mutation_context(&self.actor),

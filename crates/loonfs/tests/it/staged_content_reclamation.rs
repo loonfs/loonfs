@@ -53,6 +53,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
     loonfs_core::gc_namespace(
         store.as_ref(),
         None,
+        None,
         namespace_id,
         &gc_options(),
         &MutationContext {

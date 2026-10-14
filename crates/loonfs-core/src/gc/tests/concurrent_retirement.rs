@@ -105,6 +105,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         gc_namespace(
             &store,
             None,
+            None,
             &target,
             &gc_options,
             &deadline,
@@ -115,6 +116,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             store.inner().fail_next(1);
             gc_namespace(
                 store.inner(),
+                None,
                 None,
                 &target,
                 &gc_options,
@@ -137,6 +139,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             gc_namespace(
                 store.inner(),
                 None,
+                None,
                 &source,
                 &gc_options,
                 &deadline,
@@ -155,6 +158,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
 
             gc_namespace(
                 store.inner(),
+                None,
                 None,
                 &target,
                 &gc_options,
@@ -213,6 +217,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     gc_namespace(
         &store,
         None,
+        None,
         &target,
         &gc_options,
         &deadline,
@@ -222,6 +227,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     .expect("repeated target retirement");
     gc_namespace(
         &store,
+        None,
         None,
         &source,
         &gc_options,

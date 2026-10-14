@@ -87,6 +87,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         let young = crate::gc::gc_namespace(
             &store,
             None,
+            None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &setup,
@@ -98,6 +99,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
 
         let collected = crate::gc::gc_namespace(
             &store,
+            None,
             None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
@@ -117,6 +119,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         assert!(store.head(&pins[0]).await.expect("pin").is_none());
         crate::gc::gc_namespace(
             &store,
+            None,
             None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
@@ -169,6 +172,7 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
         crate::gc::gc_namespace(
             &store,
             None,
+            None,
             &namespace_id,
             &options,
             &aged,
@@ -183,6 +187,7 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
                 .expect("release pin");
             crate::gc::gc_namespace(
                 store.inner(),
+                None,
                 None,
                 &namespace_id,
                 &options,
@@ -261,6 +266,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     let error = crate::gc::gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options,
         &aged,
@@ -273,6 +279,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     store.fail_all();
     let error = crate::gc::gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options,
@@ -290,6 +297,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .expect("malformed pin");
     let error = crate::gc::gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options,

@@ -139,6 +139,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             let retained = gc_namespace(
                 &recent,
                 None,
+                None,
                 &namespace_id,
                 &options,
                 &context(published_at_ms + grace_window_ms - 1),
@@ -180,6 +181,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             .expect("advance hint");
             let collected = gc_namespace(
                 &recent,
+                None,
                 None,
                 &namespace_id,
                 &options,
@@ -248,6 +250,7 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
     gc_namespace(
         &recorded,
         None,
+        None,
         &namespace_id,
         &options(),
         &context(now_ms),
@@ -281,6 +284,7 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .expect("remove successor");
     gc_namespace(
         &recent,
+        None,
         None,
         &namespace_id,
         &options(),
@@ -319,6 +323,7 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     let retained = gc_namespace(
         &undated,
         None,
+        None,
         &namespace_id,
         &options(),
         &aged,
@@ -337,6 +342,7 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
 
     let collected = gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &options(),

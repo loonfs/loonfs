@@ -3,8 +3,9 @@
 use crate::metrics::{MetadataCacheInstruments, MetricsRecorder};
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
-    CacheScope, HeadStateCache, MetadataSegmentCache, ObjectStoreScope, ReadWorkingMemory,
-    SharedHeadState, SharedSegmentBlocks, StoredMetadataBlockCache,
+    CacheScope, CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache,
+    ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions, SharedHeadState,
+    SharedSegmentBlocks, StoredMetadataBlockCache,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +18,9 @@ mod tests;
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 /// Default limit for namespace head anchors and WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
+/// Default limit for completed upload sessions, 16 MiB (enough for about
+/// 110,000 sessions).
+pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 16 * 1024 * 1024;
 
 /// Whether a cache lookup found its entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +31,11 @@ pub(crate) enum CacheLookup {
     Miss,
 }
 
-/// Decoded metadata that one or more runtimes read through: segment blocks,
-/// manifests, namespace head anchors, and WAL-tail projections.
+/// Decoded metadata that one or more runtimes read through.
+///
+/// The cache stores segment blocks, manifests, namespace head anchors,
+/// WAL-tail projections, and the completed upload sessions that garbage
+/// collection reuses between passes.
 ///
 /// Runtimes built with the cache over clones of one [`SharedObjectStore`]
 /// share the decoded segment blocks and manifests in the cache. Runtimes over
@@ -36,11 +43,13 @@ pub(crate) enum CacheLookup {
 /// object stores contain objects under the same keys. Two runtimes built
 /// from the same [`StoreConfig`](crate::StoreConfig) each create their own
 /// object-store client, so they don't share blocks. Each
-/// [`LoonFs`](crate::LoonFs) keeps its own head anchors and WAL-tail
-/// projections. The limits bound the whole cache, and the least recently
-/// used entry is evicted first, whichever runtime it belongs to. Clones share
-/// the cache. A runtime built without one creates a private cache with the
-/// default limits.
+/// [`LoonFs`](crate::LoonFs) keeps its own head anchors, WAL-tail
+/// projections, and completed upload sessions. The limits bound the whole
+/// cache, and the least recently used entry is evicted first, whichever
+/// runtime it belongs to. (Completed upload sessions are the exception. When
+/// an insert takes them over their limit, the cache drops all of them.)
+/// Clones share the cache. A runtime built without one creates a private
+/// cache with the default limits.
 #[derive(Clone)]
 pub struct MetadataCache {
     inner: Arc<MetadataCacheInner>,
@@ -49,6 +58,7 @@ pub struct MetadataCache {
 struct MetadataCacheInner {
     segment_blocks: Arc<SharedSegmentBlocks>,
     head_state: Arc<SharedHeadState>,
+    completed_upload_sessions: Arc<SharedCompletedUploadSessions>,
     next_runtime_scope: AtomicU64,
     object_store_scopes: Mutex<ObjectStoreScopes>,
     head_anchor_hits: AtomicUsize,
@@ -78,6 +88,7 @@ impl MetadataCache {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
             max_head_state_bytes: DEFAULT_MAX_HEAD_STATE_BYTES,
+            max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
             metrics_recorder: None,
         }
     }
@@ -107,7 +118,8 @@ impl MetadataCache {
     }
 
     /// Returns one runtime's views of the cache, with segment blocks under
-    /// the scope of `store` and head state under a new scope for the runtime.
+    /// the scope of `store`, and head state and completed upload sessions
+    /// under a new scope for the runtime.
     pub(crate) fn bind(
         &self,
         store: &SharedObjectStore,
@@ -131,6 +143,10 @@ impl MetadataCache {
                 stored_block_cache,
             ),
             head_state: HeadStateCache::new(Arc::clone(&self.inner.head_state), runtime_scope),
+            completed_upload_sessions: CompletedUploadSessionCache::new(
+                Arc::clone(&self.inner.completed_upload_sessions),
+                runtime_scope,
+            ),
         }
     }
 
@@ -156,6 +172,7 @@ pub(crate) struct MetadataCacheBinding {
     pub(crate) cache: MetadataCache,
     pub(crate) segment_blocks: MetadataSegmentCache,
     pub(crate) head_state: HeadStateCache,
+    pub(crate) completed_upload_sessions: CompletedUploadSessionCache,
 }
 
 /// The object stores of the runtimes that read through the cache, each with
@@ -197,6 +214,7 @@ impl ObjectStoreScopes {
 pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
     max_head_state_bytes: usize,
+    max_completed_upload_session_bytes: usize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
@@ -216,6 +234,21 @@ impl MetadataCacheBuilder {
     /// is not kept.
     pub fn max_head_state_bytes(mut self, max_head_state_bytes: usize) -> Self {
         self.max_head_state_bytes = max_head_state_bytes;
+        self
+    }
+
+    /// Sets the bytes of completed upload sessions that the cache keeps
+    /// between garbage collection passes.
+    ///
+    /// A pass doesn't read the record of a completed session that the cache
+    /// keeps. Defaults to [`DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES`]. Zero
+    /// keeps none, so every pass reads every session's record. When an insert
+    /// takes the sessions over the limit, the cache drops all of them.
+    pub fn max_completed_upload_session_bytes(
+        mut self,
+        max_completed_upload_session_bytes: usize,
+    ) -> Self {
+        self.max_completed_upload_session_bytes = max_completed_upload_session_bytes;
         self
     }
 
@@ -241,6 +274,9 @@ impl MetadataCacheBuilder {
                     self.max_head_state_bytes,
                     instruments.head_state_cache_observer(),
                     instruments.wal_tail_projection_cache_observer(),
+                )),
+                completed_upload_sessions: Arc::new(SharedCompletedUploadSessions::new(
+                    self.max_completed_upload_session_bytes,
                 )),
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),

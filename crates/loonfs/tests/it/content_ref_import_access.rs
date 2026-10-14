@@ -47,6 +47,7 @@ async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_i
     loonfs_core::gc_namespace(
         store,
         None,
+        None,
         namespace_id,
         &loonfs::GcOptions::default(),
         &loonfs_core::MutationContext {
@@ -326,6 +327,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     source_writer.delete().await.expect("delete owner");
     let report = loonfs_core::gc_namespace(
         recording.as_ref(),
+        None,
         None,
         &source,
         &loonfs_core::GcOptions {

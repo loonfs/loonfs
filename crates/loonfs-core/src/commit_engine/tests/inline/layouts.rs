@@ -734,6 +734,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     let report = gc_namespace(
         &aged,
         None,
+        None,
         &namespace_id,
         &options,
         &MutationContext {
@@ -797,6 +798,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     prune_revisions(&store, &namespace_id).await;
     let report = gc_namespace(
         &aged,
+        None,
         None,
         &namespace_id,
         &options,
@@ -962,6 +964,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
     let options = GcOptions::default();
     let report = gc_namespace(
         &aged,
+        None,
         None,
         &namespace_id,
         &options,
@@ -1483,6 +1486,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
         gc_namespace(
             &aged,
+            None,
             None,
             &namespace_id,
             &options,

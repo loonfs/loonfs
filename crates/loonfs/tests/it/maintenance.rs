@@ -787,3 +787,46 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_objects, 0);
 }
+
+/// Checks that a second `Maintenance::gc` call reads no completed upload
+/// session record, because the runtime keeps the completed sessions between
+/// passes.
+#[tokio::test]
+async fn a_second_collection_reads_no_completed_session_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::upload_session_prefix(
+            &namespace_id,
+        )),
+    ));
+    let fs = open_runtime_with_async(store.clone(), "session-cache-test", |builder| {
+        builder.inline_content(loonfs::InlineContentPolicy {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
+    })
+    .await;
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = fs.namespace_writer(&namespace_id).expect("open namespace");
+    for body in [&b"one"[..], b"two", b"three"] {
+        namespace
+            .prepare_content(body)
+            .await
+            .expect("prepare content");
+    }
+
+    store.reset();
+    let first = fs.maintenance.gc(&namespace_id).await.expect("first pass");
+    let first_reads = store.count(OperationSelector::Read);
+    store.reset();
+    let second = fs.maintenance.gc(&namespace_id).await.expect("second pass");
+
+    assert_eq!(first_reads, 3, "the first pass reads each record once");
+    assert_eq!(store.count(OperationSelector::Read), 0);
+    assert_eq!(first.retained.upload_session_window, 3);
+    assert_eq!(second.retained.upload_session_window, 3);
+}

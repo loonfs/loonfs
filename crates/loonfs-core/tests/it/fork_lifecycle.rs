@@ -132,6 +132,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let collected = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &source,
         &loonfs_core::GcOptions::default(),
         &aged,
@@ -170,6 +171,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     aged.now_ms = u64::MAX / 2;
     loonfs_core::gc_namespace(
         &store,
+        None,
         None,
         &source,
         &loonfs_core::GcOptions::default(),
@@ -869,6 +871,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &ancestor,
         &loonfs_core::GcOptions::default(),
         &aged,
@@ -898,6 +901,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let parent_waiting = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &parent,
         &options,
         &aged,
@@ -908,6 +912,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
     let ancestor_waiting = loonfs_core::gc_namespace(
         &store,
+        None,
         None,
         &ancestor,
         &options,
@@ -931,6 +936,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let retired = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &descendant,
         &options,
         &aged,
@@ -945,6 +951,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let waiting = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &parent,
         &options,
         &aged,
@@ -957,6 +964,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &descendant,
         &options,
         &aged,
@@ -966,6 +974,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     .expect("descendant releases its source pin");
     let released = loonfs_core::gc_namespace(
         &store,
+        None,
         None,
         &parent,
         &options,
@@ -978,6 +987,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
     let released = loonfs_core::gc_namespace(
         &store,
+        None,
         None,
         &ancestor,
         &options,
@@ -1003,6 +1013,7 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
     let collecting = loonfs_core::gc_namespace(
         store.as_ref(),
+        None,
         None,
         &source,
         &gc_options,
@@ -1259,6 +1270,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let report = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &loonfs_core::GcOptions::default(),
         &aged,
@@ -1282,6 +1294,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let report = loonfs_core::gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &loonfs_core::GcOptions::default(),
         &aged,
@@ -1292,6 +1305,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
     loonfs_core::gc_namespace(
         &store,
+        None,
         None,
         &namespace_id,
         &loonfs_core::GcOptions::default(),
@@ -1585,6 +1599,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         let report = loonfs_core::gc_namespace(
             &store,
             None,
+            None,
             &leaf,
             &options,
             &aged,
@@ -1648,6 +1663,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         aged.now_ms += options.grace_window_ms;
         let report = loonfs_core::gc_namespace(
             &store,
+            None,
             None,
             &source,
             &options,
