@@ -26,7 +26,7 @@ In a process without the writer session, the read cache keeps the head, as it do
 
 When the writer session closes or is fenced, the publisher's projection is dropped, and reads in that process go back to the read cache.
 
-Why not keep confirming in the writer's process? The confirmation can only disagree with the publisher when another process has become the writer, which fences this session on its next publish. Between the takeover and that publish, a read confirmed with a GET would see the other writer's commits and a read from the projection would not. The design accepts that window and bounds it with the manifest check below, because the alternative costs one request on every read for every writer that is never fenced.
+Why not keep confirming in the writer's process? The confirmation can only disagree with the publisher when another process has become the writer, which fences this session on its next publish. Between the takeover and that publish, a read confirmed with a GET would see the other writer's commits and a read from the projection would not. The window is bounded, because a new writer publishes a claim manifest before it writes its first WAL number, and the manifest check below finds that manifest within one interval. The design accepts a window of one interval, at one HEAD per interval per namespace, because the alternative costs one request on every read for every writer that is never fenced.
 
 Why not let readers in the writer's process share the read cache with the publisher through seeds, as today? Because a seed is a copy, and every copy needs a rule for when it is stale. The defects above were those rules going wrong.
 
@@ -38,6 +38,8 @@ A read takes a freshness setting:
 - `bounded`, with an interval: LoonFS confirms the head at most once per interval, and reads inside the interval use the head it confirmed last. In the writer's process this is the same as `latest`. In another process a read inside the interval sends no request to confirm the head.
 
 The runtime has a default interval for `bounded` reads (1 s, the same as the manifest check today), and a host can set it per runtime. A read can give its own interval.
+
+No interval exceeds the revalidation bound (`READ_REVALIDATION_BOUND_MS`). A head older than the bound is confirmed before a read of any freshness, in the writer's process as well, where the publisher rebases its projection onto the current manifest. Collection may delete the segments of a superseded manifest once the grace window passes, and the bound is what keeps a read off them. An idle writer is the case this covers: it publishes nothing, so nothing else moves its projection off a manifest that a compaction has replaced.
 
 A pinned read (a snapshot or a checkpoint) has no freshness setting. Its state is fixed by the pin.
 
@@ -63,7 +65,7 @@ The memory used per namespace falls by one anchor in the writer's process. The s
 
 ## What the format and API specs change
 
-The format doesn't change. The API gains the freshness setting on reads that take options (`stat`, `list`, `read_file`, their inode-addressed forms, and the change feed), and the API specification gains a section that states the two promises above. The architecture overview's sentence on cached views ("A reader with a cached view checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default") becomes a description of `latest` reads in a process without the writer session.
+The format doesn't change. The API gains the freshness setting on reads that take options (`stat`, `list`, `read_file`, their inode-addressed forms, and the change feed), and the API specification gains a section that states the two promises above and the cap on the interval. The architecture overview's sentence on cached views ("A reader with a cached view checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default") becomes a description of `latest` reads in a process without the writer session.
 
 ## Alternatives considered
 
