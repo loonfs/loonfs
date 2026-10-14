@@ -129,6 +129,35 @@ impl PublishTailPosition {
         self.head.folded_wal_no = fold.from.wal_no;
         Some(Arc::new(fold.since))
     }
+
+    /// Moves the position to a manifest that a compaction published, and
+    /// returns whether the position moved.
+    ///
+    /// The position moves only when the compaction's manifest is the
+    /// successor of the position's manifest, has the same `head_seq`, and no
+    /// fold is in progress. (During a fold, `record_wal_fold` moves or drops
+    /// the position when the fold finishes.) The cached WAL tail is still
+    /// correct after the move, for two reasons:
+    ///
+    /// - A compaction copies every field that `NamespaceReadState::from`
+    ///   reads (such as `head_seq`, `folded_wal_no`, `next_inode_id`, and
+    ///   `writer_epoch`) into its manifest, so replay starts from the same
+    ///   head on either manifest.
+    /// - Both manifests list runs, so replay starts from empty base rows on
+    ///   either manifest. A compaction needs runs to merge, and it keeps every
+    ///   live row, including the root directory's.
+    pub(crate) fn reanchor_after_compaction(&mut self, basis: MetadataBasis) -> bool {
+        let succeeds = self
+            .basis
+            .manifest_no()
+            .successor()
+            .is_ok_and(|next| next == basis.manifest_no());
+        if self.fold.is_some() || !succeeds || basis.0.head_seq != self.basis.0.head_seq {
+            return false;
+        }
+        self.basis = basis;
+        true
+    }
 }
 
 impl PublishTailProjection {

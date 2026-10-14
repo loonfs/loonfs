@@ -27,13 +27,14 @@ use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
 };
 use loonfs_types::CompactorEpoch;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{ChangeSeq, NamespaceId, RunNo};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -68,7 +69,8 @@ pub enum CompactionStepOutcome {
         input_runs: usize,
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
-        manifest_no: ManifestNo,
+        /// A reference to the published manifest.
+        manifest: ManifestRef,
         /// True when this merge ran above a frozen base.
         bottom_anchored_merge_blocked: bool,
     },
@@ -206,17 +208,18 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     )?;
 
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let manifest_no = manifest.envelope().payload().manifest_no;
     match publish_manifest(store, manifest, deadline).await? {
-        ManifestPublicationOutcome::Published(_) => Ok(CompactionStepOutcome::UnitPublished {
-            group,
-            merged_delta_rows: input.merged_delta_rows,
-            input_runs: input.runs.len(),
-            decoded_input_rows: input.decoded_rows,
-            decoded_input_bytes: input.decoded_bytes,
-            manifest_no,
-            bottom_anchored_merge_blocked,
-        }),
+        ManifestPublicationOutcome::Published(current) => {
+            Ok(CompactionStepOutcome::UnitPublished {
+                group,
+                merged_delta_rows: input.merged_delta_rows,
+                input_runs: input.runs.len(),
+                decoded_input_rows: input.decoded_rows,
+                decoded_input_bytes: input.decoded_bytes,
+                manifest: current.manifest(),
+                bottom_anchored_merge_blocked,
+            })
+        }
         ManifestPublicationOutcome::CoveredByCurrent(current)
         | ManifestPublicationOutcome::PredecessorChanged(current)
             if current.compactor_epoch() != compactor_epoch =>

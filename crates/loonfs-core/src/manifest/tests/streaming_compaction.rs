@@ -500,7 +500,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &MetadataMergeReport,
 ) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, input_keys, result).await {
-        MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
+        MetadataCompactionJobOutcome::Published { manifest, .. } => manifest.manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -2665,7 +2665,7 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     )
     .await
     {
-        MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
+        MetadataCompactionJobOutcome::Published { manifest, .. } => manifest.manifest_no,
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
@@ -3163,11 +3163,11 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     );
     assert_matches!(
         second_outcome.expect("second publication"),
-        MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 1
+        MetadataCompactionJobOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 1
     );
     assert_matches!(
         first_outcome.expect("retried publication"),
-        MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 2
+        MetadataCompactionJobOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 2
     );
     assert_eq!(store.inner().counts().create_if_absent_puts, 3);
     assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
@@ -3213,8 +3213,8 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .expect("publish");
     assert_matches!(
         outcome,
-        MetadataCompactionJobOutcome::Published { manifest_no, .. }
-            if manifest_no == before.successor().expect("next number")
+        MetadataCompactionJobOutcome::Published { manifest, .. }
+            if manifest.manifest_no == before.successor().expect("next number")
     );
     let puts = store
         .take()

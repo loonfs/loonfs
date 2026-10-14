@@ -1307,7 +1307,8 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         .await
         .expect("compaction step");
         match report {
-            super::CompactionStepOutcome::UnitPublished { manifest_no, .. } => {
+            super::CompactionStepOutcome::UnitPublished { manifest, .. } => {
+                let manifest_no = manifest.manifest_no;
                 units += 1;
                 if let Some(previous) = last_manifest_no {
                     assert!(manifest_no > previous, "units must advance the manifest");
