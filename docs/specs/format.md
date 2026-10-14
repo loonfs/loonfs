@@ -48,7 +48,7 @@ A "namespace" is a directory tree with its own ordered history of changes. A nam
 
 A namespace is created when its manifest 1 is written with put-if-absent. The current manifest records the namespace's identity, creation time, lifecycle status, and writer authority. Together, the current manifest and the WAL objects after it describe the namespace's current metadata.
 
-Two pairs identify things across namespaces:
+Across namespaces, two pairs of values identify items and commit positions:
 
 - An item is identified by `(namespace_id, inode_id)`.
 - A commit position is identified by `(namespace_id, committed_seq)`.
@@ -162,7 +162,7 @@ File content is durable no later than the commit that references it. File conten
 
 Garbage collection deletes a WAL object only after a manifest covers it, and the fold that published that manifest has already written the WAL object's pieces as extents. So a WAL object is never deleted while some of its pieces exist only in the WAL. This is also why a reference identifies content but doesn't prove that a content object contains its bytes yet. [Content verification](#45-content-verification) defines where a reader finds the bytes.
 
-New uploads are owned by the namespace that creates them, and inherited references keep their original owners. Forking, restoring a revision, replaying the WAL, and compacting metadata MUST NOT replace a reference's owner with the current namespace.
+The owner of a new upload is the uploading namespace, and inherited references keep their original owners. Forking, restoring a revision, replaying the WAL, and compacting metadata MUST NOT replace a reference's owner with the current namespace.
 
 Reading inherited content doesn't require the original owner's manifest. This matters for forks, because a fork can keep reading the exact objects in its pinned basis after its source namespace is deleted.
 
@@ -203,7 +203,7 @@ An inode starts with an empty map at attribute revision `0`, and that initial st
 
 Clients use attribute revision numbers for optimistic concurrency. The API doesn't offer a way to list old attribute maps, but the storage layer keeps the rows needed for supported sequence-based views, as the compaction rules specify.
 
-Every commit also records a timestamp, an optional message, and an "actor". The actor is a required, opaque identifier that the application supplies. LoonFS stores it without authenticating it or looking up any profile information, so the application chooses a stable identifier with whatever identity scope it needs. The actor records who made a change, and it plays no part in authorization.
+Every commit also records a timestamp, an optional message, and an "actor". The actor is a required, opaque identifier that the application supplies. LoonFS stores it without authenticating it or looking up any profile information, so the application chooses a stable identifier and its identity scope. The actor records who made a change, and it plays no part in authorization.
 
 Every row that records an event copies its commit's actor and timestamp (as `committed_by` and `committed_at_ms`), along with the commit's `committed_seq` and `commit_id`. The API exposes these fields under the names the API specification defines, such as `created_by` for the commit that created an inode and `attributes_updated_by` for its newest attribute revision.
 
@@ -243,7 +243,7 @@ Every namespace has an "access mode", which is stored in its manifest and set wh
 - `unrestricted`: requests aren't checked against any rights, and the namespace has no access rows.
 - `acl`: requests are authorized against access rows. The mode includes a `principal_scope`, which identifies the identity domain of the namespace's principal IDs, and the `root_grants` that the root inode starts with (normally `admin` for each initial administrator). Before authorization reads a grant, the request's subject scope MUST match the namespace's `principal_scope`.
 
-A set of principals' effective rights on an inode are the union of their grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
+A principal's effective rights on an inode are the union of its grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
 
 A deletion root has no current binding, so its tombstone's saved parent is used for that step of the walk. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited.
 
@@ -439,7 +439,7 @@ An immutable write creates its key with put-if-absent, at every size. A large wr
 
 A streamed immutable write computes the store's checksum as the bytes pass through. A stream shorter than one part is buffered and written with a single create request. A longer stream sends parts as they arrive and completes with the full-object checksum. An occupied key is checked the same way as for a buffered write. An error in the stream prevents completion, and because a stream can't be sent twice, a transport failure isn't retried.
 
-An "assembly" creates one immutable object from an ordered list of source ranges, followed by ordered tail pieces (new bytes). Each source identifies an object, an optional half-open byte range, and the checksum of exactly those bytes. A source with no range is the whole object. The expected checksum covers the complete result, and it and every source checksum use the store's algorithm. A missing source, or a source shorter than its range, fails the precondition. An occupied destination is checked by comparing its stored checksum with the expected checksum.
+An "assembly" creates one immutable object from an ordered list of source ranges, followed by ordered tail pieces (new bytes). Each source identifies an object, an optional half-open byte range, and the checksum of exactly those bytes. A source with no range is the whole object. The expected checksum covers the complete result, and every checksum in an assembly uses the store's algorithm. A missing source, or a source shorter than its range, fails the precondition. An occupied destination is checked by comparing its stored checksum with the expected checksum.
 
 Each provider adapter builds an assembly differently, depending on the size of the result:
 
@@ -467,7 +467,7 @@ Garbage collection assumes that clock error is bounded, and that publications an
 
 ## 4. Reading a namespace
 
-This section describes how a reader finds a namespace's current state, decides what's visible at a sequence, and verifies file contents.
+This section describes how a reader finds a namespace's current state, determines what's visible at a sequence, and verifies file contents.
 
 ### 4.1 Resolving the metadata basis
 
@@ -655,7 +655,7 @@ The claim has no expiry of its own. A failed write releases the claim only if it
 
 Completion resets staging to `idle` in the same CAS that records the completed reference, and abort also resets staging to `idle`. A terminal record MUST NOT keep a second staged content reference, even if the two references would agree.
 
-Service-proxied staging computes the store's checksum while it streams the bytes, and it records the checksum in the session's content reference (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). When the body ends, the request reads the session record again, and it lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+Service-proxied staging computes the store's checksum while it streams the bytes, and it records the checksum in the session's content reference (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). When the body ends, the request reads the session record again, and it lets the object store finish the write only if the session is still open and this request still has the staging claim. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
 
 ### 5.4 Direct uploads
 
@@ -836,7 +836,7 @@ Receipt lookup uses the publisher's current projection. The publisher refreshes 
 
 The writer checks for the commit receipt before it uploads inline bytes as content objects. If the receipt is still available, it returns the original result for an identical request, or a reuse conflict for a changed one. Neither case requires another upload, even after a restart or on another server.
 
-The guarantee only lasts as long as the receipt. Compaction can remove receipts below the retention floor, and once a receipt is gone, the old ID can't be distinguished from an unused one, so a later request can run as a new mutation. A receipt that hasn't been compacted yet might still be available, but callers MUST NOT depend on that extra lifetime.
+The guarantee lasts as long as the receipt. Compaction can remove receipts below the retention floor, and once a receipt is gone, the old ID can't be distinguished from an unused one, so a later request can run as a new mutation. A receipt that hasn't been compacted yet might still be available, but callers MUST NOT depend on that extra lifetime.
 
 Receipt lookup still works at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits are rejected with `maintenance_required`, and the writer-session, availability, and corruption checks still apply.
 
@@ -939,7 +939,7 @@ A fold works in these steps:
 
 A fold doesn't need a writer epoch, and any process can run one. It copies the predecessor's writer and compactor epochs forward. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-A fold loads the current manifest before its put, and again if its put loses, and then it decides whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
+A fold loads the current manifest before its put, and again if its put loses, and then it checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
 Before it writes segments or publishes the manifest, a fold checks each chain's ordered tail pieces, up to the chain's newest reference. Missing pieces are corruption. The fold checks every whole value that starts at offset 0 before it writes any object.
 
@@ -988,7 +988,7 @@ Implementations can fold automatically as the WAL grows. The reference implement
 | Reject new commits with `maintenance_required` | 128 unfolded WAL objects |
 | Fold an idle tail | The tail contains a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock |
 
-The commit that triggers a fold can finish before the fold does. Reads and lookups of retained receipts still work at the write-stop threshold. Idleness is measured from the newest commit's timestamp, so a tail that contains only fences is never idle. The timestamp only decides when to fold, and a fold is valid at any time.
+The commit that triggers a fold can finish before the fold does. Reads and lookups of retained receipts still work at the write-stop threshold. Idleness is measured from the newest commit's timestamp, so a tail that contains only fences is never idle. The timestamp determines when to fold, but a fold is valid at any time.
 
 Folding doesn't advance retention. An operator decides separately when older replay history can be discarded. [Appendix C](#appendix-c-timing-and-size-reference) lists the reference implementation's sizing defaults.
 
@@ -1054,7 +1054,7 @@ To create a pin from the current head, LoonFS:
 3. Loads the current manifest again.
 4. Checks that the manifest number and payload checksum are the same, that the namespace is active, and that its retention floor is no later than the pinned head sequence.
 
-If another manifest became current in the meantime, LoonFS deletes the candidate pin and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a pin whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection decides what to do with the pin (see [Pin cleanup](#117-pin-cleanup)). Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same sequence.
+If another manifest became current in the meantime, LoonFS deletes the candidate pin and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a pin whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection applies the rules in [Pin cleanup](#117-pin-cleanup) to the pin. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same sequence.
 
 A put whose outcome is unknown can succeed after its creator stopped waiting (see [Required operations](#31-required-operations)), even after the creator's delete. A pin created that way was never returned to a caller. It appears in the pin listing and is collected like any other pin, so a user pin without an expiry stays until someone deletes it.
 
@@ -1124,7 +1124,7 @@ A confirmed precondition failure is a conflict. After a put with an unknown tran
 
 Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two plain creates with the same request), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a new pin or a new segment, proves that the attempt succeeded.
 
-When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads the target and deletes its source pin, unless the target's fork basis refers to that pin. It returns the original error in every case. If the reload or the deletion fails, the pin stays, and garbage collection decides what to do with it (see [Pin cleanup](#117-pin-cleanup)). A matching pin ID with a different manifest reference is corruption. An unused fork pin is collected after its creation grace.
+When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads the target and deletes its source pin, unless the target's fork basis refers to that pin. It returns the original error in every case. If the reload or the deletion fails, the pin stays, and garbage collection applies the rules in [Pin cleanup](#117-pin-cleanup) to it. A matching pin ID with a different manifest reference is corruption. An unused fork pin is collected after its creation grace.
 
 ### 9.4 Deleting a namespace
 
@@ -1231,7 +1231,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 
 An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor, but it can drop superseded layout rows, because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It decides with a Bloom filter, which can only err toward keeping a row, and a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before they merge layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, and its expected count is the sum of the revision segments' `row_count`. If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before they merge layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, and its expected count is the sum of the revision segments' `row_count`. If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
 
 Each binding event appears in both indexes, and both indexes group their rows by edge, so compaction keeps or removes each event in both indexes the same way. Row counts and row digests verify that the two indexes agree, and every event above the floor stays.
 
@@ -1270,11 +1270,11 @@ With the current constants, a job can start its publication for at most 23 hours
 
 Streaming compaction applies the row-retention rules for its selected window, the same way bounded compaction does, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
-Why does core keep a compactor epoch? A streaming compaction merges a window that's too large for one bounded step, and it publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race only costs one step, and grep doesn't need an epoch.)
+Why does core keep a compactor epoch? A streaming compaction merges a window that's too large for one bounded step, and it publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race costs one step, and grep doesn't need an epoch.)
 
 ## 11. Garbage collection
 
-This section describes how garbage collection decides which objects are still referenced, and when an unreferenced object is old enough to delete safely.
+This section describes how garbage collection determines which objects are still referenced, and when an unreferenced object is old enough to delete safely.
 
 Garbage collection deletes objects that no retained view needs, after the required age and publication checks. A logical deletion on its own doesn't allow file bytes to be removed. A live namespace's content stays while a retained view refers to it (see [Content roots](#119-content-roots)), and a deleted ancestor's content stays while fork descendants depend on it.
 
@@ -1292,7 +1292,7 @@ A garbage collection pass first establishes the roots. It:
 
 An invalid or unreadable root manifest stops the pass before anything is deleted. An absent namespace has nothing for core garbage collection to delete.
 
-The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs with a common hex prefix. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that decide which records can be deleted.
+The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs with a common hex prefix. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that determine which records can be deleted.
 
 Every age decision in a pass uses the same `now_ms`, captured when the pass starts. A later pass reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed pass might have deleted some candidates already, but the next pass can safely start over.
 
@@ -1339,13 +1339,13 @@ For example, suppose a collector observes hint 8 and current manifest 10. It kee
 
 ### 11.4 Clock and operation assumptions
 
-Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_at_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
+Garbage collection deletes an unreferenced object based on its age, which is calculated as `now_ms.saturating_sub(last_modified_at_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
-The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
+The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider clock that's ahead of the collector's delays garbage collection, but doesn't make it unsafe. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
 Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum ordinary grace covers the longer of two times: the longest bounded publication, or the revalidation bound plus the lifetime of a direct transfer capability (a view up to that bound old can still issue a capability). It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
-If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the attempt can't rule out that its put was applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
+If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the put might have been applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
 
 The publication protocol depends on one assumption that the implementation can't check. A provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. This is the provider time that the reclamation grace reserves, and it's an operational requirement on the provider. The protocol is safe under that assumption, for these reasons:
 
@@ -1423,7 +1423,7 @@ A fork pin is cleaned up based on its target namespace:
 
 The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content) defines when a source pin is released.
 
-A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection decides the pin under its owner's rules, including a fork pin's creation grace.
+A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the pin owner's rules, including a fork pin's creation grace.
 
 ### 11.8 Sweeping a retired owner's content
 
@@ -1530,9 +1530,9 @@ Versions work like this:
 
 After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed meaning requires a new version of the owning family. A change to the garbage collection protocol can require a version gate, even when most stored fields stay the same. An implementation MUST NOT operate on a newer protocol just because it can deserialize some of its fields. This rule applies to every role that changes durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, garbage collection, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected when it's loaded. So a process that was running when a newer version was published stops changing durable state at its next publication attempt, and a garbage collection pass stops at its next start.
 
-A reader accepts every released version of a family up to its own, and it rejects a newer one. Segment encodings follow the same rule. Pins and fork bases capture manifests by checksum, and they keep their segments for as long as any pin or fork lives, so objects written by any earlier release can stay in use. A writer writes the lowest version that can express the object it writes, so an upgraded binary writes objects that an older binary can read until an object needs a newer version.
+A reader accepts every released version of a family up to its own, and it rejects a newer one. Segment encodings follow the same rule. Pins and fork bases capture manifests by checksum, and they keep their segments for as long as any pin or fork exists, so objects written by any earlier release can stay in use. A writer writes the lowest version that can express the object it writes, so an upgraded binary writes objects that an older binary can read until an object needs a newer version.
 
-Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures, and fingerprint vectors also pin canonical JSON bytes and digests. Validating a new release means preserving the meaning of retained data, not just recompiling its type definitions.
+Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures, and fingerprint vectors also pin canonical JSON bytes and digests. Validating a new release means checking that it preserves the meaning of retained data.
 
 [Family versions](#a1-family-versions) lists the family versions. A binary rollback is valid only if the older binary supports every stored family version and its protocol. Downgrading the binary doesn't convert stored data.
 
@@ -1728,7 +1728,7 @@ A delta's own commit sequence is implied by its commit. An unbind target and a t
 A revision delta's `layout` follows these rules:
 
 - It can be left out only when the commit includes a piece at offset 0 for its content ID, or a piece for a chain that already has a revision in the planning view. The same-chain case is safe, because the base stays the inode's head until the append is folded, so retention keeps a revision that refers to the chain, and layout compaction can't prune its row.
-- A piece at offset 0 rules out a layout.
+- A commit with a piece at offset 0 can't include a layout.
 - A present layout validates against its own `size_bytes()`, and its extents can refer to other owners and content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit includes no piece for it. A failed check is `InvalidWalRevisionLayout`.
 - Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view. Before it admits the reference, validation writes any pending pieces that prefix needs to content objects, the same way a fold does. The resulting layout refers to those objects even if compaction later removes the source chain's row.
 
@@ -1738,7 +1738,7 @@ Encoding and decoding enforce these rules, using only the WAL object:
 
 1. Every entry's `content_id` is referenced by an `append_file_revision` delta in the same commit, whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
 2. The entries for one content ID in one commit, ordered by offset, are contiguous, and the last one ends at the largest `size_bytes` of those references. A zero-length entry is valid.
-3. A delta without pieces for its content ID requires a layout. A first piece past offset 0 allows an absent layout, and a present layout covers exactly `[0, offset)`. A first piece at offset 0 rules out a layout. The planner checks that a new chain includes a layout, because the decoder can't see earlier revisions.
+3. A delta without pieces for its content ID requires a layout. A first piece past offset 0 allows an absent layout, and a present layout covers exactly `[0, offset)`. A first piece at offset 0 can't have a layout. The planner checks that a new chain includes a layout, because the decoder can't see earlier revisions.
 4. A commit contains at most one entry per content ID and offset.
 5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES` (256 KiB, or 262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES` (4 MiB, or 4,194,304 bytes).
 

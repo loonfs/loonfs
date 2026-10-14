@@ -148,7 +148,7 @@ File bytes that are committed inside a WAL object, as pieces, instead of being u
 
 ### Assembly
 
-An object-store operation that creates one new immutable object from ranges of existing objects followed by new bytes. A fold uses an assembly to write each chain's new extent. Where the provider supports it, an assembly copies parts inside the provider (S3 and R2) or composes objects (GCS), so the bytes don't pass through the LoonFS server. Otherwise, it reads the sources and writes the result itself. See [Immutable writes and retries](format.md#32-immutable-writes-and-retries).
+An object-store operation that creates one new immutable object from ranges of existing objects followed by new bytes. A fold uses an assembly to write each chain's new extent. Where the provider supports it, an assembly copies parts inside the provider (S3 and R2) or composes objects (GCS), so the bytes don't pass through the LoonFS server. Otherwise, LoonFS reads the sources and writes the result itself. See [Immutable writes and retries](format.md#32-immutable-writes-and-retries).
 
 ### Temporary object
 
@@ -224,7 +224,7 @@ A new namespace that starts as a copy of another namespace at one point in its h
 
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). After that, the reader checks again before it serves a read. This bound is what tells garbage collection how long a superseded manifest might still be in use. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). After that, the reader checks again before it serves a read. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 
