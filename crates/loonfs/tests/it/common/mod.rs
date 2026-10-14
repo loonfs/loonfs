@@ -31,13 +31,18 @@ impl loonfs::WallClock for SettableWallClock {
     }
 }
 
+/// Returns the object key of the WAL object at `wal_no`.
+pub(crate) fn wal_key(namespace_id: &NamespaceId, wal_no: loonfs_types::WalNo) -> String {
+    format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
+}
+
 /// The GET of a WAL number that finds nothing.
 pub(crate) fn wal_probe(
     namespace_id: &NamespaceId,
     wal_no: loonfs_types::WalNo,
 ) -> loonfs_test_support::stores::RecordedOperation {
     loonfs_test_support::stores::RecordedOperation::Get {
-        key: format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0),
+        key: wal_key(namespace_id, wal_no),
         range: None,
         result_bytes: 0,
     }

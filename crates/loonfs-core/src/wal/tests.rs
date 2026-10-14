@@ -934,10 +934,11 @@ async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
     );
 }
 
-/// Checks that a warm probe reports a missing WAL number below a present one
-/// as corruption.
+/// Checks that a warm probe returns false for a missing WAL number below a
+/// present one, and that discovery from the unchanged manifest reports the
+/// same gap as corruption.
 #[tokio::test]
-async fn a_warm_probe_reports_a_gap_in_the_wal_as_corruption() {
+async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corruption() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("warm-gap").expect("namespace");
     let store = RecordingStore::new(
@@ -945,14 +946,26 @@ async fn a_warm_probe_reports_a_gap_in_the_wal_as_corruption() {
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     let mut warm = warm_context_behind(&store, &namespace_id, 8).await;
-    let missing = wal_object(&namespace_id, &WalNo(warm.head.wal_no.0 + 5));
+    assert_eq!(warm.head.wal_no, WalNo(2));
+    let cached = warm.head.clone();
+    // The probe reads WAL 6 to 9 in one window, and discovery reads WAL 4 to 7,
+    // so both find WAL 6 missing below a present number.
+    let missing = wal_object(&namespace_id, &WalNo(6));
     store
         .delete(&missing)
         .await
         .expect("remove a WAL object below the tip");
-    let error = super::probe_namespace_wal(&store, &mut warm)
+    assert!(!super::probe_namespace_wal(&store, &mut warm)
         .await
-        .expect_err("a gap below the tip is corruption");
+        .expect("a gap sends the read to discovery"));
+    assert_eq!(warm.head, cached);
+    let error = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect_err("a gap above the folded boundary is corruption");
     assert_matches!(
         error,
         crate::control_object::ControlObjectLoadError::Codec { object_key, .. }

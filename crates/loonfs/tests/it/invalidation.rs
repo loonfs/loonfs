@@ -11,11 +11,14 @@ use loonfs::{
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::WalNo;
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -591,6 +594,134 @@ async fn warm_answers_are_measured_against_the_previous_check() {
             if key == &loonfs_objectstore::keys::hint(&namespace_id),
         "the late answer was trusted: {operations:?}"
     );
+}
+
+/// Checks that a warm read rediscovers from the current manifest when its WAL
+/// probe finds a missing number below a present one, as it can after a fold and
+/// a collection pass.
+#[tokio::test]
+async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("collected-gap").expect("namespace");
+    // The reader's clock doesn't move, so its manifest check doesn't fall due,
+    // and each warm read starts with the WAL probe.
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("reader");
+    let namespace = reader.namespace(&namespace_id);
+    let writer = writer(&store, "collected-gap-writer").await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let actor = loonfs_test_support::test_actor();
+    let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
+    put("/cached.txt").await.expect("first put");
+    writer.drain().await.expect("finish hints");
+    namespace.stat("/cached.txt").await.expect("cache a view");
+    let tip = head_state(&store, &namespace_id).await.wal_no.0;
+
+    // A fold moves WAL objects tip + 1 to tip + 3 into a newer manifest, and
+    // tip + 4 is written after it.
+    for path in ["/one.txt", "/two.txt", "/three.txt"] {
+        put(path).await.expect(path);
+    }
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("collected-gap-writer"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the WAL");
+    put("/four.txt").await.expect("put after the fold");
+    writer.drain().await.expect("finish hints");
+    let state = head_state(&store, &namespace_id).await;
+    assert_eq!(
+        (state.folded_wal_no, state.wal_no),
+        (WalNo(tip + 3), WalNo(tip + 4))
+    );
+
+    // Garbage collection deletes the WAL objects below the folded boundary. A
+    // collection pass that has deleted tip + 2 but not yet tip + 3 leaves the
+    // gap that the probe's second window reads.
+    store
+        .delete(&crate::common::wal_key(&namespace_id, WalNo(tip + 2)))
+        .await
+        .expect("collect a folded WAL object");
+    for path in [
+        "/cached.txt",
+        "/one.txt",
+        "/two.txt",
+        "/three.txt",
+        "/four.txt",
+    ] {
+        namespace.stat(path).await.expect(path);
+    }
+}
+
+/// Checks that a warm read reloads its view when the view passes the
+/// revalidation bound while the WAL probe runs, even if the probe fails.
+#[tokio::test]
+async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("late-probe-error").expect("namespace");
+    let wal_keys = || KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id));
+    let blocking = Arc::new(BlockingStore::new(
+        FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            wal_keys(),
+            OperationSelector::Get,
+            InjectedError::Transport("injected WAL GET failure".to_owned()),
+        ),
+        wal_keys(),
+        OperationSelector::Get,
+    ));
+    let store: SharedObjectStore = blocking.clone();
+    let timer = Arc::new(ManualClock::new(0));
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .monotonic_timer(timer.clone())
+        .build()
+        .await
+        .expect("reader");
+    let namespace = reader.namespace(&namespace_id);
+    let writer = writer(&store, "late-probe-error-writer").await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let actor = loonfs_test_support::test_actor();
+    namespace_writer
+        .put_file("/cached.txt", b"file", &actor)
+        .await
+        .expect("first put");
+    writer.drain().await.expect("finish hints");
+    namespace.stat("/cached.txt").await.expect("cache a view");
+    namespace_writer
+        .put_file("/next.txt", b"file", &actor)
+        .await
+        .expect("put after the cached view");
+    writer.drain().await.expect("finish hints");
+
+    // Park the probe's first GET until the view is past the bound, and then
+    // fail it.
+    blocking.block_next();
+    blocking.inner().fail_next(1);
+    let (entry, ()) = futures::join!(namespace.stat("/next.txt"), async {
+        blocking.wait_until_blocked().await;
+        timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+        blocking.release();
+    });
+    assert_eq!(blocking.inner().remaining(), 0, "the probe's GET failed");
+    entry.expect("reload the view instead of returning the probe's error");
 }
 
 async fn writer_with_timer(
