@@ -5,6 +5,7 @@ use super::deletes::apply_decisions;
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::reclaim::reclaim_namespace;
+use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
 use super::GcOptions;
 use crate::context::MutationContext;
@@ -15,12 +16,17 @@ use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, NamespaceId};
 
-/// Collects one namespace. The root scan reads through `segment_cache`
-/// and charges exact content roots to that cache's read working memory.
-/// The shared base filter has a separate byte cap.
+/// Collects one namespace.
+///
+/// The root scan reads through `segment_cache` and charges exact content
+/// roots to that cache's read working memory. The shared base filter has a
+/// separate byte cap. The pass doesn't read the record of a completed upload
+/// session that `session_cache` has, and it adds each completed session that
+/// it keeps to `session_cache`.
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
+    session_cache: Option<&CompletedUploadSessionCache>,
     namespace_id: &NamespaceId,
     options: &GcOptions,
     context: &MutationContext,
@@ -31,6 +37,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     let live = LiveSet::load(
         store,
         segment_cache,
+        session_cache,
         namespace_id,
         options.grace_window_ms,
         context,
@@ -61,6 +68,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         grace_window_ms: options.grace_window_ms,
         mutation: context,
         live: &live,
+        session_cache,
     };
     for family in CandidateFamily::ALL {
         if family == CandidateFamily::Content {

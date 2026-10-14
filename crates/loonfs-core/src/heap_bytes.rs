@@ -6,6 +6,7 @@
 //! tree node, and reference count the value owns. Allocator rounding and
 //! bookkeeping stay outside every budget.
 
+use crate::gc::CompletedUploadSession;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::api::v0::FilesystemChange;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
@@ -171,6 +172,12 @@ impl HeapBytes for ChangeSeq {
 impl HeapBytes for Checksum {
     fn heap_bytes(&self) -> usize {
         self.value.heap_bytes()
+    }
+}
+
+impl HeapBytes for CompletedUploadSession {
+    fn heap_bytes(&self) -> usize {
+        self.content_id.heap_bytes()
     }
 }
 

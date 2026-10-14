@@ -31,6 +31,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
     let report = gc_namespace(
         &recorded,
         None,
+        None,
         &namespace_id,
         &options(),
         &context(GRACE_MS + 1),
@@ -78,6 +79,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
     let retired = gc_namespace(
         &recorded,
         None,
+        None,
         &target,
         &options(),
         &context(1_000 + retirement_ms()),
@@ -110,6 +112,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let recorded = RecordingStore::new(undated, KeyPredicate::any());
     let report = gc_namespace(
         &recorded,
+        None,
         None,
         &namespace_id,
         &options(),
@@ -228,6 +231,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         gc_namespace(
             &rooted,
             None,
+            None,
             &namespace_id,
             &options(),
             &context(now_ms),
@@ -242,6 +246,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
         gc_namespace(
             &current_only,
+            None,
             None,
             &namespace_id,
             &options(),

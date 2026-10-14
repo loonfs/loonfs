@@ -417,6 +417,7 @@ mod streamed_content {
                 loonfs_core::gc_namespace(
                     &store,
                     None,
+                    None,
                     &namespace_id,
                     &options,
                     &aged,
@@ -437,6 +438,7 @@ mod streamed_content {
         );
         loonfs_core::gc_namespace(
             &store,
+            None,
             None,
             &namespace_id,
             &loonfs_core::GcOptions::default(),
@@ -519,6 +521,7 @@ mod streamed_content {
             loonfs_core::gc_namespace(
                 &store,
                 None,
+                None,
                 &namespace_id,
                 &options,
                 &expired,
@@ -550,6 +553,7 @@ mod streamed_content {
                 loonfs_core::gc_namespace(
                     &store,
                     None,
+                    None,
                     &namespace_id,
                     &options,
                     &aged,
@@ -570,6 +574,7 @@ mod streamed_content {
         );
         loonfs_core::gc_namespace(
             &store,
+            None,
             None,
             &namespace_id,
             &loonfs_core::GcOptions::default(),
@@ -1422,6 +1427,7 @@ mod direct_multipart {
         };
         gc_namespace(
             &store,
+            None,
             None,
             &session.namespace_id,
             &options,

@@ -211,6 +211,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
     gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &GcOptions::default(),
         &context,

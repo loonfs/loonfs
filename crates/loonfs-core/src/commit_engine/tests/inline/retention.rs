@@ -228,6 +228,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     gc_namespace(
         &aged,
         None,
+        None,
         &namespace_id,
         &GcOptions::default(),
         &MutationContext {

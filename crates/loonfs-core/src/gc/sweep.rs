@@ -3,6 +3,7 @@ use super::deletes::DeletedCounter;
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{sweep_pin, GraceAge, PinSweep};
+use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{sweep_completed_session, sweep_upload_session, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
@@ -30,6 +31,7 @@ pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
+    pub(super) session_cache: Option<&'a CompletedUploadSessionCache>,
 }
 
 impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
@@ -114,29 +116,54 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         let Some(upload_id) = upload_id_of(&key) else {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         };
-        if let Some(completed_at_ms) = self.live.completed_sessions.get(&upload_id) {
-            let sweep = sweep_completed_session(self.live, self.mutation.now_ms, completed_at_ms);
-            return Ok(self.upload_session_decision(key, sweep));
-        }
-        // An open session's record can change during the pass, and an aborted
-        // session's cleanup needs the whole record, so the sweep reads these
-        // records again.
-        let state = match load_upload_session_state(self.store, self.namespace_id, &upload_id).await
-        {
-            Ok(state) => state,
-            Err(CoreError::UploadNotFound { .. }) => {
-                return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
+        let sweep = match self.live.completed_sessions.get(&upload_id) {
+            Some(session) => {
+                let sweep = sweep_completed_session(
+                    self.live,
+                    self.mutation.now_ms,
+                    session.completed_at_ms,
+                );
+                // The sweep adds a kept session to the cache, so a later pass
+                // doesn't read its record. Adding it here instead of when the
+                // record is read means that this pass's inserts can't drop an
+                // entry that its own listing hasn't looked up yet.
+                if let (Some(cache), UploadSessionSweep::Retain { .. }) =
+                    (self.session_cache, sweep)
+                {
+                    cache.insert(upload_id.clone(), session.clone());
+                }
+                sweep
             }
-            Err(error) => return Err(error),
+            // An open session's record can change during the pass, and an
+            // aborted session's cleanup needs the whole record, so the sweep
+            // reads these records again.
+            None => {
+                let state = match load_upload_session_state(
+                    self.store,
+                    self.namespace_id,
+                    &upload_id,
+                )
+                .await
+                {
+                    Ok(state) => state,
+                    Err(CoreError::UploadNotFound { .. }) => {
+                        return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
+                    }
+                    Err(error) => return Err(error),
+                };
+                sweep_upload_session(
+                    self.store,
+                    self.grace_window_ms,
+                    self.live,
+                    self.mutation,
+                    &state,
+                )
+                .await?
+            }
         };
-        let sweep = sweep_upload_session(
-            self.store,
-            self.grace_window_ms,
-            self.live,
-            self.mutation,
-            &state,
-        )
-        .await?;
+        if let (Some(cache), UploadSessionSweep::Delete) = (self.session_cache, sweep) {
+            cache.invalidate(&upload_id);
+        }
         Ok(self.upload_session_decision(key, sweep))
     }
 

@@ -214,6 +214,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         gc_namespace(
             &aged,
             None,
+            None,
             &namespace_id,
             &options,
             &reclaimed,
@@ -223,6 +224,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .expect("gc removes the session record");
         let report = gc_namespace(
             &aged,
+            None,
             None,
             &namespace_id,
             &options,

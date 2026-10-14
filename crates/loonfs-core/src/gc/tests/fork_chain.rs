@@ -82,6 +82,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         let report = gc_namespace(
             &store,
             None,
+            None,
             &namespaces[index],
             &options(),
             &aged,
@@ -111,6 +112,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         let report = gc_namespace(
             &store,
             None,
+            None,
             &namespaces[index],
             &options(),
             &aged,
@@ -123,6 +125,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     for index in [2, 1, 0] {
         gc_namespace(
             &store,
+            None,
             None,
             &namespaces[index],
             &options(),

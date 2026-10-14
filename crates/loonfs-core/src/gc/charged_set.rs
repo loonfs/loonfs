@@ -109,15 +109,15 @@ impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
     }
 }
 
-/// A map charged like `ChargedSet`. Its values are `Copy`, so they own no heap
-/// and the charge counts only their inline size.
+/// A map charged like `ChargedSet`, for its table and the heap bytes of its
+/// keys and values.
 pub(super) struct ChargedMap<K, V> {
     entries: HashMap<K, V>,
     heap_bytes: usize,
     charge: Charge,
 }
 
-impl<K: Eq + std::hash::Hash + HeapBytes, V: Copy> ChargedMap<K, V> {
+impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
     pub(super) fn new(pass: &PassMemory) -> Self {
         Self {
             entries: HashMap::new(),
@@ -126,15 +126,18 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: Copy> ChargedMap<K, V> {
         }
     }
 
-    pub(super) fn get(&self, key: &K) -> Option<V> {
-        self.entries.get(key).copied()
+    pub(super) fn get(&self, key: &K) -> Option<&V> {
+        self.entries.get(key)
     }
 
     pub(super) fn insert(&mut self, key: K, value: V) -> Result<()> {
         let key_heap_bytes = key.heap_bytes();
-        if self.entries.insert(key, value).is_none() {
-            self.heap_bytes += key_heap_bytes;
-        }
+        let value_heap_bytes = value.heap_bytes();
+        // A replaced entry keeps its original key.
+        self.heap_bytes = match self.entries.insert(key, value) {
+            Some(previous) => self.heap_bytes - previous.heap_bytes() + value_heap_bytes,
+            None => self.heap_bytes + key_heap_bytes + value_heap_bytes,
+        };
         let bytes = hash_map_table_bytes(&self.entries) + self.heap_bytes;
         self.charge
             .add(bytes.saturating_sub(self.charge.reserved_bytes))

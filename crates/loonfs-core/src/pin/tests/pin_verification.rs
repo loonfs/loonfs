@@ -148,6 +148,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     let collection = crate::gc::gc_namespace(
         store,
         None,
+        None,
         namespace_id,
         &options,
         &mutation_context(

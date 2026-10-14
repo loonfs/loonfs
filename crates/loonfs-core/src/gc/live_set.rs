@@ -5,7 +5,8 @@
 
 use super::charged_set::{Charge, ChargedMap, ChargedSet, PassMemory};
 use super::reap::GraceAge;
-use super::uploads::load_upload_sessions;
+use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
+use super::uploads::{load_upload_sessions, ListedUploadSession};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
@@ -22,7 +23,6 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::UploadSessionRecordStatus;
 use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestPayload};
 use loonfs_types::{ContentId, ManifestNo, NamespaceId, UploadId, WalNo};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,11 +40,10 @@ pub(super) struct LiveSet {
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
     pub(super) content_ids: ChargedSet<ContentId>,
-    /// The completion time of each upload session that was completed when the
-    /// pass read the session records, keyed by upload ID. A completed record
-    /// can't change, so the session sweep uses this time instead of reading the
-    /// record again.
-    pub(super) completed_sessions: ChargedMap<UploadId, u64>,
+    /// Each upload session that was completed when the pass listed the
+    /// sessions, keyed by upload ID. A completed record can't change, so the
+    /// session sweep uses these facts instead of reading the record again.
+    pub(super) completed_sessions: ChargedMap<UploadId, CompletedUploadSession>,
     pub(super) manifests: Vec<LoadedManifest>,
     manifest_charge: Charge,
     pub(super) memory: PassMemory,
@@ -59,11 +58,13 @@ impl LiveSet {
     /// Loads roots, their segments, and in an active namespace the content they
     /// name, including superseded manifests with a young or undated successor
     /// regardless of the discovery hint. Reads go through `segment_cache`, and
-    /// the object keys, content IDs, session completion times, and held
-    /// manifests are charged to its read working memory.
+    /// the object keys, content IDs, completed sessions, and manifests that the
+    /// pass keeps are charged to its read working memory. The pass doesn't
+    /// read the record of a completed session that `session_cache` has.
     pub(super) async fn load<S: ObjectStore + ?Sized>(
         store: &S,
         segment_cache: Option<&MetadataSegmentCache>,
+        session_cache: Option<&CompletedUploadSessionCache>,
         namespace_id: &NamespaceId,
         grace_window_ms: u64,
         context: &MutationContext,
@@ -78,15 +79,12 @@ impl LiveSet {
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
         if !manifest.state.envelope.payload().status.is_deleted() {
-            load_upload_sessions(store, namespace_id, |session| {
-                content_ids.insert(session.content_id)?;
-                if let UploadSessionRecordStatus::Completed {
-                    completed_at_ms, ..
-                } = session.status
-                {
-                    completed_sessions.insert(session.upload_id, completed_at_ms)?;
+            load_upload_sessions(store, namespace_id, session_cache, |listed| match listed {
+                ListedUploadSession::Completed { upload_id, session } => {
+                    content_ids.insert(session.content_id.clone())?;
+                    completed_sessions.insert(upload_id, session)
                 }
-                Ok(())
+                ListedUploadSession::Incomplete { content_id } => content_ids.insert(content_id),
             })
             .await?;
         }

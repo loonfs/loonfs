@@ -31,6 +31,7 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
         loonfs_core::gc_namespace(
             &store,
             None,
+            None,
             deleted,
             &loonfs_core::GcOptions::default(),
             &aged,

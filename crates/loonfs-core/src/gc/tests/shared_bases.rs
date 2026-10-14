@@ -151,6 +151,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
     let report = gc_namespace(
         &store,
         Some(&cache),
+        None,
         &namespace_id,
         &options,
         &context(GRACE_MS + 1),
@@ -232,6 +233,7 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
         let report = gc_namespace(
             &store,
             None,
+            None,
             &namespace_id,
             &options(),
             &context(now_ms),
@@ -298,6 +300,7 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
     let report = gc_namespace(
         &store,
         None,
+        None,
         &namespace_id,
         &options(),
         &context(GRACE_MS + 1),
@@ -342,6 +345,7 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     let context = context(GRACE_MS + 1);
     let live = LiveSet::load(
         &store,
+        None,
         None,
         &namespace_id,
         GRACE_MS,
