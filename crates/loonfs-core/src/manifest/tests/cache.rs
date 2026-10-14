@@ -1714,3 +1714,116 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     drop(second);
     assert_eq!(pool.in_use(), 0);
 }
+
+async fn current_segment_refs<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<MetadataSegmentRef> {
+    load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| run.segments.iter().cloned())
+        .collect()
+}
+
+/// The number of blocks that inserting `descriptors` adds to a segment cache:
+/// each segment's index and filter blocks, and its data blocks, because the
+/// fixture's segments are small enough to fetch whole.
+async fn written_segment_blocks<S: ObjectStore + ?Sized>(
+    store: &S,
+    descriptors: &[MetadataSegmentRef],
+) -> usize {
+    let mut blocks = 0;
+    for descriptor in descriptors {
+        assert!(index_block_load::segment_object_bytes(descriptor) <= 256 * 1024);
+        let index =
+            index_block_load::load_segment_index_for_compaction(store, None, None, descriptor)
+                .await
+                .expect("load the segment index");
+        blocks += 2 + index.len();
+    }
+    blocks
+}
+
+/// Checks that a compaction step and a streaming compaction read their input
+/// segments without the segment cache, and insert the blocks of the segments
+/// they write and nothing else.
+#[tokio::test]
+async fn compactions_read_input_without_the_cache_and_insert_only_their_output() {
+    for streaming in [false, true] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        for index in 0..4 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
+                .expect("write file");
+            fold::fold_wal(&store, &namespace_id)
+                .await
+                .expect("fold the tail");
+        }
+        let input: BTreeSet<String> = current_segment_refs(&store, &namespace_id)
+            .await
+            .iter()
+            .map(metadata_segment_object_key)
+            .collect();
+        let cache = MetadataSegmentCache::unshared(usize::MAX);
+        if streaming {
+            let (policy, spec) =
+                plan_a_family_group_compaction(&store, &namespace_id, &context).await;
+            let outcome = run_metadata_compaction_job(
+                &store,
+                Some(&cache),
+                &namespace_id,
+                loonfs_types::CompactorEpoch(0),
+                &spec,
+                policy,
+                &MetadataCompactionCancellation::default(),
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("run the streaming compaction");
+            assert_matches!(outcome, MetadataCompactionJobOutcome::Published { .. });
+        } else {
+            let outcome = compaction_step(
+                &store,
+                &namespace_id,
+                loonfs_types::CompactorEpoch(0),
+                MetadataRunPolicy::default(),
+                MetadataCompactionPolicy::CompactImmediately,
+                Some(&cache),
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("run a compaction step");
+            assert_matches!(outcome, CompactionStepOutcome::UnitPublished { .. });
+        }
+        let output: Vec<_> = current_segment_refs(&store, &namespace_id)
+            .await
+            .into_iter()
+            .filter(|descriptor| !input.contains(&metadata_segment_object_key(descriptor)))
+            .collect();
+        assert!(!output.is_empty(), "the compaction writes segments");
+        let stats = cache.stats();
+        assert_eq!(
+            (stats.hits, stats.misses),
+            (0, 0),
+            "a compaction looks up no input block (streaming: {streaming})"
+        );
+        assert_eq!(
+            stats.inserts,
+            written_segment_blocks(&store, &output).await,
+            "a compaction inserts its output's blocks and nothing else (streaming: {streaming})"
+        );
+    }
+}

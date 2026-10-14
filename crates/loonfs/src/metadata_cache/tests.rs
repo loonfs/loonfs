@@ -177,13 +177,7 @@ async fn folds_and_pin_folds_use_the_shared_pool_and_segment_cache() {
             small_memo_reads > default_memo_reads,
             "{creation:?}: a one-byte memo must reread blocks: {small_memo_reads} against {default_memo_reads}"
         );
-        match creation {
-            PinCreation::Fold => assert_eq!(
-                warm_cache_reads, small_memo_reads,
-                "standalone folds bypass the segment cache"
-            ),
-            _ => assert_eq!(warm_cache_reads, 0, "{creation:?} reuses cached blocks"),
-        }
+        assert_eq!(warm_cache_reads, 0, "{creation:?} reuses cached blocks");
     }
 }
 

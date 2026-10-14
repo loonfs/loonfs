@@ -928,7 +928,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
             context,
             &deadline,
-            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            self.segment_cache.as_deref(),
             &self.content_writes,
         )
         .await;

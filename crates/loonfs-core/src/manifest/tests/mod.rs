@@ -331,7 +331,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -366,6 +366,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
 ) -> MetadataCompactionJobOutcome {
     run_metadata_compaction_job(
         store,
+        None,
         namespace_id,
         loonfs_types::CompactorEpoch(0),
         spec,
@@ -456,7 +457,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -731,6 +732,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
             let run_segments = build_manifest_segments(
                 store,
+                None,
                 namespace_id,
                 metadata_state,
                 &HashMap::new(),
@@ -757,6 +759,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                     segments: flatten_manifest_segments(
                         build_manifest_delta_run_segments(
                             store,
+                            None,
                             namespace_id,
                             previous.manifest.payload().head_seq,
                             metadata_state,
@@ -774,6 +777,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         Some(_) => {
             let run_segments = build_manifest_segments(
                 store,
+                None,
                 namespace_id,
                 metadata_state,
                 &HashMap::new(),
@@ -791,6 +795,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         _ => {
             let run_segments = build_manifest_segments(
                 store,
+                None,
                 namespace_id,
                 metadata_state,
                 &HashMap::new(),

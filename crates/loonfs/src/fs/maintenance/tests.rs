@@ -1214,3 +1214,75 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     );
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Checks that the first read after an explicit fold, and again after bounded
+/// compaction units, finds the segments that maintenance wrote in the
+/// runtime's segment cache and sends no segment GET.
+#[tokio::test]
+async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
+    use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+    use std::collections::HashMap;
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let namespace_id = namespace_id("read-after-maintenance");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    let read_gets_by_key_class = |path: &'static str| {
+        let namespace = &namespace;
+        let store = &store;
+        async move {
+            store.reset();
+            let file = namespace.read_file(path).await.expect("read the file");
+            assert_eq!(file.bytes, path.as_bytes());
+            let mut gets = HashMap::<Option<DurableObjectFamily>, usize>::new();
+            for key in store.take_get_keys() {
+                *gets
+                    .entry(parse_object_key(&key).map(|parsed| parsed.family()))
+                    .or_default() += 1;
+            }
+            gets
+        }
+    };
+    let segment = Some(DurableObjectFamily::MetadataSegment);
+
+    write_and_fold(&writer, &maintenance, &namespace_id, "/docs/first.txt").await;
+    let gets = read_gets_by_key_class("/docs/first.txt").await;
+    assert_eq!(gets.get(&segment), None, "GETs after a fold: {gets:?}");
+
+    write_and_fold(&writer, &maintenance, &namespace_id, "/docs/second.txt").await;
+    let mut units = 0;
+    loop {
+        match maintenance
+            .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("compact one unit")
+            .compaction
+        {
+            MetadataCompactionOutcome::BoundedMergePublished => units += 1,
+            MetadataCompactionOutcome::NotNeeded => break,
+            other => panic!("expected a bounded unit, found {other:?}"),
+        }
+    }
+    assert!(units > 0, "the second fold leaves runs to merge");
+    let manifest = current_manifest_payload(store.as_ref(), &namespace_id).await;
+    assert!(manifest.runs.iter().all(|run| run.tier == RunTier::Base));
+    let gets = read_gets_by_key_class("/docs/second.txt").await;
+    assert_eq!(gets.get(&segment), None, "GETs after compaction: {gets:?}");
+    writer.shutdown().await.expect("shutdown");
+}

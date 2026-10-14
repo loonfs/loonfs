@@ -1124,7 +1124,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 &namespace_id,
                 &Deadline::start(timer_b.clone()),
                 crate::manifest::MetadataRunPolicy::default(),
-                Arc::default(),
+                None,
                 &tokio::sync::Semaphore::new(32),
             )
             .await

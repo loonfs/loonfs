@@ -68,7 +68,7 @@ impl Fixture {
             selected.state.compactor_epoch(),
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -326,7 +326,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
                 writer,
                 &fixture.context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                Arc::default(),
+                None,
                 &content_writes,
             )
             .await

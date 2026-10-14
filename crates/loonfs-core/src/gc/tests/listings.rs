@@ -188,7 +188,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                     loonfs_types::CompactorEpoch(0),
                     Default::default(),
                     MetadataCompactionPolicy::CompactImmediately,
-                    Arc::default(),
+                    None,
                     crate::test_support::std_timer(),
                 )
                 .await

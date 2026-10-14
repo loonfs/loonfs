@@ -204,6 +204,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
 
     let segments = build_manifest_segments(
         &store,
+        None,
         &namespace_id,
         &state,
         &HashMap::new(),
@@ -301,9 +302,10 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
             target_segment_bytes: NonZeroUsize::new(target_bytes).expect("target"),
             ..MetadataRunPolicy::default()
         };
-        let families = build_manifest_segments(&store, &namespace, &state, &HashMap::new(), policy)
-            .await
-            .expect("write byte-bounded segments");
+        let families =
+            build_manifest_segments(&store, None, &namespace, &state, &HashMap::new(), policy)
+                .await
+                .expect("write byte-bounded segments");
         let family = families
             .iter()
             .find(|family| family.family == ApiMetadataRowFamily::Attributes)

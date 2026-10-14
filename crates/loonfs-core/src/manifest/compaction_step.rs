@@ -9,6 +9,7 @@
 //! [`MetadataCompactionPolicy`] decides when input sizes warrant a merge.
 
 use super::block_load::SessionBlockMemo;
+use super::cache::{read_working_memory, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::index_block_load::{load_segment_index_for_compaction, segment_object_bytes};
@@ -20,7 +21,6 @@ use super::runs::{
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
-use crate::cache::ReadWorkingMemory;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::load_current_manifest;
@@ -104,7 +104,7 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
     compactor_epoch: CompactorEpoch,
     policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
-    pool: Arc<ReadWorkingMemory>,
+    segment_cache: Option<&MetadataSegmentCache>,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<CompactionStepOutcome> {
     let deadline = Deadline::start(timer);
@@ -115,7 +115,7 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
         policy,
         compaction_policy,
         &deadline,
-        pool,
+        segment_cache,
     )
     .await
 }
@@ -127,7 +127,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
     deadline: &Deadline,
-    pool: Arc<ReadWorkingMemory>,
+    segment_cache: Option<&MetadataSegmentCache>,
 ) -> Result<CompactionStepOutcome> {
     let current_manifest = load_current_manifest(store, namespace_id)
         .await
@@ -137,8 +137,10 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
         return Ok(CompactionStepOutcome::Fenced);
     }
     let floor_seq = current_manifest.retention_floor_seq();
+    // The step reads its input runs without the cache, and the merge inserts
+    // its output into the cache.
     let mut segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
-    segments.block_memo = SessionBlockMemo::new(pool);
+    segments.block_memo = SessionBlockMemo::new(read_working_memory(segment_cache));
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(previous.payload());
@@ -174,6 +176,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     let merged = merge_group_in_step(
         &segments,
         Some(&segments.block_memo),
+        segment_cache,
         namespace_id,
         group,
         &input.runs,

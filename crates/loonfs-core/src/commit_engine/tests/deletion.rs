@@ -204,7 +204,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             acquired_writer.clone(),
             &context,
             &deadline,
-            Arc::default(),
+            None,
             &tokio::sync::Semaphore::new(32),
         )
         .await

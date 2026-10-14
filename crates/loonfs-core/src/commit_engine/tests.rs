@@ -945,7 +945,7 @@ async fn writer_after_own_compaction(
         current.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
-        crate::manifest::read_working_memory(engine.segment_cache.as_deref()),
+        engine.segment_cache.as_deref(),
         crate::test_support::std_timer(),
     )
     .await

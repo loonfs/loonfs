@@ -769,6 +769,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         .expect("materialization");
     let malformed_run_segments = build_manifest_segments_from_rows(
         &store,
+        None,
         &namespace_id,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
         MetadataRunPolicy {
@@ -780,6 +781,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     .expect("write malformed run segments");
     let metadata_segments = build_manifest_segments_from_rows(
         &store,
+        None,
         &namespace_id,
         |family| {
             super::row::manifest_rows_for_family_after_seq(

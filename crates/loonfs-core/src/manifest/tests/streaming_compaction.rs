@@ -424,7 +424,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    run_metadata_compaction(&segments, namespace_id, spec, policy, cancellation)
+    run_metadata_compaction(&segments, None, namespace_id, spec, policy, cancellation)
         .await
         .expect("run the streaming compaction")
 }
@@ -593,7 +593,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -685,7 +685,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         loonfs_types::CompactorEpoch(0),
         starving_policy(),
         MetadataCompactionPolicy::default(),
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -738,7 +738,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::SizeTiered,
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -800,7 +800,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -849,7 +849,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -1268,6 +1268,7 @@ async fn a_repeated_revision_row_key_is_refused() {
     let step_error = merge_group_in_step(
         &segments,
         None,
+        None,
         &namespace_id,
         group,
         &input.runs,
@@ -1283,6 +1284,7 @@ async fn a_repeated_revision_row_key_is_refused() {
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let job_error = run_metadata_compaction(
         &segments,
+        None,
         &namespace_id,
         &spec,
         merge_everything_policy(),
@@ -1527,6 +1529,7 @@ async fn install_synthetic_bindings_base(
     ]);
     let run_segments = build_manifest_segments_from_rows(
         store,
+        None,
         namespace_id,
         |family| {
             let mut rows = rows_by_family.remove(&family).unwrap_or_default();
@@ -1618,6 +1621,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
 
     let merged = merge_group_in_step(
         &segments,
+        None,
         None,
         &namespace_id,
         group,
@@ -1894,6 +1898,7 @@ async fn large_compaction_inputs(
         let mut rows = Some(rows);
         let segments = build_manifest_segments_from_rows(
             store,
+            None,
             namespace_id,
             |family| {
                 if family == ApiMetadataRowFamily::Attributes {
@@ -1962,6 +1967,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     let segments = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
     let result = merge_group_in_step(
         &segments,
+        None,
         None,
         &namespace_id,
         group,
@@ -2132,6 +2138,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     };
     let merged = merge_group_in_step(
         &segments,
+        None,
         None,
         &namespace_id,
         group,
@@ -2327,7 +2334,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -2466,7 +2473,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            Arc::default(),
+            None,
             crate::test_support::std_timer(),
         )
         .await
@@ -2514,6 +2521,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         };
         let outcome = run_metadata_compaction_job(
             &dying_store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             &spec,
@@ -2986,7 +2994,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         epoch,
         merge_everything_policy(),
         MetadataCompactionPolicy::CompactImmediately,
-        Arc::default(),
+        None,
         crate::test_support::std_timer(),
     )
     .await
@@ -2995,6 +3003,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert!(reads_only_manifests(&store));
     let job = run_metadata_compaction_job(
         &store,
+        None,
         &namespace,
         epoch,
         &spec,
@@ -3202,6 +3211,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = run_metadata_compaction_job(
         &store,
+        None,
         &namespace,
         epoch,
         &spec,
@@ -3269,6 +3279,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     failing.fail_next(1);
     run_metadata_compaction_job(
         &failing,
+        None,
         &namespace,
         epoch,
         &spec,
@@ -3422,6 +3433,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
         let bounded = merge_group_in_step(
             &basis,
             None,
+            None,
             &namespace_id,
             group,
             &runs,
@@ -3434,6 +3446,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
         let spec = MetadataCompactionSpec::new(group, vec![RunNo(0)], 3, placement, head.seq);
         let streamed = run_metadata_compaction(
             &basis,
+            None,
             &namespace_id,
             &spec,
             policy,

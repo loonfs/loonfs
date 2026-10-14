@@ -1,8 +1,7 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::block_load::SessionBlockMemo;
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
-use super::cache::{read_working_memory, MetadataSegmentCache};
+use super::cache::MetadataSegmentCache;
 use super::load::load_basis_metadata_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
@@ -19,7 +18,6 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::CurrentManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::read_working_memory::ReadWorkingMemory;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::time::{Deadline, Observation};
 use crate::wal::replay_discovered_tail;
@@ -97,7 +95,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         namespace_id,
         &deadline,
         MetadataRunPolicy::default(),
-        Arc::default(),
+        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -108,12 +106,18 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataRunPolicy,
-    pool: Arc<ReadWorkingMemory>,
+    segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldWalResponse> {
-    let basis =
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, content_writes)
-            .await?;
+    let basis = fold_wal_basis_with_deadline(
+        store,
+        namespace_id,
+        deadline,
+        policy,
+        segment_cache,
+        content_writes,
+    )
+    .await?;
     Ok(fold_wal_response(namespace_id, basis))
 }
 
@@ -122,15 +126,14 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataRunPolicy,
-    pool: &Arc<ReadWorkingMemory>,
+    segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
         // the rule that keeps a held tail.
-        let mut projection =
-            load_fold_projection(store, namespace_id, None, deadline.observe()).await?;
-        projection.manifest_segments.block_memo = SessionBlockMemo::new(Arc::clone(pool));
+        let projection =
+            load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?;
         Result::Ok(
             match try_fold_wal_projection(
                 store,
@@ -397,7 +400,6 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
     let policy = MetadataRunPolicy::default();
-    let pool = read_working_memory(segment_cache);
     let folded = if let Some(input) = input {
         let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
         let manifest_projection = ManifestProjection {
@@ -425,15 +427,22 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
                     namespace_id,
                     deadline,
                     policy,
-                    &pool,
+                    segment_cache,
                     content_writes,
                 )
                 .await?
             }
         }
     } else {
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, content_writes)
-            .await?
+        fold_wal_basis_with_deadline(
+            store,
+            namespace_id,
+            deadline,
+            policy,
+            segment_cache,
+            content_writes,
+        )
+        .await?
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(folded.manifest.clone()),
@@ -563,6 +572,8 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         })?;
     let head_seq = projection.head.seq;
     let tail_state = projection.tail_with_deletion_inodes().await?;
+    // The fold inserts the segments it writes into the cache it read through.
+    let segment_cache = projection.manifest_segments.segment_cache;
     // A WAL fold keeps existing runs and writes the WAL delta as one new delta
     // run. Compaction merges delta runs into the base separately.
     //
@@ -580,8 +591,15 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 run_seq: head_seq,
                 tier: RunTier::Base,
                 segments: flatten_manifest_segments(
-                    build_manifest_segments(store, namespace_id, &tail_state, layouts, policy)
-                        .await?,
+                    build_manifest_segments(
+                        store,
+                        segment_cache,
+                        namespace_id,
+                        &tail_state,
+                        layouts,
+                        policy,
+                    )
+                    .await?,
                 ),
             }],
             next_run_no_after(run_no)?,
@@ -601,6 +619,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 segments: flatten_manifest_segments(
                     build_manifest_delta_run_segments(
                         store,
+                        segment_cache,
                         namespace_id,
                         previous_manifest.payload().head_seq,
                         &tail_state,
