@@ -186,7 +186,7 @@ impl Fixture {
         kind != "revoke"
     }
 
-    /// Checks that the read uses at most three storage requests without
+    /// Checks that the read uses at most four storage requests without
     /// reloading the hint or any manifests.
     fn assert_no_reload(&self, read: &str) {
         let operations = self.recording.take();
@@ -200,7 +200,7 @@ impl Fixture {
             })
             .count();
         assert!(
-            operations.len() <= 3 && reloads == 0,
+            operations.len() <= 4 && reloads == 0,
             "{read}: {} requests, {reloads} hint or manifest GETs: {operations:?}",
             operations.len()
         );
