@@ -21,7 +21,8 @@ use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalI
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
     Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName,
-    InodeId, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
+    InodeId, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, UploadId,
+    WriterId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
@@ -151,6 +152,7 @@ text_heap_bytes!(
     PinId,
     PrincipalId,
     PrincipalScope,
+    UploadId,
     WriterId,
 );
 

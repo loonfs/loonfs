@@ -1,10 +1,10 @@
 //! Bytes a collection pass holds, charged to the read working memory.
 
 use crate::error::{CoreError, Result};
-use crate::heap_bytes::{hash_set_table_bytes, HeapBytes};
+use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
 use crate::read_working_memory::ReadWorkingMemory;
 use loonfs_types::NamespaceId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -104,6 +104,38 @@ impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
         self.heap_bytes += value.heap_bytes();
         self.values.insert(value);
         let bytes = hash_set_table_bytes(&self.values) + self.heap_bytes;
+        self.charge
+            .add(bytes.saturating_sub(self.charge.reserved_bytes))
+    }
+}
+
+/// A map charged like `ChargedSet`. Its values are `Copy`, so they own no heap
+/// and the charge counts only their inline size.
+pub(super) struct ChargedMap<K, V> {
+    entries: HashMap<K, V>,
+    heap_bytes: usize,
+    charge: Charge,
+}
+
+impl<K: Eq + std::hash::Hash + HeapBytes, V: Copy> ChargedMap<K, V> {
+    pub(super) fn new(pass: &PassMemory) -> Self {
+        Self {
+            entries: HashMap::new(),
+            heap_bytes: 0,
+            charge: Charge::new(pass),
+        }
+    }
+
+    pub(super) fn get(&self, key: &K) -> Option<V> {
+        self.entries.get(key).copied()
+    }
+
+    pub(super) fn insert(&mut self, key: K, value: V) -> Result<()> {
+        let key_heap_bytes = key.heap_bytes();
+        if self.entries.insert(key, value).is_none() {
+            self.heap_bytes += key_heap_bytes;
+        }
+        let bytes = hash_map_table_bytes(&self.entries) + self.heap_bytes;
         self.charge
             .add(bytes.saturating_sub(self.charge.reserved_bytes))
     }

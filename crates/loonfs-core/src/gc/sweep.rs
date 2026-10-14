@@ -3,7 +3,7 @@ use super::deletes::DeletedCounter;
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{sweep_pin, GraceAge, PinSweep};
-use super::uploads::{sweep_upload_session, UploadSessionSweep};
+use super::uploads::{sweep_completed_session, sweep_upload_session, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
@@ -114,6 +114,13 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         let Some(upload_id) = upload_id_of(&key) else {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         };
+        if let Some(completed_at_ms) = self.live.completed_sessions.get(&upload_id) {
+            let sweep = sweep_completed_session(self.live, self.mutation.now_ms, completed_at_ms);
+            return Ok(self.upload_session_decision(key, sweep));
+        }
+        // An open session's record can change during the pass, and an aborted
+        // session's cleanup needs the whole record, so the sweep reads these
+        // records again.
         let state = match load_upload_session_state(self.store, self.namespace_id, &upload_id).await
         {
             Ok(state) => state,
@@ -122,29 +129,31 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
             }
             Err(error) => return Err(error),
         };
-        Ok(
-            match sweep_upload_session(
-                self.store,
-                self.grace_window_ms,
-                self.live,
-                self.mutation,
-                &state,
-            )
-            .await?
-            {
-                UploadSessionSweep::Delete => Decision::Delete {
-                    key,
-                    counter: |report| &mut report.deleted.upload_sessions,
-                },
-                UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
-                    match reclaimable_at_ms {
-                        Some(_) => RetainedReason::UploadSessionWindow,
-                        None => RetainedReason::UploadSessionUndecided,
-                    },
-                    reclaimable_at_ms,
-                ),
-            },
+        let sweep = sweep_upload_session(
+            self.store,
+            self.grace_window_ms,
+            self.live,
+            self.mutation,
+            &state,
         )
+        .await?;
+        Ok(self.upload_session_decision(key, sweep))
+    }
+
+    fn upload_session_decision(&self, key: String, sweep: UploadSessionSweep) -> Decision {
+        match sweep {
+            UploadSessionSweep::Delete => Decision::Delete {
+                key,
+                counter: |report| &mut report.deleted.upload_sessions,
+            },
+            UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
+                match reclaimable_at_ms {
+                    Some(_) => RetainedReason::UploadSessionWindow,
+                    None => RetainedReason::UploadSessionUndecided,
+                },
+                reclaimable_at_ms,
+            ),
+        }
     }
 
     pub(super) fn content_candidate(&self, entry: ListedObject, protected: bool) -> Decision {

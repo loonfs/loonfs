@@ -6,9 +6,10 @@ use crate::control_update::{
     load_upload_session_state, try_update_upload_session, CasOutcome, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
 use crate::protocol::AbandonedUpload;
-use futures::StreamExt;
+use futures::{future, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
@@ -16,31 +17,34 @@ use loonfs_types::format::control::{
     UploadAbortOutcome, UploadAlreadyCompletedError, UploadSessionPayload,
     UploadSessionRecordStatus,
 };
-use loonfs_types::{ContentId, NamespaceId};
+use loonfs_types::NamespaceId;
+use std::pin::pin;
 
-/// Hands the content ID of every upload session record in the namespace to
-/// `protect`, one record at a time, so the caller's budget sees each id as
-/// it arrives.
-pub(super) async fn protect_session_content<S: ObjectStore + ?Sized>(
+/// Reads every upload session record in the namespace, with at most
+/// `STORE_READS_IN_FLIGHT` reads in flight, and calls `visit` with each record
+/// as soon as its read finishes, so the caller can charge each record to its
+/// budget as the record arrives.
+pub(super) async fn load_upload_sessions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    mut protect: impl FnMut(ContentId) -> Result<()>,
+    mut visit: impl FnMut(UploadSessionPayload) -> Result<()>,
 ) -> Result<()> {
     let prefix = upload_session_prefix(namespace_id);
-    let mut listing = store.list_prefix_stream(&prefix);
-    while let Some(key) = listing
-        .next()
-        .await
-        .transpose()
-        .map_err(|error| CoreError::store(&prefix, &error))?
-    {
-        let Some(upload_id) = upload_id_of(&key) else {
-            continue;
-        };
-        match load_upload_session_state(store, namespace_id, &upload_id).await {
-            Ok(state) => protect(state.content_id)?,
-            Err(CoreError::UploadNotFound { .. }) => {}
-            Err(error) => return Err(error),
+    let mut sessions = pin!(store
+        .list_prefix_stream(&prefix)
+        .map_err(|error| CoreError::store(&prefix, &error))
+        .try_filter_map(|key| future::ok(upload_id_of(&key)))
+        .map_ok(|upload_id| async move {
+            match load_upload_session_state(store, namespace_id, &upload_id).await {
+                Ok(state) => Ok(Some(state)),
+                Err(CoreError::UploadNotFound { .. }) => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+        .try_buffer_unordered(STORE_READS_IN_FLIGHT));
+    while let Some(state) = sessions.try_next().await? {
+        if let Some(state) = state {
+            visit(state)?;
         }
     }
     Ok(())
@@ -66,13 +70,9 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     state: &UploadSessionPayload,
 ) -> Result<UploadSessionSweep> {
-    match live.retirement_status() {
-        RetirementStatus::Retained { reclaimable_at_ms } => {
-            return Ok(UploadSessionSweep::Retain { reclaimable_at_ms })
-        }
-        RetirementStatus::Active | RetirementStatus::Eligible => {}
+    if let RetirementStatus::Retained { reclaimable_at_ms } = live.retirement_status() {
+        return Ok(UploadSessionSweep::Retain { reclaimable_at_ms });
     }
-    let retired = live.retirement_status() == RetirementStatus::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             abort_expired_session(store, grace_window_ms, context, state, *expires_at_ms).await
@@ -91,17 +91,31 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         }
         UploadSessionRecordStatus::Completed {
             completed_at_ms, ..
-        } => {
-            if !retired
-                && context.now_ms.saturating_sub(*completed_at_ms)
-                    < CONTENT_RECLAMATION_GRACE_WINDOW_MS
-            {
-                return Ok(retain_until(
-                    completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_WINDOW_MS),
-                ));
-            }
-            Ok(UploadSessionSweep::Delete)
+        } => Ok(sweep_completed_session(
+            live,
+            context.now_ms,
+            *completed_at_ms,
+        )),
+    }
+}
+
+/// Returns whether a completed session's record is kept or deleted, using
+/// only the session's completion time.
+pub(super) fn sweep_completed_session(
+    live: &LiveSet,
+    now_ms: u64,
+    completed_at_ms: u64,
+) -> UploadSessionSweep {
+    match live.retirement_status() {
+        RetirementStatus::Retained { reclaimable_at_ms } => {
+            UploadSessionSweep::Retain { reclaimable_at_ms }
         }
+        RetirementStatus::Active
+            if now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_WINDOW_MS =>
+        {
+            retain_until(completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_WINDOW_MS))
+        }
+        RetirementStatus::Active | RetirementStatus::Eligible => UploadSessionSweep::Delete,
     }
 }
 
