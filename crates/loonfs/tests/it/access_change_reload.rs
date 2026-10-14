@@ -1,7 +1,4 @@
-//! Store requests of a subject's first read after a commit, once a manifest
-//! the publisher never heard about has been published: the publisher keeps
-//! planning on its older basis, and its commits must not seed that basis
-//! over the newer manifest a read already loaded.
+//! Storage requests and access checks when the publisher uses an older manifest.
 
 use loonfs::{
     AccessState, AttributeChanges, CreateNamespaceOptions, LoonFs, Maintenance,
@@ -67,10 +64,11 @@ struct Fixture {
     maintenance: Maintenance,
 }
 
-/// A namespace with folded runs and a subject reader on the writer's
-/// runtime. The first compaction on a runtime also publishes its compactor
-/// claim, which no publisher hears about, so the test's compaction leaves
-/// the publisher on an older basis than the manifest a read then loads.
+/// Creates a namespace with folded WAL data and a reader on the writer's runtime.
+///
+/// The first compaction also records a compactor claim without updating the
+/// publisher's cached position. A read can then load the newer manifest
+/// while the publisher continues to use the older manifest.
 async fn fixture(name: &str) -> Fixture {
     let recording = Arc::new(RecordingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
@@ -131,7 +129,8 @@ async fn fixture(name: &str) -> Fixture {
             .await
             .expect("fold");
     }
-    // Maintenance folds drop the publisher's position; this commit reloads it.
+    // Folding clears the publisher's cached position. The next commit reloads
+    // that position.
     admin
         .put_file("/settle", b"x", actor)
         .await
@@ -187,8 +186,8 @@ impl Fixture {
         kind != "revoke"
     }
 
-    /// Asserts the requests since the last call probe the manifest and the
-    /// WAL tip and reload nothing.
+    /// Checks that the read uses at most three storage requests without
+    /// reloading the hint or any manifests.
     fn assert_no_reload(&self, read: &str) {
         let operations = self.recording.take();
         let reloads = operations
@@ -210,9 +209,7 @@ impl Fixture {
 
 const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "regrant"];
 
-/// The publisher misses the compactor claim, so it keeps planning on a
-/// manifest older than the one the first read reloads onto. Its later
-/// commits must not seed that older manifest over the read's.
+/// Checks that later commits keep the newer manifest in the read cache.
 #[tokio::test]
 async fn commits_on_an_older_basis_keep_the_reads_newer_manifest() {
     let fixture = fixture("anchor-seed-guard").await;
@@ -223,7 +220,7 @@ async fn commits_on_an_older_basis_keep_the_reads_newer_manifest() {
         let user_granted = fixture.commit(kind, round + 1).await;
         fixture.recording.reset();
         let read = fixture.user.stat("/m/doc").await;
-        assert_eq!(read.is_ok(), user_granted, "{kind}: access answer");
+        assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
 }

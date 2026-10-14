@@ -302,10 +302,9 @@ impl RuntimeCore {
         state: loonfs_core::publish::ResultingReadState,
     ) {
         let cached = self.inner.head_state.peek_anchor(namespace_id);
-        // A publisher plans on its basis until a successor check moves it, so
-        // its seed can name a manifest older than one a read here already
-        // loaded. The newer anchor stays: its WAL probe finds this publish,
-        // while the older basis would make the next read reload everything.
+        // The publisher can use an older manifest even after a read has loaded a
+        // newer manifest. Keep the newer manifest in the read cache to avoid
+        // reloading metadata. The next read checks the WAL for the new commit.
         if cached
             .as_ref()
             .is_some_and(|cached| cached.basis.manifest_no() > state.basis.manifest_no())
