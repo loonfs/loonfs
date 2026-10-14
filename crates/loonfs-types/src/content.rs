@@ -459,7 +459,7 @@ pub enum ContentRefValidationError {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentRef {
-    /// The content strategy that the referenced content uses.
+    /// The kind of content reference. The format defines one kind, `blob_v1`.
     pub kind: ContentRefKind,
     /// The namespace that originally wrote the bytes.
     pub owner_namespace_id: NamespaceId,

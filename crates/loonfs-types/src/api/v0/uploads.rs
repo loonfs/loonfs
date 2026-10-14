@@ -131,7 +131,7 @@ pub struct SignUploadPartsRequest {
 pub struct SignedUploadPart {
     /// The part number that this capability writes.
     pub part_number: u32,
-    /// A short-lived write capability for that part.
+    /// A short-lived write capability for this part.
     pub access: ObjectTransferAccess,
 }
 
@@ -160,7 +160,8 @@ pub struct CompletedUploadPart {
     pub checksum: Checksum,
 }
 
-/// Proof that a specific `content_ref` can be used in a later commit.
+/// A signed token that shows a `content_ref` was verified in a completed upload, so a later
+/// commit can use that reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -246,14 +247,15 @@ pub enum UploadSessionStatus {
     Completed {
         /// The time the session completed, in Unix milliseconds.
         completed_at_ms: u64,
-        /// The verified content that this session selected.
+        /// The verified content that the session completed with.
         content_ref: ContentRef,
-        /// A new proof for a later commit. It's absent after the window for creating tokens closes.
+        /// A new content token, which a later commit can use to reference the content. It's absent
+        /// after the window for issuing tokens closes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_token: Option<ContentToken>,
     },
-    /// A session that ended without selecting content. Its object no longer exists.
+    /// A session that was aborted before it completed. Its object no longer exists.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusAborted"))]
     Aborted {
         /// The time the session was aborted, in Unix milliseconds.

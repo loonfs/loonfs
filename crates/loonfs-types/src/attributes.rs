@@ -222,7 +222,7 @@ numeric_id! {
     /// precondition, but they can't read earlier maps.
     AttributesRevisionNo,
     public_ordinal,
-    schema_description = "The number of one revision of an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
+    schema_description = "The number of one revision of an inode's attributes. It starts at 0 and increases with every accepted attribute update, even when the map doesn't change."
 }
 
 #[cfg(test)]

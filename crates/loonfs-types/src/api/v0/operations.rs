@@ -38,7 +38,7 @@ pub struct ErrorResponse {
     pub details: Option<Box<ErrorDetails>>,
 }
 
-/// The machine-readable identifiers and state that explain an `ErrorResponse`.
+/// The machine-readable identifiers and state that explain an error response.
 ///
 /// Every field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,7 +582,8 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
     },
-    /// An operation that adds a revision to a file inode if the inode's current revision matches.
+    /// An operation that adds a revision to a file inode if the inode's current revision is
+    /// `expected_revision_no`.
     ///
     /// The operation requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(
@@ -666,7 +667,8 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
     },
-    /// An operation that deletes an inode if its current binding matches.
+    /// An operation that deletes an inode if its current binding version is
+    /// `expected_binding_version`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationDeleteByInode")
@@ -692,7 +694,8 @@ pub enum FilesystemOperation {
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
-    /// An operation that moves an inode if its current binding matches.
+    /// An operation that moves an inode if its current binding version is
+    /// `expected_binding_version`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
     MoveByInode {
         /// The inode to move.
@@ -1066,7 +1069,7 @@ pub struct CommitRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// The proofs for the new external content references in this request.
+    /// One content token for each uploaded `content_ref` that the request uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ContentToken>,
     /// The conditions that the server checks, in order, before it runs any operation.
@@ -1165,7 +1168,7 @@ pub struct CreateSnapshotRequest {
     pub ttl_ms: u64,
 }
 
-/// A request to extend a read snapshot.
+/// A request to extend a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1202,7 +1205,7 @@ pub enum CheckpointOwner {
         /// namespace exists.
         target_namespace_id: NamespaceId,
     },
-    /// A read view that an application created.
+    /// A pin that an application created as a snapshot. It's readable until it expires.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerSnapshot"))]
     Snapshot {
         /// The snapshot's label, which doesn't need to be unique.
@@ -1294,7 +1297,7 @@ pub struct ListCheckpointsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// One page of live read snapshots.
+/// One page of live snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListSnapshotsResponse {
@@ -1336,12 +1339,13 @@ pub struct GcRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// The candidates that current references or manifest discovery protected.
+    /// The candidates that a current root or the shared base filter protected, or that manifest
+    /// discovery needed.
     pub referenced: u64,
-    /// The unreachable candidates that were younger than the grace window, according to their
+    /// The unreferenced candidates that were younger than the grace window, according to their
     /// provider timestamps.
     pub within_grace_window: u64,
-    /// The unreachable candidates that had no provider timestamp.
+    /// The unreferenced candidates that had no provider timestamp, so their age was unknown.
     pub no_provider_timestamp: u64,
     /// The keys that garbage collection didn't recognize in the object families it scanned. The
     /// pass keeps these objects.
@@ -1365,7 +1369,7 @@ pub struct DeletedObjectCounts {
     pub metadata_segments: u64,
     /// The unreferenced manifests that the pass deleted.
     pub manifests: u64,
-    /// The upload session control objects that the pass deleted after the reap window.
+    /// The upload session records that the pass deleted after their grace windows passed.
     pub upload_sessions: u64,
     /// The content objects the pass deleted because no retained view referenced them and they were
     /// older than the grace window.
@@ -1717,7 +1721,7 @@ pub enum CompactionStepOutcome {
         schema(title = "CompactionStepOutcomeManifestAdvanced")
     )]
     ManifestAdvanced {},
-    /// A newer runtime has the compactor epoch.
+    /// A newer runtime claimed the namespace's compactor epoch, so this step published nothing.
     #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeFenced"))]
     Fenced {},
     /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
@@ -1791,7 +1795,7 @@ pub enum MetadataCompactionOutcome {
     NotNeeded,
     /// The selected window fit in a bounded step, and this run published it.
     BoundedMergePublished,
-    /// The selected run window was replaced in a published manifest.
+    /// A streaming compaction merged the selected window and published the next manifest.
     Published {
         /// The manifest that the compaction published.
         manifest_no: ManifestNo,
@@ -1811,7 +1815,7 @@ pub enum MetadataCompactionOutcome {
     /// The run stopped because its inputs changed, time ran out, or publication retries were
     /// exhausted.
     Abandoned,
-    /// Another process claimed the namespace's compactor role, so nothing was published.
+    /// Another process claimed the namespace's compactor epoch, so nothing was published.
     Fenced,
     /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
@@ -1853,7 +1857,7 @@ impl StoreProbeResponse {
 pub struct StoreProbeCheckResult {
     /// The check's stable name.
     pub name: String,
-    /// What the store did.
+    /// Whether the store passed the check, failed it, or doesn't support the capability.
     pub outcome: StoreProbeCheckOutcome,
     /// The expected and actual behavior for a failed check.
     #[serde(default, skip_serializing_if = "Option::is_none")]

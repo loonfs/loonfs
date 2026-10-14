@@ -114,7 +114,7 @@
         "type": "object"
       },
       "AttributesRevisionNo": {
-        "description": "The number of one revision of an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
+        "description": "The number of one revision of an inode's attributes. It starts at 0 and increases with every accepted attribute update, even when the map doesn't change.",
         "format": "int64",
         "maximum": 9007199254740991,
         "minimum": 0,
@@ -203,7 +203,7 @@
         "type": "string"
       },
       "Commit": {
-        "description": "One committed logical commit, including its identity and the events it applied.",
+        "description": "One commit, including its identity and the events it applied.",
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -250,7 +250,7 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "The client's idempotency key for one logical commit.\n\nReuse the same `CommitId` when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value\nthat follows these rules.",
+        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value\nthat follows these rules.",
         "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
@@ -500,7 +500,7 @@
             "description": "The caller's idempotency key for the whole request."
           },
           "content_tokens": {
-            "description": "The proofs for the new external content references in this request.",
+            "description": "One content token for each uploaded `content_ref` that the request uses.",
             "items": {
               "$ref": "#/components/schemas/ContentToken"
             },
@@ -662,7 +662,7 @@
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
-            "description": "The content strategy that the referenced content uses."
+            "description": "The kind of content reference. The format defines one kind, `blob_v1`."
           },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -693,7 +693,7 @@
       },
       "ContentToken": {
         "additionalProperties": false,
-        "description": "Proof that a specific `content_ref` can be used in a later commit.",
+        "description": "A signed token that shows a `content_ref` was verified in a completed upload, so a later\ncommit can use that reference.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -724,7 +724,7 @@
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
-            "description": "A snapshot whose captured file revision the download reads. It can't be combined with\n`revision_no`."
+            "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured. It can't be combined with `revision_no`."
           },
           "start_offset": {
             "description": "The first byte that the grant reads. The grant covers the revision's bytes from\n`start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant\nthat starts after the bytes it already has. The offset must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
@@ -941,7 +941,7 @@
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived read capability for exactly those bytes."
+            "description": "A short-lived read capability for exactly this range's bytes."
           },
           "length": {
             "description": "The number of bytes in the run.",
@@ -964,7 +964,7 @@
         "type": "object"
       },
       "ErrorDetails": {
-        "description": "The machine-readable identifiers and state that explain an `ErrorResponse`.\n\nEvery field is optional.",
+        "description": "The machine-readable identifiers and state that explain an error response.\n\nEvery field is optional.",
         "properties": {
           "active_acquired_at_ms": {
             "description": "The time the current writer acquired its epoch, in Unix milliseconds. It's present when the\ncurrent manifest records a writer.",
@@ -1119,7 +1119,7 @@
       },
       "ExtendSnapshotRequest": {
         "additionalProperties": false,
-        "description": "A request to extend a read snapshot.",
+        "description": "A request to extend a snapshot.",
         "properties": {
           "ttl_ms": {
             "description": "The new lifetime in milliseconds, counted from the server's current time.",
@@ -1817,7 +1817,7 @@
         "type": "object"
       },
       "FilesystemOperationDeleteByInode": {
-        "description": "An operation that deletes an inode if its current binding matches.",
+        "description": "An operation that deletes an inode if its current binding version is\n`expected_binding_version`.",
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DeleteDirectoryBehavior",
@@ -1874,7 +1874,7 @@
         "type": "object"
       },
       "FilesystemOperationMoveByInode": {
-        "description": "An operation that moves an inode if its current binding matches.",
+        "description": "An operation that moves an inode if its current binding version is\n`expected_binding_version`.",
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
@@ -1999,7 +1999,7 @@
         "type": "object"
       },
       "FilesystemOperationPutFileRevisionByInode": {
-        "description": "An operation that adds a revision to a file inode if the inode's current revision matches.\n\nThe operation requires exactly one of `content_ref` and `inline_content`.",
+        "description": "An operation that adds a revision to a file inode if the inode's current revision is\n`expected_revision_no`.\n\nThe operation requires exactly one of `content_ref` and `inline_content`.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -2310,11 +2310,11 @@
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The file's absolute path at the search's snapshot."
+            "description": "The file's absolute path in the view that the search read."
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "The matched revision, which is the newest visible revision at the snapshot."
+            "description": "The matched revision, which is the file's newest revision visible to the search."
           }
         },
         "required": [
@@ -2402,7 +2402,7 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose ordered commit stream was read."
+            "description": "The namespace whose change feed was read."
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -2488,7 +2488,7 @@
         "type": "object"
       },
       "ListSnapshotsResponse": {
-        "description": "One page of live read snapshots.",
+        "description": "One page of live snapshots.",
         "properties": {
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -2543,7 +2543,7 @@
         "type": "object"
       },
       "NameKey": {
-        "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use `DisplayName` for the spelling that\nusers see.",
+        "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use the display name for the spelling\nthat users see.",
         "example": "report.txt",
         "type": "string"
       },
@@ -2820,7 +2820,7 @@
         "type": "string"
       },
       "RevisionNo": {
-        "description": "The number of one revision of a file's content. It increases whenever the content is replaced or restored.",
+        "description": "The number of one revision of a file's content. It increases with every new revision of the file, whether from a put, an append, a replacing copy, or a restore.",
         "format": "int64",
         "maximum": 9007199254740991,
         "minimum": 0,
@@ -2874,7 +2874,7 @@
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived write capability for that part."
+            "description": "A short-lived write capability for this part."
           },
           "part_number": {
             "description": "The part number that this capability writes.",
@@ -3051,7 +3051,7 @@
         ]
       },
       "UploadSessionStatusAborted": {
-        "description": "A session that ended without selecting content. Its object no longer exists.",
+        "description": "A session that was aborted before it completed. Its object no longer exists.",
         "properties": {
           "aborted_at_ms": {
             "description": "The time the session was aborted, in Unix milliseconds.",
@@ -3099,11 +3099,11 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The verified content that this session selected."
+            "description": "The verified content that the session completed with."
           },
           "content_token": {
             "$ref": "#/components/schemas/ContentToken",
-            "description": "A new proof for a later commit. It's absent after the window for creating tokens closes."
+            "description": "A new content token, which a later commit can use to reference the content. It's absent\nafter the window for issuing tokens closes."
           },
           "mode": {
             "$ref": "#/components/schemas/UploadMode",
@@ -3303,7 +3303,7 @@
             }
           },
           {
-            "description": "A snapshot whose captured sequence ends the feed.",
+            "description": "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.",
             "in": "query",
             "name": "snapshot_id",
             "required": false,
@@ -3935,7 +3935,7 @@
                 }
               }
             },
-            "description": "Authoritative path entry"
+            "description": "Path entry"
           },
           "400": {
             "content": {
@@ -4274,7 +4274,7 @@
             }
           },
           {
-            "description": "Whether a pattern with no required grams can use a capped exhaustive scan. The default is `false`.",
+            "description": "Whether a pattern with no required literal bytes can use a capped exhaustive scan. The default is `false`.",
             "in": "query",
             "name": "allow_scan",
             "required": false,
@@ -4904,7 +4904,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads": {
       "post": {
-        "description": "Starts an upload session for content that can later be attached to a file. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns presigned object store credentials.",
+        "description": "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
         "operationId": "create_upload",
         "parameters": [
           {
@@ -5019,7 +5019,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}": {
       "get": {
-        "description": "Returns an upload session. An open `direct_put` session includes newly signed access. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        "description": "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         "operationId": "get_upload",
         "parameters": [
           {
@@ -5110,7 +5110,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort": {
       "post": {
-        "description": "Ends an upload session without selecting content, and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
+        "description": "Aborts an open upload session and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
         "operationId": "abort_upload",
         "parameters": [
           {

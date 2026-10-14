@@ -295,7 +295,7 @@ pub(super) async fn list_path_entries(
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read.")
         ),
         responses(
-            (status = 200, description = "Authoritative path entry", body = loonfs_types::PathEntry),
+            (status = 200, description = "Path entry", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid path, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
@@ -625,7 +625,7 @@ pub(super) async fn create_commit(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("after_seq" = loonfs_types::ChangeSeq, Query, description = "The sequence after which to return committed changes."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot whose captured sequence ends the feed.")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),

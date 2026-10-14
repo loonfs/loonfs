@@ -110,7 +110,7 @@ pub(super) struct UploadPathParams {
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
-        description = "Starts an upload session for content that can later be attached to a file. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns presigned object store credentials.",
+        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateUploadBody,
         responses(
@@ -608,7 +608,7 @@ pub(super) async fn complete_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
-        description = "Returns an upload session. An open `direct_put` session includes newly signed access. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        description = "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")
@@ -676,7 +676,7 @@ pub(super) async fn get_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
         tag = "uploads",
         summary = "Abort upload",
-        description = "Ends an upload session without selecting content, and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
+        description = "Aborts an open upload session and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")

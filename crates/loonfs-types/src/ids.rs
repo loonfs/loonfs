@@ -519,7 +519,7 @@ string_id! {
 string_id! {
     /// The client's idempotency key for one logical commit.
     ///
-    /// Reuse the same `CommitId` when you retry the same request. A commit ID is 1 to 128 lowercase
+    /// Reuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase
     /// ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.
     /// Generated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value
     /// that follows these rules.
@@ -644,8 +644,8 @@ string_id! {
 string_id! {
     /// The directory entry key that the namespace's naming mode derives from a display name.
     ///
-    /// Use the name key for exact name preconditions, and use `DisplayName` for the spelling that
-    /// users see.
+    /// Use the name key for exact name preconditions, and use the display name for the spelling
+    /// that users see.
     NameKey,
     error = NameKeyValidationError,
     validate = validate_name_key,
@@ -735,7 +735,7 @@ numeric_id! {
     /// The number of one revision of a file's content.
     RevisionNo,
     public_ordinal,
-    schema_description = "The number of one revision of a file's content. It increases whenever the content is replaced or restored."
+    schema_description = "The number of one revision of a file's content. It increases with every new revision of the file, whether from a put, an append, a replacing copy, or a restore."
 }
 
 numeric_id! {

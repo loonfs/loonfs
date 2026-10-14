@@ -56,7 +56,7 @@ pub(super) struct GrepQuery {
             ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether matching ignores case. The default is `false`."),
             ("path_prefix" = Option<String>, Query, description = "A complete absolute path that limits matches to its descendants. It can't be combined with `inode_id`."),
             ("inode_id" = Option<String>, Query, description = "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether a pattern with no required grams can use a capped exhaustive scan. The default is `false`."),
+            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether a pattern with no required literal bytes can use a capped exhaustive scan. The default is `false`."),
             ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the server returns results from the index alone when the unindexed tail exceeds the scan budget. The default is `false`."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum number of matches per page."),
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
@@ -164,7 +164,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. The deployment must maintain the grep index.",
+        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
@@ -216,7 +216,7 @@ pub(super) async fn enable_grep_index(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index",
         tag = "maintenance",
         summary = "Get grep index status",
-        description = "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. The deployment must maintain grep indexes, and this operation doesn't change the index.",
+        description = "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. A deployment that doesn't maintain grep indexes returns `not_supported`, and this operation doesn't change the index.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndex),
@@ -255,7 +255,7 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. The deployment must maintain the grep index.",
+        description = "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),

@@ -61,13 +61,13 @@ impl GrepRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepMatch {
-    /// The file's absolute path at the search's snapshot.
+    /// The file's absolute path in the view that the search read.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// The matched file's durable inode ID.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// The matched revision, which is the newest visible revision at the snapshot.
+    /// The matched revision, which is the file's newest revision visible to the search.
     pub revision_no: RevisionNo,
     /// The match's line number, counting from 1.
     pub line_number: u64,

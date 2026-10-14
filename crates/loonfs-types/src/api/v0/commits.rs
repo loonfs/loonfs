@@ -6,7 +6,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// One committed logical commit, including its identity and the events it applied.
+/// One commit, including its identity and the events it applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Commit {
@@ -182,7 +182,7 @@ pub enum FilesystemChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListChangesResponse {
-    /// The namespace whose ordered commit stream was read.
+    /// The namespace whose change feed was read.
     pub namespace_id: NamespaceId,
     /// The exclusive cursor that this page starts after. It's the cursor that the caller supplied,
     /// or the endpoint's initial position.

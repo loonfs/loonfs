@@ -824,7 +824,7 @@ In a `metadata` result, `compaction.outcome` reports the bounded compaction step
 | `bounded_merge_published` | This run published one bounded merge. |
 | `metadata_compaction_required` | A family group's window is too large for one bounded merge. The caller runs the `metadata_compaction` job instead, which compacts the group by streaming. |
 | `manifest_advanced` | Another publisher changed the current manifest first. The segments this run wrote stay unreferenced, and a later GC pass can delete them. |
-| `fenced` | A newer runtime has the compactor epoch. |
+| `fenced` | A newer runtime claimed the namespace's compactor epoch, so this step published nothing. |
 
 The bounded step in a `metadata` run never runs a streaming compaction. Only the `metadata_compaction` job does.
 
@@ -890,8 +890,8 @@ Every core GC response also includes `retained`, which counts the candidates the
 | Reason | Means |
 | --- | --- |
 | `referenced` | Protected by current roots or the shared base filter, or needed for forward manifest discovery. |
-| `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
-| `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
+| `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
+| `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a swept family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
 | `checkpoint_not_deletable` | A pin that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |

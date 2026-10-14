@@ -16,8 +16,8 @@ pub struct CreateDownloadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub revision_no: Option<RevisionNo>,
-    /// A snapshot whose captured file revision the download reads. It can't be combined with
-    /// `revision_no`.
+    /// A snapshot to read the file from. The download reads the revision that the snapshot
+    /// captured. It can't be combined with `revision_no`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
@@ -34,7 +34,8 @@ pub struct CreateDownloadRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateDownloadByInodeRequest {
-    /// A snapshot whose captured file revision the download reads.
+    /// A snapshot to read the file from. The download reads the revision that the snapshot
+    /// captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
@@ -101,7 +102,7 @@ pub struct DownloadRange {
     pub start_offset: u64,
     /// The number of bytes in the run.
     pub length: u64,
-    /// A short-lived read capability for exactly those bytes.
+    /// A short-lived read capability for exactly this range's bytes.
     pub access: ObjectTransferAccess,
 }
 

@@ -114,7 +114,7 @@
         "type": "object"
       },
       "AttributesRevisionNo": {
-        "description": "The number of one revision of an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
+        "description": "The number of one revision of an inode's attributes. It starts at 0 and increases with every accepted attribute update, even when the map doesn't change.",
         "format": "int64",
         "maximum": 9007199254740991,
         "minimum": 0,
@@ -264,7 +264,7 @@
         "type": "object"
       },
       "CheckpointOwnerSnapshot": {
-        "description": "A read view that an application created.",
+        "description": "A pin that an application created as a snapshot. It's readable until it expires.",
         "properties": {
           "kind": {
             "enum": [
@@ -331,7 +331,7 @@
         "type": "string"
       },
       "Commit": {
-        "description": "One committed logical commit, including its identity and the events it applied.",
+        "description": "One commit, including its identity and the events it applied.",
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -378,7 +378,7 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "The client's idempotency key for one logical commit.\n\nReuse the same `CommitId` when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value\nthat follows these rules.",
+        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value\nthat follows these rules.",
         "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
@@ -628,7 +628,7 @@
             "description": "The caller's idempotency key for the whole request."
           },
           "content_tokens": {
-            "description": "The proofs for the new external content references in this request.",
+            "description": "One content token for each uploaded `content_ref` that the request uses.",
             "items": {
               "$ref": "#/components/schemas/ContentToken"
             },
@@ -705,7 +705,7 @@
         "type": "object"
       },
       "CompactionStepOutcomeFenced": {
-        "description": "A newer runtime has the compactor epoch.",
+        "description": "A newer runtime claimed the namespace's compactor epoch, so this step published nothing.",
         "properties": {
           "outcome": {
             "enum": [
@@ -895,7 +895,7 @@
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
-            "description": "The content strategy that the referenced content uses."
+            "description": "The kind of content reference. The format defines one kind, `blob_v1`."
           },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -926,7 +926,7 @@
       },
       "ContentToken": {
         "additionalProperties": false,
-        "description": "Proof that a specific `content_ref` can be used in a later commit.",
+        "description": "A signed token that shows a `content_ref` was verified in a completed upload, so a later\ncommit can use that reference.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -969,7 +969,7 @@
         "properties": {
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
-            "description": "A snapshot whose captured file revision the download reads."
+            "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured."
           },
           "start_offset": {
             "description": "The first byte that the grant reads. It defaults to 0 and must be less than the file's size.\nFor a file of zero bytes, it must be 0.",
@@ -1030,7 +1030,7 @@
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
-            "description": "A snapshot whose captured file revision the download reads. It can't be combined with\n`revision_no`."
+            "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured. It can't be combined with `revision_no`."
           },
           "start_offset": {
             "description": "The first byte that the grant reads. The grant covers the revision's bytes from\n`start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant\nthat starts after the bytes it already has. The offset must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
@@ -1340,7 +1340,7 @@
             "type": "integer"
           },
           "upload_sessions": {
-            "description": "The upload session control objects that the pass deleted after the reap window.",
+            "description": "The upload session records that the pass deleted after their grace windows passed.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1404,7 +1404,7 @@
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived read capability for exactly those bytes."
+            "description": "A short-lived read capability for exactly this range's bytes."
           },
           "length": {
             "description": "The number of bytes in the run.",
@@ -1427,7 +1427,7 @@
         "type": "object"
       },
       "ErrorDetails": {
-        "description": "The machine-readable identifiers and state that explain an `ErrorResponse`.\n\nEvery field is optional.",
+        "description": "The machine-readable identifiers and state that explain an error response.\n\nEvery field is optional.",
         "properties": {
           "active_acquired_at_ms": {
             "description": "The time the current writer acquired its epoch, in Unix milliseconds. It's present when the\ncurrent manifest records a writer.",
@@ -1582,7 +1582,7 @@
       },
       "ExtendSnapshotRequest": {
         "additionalProperties": false,
-        "description": "A request to extend a read snapshot.",
+        "description": "A request to extend a snapshot.",
         "properties": {
           "ttl_ms": {
             "description": "The new lifetime in milliseconds, counted from the server's current time.",
@@ -2280,7 +2280,7 @@
         "type": "object"
       },
       "FilesystemOperationDeleteByInode": {
-        "description": "An operation that deletes an inode if its current binding matches.",
+        "description": "An operation that deletes an inode if its current binding version is\n`expected_binding_version`.",
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DeleteDirectoryBehavior",
@@ -2337,7 +2337,7 @@
         "type": "object"
       },
       "FilesystemOperationMoveByInode": {
-        "description": "An operation that moves an inode if its current binding matches.",
+        "description": "An operation that moves an inode if its current binding version is\n`expected_binding_version`.",
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
@@ -2462,7 +2462,7 @@
         "type": "object"
       },
       "FilesystemOperationPutFileRevisionByInode": {
-        "description": "An operation that adds a revision to a file inode if the inode's current revision matches.\n\nThe operation requires exactly one of `content_ref` and `inline_content`.",
+        "description": "An operation that adds a revision to a file inode if the inode's current revision is\n`expected_revision_no`.\n\nThe operation requires exactly one of `content_ref` and `inline_content`.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -2929,11 +2929,11 @@
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The file's absolute path at the search's snapshot."
+            "description": "The file's absolute path in the view that the search read."
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "The matched revision, which is the newest visible revision at the snapshot."
+            "description": "The matched revision, which is the file's newest revision visible to the search."
           }
         },
         "required": [
@@ -3021,7 +3021,7 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose ordered commit stream was read."
+            "description": "The namespace whose change feed was read."
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3167,7 +3167,7 @@
         "type": "object"
       },
       "ListSnapshotsResponse": {
-        "description": "One page of live read snapshots.",
+        "description": "One page of live snapshots.",
         "properties": {
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3308,7 +3308,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomeFenced": {
-        "description": "Another process claimed the namespace's compactor role, so nothing was published.",
+        "description": "Another process claimed the namespace's compactor epoch, so nothing was published.",
         "properties": {
           "outcome": {
             "enum": [
@@ -3338,7 +3338,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomePublished": {
-        "description": "The selected run window was replaced in a published manifest.",
+        "description": "A streaming compaction merged the selected window and published the next manifest.",
         "properties": {
           "input_bytes": {
             "description": "The input bytes that the compaction read.",
@@ -3393,7 +3393,7 @@
         "type": "object"
       },
       "NameKey": {
-        "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use `DisplayName` for the spelling that\nusers see.",
+        "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use the display name for the spelling\nthat users see.",
         "example": "report.txt",
         "type": "string"
       },
@@ -3947,13 +3947,13 @@
             "type": "integer"
           },
           "no_provider_timestamp": {
-            "description": "The unreachable candidates that had no provider timestamp.",
+            "description": "The unreferenced candidates that had no provider timestamp, so their age was unknown.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "referenced": {
-            "description": "The candidates that current references or manifest discovery protected.",
+            "description": "The candidates that a current root or the shared base filter protected, or that manifest\ndiscovery needed.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3977,7 +3977,7 @@
             "type": "integer"
           },
           "within_grace_window": {
-            "description": "The unreachable candidates that were younger than the grace window, according to their\nprovider timestamps.",
+            "description": "The unreferenced candidates that were younger than the grace window, according to their\nprovider timestamps.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3995,7 +3995,7 @@
         "type": "object"
       },
       "RevisionNo": {
-        "description": "The number of one revision of a file's content. It increases whenever the content is replaced or restored.",
+        "description": "The number of one revision of a file's content. It increases with every new revision of the file, whether from a put, an append, a replacing copy, or a restore.",
         "format": "int64",
         "maximum": 9007199254740991,
         "minimum": 0,
@@ -4449,7 +4449,7 @@
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived write capability for that part."
+            "description": "A short-lived write capability for this part."
           },
           "part_number": {
             "description": "The part number that this capability writes.",
@@ -4528,7 +4528,7 @@
           },
           "outcome": {
             "$ref": "#/components/schemas/StoreProbeCheckOutcome",
-            "description": "What the store did."
+            "description": "Whether the store passed the check, failed it, or doesn't support the capability."
           }
         },
         "required": [
@@ -4683,7 +4683,7 @@
         ]
       },
       "UploadSessionStatusAborted": {
-        "description": "A session that ended without selecting content. Its object no longer exists.",
+        "description": "A session that was aborted before it completed. Its object no longer exists.",
         "properties": {
           "aborted_at_ms": {
             "description": "The time the session was aborted, in Unix milliseconds.",
@@ -4731,11 +4731,11 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The verified content that this session selected."
+            "description": "The verified content that the session completed with."
           },
           "content_token": {
             "$ref": "#/components/schemas/ContentToken",
-            "description": "A new proof for a later commit. It's absent after the window for creating tokens closes."
+            "description": "A new content token, which a later commit can use to reference the content. It's absent\nafter the window for issuing tokens closes."
           },
           "mode": {
             "$ref": "#/components/schemas/UploadMode",
@@ -4944,7 +4944,7 @@
     },
     "securitySchemes": {
       "bearer_auth": {
-        "description": "The client sends the deployment's `auth_token` as `Authorization: Bearer <token>`. A server without a configured token accepts every request. A server with a configured token admits the request and then returns 401 `unauthorized` if the token is missing.",
+        "description": "The client sends the deployment's `auth_token` as `Authorization: Bearer <token>`. A server without a configured token accepts every request. A server with a configured token returns 401 `unauthorized` when the token is missing or wrong.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -5562,7 +5562,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index": {
       "get": {
-        "description": "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. The deployment must maintain grep indexes, and this operation doesn't change the index.",
+        "description": "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. A deployment that doesn't maintain grep indexes returns `not_supported`, and this operation doesn't change the index.",
         "operationId": "get_grep_index",
         "parameters": [
           {
@@ -5645,7 +5645,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable": {
       "post": {
-        "description": "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. The deployment must maintain the grep index.",
+        "description": "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "disable_grep_index",
         "parameters": [
           {
@@ -5748,7 +5748,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
-        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. The deployment must maintain the grep index.",
+        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -6355,7 +6355,7 @@
             }
           },
           {
-            "description": "A snapshot whose captured sequence ends the feed.",
+            "description": "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.",
             "in": "query",
             "name": "snapshot_id",
             "required": false,
@@ -6987,7 +6987,7 @@
                 }
               }
             },
-            "description": "Authoritative path entry"
+            "description": "Path entry"
           },
           "400": {
             "content": {
@@ -7441,7 +7441,7 @@
             }
           },
           {
-            "description": "Whether a pattern with no required grams can use a capped exhaustive scan. The default is `false`.",
+            "description": "Whether a pattern with no required literal bytes can use a capped exhaustive scan. The default is `false`.",
             "in": "query",
             "name": "allow_scan",
             "required": false,
@@ -7629,7 +7629,7 @@
                 }
               }
             },
-            "description": "Authoritative current inode entry"
+            "description": "Path entry for the inode"
           },
           "400": {
             "content": {
@@ -8989,7 +8989,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads": {
       "post": {
-        "description": "Starts an upload session for content that can later be attached to a file. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns presigned object store credentials.",
+        "description": "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
         "operationId": "create_upload",
         "parameters": [
           {
@@ -9104,7 +9104,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}": {
       "get": {
-        "description": "Returns an upload session. An open `direct_put` session includes newly signed access. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        "description": "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         "operationId": "get_upload",
         "parameters": [
           {
@@ -9195,7 +9195,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort": {
       "post": {
-        "description": "Ends an upload session without selecting content, and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
+        "description": "Aborts an open upload session and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
         "operationId": "abort_upload",
         "parameters": [
           {
@@ -9691,7 +9691,7 @@
       "name": "filesystem"
     },
     {
-      "description": "Identity-oriented inode read APIs",
+      "description": "Inode-addressed read APIs",
       "name": "inodes"
     },
     {

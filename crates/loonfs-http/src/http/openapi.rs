@@ -197,7 +197,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         (name = "system", description = "Server health, readiness, metrics, and capability discovery"),
         (name = "namespaces", description = "Namespace lifecycle and status"),
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
-        (name = "inodes", description = "Identity-oriented inode read APIs"),
+        (name = "inodes", description = "Inode-addressed read APIs"),
         (name = "uploads", description = "Upload session APIs"),
         (name = "maintenance", description = "Maintenance APIs"),
         (name = "query", description = "Derived-index query APIs")
@@ -254,8 +254,8 @@ impl utoipa::Modify for BearerAuth {
                             "The client sends the deployment's `auth_token` as \
                              `Authorization: Bearer <token>`. A server without a \
                              configured token accepts every request. A server with a \
-                             configured token admits the request and then returns 401 \
-                             `unauthorized` if the token is missing.",
+                             configured token returns 401 `unauthorized` when the token \
+                             is missing or wrong.",
                         ))
                         .build(),
                 ),

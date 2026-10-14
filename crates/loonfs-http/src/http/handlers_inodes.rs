@@ -71,7 +71,7 @@ pub(super) struct StatInodeQuery {
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read.")
         ),
         responses(
-            (status = 200, description = "Authoritative current inode entry", body = loonfs_types::PathEntry),
+            (status = 200, description = "Path entry for the inode", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
