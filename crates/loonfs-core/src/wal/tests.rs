@@ -854,6 +854,125 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     );
 }
 
+/// Returns a warm read context that's `behind` WAL objects behind the tip,
+/// with the store's log cleared.
+async fn warm_context_behind(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    behind: u64,
+) -> crate::RuntimeReadContext {
+    create(store, namespace_id, &context(1_000))
+        .await
+        .expect("create");
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        Arc::new(tokio::sync::Semaphore::new(32)),
+    );
+    publish(&mut engine, store, "first").await.expect("first");
+    let loaded = crate::namespace::read_anchor::load_read_anchor(
+        store,
+        namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("warm head");
+    for number in 0..behind {
+        publish(&mut engine, store, &format!("commit-{number}"))
+            .await
+            .expect("commit");
+    }
+    store.reset();
+    crate::RuntimeReadContext {
+        basis: loaded.basis(),
+        head: loaded.read_state,
+        segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
+        head_state: Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
+    }
+}
+
+/// Checks that a warm probe reads the WAL in discovery's widening windows, and
+/// that a probe at the tip sends one GET.
+#[tokio::test]
+async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("warm-windows").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+    );
+    let mut warm = warm_context_behind(&store, &namespace_id, 40).await;
+    let cached = warm.head.wal_no.0;
+    assert!(super::probe_namespace_wal(&store, &mut warm)
+        .await
+        .expect("probe 40 objects behind"));
+    assert_eq!(warm.head.wal_no, WalNo(cached + 40));
+    // A window starts only after the one before it ends, so each window's
+    // reads are the next ones in the log, in any order.
+    let mut gets = store.take_get_keys().into_iter();
+    let mut first = cached + 1;
+    for width in [1, 2, 4, 8, 16, 16] {
+        let mut window = gets
+            .by_ref()
+            .take(loonfs_types::usize_from_u64(width))
+            .collect::<Vec<_>>();
+        window.sort();
+        let mut expected = (first..first + width)
+            .map(|number| wal_object(&namespace_id, &WalNo(number)))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(window, expected, "the window of {width} from WAL {first}");
+        first += width;
+    }
+    assert_eq!(gets.next(), None);
+
+    assert!(super::probe_namespace_wal(&store, &mut warm)
+        .await
+        .expect("probe at the tip"));
+    assert_eq!(
+        store.take_get_keys(),
+        [wal_object(&namespace_id, &WalNo(cached + 41))]
+    );
+}
+
+/// Checks that a warm probe returns false for a missing WAL number below a
+/// present one, and that discovery from the unchanged manifest reports the
+/// same gap as corruption.
+#[tokio::test]
+async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corruption() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("warm-gap").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+    );
+    let mut warm = warm_context_behind(&store, &namespace_id, 8).await;
+    assert_eq!(warm.head.wal_no, WalNo(2));
+    let cached = warm.head.clone();
+    // The probe reads WAL 6 to 9 in one window, and discovery reads WAL 4 to 7,
+    // so both find WAL 6 missing below a present number.
+    let missing = wal_object(&namespace_id, &WalNo(6));
+    store
+        .delete(&missing)
+        .await
+        .expect("remove a WAL object below the tip");
+    assert!(!super::probe_namespace_wal(&store, &mut warm)
+        .await
+        .expect("a gap sends the read to discovery"));
+    assert_eq!(warm.head, cached);
+    let error = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect_err("a gap above the folded boundary is corruption");
+    assert_matches!(
+        error,
+        crate::control_object::ControlObjectLoadError::Codec { object_key, .. }
+            if object_key == missing
+    );
+}
+
 #[tokio::test]
 async fn fence_publication_enforces_the_wal_budget_before_the_put() {
     let directory = tempdir().expect("directory");

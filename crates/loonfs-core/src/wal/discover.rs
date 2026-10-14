@@ -10,12 +10,15 @@ use crate::namespace::state::NamespaceReadState;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::WalObjectEnvelope;
 use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-/// Largest window of WAL numbers one discovery round reads, at most 16 GETs
-/// in flight. The probe is a lockstep wave by design, because each round's
-/// results decide whether discovery stops and how wide the next window is.
+/// Largest window of WAL numbers that one round of [`read_wal_after`] reads,
+/// at most 16 GETs in flight. A round is a lockstep wave by design, because
+/// each round's results decide whether the reads stop and how wide the next
+/// window is.
 const WAL_DISCOVERY_PROBE_WAVE: usize = 16;
 
 pub(crate) struct DiscoveredTail {
@@ -37,12 +40,55 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         });
     }
     let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
-    let mut window = 1;
     // Replay needs every object above the folded boundary, so discovery keeps the bodies.
+    let outcome = read_wal_after(store, namespace_id, head.wal_no, |object_key, envelope| {
+        let object = walk.validate(object_key, envelope).map_err(wal_error)?;
+        head = head.after_wal_object(object.envelope().payload());
+        objects.push(object);
+        Ok(ControlFlow::Continue(()))
+    })
+    .await?;
+    if let WalReadOutcome::Gap { object_key } = outcome {
+        return Err(wal_error(WalTailLoadError::MissingWalObject { object_key }));
+    }
+    Ok(DiscoveredTail {
+        head,
+        tail: ValidatedWalTail::new(objects),
+    })
+}
+
+/// How [`read_wal_after`] ended.
+enum WalReadOutcome {
+    /// The reads reached the first missing number or the largest WAL number,
+    /// or `visit` stopped them.
+    Ended,
+    /// A number was still missing when it was read again, and a later number
+    /// in the same window was present.
+    Gap { object_key: String },
+}
+
+/// Reads the WAL numbers after `after` in widening windows, and passes each
+/// object to `visit` in WAL order, until the first number that's still missing
+/// or until `visit` returns `ControlFlow::Break`.
+///
+/// The first window is one number, so a caller at the tip sends one GET. Each
+/// window that finds every number doubles, up to [`WAL_DISCOVERY_PROBE_WAVE`].
+/// A number that's missing below a present one is read again, and if it's
+/// still missing, this function returns [`WalReadOutcome::Gap`] with that
+/// number's object key. Discovery reports the gap as corruption, and a warm
+/// probe returns false so that the read runs discovery.
+async fn read_wal_after<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    after: WalNo,
+    mut visit: impl FnMut(String, WalObjectEnvelope) -> Result<ControlFlow<()>, ControlObjectLoadError>,
+) -> Result<WalReadOutcome, ControlObjectLoadError> {
+    let mut through = after.0;
+    let mut window = 1;
     loop {
-        let first = head.wal_no.0 + 1;
-        let end = (head.wal_no.0 + window as u64).min(MAX_PUBLIC_INTEGER);
-        let loaded = stream::iter(head.wal_no.0..end)
+        let first = through + 1;
+        let end = (through + window as u64).min(MAX_PUBLIC_INTEGER);
+        let loaded = stream::iter(through..end)
             .map(|number| load_wal_object(store, namespace_id, WalNo(number + 1)))
             .buffered(window)
             .collect::<Vec<_>>()
@@ -50,43 +96,39 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         let last_present = loaded
             .iter()
             .rposition(|loaded| matches!(loaded.envelope, Ok(Some(_))));
-        let mut ended = false;
         for (index, loaded) in loaded.into_iter().enumerate() {
             let (object_key, envelope) = match loaded.envelope.map_err(wal_error)? {
                 Some(envelope) => (loaded.object_key, envelope),
                 None if last_present.is_none_or(|last| index > last) => {
-                    ended = true;
-                    break;
+                    return Ok(WalReadOutcome::Ended)
                 }
                 None => {
-                    // The window's reads do not see one moment: a number absent here
-                    // may have been published before a later number was read. Read it
-                    // again; only a number still absent is missing.
+                    // The window's reads don't happen at one moment, so a number that's
+                    // missing here might have been published before a later number was
+                    // read. Only a number that's still missing when it's read again is
+                    // missing.
                     let again =
                         load_wal_object(store, namespace_id, WalNo(first + index as u64)).await;
                     match again.envelope.map_err(wal_error)? {
                         Some(envelope) => (again.object_key, envelope),
                         None => {
-                            return Err(wal_error(WalTailLoadError::MissingWalObject {
+                            return Ok(WalReadOutcome::Gap {
                                 object_key: again.object_key,
-                            }))
+                            })
                         }
                     }
                 }
             };
-            let object = walk.validate(object_key, envelope).map_err(wal_error)?;
-            head = head.after_wal_object(object.envelope().payload());
-            objects.push(object);
+            if visit(object_key, envelope)?.is_break() {
+                return Ok(WalReadOutcome::Ended);
+            }
         }
-        if ended || end == MAX_PUBLIC_INTEGER {
-            break;
+        if end == MAX_PUBLIC_INTEGER {
+            return Ok(WalReadOutcome::Ended);
         }
+        through = end;
         window = (window * 2).min(WAL_DISCOVERY_PROBE_WAVE);
     }
-    Ok(DiscoveredTail {
-        head,
-        tail: ValidatedWalTail::new(objects),
-    })
 }
 
 pub(super) fn wal_error(error: WalTailLoadError) -> ControlObjectLoadError {
@@ -114,12 +156,19 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
     }
 }
 
-/// Probes the next WAL number and extends the cached tail with returned
-/// objects.
+/// Reads the WAL numbers after the cached head, in the same windows as
+/// discovery, and extends the cached tail with the objects it finds.
 ///
-/// Returns false when the next object has another writer epoch, which requires
-/// full discovery. Writer acquisition raises the epoch, so a WAL object at the
-/// cached epoch must continue the cached head.
+/// Returns false when the cached view needs full discovery from the current
+/// manifest, which happens in two cases:
+///
+/// - The next object has another writer epoch. Writer acquisition raises the
+///   epoch, so a WAL object at the cached epoch must continue the cached head.
+/// - A WAL number is still missing below a present one. Maintenance might have
+///   folded the objects after the cached head into a newer manifest, and
+///   garbage collection might be deleting them while the probe reads. Discovery
+///   from the current manifest still reports a gap above its folded boundary as
+///   corruption.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     context: &mut RuntimeReadContext,
@@ -134,17 +183,15 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let mut extended = false;
     let namespace_id = state.namespace_id.clone();
     let mut walk = WalWalk::after(&namespace_id, state.wal_no, state.seq, state.writer_epoch);
-    while let Ok(wal_no) = state.wal_no.successor() {
-        let loaded = load_wal_object(store, &state.namespace_id, wal_no).await;
-        let Some(envelope) = loaded.envelope.map_err(wal_error)? else {
-            break;
-        };
+    let mut other_epoch = false;
+    let visit = |object_key: String,
+                 envelope: WalObjectEnvelope|
+     -> Result<ControlFlow<()>, ControlObjectLoadError> {
         if envelope.payload().writer_epoch != state.writer_epoch {
-            return Ok(false);
+            other_epoch = true;
+            return Ok(ControlFlow::Break(()));
         }
-        let object = walk
-            .validate(loaded.object_key, envelope)
-            .map_err(wal_error)?;
+        let object = walk.validate(object_key, envelope).map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
             tail = context.head_state.get_tail(&cache_key);
         }
@@ -154,7 +201,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         if let Some(cached) = context.head_state.get_tail(&cache_key) {
             tail = Some(cached);
             extended = false;
-        } else if let Some(current) = tail {
+        } else if let Some(current) = tail.take() {
             let object_key = object.object_key().to_owned();
             let objects = ValidatedWalTail::new(vec![object]);
             let replayed =
@@ -163,6 +210,11 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             tail = Some(Arc::new(replayed.projected_tail));
             extended = true;
         }
+        Ok(ControlFlow::Continue(()))
+    };
+    let outcome = read_wal_after(store, &namespace_id, context.head.wal_no, visit).await?;
+    if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
+        return Ok(false);
     }
     if let Some(tail) = tail.filter(|_| extended) {
         context.head_state.insert_tail(cache_key, tail);

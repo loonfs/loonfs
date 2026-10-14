@@ -131,9 +131,17 @@ impl RuntimeCore {
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
                     let mut context = self.runtime_read_context(&head);
-                    if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
+                    let probed = loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
-                    .await.map_err(MetadataProjectionLoadError::LoadHead)? && checked.is_within_revalidation_bound() {
+                        .await;
+                    // Check the bound before using the probe's result, so a view that passed
+                    // the bound while the probe ran is reloaded whatever the probe returned.
+                    // By then, garbage collection might have deleted WAL objects after the
+                    // view's tip that a fold moved into a newer manifest, and the probe can
+                    // fail on them.
+                    if checked.is_within_revalidation_bound()
+                        && probed.map_err(MetadataProjectionLoadError::LoadHead)?
+                    {
                         if check_due {
                             head.basis_checked = Some(observed);
                         }
