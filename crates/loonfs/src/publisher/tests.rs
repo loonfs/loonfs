@@ -199,18 +199,20 @@ fn lost_wal_put_ack_store(
 }
 
 fn test_runtime_core(store: SharedStore) -> RuntimeCore {
+    let execution_budget = ExecutionBudget::default();
+    let metadata_cache =
+        MetadataCache::default().bind(&store, execution_budget.read_working_memory(), None);
     RuntimeCore::open(
         store,
         ReadConfig {
-            execution_budget: ExecutionBudget::default(),
+            execution_budget,
             max_read_content_bytes: crate::DEFAULT_MAX_READ_CONTENT_BYTES,
             manifest_revalidation_interval_ms: 1000,
             metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
             trace_mode: TraceMode::Remote,
             store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
         },
-        MetadataCache::default(),
-        None,
+        metadata_cache,
         RuntimeInstruments::new(None),
         Arc::new(loonfs_types::StdMonotonicTimer::default()),
         Arc::new(loonfs_core::time::SystemWallClock),

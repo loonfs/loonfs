@@ -386,7 +386,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
     let cache = MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, None)),
-        CacheScope::new(0),
+        ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(
             64 * 1024 * 1024,
             Some(observer),

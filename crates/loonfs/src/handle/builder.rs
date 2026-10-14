@@ -118,12 +118,14 @@ impl<M> LoonFsBuilder<M> {
 
     /// Reads through `metadata_cache`, which other runtimes may share.
     ///
-    /// This runtime gets a scope of its own in the cache, so it never sees
-    /// another runtime's entries, and its clones, its read-only view, and its
-    /// maintenance share that scope. The cache reports its metrics to its
-    /// own recorder. Without this setting, the runtime creates a private
-    /// cache with the default limits that reports to
-    /// [`Self::metrics_recorder`].
+    /// Runtimes built over clones of one [`SharedObjectStore`] share the
+    /// decoded segment blocks and manifests in the cache, and runtimes over
+    /// different object stores never read each other's blocks. This runtime
+    /// keeps its own head anchors and WAL-tail projections in the cache, and
+    /// its clones, its read-only view, and its maintenance share them. The
+    /// cache reports its metrics to its own recorder. Without this setting,
+    /// the runtime creates a private cache with the default limits that
+    /// reports to [`Self::metrics_recorder`].
     pub fn metadata_cache(mut self, metadata_cache: MetadataCache) -> Self {
         self.core.metadata_cache = Some(metadata_cache);
         self
@@ -384,6 +386,14 @@ impl CoreConfig {
             max_decoded_input_bytes_per_step: execution_budget.max_merge_input_bytes(),
             ..MetadataRunPolicy::default()
         };
+        // Bind the cache to the store the caller supplied, not to the metrics
+        // wrapper below. Each runtime builds its own wrapper, so runtimes over
+        // clones of one store would otherwise read under separate scopes.
+        let metadata_cache = metadata_cache.bind(
+            &store,
+            execution_budget.read_working_memory(),
+            self.stored_metadata_block_cache,
+        );
         let instruments = RuntimeInstruments::new(self.metrics_recorder);
         let recorder = fan_out_object_store_recorder(
             self.object_store_metrics_recorder,
@@ -407,7 +417,6 @@ impl CoreConfig {
                 store_kind,
             },
             metadata_cache,
-            self.stored_metadata_block_cache,
             instruments,
             self.timer,
             self.wall_clock,

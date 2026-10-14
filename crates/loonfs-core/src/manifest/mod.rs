@@ -30,8 +30,8 @@ mod validate;
 
 pub use self::cache::{
     CacheScope, CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
-    MetadataSegmentCacheStats, NamespaceValidation, SharedHeadState, SharedSegmentBlocks,
-    WalTailProjectionCacheKey,
+    MetadataSegmentCacheStats, NamespaceValidation, ObjectStoreScope, SharedHeadState,
+    SharedSegmentBlocks, WalTailProjectionCacheKey,
 };
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,

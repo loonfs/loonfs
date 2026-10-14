@@ -553,7 +553,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
 
     let cache = MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, None)),
-        CacheScope::new(0),
+        ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
         None,
     );
@@ -845,7 +845,7 @@ async fn checkpointed_direntry_segment() -> (
 fn segment_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataSegmentCache {
     MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(usize::MAX, None)),
-        CacheScope::new(0),
+        ObjectStoreScope::new(0),
         Arc::default(),
         Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
     )
@@ -1630,7 +1630,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     let cache = |pool| {
         MetadataSegmentCache::new(
             Arc::new(SharedSegmentBlocks::new(0, None)),
-            CacheScope::new(0),
+            ObjectStoreScope::new(0),
             pool,
             None,
         )
