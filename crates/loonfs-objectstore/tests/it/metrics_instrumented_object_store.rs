@@ -112,7 +112,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
-    store
+    let metadata = store
         .put("source", bytes(b"base"), PutMode::CreateIfAbsent)
         .await
         .expect("source");
@@ -123,6 +123,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
                 key: "source".to_owned(),
                 range: None,
                 checksum: Checksum::crc64nvme(b"base"),
+                metadata,
             }],
             vec![bytes(b" "), bytes(b"more")],
             &Checksum::crc64nvme(b"base more"),

@@ -23,18 +23,6 @@ use object_store::client::HttpRequestBody;
 const GCS_MAX_COMPOSE_SOURCES: usize = 32;
 
 impl GcsRequestSigner {
-    async fn object(&self, key: &str) -> Result<ObjectMetadata> {
-        let url = format!(
-            "{GCS_JSON_OBJECTS}/{}/o/{}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(key)?
-        );
-        self.send_authorized(key, http::Request::get(url), HttpRequestBody::empty())
-            .await
-            .and_then(|response| gcs_object(key, &response.body))
-            .map_err(precondition_failed_when_missing)
-    }
-
     fn compose_source(&self, key: &str, metadata: &ObjectMetadata) -> Result<serde_json::Value> {
         let name = scope_object_key(self.key_prefix.as_deref(), key)?;
         let generation = crate::required_etag(key, metadata.etag.clone())?;
@@ -193,7 +181,7 @@ impl GcsRequestSigner {
             })?;
         let mut resolved = Vec::with_capacity(sources.len());
         for source in sources {
-            let metadata = self.object(&source.key).await?;
+            let metadata = source.metadata.clone();
             let range = source_range(source, metadata.size_bytes)?;
             let checksum = metadata.checksum.as_ref().ok_or_else(|| {
                 ObjectStoreError::StoredChecksumMissing {

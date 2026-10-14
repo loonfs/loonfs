@@ -23,6 +23,25 @@ pub(crate) fn source_range(source: &AssemblySource, size_bytes: u64) -> Result<B
     Ok(range)
 }
 
+/// Returns the length of the assembled object, with each whole source's
+/// length taken from its caller's metadata.
+///
+/// An inverted range counts as empty here; the adapter rejects it.
+pub(crate) fn assembled_size_bytes(sources: &[AssemblySource], tail: &[Bytes]) -> u64 {
+    sources
+        .iter()
+        .map(|source| {
+            source
+                .range
+                .as_ref()
+                .map_or(source.metadata.size_bytes, |range| {
+                    range.end_exclusive.saturating_sub(range.start_inclusive)
+                })
+        })
+        .sum::<u64>()
+        + tail.iter().map(|piece| piece.len() as u64).sum::<u64>()
+}
+
 pub(crate) fn missing_source(key: &str) -> ObjectStoreError {
     ObjectStoreError::PreconditionFailed {
         object_key: key.to_owned(),
@@ -79,7 +98,7 @@ pub(crate) fn stream_sources<'a, S: ObjectStore + ?Sized>(
     tail: Vec<Bytes>,
 ) -> BoxStream<'a, Result<Bytes>> {
     stream::iter(sources)
-        .then(move |source| async move { source_stream(store, source).await })
+        .map(move |source| source_stream(store, source))
         .try_flatten()
         .chain(stream::iter(tail).flat_map(|piece| {
             let read_bytes = loonfs_types::usize_from_u64(READ_BYTES);
@@ -92,15 +111,11 @@ pub(crate) fn stream_sources<'a, S: ObjectStore + ?Sized>(
         .boxed()
 }
 
-async fn source_stream<'a, S: ObjectStore + ?Sized>(
+fn source_stream<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     source: &'a AssemblySource,
 ) -> Result<BoxStream<'a, Result<Bytes>>> {
-    let metadata = store
-        .head(&source.key)
-        .await?
-        .ok_or_else(|| missing_source(&source.key))?;
-    let range = source_range(source, metadata.size_bytes)?;
+    let range = source_range(source, source.metadata.size_bytes)?;
     let checksum = ChecksumDigest::new(source.checksum.algorithm);
     Ok(stream::try_unfold(
         (range.start_inclusive, Some(checksum)),
@@ -247,11 +262,21 @@ mod tests {
                     end_exclusive: first.len() as u64 - 1,
                 }),
                 checksum: Checksum::crc64nvme(&first[1..first.len() - 1]),
+                metadata: local
+                    .head("source/first")
+                    .await
+                    .expect("head")
+                    .expect("first"),
             },
             AssemblySource {
                 key: "source/second".to_owned(),
                 range: None,
                 checksum: Checksum::crc64nvme(&second),
+                metadata: local
+                    .head("source/second")
+                    .await
+                    .expect("head")
+                    .expect("second"),
             },
         ];
         let tail = vec![Bytes::from_static(b"ta"), Bytes::from_static(b"il")];
@@ -296,6 +321,7 @@ mod tests {
             key: "source".to_owned(),
             range: None,
             checksum: Checksum::crc64nvme(b"source"),
+            metadata: store.head("source").await.expect("head").expect("source"),
         }];
         let assembled = store
             .assemble(

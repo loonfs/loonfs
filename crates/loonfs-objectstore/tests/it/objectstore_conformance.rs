@@ -598,6 +598,7 @@ async fn assert_assembly<S: ObjectStore>(
                 .await
                 .expect("source");
             sources.push(AssemblySource {
+                metadata: store.head(&key).await.expect("head").expect("source"),
                 key,
                 range: None,
                 checksum: Checksum::compute(crc, &bytes),
@@ -638,6 +639,7 @@ async fn assert_assembly<S: ObjectStore>(
                     key: key.clone(),
                     range: None,
                     checksum: expected.clone(),
+                    metadata: stored.clone(),
                 }],
                 Vec::new(),
                 &expected,
@@ -798,6 +800,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
             .await
             .expect("source");
         sources.push(AssemblySource {
+            metadata: store.head(&key).await.expect("head").expect("source"),
             key,
             range: None,
             checksum: Checksum::crc32c(&source),

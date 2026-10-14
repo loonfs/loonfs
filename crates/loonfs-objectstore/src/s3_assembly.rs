@@ -25,12 +25,11 @@ impl S3RequestSigner {
         let mut ranges = Vec::with_capacity(sources.len());
         let mut etags = Vec::with_capacity(sources.len());
         for source in sources {
-            let (length, etag) = self
-                .head_object(&source.key)
-                .await?
-                .ok_or_else(|| crate::assembly::missing_source(&source.key))?;
-            ranges.push(source_range(source, length)?);
-            etags.push(etag);
+            ranges.push(source_range(source, source.metadata.size_bytes)?);
+            etags.push(crate::required_etag(
+                &source.key,
+                source.metadata.etag.clone(),
+            )?);
         }
         let lengths: Vec<_> = ranges
             .iter()
