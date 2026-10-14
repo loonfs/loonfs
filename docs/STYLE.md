@@ -1,6 +1,6 @@
 # LoonFS style
 
-This guide describes how LoonFS code is written. Each rule is a design decision, recorded with a short explanation.
+This guide explains how we write LoonFS code and why, so that every part of the codebase follows the same conventions.
 
 The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide.
 
@@ -10,7 +10,7 @@ LoonFS code serves four goals, in this order of priority: correctness, simplicit
 
 Three rules apply everywhere:
 
-- **Use one pattern for each decision**, so that a reader can rely on it. A convention applies to new code and to code that a change already touches, but an existing departure isn't, on its own, a reason for a change.
+- **Solve each kind of problem the same way across the codebase**, so that a developer who has seen the pattern once recognizes it everywhere. A convention applies to new code and to code that a change already touches, but an existing departure isn't, on its own, a reason for a change.
 
 - **Remove the old design in the same change that adds a new one.** A compatibility layer retains conflicting design decisions, and every developer has to learn both without an established preference.
 
@@ -269,7 +269,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Implement each rule, constant, mapping, and helper only once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies on purpose. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
 
-- **Don't put code in `mod.rs`.** Every module has one, so the file name doesn't tell a reader what's inside. Put code in a file whose name describes its contents, and use `mod.rs` for docs and re-exports.
+- **Don't put code in `mod.rs`.** Every module has one, so the file name doesn't tell a developer what's inside. Put code in a file whose name describes its contents, and use `mod.rs` for docs and re-exports.
 
 - **Keep a module under about 500 non-test lines, and a function under about 100.** Move branches up into the parent function and loops down into helpers, so that the parent keeps the state and the helpers compute results.
 
