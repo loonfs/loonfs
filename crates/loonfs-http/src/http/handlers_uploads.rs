@@ -110,8 +110,8 @@ pub(super) struct UploadPathParams {
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
-        description = "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateUploadBody,
         responses(
             (status = 200, description = "Upload session started", body = UploadSession),
@@ -269,10 +269,10 @@ async fn begin_direct_multipart_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
-        description = "Returns one short-lived, checksum-bound upload capability per requested part of an open direct_multipart session. Asking again for a part is how a client retries it.",
+        description = "Returns one short-lived upload capability for each requested part of an open `direct_multipart` session. Each capability is bound to the part's checksum. To retry a part, a client asks for its capability again.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("upload_id" = String, Path, description = "The upload session ID.")
         ),
         request_body = SignUploadPartsRequest,
         responses(
@@ -493,8 +493,8 @@ fn with_content_token(
         summary = "Upload content",
         description = "Uploads bytes into a service-proxied upload session and returns the open session with the staged content reference.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("upload_id" = String, Path, description = "The upload session ID.")
         ),
         request_body(content = Vec<u8>, content_type = "application/octet-stream"),
         responses(
@@ -546,10 +546,10 @@ pub(super) async fn put_upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload. The request mode must match the mode used to start the session. Direct uploads include a content claim; multipart also includes completed parts.",
+        description = "Completes an upload. The request mode must match the mode that started the session. A direct upload includes a content claim, and a multipart upload also includes the completed parts.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("upload_id" = String, Path, description = "The upload session ID.")
         ),
         request_body(
             content = CompleteUploadBody,
@@ -608,14 +608,14 @@ pub(super) async fn complete_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
-        description = "Returns an upload session. An open direct_put session includes freshly signed access. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
+        description = "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("upload_id" = String, Path, description = "The upload session ID.")
         ),
         responses(
             (status = 200, description = "Upload session state", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ErrorResponse),
+            (status = 400, description = "Invalid upload ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -676,14 +676,14 @@ pub(super) async fn get_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
         tag = "uploads",
         summary = "Abort upload",
-        description = "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
+        description = "Aborts an open upload session and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("upload_id" = String, Path, description = "The upload session ID.")
         ),
         responses(
             (status = 200, description = "Upload aborted", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ErrorResponse),
+            (status = 400, description = "Invalid upload ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 409, description = "Upload already completed", body = ErrorResponse),

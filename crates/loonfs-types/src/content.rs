@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-/// A supported content reference kind serialized as a string.
+/// A supported kind of content reference, serialized as a string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContentRefKind {
-    /// A prefix of one chain, addressed by its random content id.
+    /// The reference covers a prefix of one chain, which is addressed by its random content ID.
     BlobV1,
 }
 
@@ -35,9 +35,9 @@ impl fmt::Display for ContentRefKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksumAlgorithm {
-    /// CRC-64/NVME.
+    /// The CRC-64/NVME algorithm.
     Crc64nvme,
-    /// CRC-32C.
+    /// The CRC-32C algorithm.
     Crc32c,
 }
 
@@ -100,7 +100,7 @@ fn validate_checksum_hex(value: &str) -> Result<(), ChecksumHexValidationError> 
     Err(ChecksumHexValidationError::new(value, error.to_string()))
 }
 
-/// A checksum algorithm and its canonical lowercase hexadecimal value.
+/// A checksum algorithm and the checksum's canonical lowercase hexadecimal value.
 // This type also appears in request bodies, so it rejects unknown fields in
 // every context. Add new algorithms instead of new fields. This is not
 // rustdoc because it describes storage behavior, not the public API.
@@ -108,9 +108,9 @@ fn validate_checksum_hex(value: &str) -> Result<(), ChecksumHexValidationError> 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Checksum {
-    /// Algorithm that produced `value`.
+    /// The algorithm that produced `value`.
     pub algorithm: ChecksumAlgorithm,
-    /// The canonical lowercase hexadecimal checksum without a prefix.
+    /// The checksum in canonical lowercase hexadecimal, without a prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub value: ChecksumHex,
 }
@@ -452,22 +452,23 @@ pub enum ContentRefValidationError {
     InvalidChecksum(#[from] ChecksumValidationError),
 }
 
-/// Identifies a chain prefix by its owner, content id, size, and checksum.
+/// A reference to a prefix of one content chain, by its owner, content ID, size, and checksum.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentRef {
-    /// Content strategy used by the referenced content.
+    /// The kind of content reference. The format defines one kind, `blob_v1`.
     pub kind: ContentRefKind,
-    /// Namespace that originally wrote the bytes.
+    /// The namespace that originally wrote the bytes.
     pub owner_namespace_id: NamespaceId,
-    /// Immutable identity of the content; with the owner, it determines the object key.
+    /// The immutable identity of the content. The content ID and the owner together determine the
+    /// object key.
     pub content_id: ContentId,
-    /// Byte length of the referenced bytes, a prefix of the content object.
+    /// The length of the referenced bytes, which are a prefix of the content object.
     pub size_bytes: u64,
-    /// Mandatory checksum over the referenced bytes.
+    /// The required checksum of the referenced bytes.
     pub checksum: Checksum,
 }
 

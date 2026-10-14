@@ -15,14 +15,14 @@ validation_error!(
 );
 
 string_id! {
-    /// A validated actor identifier supplied by the application.
+    /// A validated actor identifier that the application supplies.
     ///
     /// Actor IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E).
     ActorId,
     error = ActorIdValidationError,
     validate = validate_actor_id,
     schema(
-        description = "Stable opaque actor id containing 1 to 256 visible ASCII characters.",
+        description = "A stable, opaque actor ID of 1 to 256 visible ASCII characters.",
         pattern = r"^[\x21-\x7E]{1,256}$",
         example = "usr_8f3c"
     )

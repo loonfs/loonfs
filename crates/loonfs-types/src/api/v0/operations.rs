@@ -12,33 +12,35 @@ use crate::{NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// HTTP error body used by LoonFS APIs.
+/// The JSON body that LoonFS APIs return with an HTTP error status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorResponse {
-    /// The stable machine-readable error code as a string.
+    /// The stable, machine-readable error code.
     pub code: String,
-    /// The capability feature key for a `not_supported` error.
+    /// The capability feature that isn't supported, when the code is `not_supported`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub feature: Option<String>,
-    /// Human-readable error message.
+    /// A human-readable description of the error.
     pub message: String,
-    /// The invalid JSON Pointer, parameter name, CLI flag, or CLI argument.
+    /// The invalid input, as a JSON Pointer, a parameter name, a CLI flag, or a CLI argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub param: Option<String>,
-    /// The request correlation ID also sent in the `x-request-id` response header.
+    /// The request ID. The server also sends this ID in the `x-request-id` response header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub request_id: Option<String>,
-    /// The optional machine-readable context for the error code.
+    /// Optional machine-readable context for the error code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub details: Option<Box<ErrorDetails>>,
 }
 
-/// Optional machine-readable identifiers and state for an `ErrorResponse`.
+/// The machine-readable identifiers and state that explain an error response.
+///
+/// Every field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
@@ -46,15 +48,17 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub namespace_id: Option<NamespaceId>,
-    /// Idempotency key of the commit the error concerns.
+    /// The idempotency key of the commit that the error is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub commit_id: Option<CommitId>,
-    /// The sequence where this commit ID already landed, when recorded by a durable receipt.
+    /// The sequence that `commit_id` was already committed at. The server includes it when a
+    /// durable commit receipt records that commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub committed_seq: Option<ChangeSeq>,
-    /// The fingerprint of the mutation that landed under `commit_id`, present with `committed_seq`.
+    /// The fingerprint of the mutation that was committed under `commit_id`. This field is present
+    /// exactly when `committed_seq` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, nullable = false))]
     pub committed_fingerprint: Option<CommitFingerprint>,
@@ -62,27 +66,28 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub operation_index: Option<u32>,
-    /// Zero-based position of the failed request precondition.
+    /// The zero-based position of the failed request precondition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub precondition_index: Option<u32>,
-    /// Epoch the failing writer session held when it was displaced.
+    /// The epoch of the failed writer session at the time another writer displaced it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub fenced_writer_epoch: Option<WriterEpoch>,
-    /// Epoch that currently owns the namespace.
+    /// The namespace's current writer epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_epoch: Option<WriterEpoch>,
-    /// The writer ID recorded for the current epoch, when available.
+    /// The writer of the current epoch. It's present when the current manifest records a writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_id: Option<WriterId>,
-    /// The Unix-millisecond time when the current writer acquired its epoch, when available.
+    /// The time the current writer acquired its epoch, in Unix milliseconds. It's present when the
+    /// current manifest records a writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_acquired_at_ms: Option<u64>,
-    /// Inode the failed precondition or operation targeted.
+    /// The inode that the failed precondition or operation targeted.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -90,7 +95,7 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub inode_id: Option<InodeId>,
-    /// The request expected the path to contain this inode.
+    /// The inode that the request expected the path to contain.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -98,7 +103,7 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
-    /// The path actually contained this inode.
+    /// The inode that the path actually contained.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -106,130 +111,131 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_inode_id: Option<InodeId>,
-    /// Opaque binding token supplied by the request.
+    /// The opaque binding token that the request supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_binding_version: Option<BindingVersion>,
-    /// Current binding token.
+    /// The current binding token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_binding_version: Option<BindingVersion>,
-    /// Revision the request expected to be current.
+    /// The revision that the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_revision_no: Option<RevisionNo>,
-    /// Revision that is actually current; absent when the inode has none.
+    /// The revision that is actually current. It's absent when the inode has no current revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_revision_no: Option<RevisionNo>,
-    /// Attribute revision the request expected to be current.
+    /// The attribute revision that the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
-    /// Attribute revision that is actually current for the inode.
+    /// The attribute revision that is actually current for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_attributes_revision_no: Option<AttributesRevisionNo>,
-    /// Access revision the request expected to be current.
+    /// The access revision that the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_access_revision_no: Option<AccessRevisionNo>,
-    /// Access revision that is actually current for the inode.
+    /// The access revision that is actually current for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_access_revision_no: Option<AccessRevisionNo>,
-    /// Change-feed cursor the request asked to resume after.
+    /// The `after_seq` value from the change feed request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub after_seq: Option<ChangeSeq>,
-    /// Oldest position a change feed can resume after. The feed returns
-    /// changes above it.
+    /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
+    /// or any later one, and the feed returns the changes committed after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_floor_seq: Option<ChangeSeq>,
-    /// Deletion sequence the undelete expected to be active.
+    /// The deletion sequence that the undelete expected to be active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_deletion_seq: Option<ChangeSeq>,
-    /// Deletion sequence actually active for the inode.
+    /// The deletion sequence that is actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
-    /// The head sequence required by the request.
+    /// The head sequence that the request required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_head_seq: Option<ChangeSeq>,
-    /// The actual namespace head sequence.
+    /// The namespace's actual head sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_head_seq: Option<ChangeSeq>,
 }
 
-/// Request to create a namespace.
+/// A request to create a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateNamespaceRequest {
-    /// The access mode, fixed for the namespace's life. Defaults to
-    /// unrestricted.
+    /// The namespace's access mode, which can't be changed after the namespace is created. The
+    /// default is unrestricted.
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
-    /// How sibling names compare, fixed for the namespace's life. Defaults
-    /// to `case_insensitive`.
+    /// How the namespace compares sibling names. The mode can't be changed after the namespace is
+    /// created, and it defaults to `case_insensitive`.
     #[serde(default)]
     pub naming: NamespaceNaming,
-    /// Durable namespace id to create.
+    /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
 }
 
-/// Request to fork a namespace.
+/// A request to fork a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {
-    /// Durable namespace id for the fork target.
+    /// The durable ID of the new namespace that the fork creates.
     pub new_namespace_id: NamespaceId,
-    /// Fork from this live snapshot instead of the current head.
+    /// A live snapshot to fork from. Without it, the fork starts from the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
 }
 
-/// Current state for one namespace.
+/// The current state of one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceMetadata {
     /// The namespace's access mode.
     pub access: NamespaceAccessMode,
-    /// How sibling names compare in the namespace.
+    /// How the namespace compares sibling names.
     pub naming: NamespaceNaming,
-    /// Namespace ID.
+    /// The namespace ID.
     pub namespace_id: NamespaceId,
-    /// Time the namespace was created, in Unix milliseconds.
+    /// The time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// Actor that created the namespace, as supplied by the application.
+    /// The actor that created the namespace, as the application supplied it.
     pub created_by: ActorId,
-    /// Present only for a fork: the source it was forked from.
+    /// The namespace and sequence this namespace was forked from. Only a forked namespace has this
+    /// field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub fork_basis: Option<NamespaceForkBasis>,
-    /// Current visible namespace sequence.
+    /// The sequence of the namespace's newest visible commit.
     pub head_seq: ChangeSeq,
-    /// Oldest position a change feed can resume after. The feed returns
-    /// changes above it.
+    /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
+    /// or any later one, and the feed returns the changes committed after it.
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// A namespace's access mode as reported, without its genesis grants.
+/// A namespace's access mode, without the grants that the namespace was created with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NamespaceAccessMode {
-    /// Every caller holding the deployment credential may do everything.
+    /// Every caller with the deployment credential can perform every operation.
     Unrestricted {},
-    /// Access rows govern operations in this identity domain.
+    /// Access rows control the operations that principals in this identity domain can perform.
     Acl {
-        /// Identity domain the namespace's principal ids belong to.
+        /// The identity domain that the namespace's principal IDs belong to.
         principal_scope: PrincipalScope,
     },
 }
@@ -247,77 +253,79 @@ impl From<&NamespaceAccess> for NamespaceAccessMode {
     }
 }
 
-/// The source a forked namespace started from.
+/// The source namespace and sequence that a forked namespace started from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceForkBasis {
-    /// Namespace the fork was taken from.
+    /// The namespace that the fork was taken from.
     pub source_namespace_id: NamespaceId,
-    /// Source sequence the fork captured.
+    /// The source namespace's sequence that the fork captured.
     pub source_head_seq: ChangeSeq,
 }
 
-/// Namespace state and storage details used by maintenance.
+/// A namespace's state and the storage details that maintenance uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceDiagnostics {
-    /// Namespace ID.
+    /// The namespace ID.
     pub namespace_id: NamespaceId,
-    /// Time the namespace was created, in Unix milliseconds.
+    /// The time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// Actor that created the namespace, as supplied by the application.
+    /// The actor that created the namespace, as the application supplied it.
     pub created_by: ActorId,
-    /// Present only for a fork: the source it was forked from.
+    /// The namespace and sequence this namespace was forked from. Only a forked namespace has this
+    /// field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub fork_basis: Option<NamespaceForkBasis>,
-    /// Current visible namespace sequence.
+    /// The sequence of the namespace's newest visible commit.
     pub head_seq: ChangeSeq,
-    /// Oldest position a change feed can resume after. The feed returns
-    /// changes above it.
+    /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
+    /// or any later one, and the feed returns the changes committed after it.
     pub retention_floor_seq: ChangeSeq,
-    /// The namespace's current manifest number.
+    /// The number of the namespace's current manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub current_manifest_no: Option<ManifestNo>,
-    /// Number of visible WAL objects after the current manifest.
+    /// The number of visible WAL objects after the current manifest.
     pub wal_tail_objects: u64,
-    /// Number of snapshots that had not expired when diagnostics began.
+    /// The number of snapshots that hadn't expired when the diagnostics read began.
     pub live_snapshots: u64,
-    /// Number of user checkpoints, including expired records awaiting collection.
+    /// The number of user checkpoints, including expired records that garbage collection hasn't
+    /// deleted yet.
     pub live_checkpoints: u64,
 }
 
-/// Result of deleting a namespace.
+/// The result of deleting a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeleteNamespaceResponse {
-    /// Namespace whose history ended.
+    /// The deleted namespace.
     pub namespace_id: NamespaceId,
-    /// The final committed sequence before the namespace was deleted.
+    /// The last committed sequence before the namespace was deleted.
     pub head_seq: ChangeSeq,
 }
 
-/// Destination-conflict behavior for path-oriented puts, moves, and copies.
+/// What a path put, move, or copy does when the destination already exists.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationBehavior {
-    /// Fail if the destination path already exists.
+    /// An operation that fails if the destination path already exists.
     #[default]
     NoReplace,
-    /// Replace the current destination file.
+    /// An operation that replaces the current destination file.
     Replace,
 }
 
-/// Requirements for replacing a move or copy destination.
+/// The requirements for replacing the destination of a move or copy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DestinationPrecondition {
-    /// Whether an existing destination file may be replaced.
+    /// Whether the operation can replace an existing destination file.
     #[serde(default)]
     pub behavior: DestinationBehavior,
-    /// With `replace` behavior, the destination inode required by the request.
+    /// The inode that the destination path must contain. It applies only with `replace` behavior.
     #[serde(
         rename = "expected_destination_inode_id",
         default,
@@ -326,7 +334,8 @@ pub struct DestinationPrecondition {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
-    /// With `replace` behavior and an inode precondition, the required content revision.
+    /// The content revision that must be the destination file's current revision. It applies only
+    /// with `replace` behavior and requires `expected_destination_inode_id`.
     #[serde(
         rename = "expected_destination_revision_no",
         default,
@@ -464,61 +473,64 @@ fn validate_revision_precondition(
     Ok(())
 }
 
-/// Directory delete behavior for path-oriented deletes.
+/// Whether a delete can remove a non-empty directory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteDirectoryBehavior {
-    /// Fail if the target is a non-empty directory.
+    /// A delete that fails if the target is a non-empty directory.
     #[default]
     NonRecursive,
-    /// Delete a directory subtree.
+    /// A delete that removes the whole directory subtree.
     Recursive,
 }
 
 /// One filesystem operation.
 ///
-/// Unknown fields are rejected, and fieldless variants require empty objects.
+/// The server rejects unknown fields, and a variant without fields requires an empty object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FilesystemOperation {
-    /// Create one directory.
+    /// An operation that creates one directory.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationCreateDirectory")
     )]
     CreateDirectory {
-        /// Absolute destination path, rejected when invalid or already bound.
+        /// The absolute path of the new directory. The operation fails if the path is invalid or
+        /// already bound.
         path: AbsolutePath,
-        /// Whether to create missing ancestor directories while requiring the final
-        /// component to be new.
+        /// Whether the operation creates any missing ancestor directories. The final path component
+        /// must still be new.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         parents: bool,
     },
-    /// Create a directory under an existing parent inode.
+    /// An operation that creates a directory under an existing parent inode.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationCreateDirectoryByInode")
     )]
     CreateDirectoryByInode {
-        /// Parent directory.
+        /// The parent directory.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// New directory name.
+        /// The name of the new directory.
         display_name: DisplayName,
     },
-    /// Create or replace one file from uploaded or inline content.
-    /// Requires exactly one of `content_ref` and `inline_content`.
+    /// An operation that creates or replaces one file from uploaded or inline content.
+    ///
+    /// The operation requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationPutFile"))]
     PutFile {
-        /// Absolute destination path; missing ancestors are created automatically.
+        /// The absolute destination path. The operation creates any missing ancestor directories.
         path: AbsolutePath,
-        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        /// The uploaded content, which a content token must cover. Set this field or
+        /// `inline_content`, but not both.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_ref: Option<ContentRef>,
-        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -526,10 +538,10 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
-        /// Whether an existing file may receive a new revision instead of causing a conflict.
+        /// Whether the operation adds a new revision to an existing file or fails with a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
-        /// With `replace` behavior, the request requires the path to contain this inode.
+        /// The inode that the path must contain. It applies only with `replace` behavior.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -537,28 +549,31 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With `replace` behavior and an inode precondition, the request requires this content revision.
+        /// The content revision that must be the file's current revision. It applies only with
+        /// `replace` behavior and requires `expected_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
-    /// Create a file with an unused name under an existing parent inode.
-    /// Requires exactly one of `content_ref` and `inline_content`.
+    /// An operation that creates a file with an unused name under an existing parent inode.
+    ///
+    /// The operation requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationCreateFileByInode")
     )]
     CreateFileByInode {
-        /// Parent directory.
+        /// The parent directory.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// New file name.
+        /// The name of the new file.
         display_name: DisplayName,
-        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        /// The uploaded content, which a content token must cover. Set this field or
+        /// `inline_content`, but not both.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_ref: Option<ContentRef>,
-        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -567,21 +582,24 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
     },
-    /// Append a revision to a file inode if its current revision matches.
-    /// Requires exactly one of `content_ref` and `inline_content`.
+    /// An operation that adds a revision to a file inode if the inode's current revision is
+    /// `expected_revision_no`.
+    ///
+    /// The operation requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationPutFileRevisionByInode")
     )]
     PutFileRevisionByInode {
-        /// File to update.
+        /// The file to update.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        /// The uploaded content, which a content token must cover. Set this field or
+        /// `inline_content`, but not both.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_ref: Option<ContentRef>,
-        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -589,15 +607,15 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
-        /// Current revision required for the write.
+        /// The revision that must be the file's current revision for the write to succeed.
         expected_revision_no: RevisionNo,
     },
-    /// Add bytes to the end of a file as its next revision.
+    /// An operation that adds bytes to the end of a file as its next revision.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationAppendFile"))]
     AppendFile {
-        /// Absolute path that must resolve to a visible file.
+        /// The absolute path, which must resolve to a visible file.
         path: AbsolutePath,
-        /// The bytes to add as base64, from 1 byte to 256 KiB.
+        /// The bytes to add, as base64, from 1 byte to 256 KiB.
         #[serde(with = "crate::base64_bytes")]
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Byte))]
         inline_content: Vec<u8>,
@@ -609,21 +627,21 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With an inode precondition, the content revision that must still be current.
+        /// The content revision that must still be current. It requires `expected_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
-    /// Add bytes to the end of a file inode as its next revision.
+    /// An operation that adds bytes to the end of a file inode as its next revision.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationAppendFileByInode")
     )]
     AppendFileByInode {
-        /// File to append to.
+        /// The file to append to.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// The bytes to add as base64, from 1 byte to 256 KiB.
+        /// The bytes to add, as base64, from 1 byte to 256 KiB.
         #[serde(with = "crate::base64_bytes")]
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Byte))]
         inline_content: Vec<u8>,
@@ -632,15 +650,15 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
-    /// Delete one path.
+    /// An operation that deletes the file or directory at one path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationDeletePath"))]
     DeletePath {
-        /// Absolute path that must resolve to a visible inode.
+        /// The absolute path, which must resolve to a visible inode.
         path: AbsolutePath,
-        /// Whether a non-empty directory may be tombstoned recursively.
+        /// Whether the operation can recursively delete a non-empty directory.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
-        /// The inode that the path must still resolve to before deletion.
+        /// The inode that the path must still resolve to before the delete.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -649,91 +667,96 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
     },
-    /// Delete an inode if its current binding matches.
+    /// An operation that deletes an inode if its current binding version is
+    /// `expected_binding_version`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationDeleteByInode")
     )]
     DeleteByInode {
-        /// Inode to delete.
+        /// The inode to delete.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Binding version required for the delete.
+        /// The binding version that the inode must currently have for the delete to succeed.
         expected_binding_version: BindingVersion,
-        /// Whether a non-empty directory may be tombstoned recursively.
+        /// Whether the operation can recursively delete a non-empty directory.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
     },
-    /// Move one path to another path.
+    /// An operation that moves a file or directory from one path to another.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMovePath"))]
     MovePath {
-        /// Absolute source path that must resolve to a visible inode.
+        /// The absolute source path, which must resolve to a visible inode.
         source_path: AbsolutePath,
-        /// Absolute destination whose parent must be visible and writable.
+        /// The absolute destination path. The destination's parent must be visible and writable.
         destination_path: AbsolutePath,
-        /// Replacement behavior and optional destination state.
+        /// The replacement behavior and the optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
-    /// Move an inode if its current binding matches.
+    /// An operation that moves an inode if its current binding version is
+    /// `expected_binding_version`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
     MoveByInode {
-        /// Inode to move.
+        /// The inode to move.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Binding version required for the move.
+        /// The binding version that the inode must currently have for the move to succeed.
         expected_binding_version: BindingVersion,
-        /// Destination directory.
+        /// The destination directory.
         #[serde(with = "crate::public_inode_id")]
         destination_parent_inode_id: InodeId,
-        /// New name.
+        /// The inode's new name.
         destination_display_name: DisplayName,
-        /// Replacement behavior and optional destination state.
+        /// The replacement behavior and the optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
-    /// Copy one file path to another path.
+    /// An operation that copies a file from one path to another.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
     CopyPath {
-        /// Absolute source path that must resolve to a visible file.
+        /// The absolute source path, which must resolve to a visible file.
         source_path: AbsolutePath,
-        /// Absolute destination whose parent must be visible and writable.
+        /// The absolute destination path. The destination's parent must be visible and writable.
         destination_path: AbsolutePath,
-        /// Replacement behavior and optional destination state.
+        /// The replacement behavior and the optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
-    /// Copy a file inode to a name under a parent inode.
+    /// An operation that copies a file inode to a new name under a parent inode.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyByInode"))]
     CopyByInode {
-        /// File to copy.
+        /// The file to copy.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Destination directory.
+        /// The destination directory.
         #[serde(with = "crate::public_inode_id")]
         destination_parent_inode_id: InodeId,
-        /// Name of the copy.
+        /// The name of the copy.
         destination_display_name: DisplayName,
-        /// Replacement behavior and optional destination state.
+        /// The replacement behavior and the optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
-    /// Restore the deletion identified by `inode_id` and `deletion_seq`.
-    /// Name the destination with `destination_path`, or with
-    /// `destination_parent_inode_id` and `destination_display_name`; omit
-    /// both to use the recorded binding.
+    /// An operation that restores the deletion that `inode_id` and `deletion_seq` identify.
+    ///
+    /// To choose the destination, set `destination_path`, or set `destination_parent_inode_id` and
+    /// `destination_display_name`. If you set neither, the undelete uses the parent and name
+    /// recorded with the deletion.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
     Undelete {
-        /// Deleted inode to make reachable again.
+        /// The deleted inode to make reachable again.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Observed deletion sequence, which prevents cancelling a newer tombstone sequence.
+        /// The deletion sequence that the caller observed. It prevents the undelete from cancelling
+        /// a newer deletion of the inode.
         deletion_seq: ChangeSeq,
-        /// Absolute restore destination; cannot be combined with a parent inode destination.
+        /// The absolute path to restore the inode to. It can't be combined with
+        /// `destination_parent_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_path: Option<AbsolutePath>,
-        /// Directory to restore into; requires `destination_display_name`.
+        /// The directory to restore the inode into. It requires `destination_display_name`.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -741,47 +764,49 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_parent_inode_id: Option<InodeId>,
-        /// Name to restore under `destination_parent_inode_id`.
+        /// The inode's name in `destination_parent_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_display_name: Option<DisplayName>,
     },
-    /// Restore an older revision as the current revision for a path.
+    /// An operation that restores an older revision as the current revision of the file at a path.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationRestoreRevision")
     )]
     RestoreRevision {
-        /// Absolute path that must resolve to a visible file.
+        /// The absolute path, which must resolve to a visible file.
         path: AbsolutePath,
-        /// Existing historical revision whose content will be copied into a new current revision.
+        /// An existing older revision. The operation copies its content into a new current
+        /// revision.
         source_revision_no: RevisionNo,
     },
-    /// Restore an older revision as the current revision of a file inode.
+    /// An operation that restores an older revision as the current revision of a file inode.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationRestoreRevisionByInode")
     )]
     RestoreRevisionByInode {
-        /// Visible file to restore.
+        /// The visible file to restore.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Existing historical revision whose content will be copied into a new current revision.
+        /// An existing older revision. The operation copies its content into a new current
+        /// revision.
         source_revision_no: RevisionNo,
     },
-    /// Write and remove attributes on the inode one path resolves to.
+    /// An operation that writes and removes attributes on the inode that a path resolves to.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationUpdateAttributes")
     )]
     UpdateAttributes {
-        /// Absolute path that must resolve to a visible file or directory.
+        /// The absolute path, which must resolve to a visible file or directory.
         path: AbsolutePath,
-        /// The attributes to write, replacing values for matching keys and leaving
-        /// other keys unchanged.
+        /// The attributes to write. A new value replaces the current value of the same key, and
+        /// other keys don't change.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         set: BTreeMap<AttributeKey, AttributeValue>,
-        /// The attribute keys to remove, including duplicates that validation must reject.
+        /// The attribute keys to remove. The server rejects a list that repeats a key.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<AttributeKey>,
         /// The inode that the path must still resolve to before the update.
@@ -792,25 +817,25 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With an inode precondition, the attribute revision that must still be current.
+        /// The attribute revision that must still be current. It requires `expected_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
-    /// Write and remove attributes on a visible inode.
+    /// An operation that writes and removes attributes on a visible inode.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationUpdateAttributesByInode")
     )]
     UpdateAttributesByInode {
-        /// Visible file or directory to update.
+        /// The visible file or directory to update.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// The attributes to write, replacing values for matching keys and leaving
-        /// other keys unchanged.
+        /// The attributes to write. A new value replaces the current value of the same key, and
+        /// other keys don't change.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         set: BTreeMap<AttributeKey, AttributeValue>,
-        /// The attribute keys to remove, including duplicates that validation must reject.
+        /// The attribute keys to remove. The server rejects a list that repeats a key.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<AttributeKey>,
         /// The attribute revision that must still be current.
@@ -818,15 +843,16 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
-    /// Replace the access row of the inode one path resolves to. The root
-    /// path is a valid target.
+    /// An operation that replaces the access row of the inode that a path resolves to.
+    ///
+    /// The root path is a valid target.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUpdateAccess"))]
     UpdateAccess {
-        /// Absolute path that must resolve to a visible file or directory.
+        /// The absolute path, which must resolve to a visible file or directory.
         path: AbsolutePath,
-        /// Whether the directory stops inheritance from its ancestors.
+        /// Whether the directory stops inheriting grants from its ancestors.
         boundary: bool,
-        /// The inode's complete direct grants after this update.
+        /// Every direct grant that the inode has after this update.
         grants: AccessGrants,
         /// The inode that the path must still resolve to before the update.
         #[serde(
@@ -836,24 +862,25 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With an inode precondition, the access revision that must still be current.
+        /// The access revision that must still be current. It requires `expected_inode_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_access_revision_no: Option<AccessRevisionNo>,
     },
-    /// Replace the access row of a visible inode. The root inode is a valid
-    /// target.
+    /// An operation that replaces the access row of a visible inode.
+    ///
+    /// The root inode is a valid target.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationUpdateAccessByInode")
     )]
     UpdateAccessByInode {
-        /// Visible file or directory to update.
+        /// The visible file or directory to update.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Whether the directory stops inheritance from its ancestors.
+        /// Whether the directory stops inheriting grants from its ancestors.
         boundary: bool,
-        /// The inode's complete direct grants after this update.
+        /// Every direct grant that the inode has after this update.
         grants: AccessGrants,
         /// The access revision that must still be current.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -941,115 +968,114 @@ impl FilesystemOperation {
     }
 }
 
-/// Admission conditions checked against the candidate's pre-state before its operations.
-/// The pre-state head sequence is the last admitted commit's sequence in the batch,
-/// or the batch's base head sequence when no earlier candidate was admitted.
-#[allow(
-    clippy::too_long_first_doc_paragraph,
-    reason = "a ToSchema doc is the OpenAPI description, so it keeps its wording"
-)]
+/// A condition that a commit must meet before its operations run.
+///
+/// The server checks each condition against the state before the commit. When several commits are
+/// applied as one batch, that state's head sequence is the sequence of the last commit admitted
+/// earlier in the batch, or the batch's starting head sequence if no earlier commit was admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommitPrecondition {
-    /// Requires the pre-state head sequence to equal `expected_head_seq`.
+    /// A requirement that the head sequence before the commit equals `expected_head_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNamespaceHead"))]
     NamespaceHead {
-        /// Sequence observed when the caller read its inputs.
+        /// The head sequence that the caller observed when it read its inputs.
         expected_head_seq: ChangeSeq,
     },
-    /// Requires a visible inode with the content revision the caller read.
+    /// A requirement that the inode is visible and has the content revision that the caller read.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionFileRevision"))]
     FileRevision {
-        /// Inode whose state the caller read.
+        /// The inode whose state the caller read.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Content revision observed by the caller.
+        /// The content revision that the caller observed.
         expected_revision_no: RevisionNo,
     },
-    /// Requires the path to retain the binding the caller read.
+    /// A requirement that the path still has the binding that the caller read.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathBinding"))]
     PathBinding {
-        /// Absolute path to check, including the root.
+        /// The absolute path to check, which can be the root.
         path: AbsolutePath,
-        /// Inode required at the path.
+        /// The inode that the path must be bound to.
         #[serde(with = "crate::public_inode_id")]
         expected_inode_id: InodeId,
-        /// Detects moves away and back.
+        /// The binding version that the path must also have, if set. This check detects an inode
+        /// that was moved away from the path and then back.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_binding_version: Option<BindingVersion>,
     },
-    /// Requires a visible inode to retain the binding the caller read.
+    /// A requirement that a visible inode still has the binding that the caller read.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionInodeBinding"))]
     InodeBinding {
-        /// Inode whose binding the caller read.
+        /// The inode whose binding the caller read.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Binding version observed by the caller.
+        /// The binding version that the caller observed.
         expected_binding_version: BindingVersion,
     },
-    /// Requires a visible inode with the attribute revision the caller read.
+    /// A requirement that the inode is visible and has the attribute revision that the caller read.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CommitPreconditionAttributesRevision")
     )]
     AttributesRevision {
-        /// Inode whose state the caller read.
+        /// The inode whose state the caller read.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Attribute revision observed by the caller.
+        /// The attribute revision that the caller observed.
         expected_attributes_revision_no: AttributesRevisionNo,
     },
-    /// Requires a visible inode with the access revision the caller read.
+    /// A requirement that the inode is visible and has the access revision that the caller read.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CommitPreconditionAccessRevision")
     )]
     AccessRevision {
-        /// Inode whose state the caller read.
+        /// The inode whose state the caller read.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Access revision observed by the caller.
+        /// The access revision that the caller observed.
         expected_access_revision_no: AccessRevisionNo,
     },
-    /// Requires no visible entry at the full path.
+    /// A requirement that no visible entry exists at the full path.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathAbsence"))]
     PathAbsence {
-        /// Absolute path to check, including the root.
+        /// The absolute path to check, which can be the root.
         path: AbsolutePath,
     },
-    /// Requires no visible entry with the name under the parent inode.
+    /// A requirement that no visible entry with this name exists under the parent inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNameAbsence"))]
     NameAbsence {
-        /// Directory to check.
+        /// The directory to check.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// Name to check.
+        /// The name to check.
         display_name: DisplayName,
     },
 }
 
-/// A request to commit one or more filesystem operations atomically in order.
+/// A request to commit one or more filesystem operations atomically, in order.
 ///
-/// Unknown fields are rejected.
+/// The server rejects unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
-    /// Caller-supplied idempotency key for the whole request.
+    /// The caller's idempotency key for the whole request.
     pub commit_id: CommitId,
-    /// The caller annotation that forms part of the commit identity.
+    /// An annotation from the caller. The message is part of the commit's identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// The proofs for new external content references in this request.
+    /// One content token for each uploaded `content_ref` that the request uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ContentToken>,
-    /// Ordered admission conditions evaluated before any operations.
+    /// The conditions that the server checks, in order, before it runs any operation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preconditions: Vec<CommitPrecondition>,
-    /// The non-empty ordered operations to commit atomically.
+    /// The operations to commit atomically, in order. The list can't be empty.
     pub operations: Vec<FilesystemOperation>,
 }
 
@@ -1076,86 +1102,88 @@ impl CommitRequest {
     }
 }
 
-/// One immutable file revision.
+/// One immutable revision of a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FileRevision {
-    /// File inode that owns this revision.
+    /// The file inode that this revision belongs to.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Revision number within the file inode.
+    /// The revision number within the file inode.
     pub revision_no: RevisionNo,
-    /// Namespace sequence that created this revision.
+    /// The namespace sequence of the commit that created this revision.
     pub committed_seq: ChangeSeq,
-    /// Commit ID for this revision.
+    /// The ID of the commit that created this revision.
     pub commit_id: CommitId,
-    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
+    /// The time the revision was committed, in Unix milliseconds. Commit order comes from
+    /// `committed_seq`, not from this time.
     pub committed_at_ms: u64,
-    /// Actor responsible for this revision, as supplied by the application.
+    /// The actor responsible for this revision, as the application supplied it.
     pub committed_by: crate::ActorId,
-    /// Content stored for this revision.
+    /// The content stored for this revision.
     pub content_ref: ContentRef,
 }
 
-/// Response for listing file revisions.
+/// One page of a file's revisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListFileRevisionsResponse {
-    /// Namespace that was read.
+    /// The namespace that was read.
     pub namespace_id: NamespaceId,
-    /// File inode whose revisions were returned.
+    /// The file inode whose revisions were returned.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Namespace head sequence used for the read.
+    /// The namespace head sequence that the read used.
     pub head_seq: ChangeSeq,
-    /// Retained revisions in order.
+    /// The retained revisions, in order.
     pub revisions: Vec<FileRevision>,
-    /// Opaque cursor for the next page, if more revisions are available.
+    /// An opaque cursor for the next page, if more revisions are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// Request to create a durable checkpoint pin.
+/// A request to create a durable checkpoint pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateCheckpointRequest {
-    /// The non-unique label recorded on the checkpoint.
+    /// A label to record on the checkpoint. Labels don't need to be unique.
     pub name: String,
-    /// The checkpoint lifetime in milliseconds. Omit it to keep the checkpoint until it is deleted.
+    /// The checkpoint's lifetime in milliseconds. Omit it to keep the checkpoint until it's
+    /// deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub ttl_ms: Option<u64>,
 }
 
-/// Request to create a snapshot.
+/// A request to create a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateSnapshotRequest {
-    /// A label that does not need to be unique.
+    /// The snapshot's label, which doesn't need to be unique.
     pub name: String,
-    /// Snapshot lifetime from the current server time, in milliseconds.
+    /// The snapshot's lifetime in milliseconds, counted from the server's current time.
     pub ttl_ms: u64,
 }
 
-/// Request to extend a read snapshot.
+/// A request to extend a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ExtendSnapshotRequest {
-    /// Requested lifetime from the server's current time, in milliseconds.
+    /// The new lifetime in milliseconds, counted from the server's current time.
     pub ttl_ms: u64,
 }
 
-/// Identifies the checkpoint record that was deleted.
+/// The checkpoint record that was deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeleteCheckpointResponse {
-    /// Namespace the checkpoint belonged to.
+    /// The namespace that the checkpoint belonged to.
     pub namespace_id: NamespaceId,
-    /// Deleted checkpoint record.
+    /// The ID of the deleted checkpoint record.
     pub checkpoint_id: PinId,
 }
 
@@ -1164,48 +1192,50 @@ pub struct DeleteCheckpointResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckpointOwner {
-    /// An operator-created pin, deleted by id or by its own expiry.
+    /// A pin that an operator created. It's deleted by its ID or after it expires.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
     User {
-        /// The non-unique label recorded by the creator.
+        /// The label that the creator recorded. Labels don't need to be unique.
         name: String,
     },
-    /// A fork target retaining its source basis for one fork attempt.
+    /// A pin that keeps the source state that one fork attempt starts from.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerFork"))]
     Fork {
-        /// The target namespace whose existence retains this checkpoint.
+        /// The fork's target namespace. Garbage collection keeps this checkpoint while that
+        /// namespace exists.
         target_namespace_id: NamespaceId,
     },
-    /// An application-created read view.
+    /// A pin that an application created as a snapshot. It's readable until it expires.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerSnapshot"))]
     Snapshot {
-        /// A label that does not need to be unique.
+        /// The snapshot's label, which doesn't need to be unique.
         name: String,
     },
-    /// An owner kind added by a newer server, without its kind-specific fields.
+    /// An owner kind from a newer server. This variant doesn't include the kind's own fields.
     #[serde(other)]
     Unknown,
 }
 
-/// One checkpoint resource described by its durable record.
+/// One checkpoint, as its durable record stores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Checkpoint {
-    /// Namespace that owns the checkpoint.
+    /// The namespace that the checkpoint belongs to.
     pub namespace_id: NamespaceId,
-    /// Durable checkpoint id used to address the checkpoint for deletion.
+    /// The checkpoint's durable ID. Use it to delete the checkpoint.
     pub checkpoint_id: PinId,
-    /// Who owns the checkpoint, including the label carried by a user pin.
+    /// The checkpoint's owner. For a user pin, the owner includes the label.
     pub owner: CheckpointOwner,
-    /// Time the checkpoint record was created, in Unix milliseconds.
+    /// The time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// Expiry in Unix milliseconds; collection waits one further grace window.
+    /// The time the checkpoint expires, in Unix milliseconds. Garbage collection waits one more
+    /// grace window before it deletes the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
-    /// Namespace sequence captured by the checkpoint.
+    /// The namespace sequence that the checkpoint captured.
     pub captured_seq: ChangeSeq,
-    /// Manifest pinned by the checkpoint.
+    /// The manifest that the checkpoint pins.
     pub manifest_no: ManifestNo,
 }
 
@@ -1213,17 +1243,17 @@ pub struct Checkpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Snapshot {
-    /// Snapshot id.
+    /// The snapshot ID.
     pub snapshot_id: PinId,
-    /// Namespace whose state the snapshot captured.
+    /// The namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
-    /// Snapshot label.
+    /// The snapshot's label.
     pub name: String,
-    /// Namespace sequence captured by the snapshot.
+    /// The namespace sequence that the snapshot captured.
     pub captured_seq: ChangeSeq,
-    /// Time the snapshot record was created, in Unix milliseconds.
+    /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// When the snapshot expires, in Unix milliseconds.
+    /// The time the snapshot expires, in Unix milliseconds.
     pub expires_at_ms: u64,
 }
 
@@ -1252,96 +1282,102 @@ impl Snapshot {
     }
 }
 
-/// One page of existing checkpoint records, including expired records that
-/// collection has not yet deleted.
+/// One page of checkpoint records, including expired records that garbage collection hasn't deleted
+/// yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListCheckpointsResponse {
-    /// Namespace the records belong to.
+    /// The namespace that the records belong to.
     pub namespace_id: NamespaceId,
-    /// The records in ascending checkpoint ID order.
+    /// The records, in ascending checkpoint ID order.
     pub checkpoints: Vec<Checkpoint>,
-    /// Opaque cursor for the next page.
+    /// An opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// One page of live read snapshots.
+/// One page of live snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListSnapshotsResponse {
-    /// Namespace the snapshots belong to.
+    /// The namespace that the snapshots belong to.
     pub namespace_id: NamespaceId,
-    /// Live snapshot records in ascending snapshot-id order.
+    /// The live snapshot records, in ascending snapshot ID order.
     pub snapshots: Vec<Snapshot>,
-    /// Opaque cursor for the next page.
+    /// An opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
-/// Identifies the snapshot record that was deleted.
+/// The snapshot record that was deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeleteSnapshotResponse {
-    /// Namespace the snapshot belonged to.
+    /// The namespace that the snapshot belonged to.
     pub namespace_id: NamespaceId,
-    /// Deleted snapshot record.
+    /// The ID of the deleted snapshot record.
     pub snapshot_id: PinId,
 }
 
-/// Optional overrides for one garbage-collection pass.
+/// Optional overrides for one garbage collection pass.
 ///
-/// Unknown fields are rejected.
+/// The server rejects unknown fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GcRequest {
-    /// The minimum object age for deletion in milliseconds, which must meet the
-    /// server's advertised safety floor.
+    /// The minimum age, in milliseconds, that an object must reach before the pass can delete it.
+    /// The value must be at least the server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub grace_window_ms: Option<u64>,
 }
 
-/// The candidates inspected but not deleted by one garbage-collection pass.
+/// The candidates that one garbage collection pass inspected but didn't delete, counted by reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// Candidates protected by current references or manifest discovery.
+    /// The candidates that a current root or the shared base filter protected, or that manifest
+    /// discovery needed.
     pub referenced: u64,
-    /// Unreachable candidates younger than the grace window by their provider timestamps.
+    /// The unreferenced candidates that were younger than the grace window, according to their
+    /// provider timestamps.
     pub within_grace_window: u64,
-    /// Unreachable candidates without provider timestamps.
+    /// The unreferenced candidates that had no provider timestamp, so their age was unknown.
     pub no_provider_timestamp: u64,
-    /// Unrecognized keys retained from object families scanned by garbage collection.
+    /// The keys that garbage collection didn't recognize in the object families it scanned. The
+    /// pass keeps these objects.
     pub unrecognized_key: u64,
-    /// Checkpoint records whose owner or grace window prevents deletion.
+    /// The checkpoint records that the pass couldn't delete because of their owner or their grace
+    /// window.
     pub checkpoint_not_deletable: u64,
-    /// Upload sessions still protected by a lease or grace window.
+    /// The upload sessions that a lease or grace window still protected.
     pub upload_session_window: u64,
-    /// Upload sessions whose deletion safety could not be determined.
+    /// The upload sessions that the pass couldn't prove safe to delete.
     pub upload_session_undecided: u64,
 }
 
-/// Object counts deleted by one garbage-collection pass, grouped by family.
+/// The number of objects that one garbage collection pass deleted, grouped by object family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedObjectCounts {
-    /// Unreferenced WAL objects deleted.
+    /// The unreferenced WAL objects that the pass deleted.
     pub wal_objects: u64,
-    /// Unreferenced metadata segments deleted.
+    /// The unreferenced metadata segments that the pass deleted.
     pub metadata_segments: u64,
-    /// Unreferenced manifests deleted.
+    /// The unreferenced manifests that the pass deleted.
     pub manifests: u64,
-    /// Upload-session control objects deleted after the reap window.
+    /// The upload session records that the pass deleted after their grace windows passed.
     pub upload_sessions: u64,
-    /// Content objects no retained view names, deleted once older than the grace window.
+    /// The content objects the pass deleted because no retained view referenced them and they were
+    /// older than the grace window.
     pub content_objects: u64,
-    /// Listed content objects deleted from a retired namespace.
+    /// The content objects that the pass listed under a retired namespace and deleted.
     pub retired_content_objects: u64,
-    /// Store temporary objects deleted once older than the grace window.
+    /// The store's temporary objects that the pass deleted because they were older than the grace
+    /// window.
     pub temporary_objects: u64,
 }
 
@@ -1367,15 +1403,15 @@ impl DeletedObjectCounts {
     }
 }
 
-/// Checkpoint record counts deleted by one garbage-collection pass, grouped by owner.
+/// The number of checkpoint records that one garbage collection pass deleted, grouped by owner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedCheckpointsByOwner {
-    /// User-owned records deleted after expiry or namespace deletion.
+    /// The user pins that the pass deleted after they expired or their namespace was deleted.
     pub user: u64,
-    /// Snapshot-owned records deleted after expiry or namespace deletion.
+    /// The snapshot pins that the pass deleted after they expired or their namespace was deleted.
     pub snapshot: u64,
-    /// Fork-owned records deleted because their target namespaces are gone.
+    /// The fork pins that the pass deleted because their target namespaces no longer exist.
     pub fork: u64,
 }
 
@@ -1393,23 +1429,23 @@ impl DeletedCheckpointsByOwner {
     }
 }
 
-/// The result of one stateless garbage-collection call.
+/// The result of one stateless garbage collection call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcResponse {
-    /// Namespace the pass ran against.
+    /// The namespace that the pass ran against.
     pub namespace_id: NamespaceId,
-    /// Objects the pass deleted, split by object family.
+    /// The objects that the pass deleted, counted by object family.
     pub deleted: DeletedObjectCounts,
-    /// The checkpoint records deleted by the pass, grouped by owner.
+    /// The checkpoint records that the pass deleted, counted by owner.
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
-    /// Candidates retained at deletion time, grouped by reason.
+    /// The candidates that the pass kept at deletion time, counted by reason.
     pub retained: RetainedCandidates,
     /// The earliest future retirement deadline, pin deletion time, or upload cleanup time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
-    /// The current tombstone's deletion time plus the configured retirement grace.
+    /// The deletion time of the current tombstone plus the configured retirement grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub reclaimable_at_ms: Option<u64>,
@@ -1531,33 +1567,32 @@ impl RetainedCandidates {
     }
 }
 
-/// Selects retention-floor advancement, to the folded manifest head unless
-/// the request names one target.
+/// A request to advance the retention floor to the folded manifest head, or to the one target that
+/// the request sets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AdvanceRetentionRequest {
-    /// Advance the floor to this sequence, or to the folded manifest head
-    /// when that is lower. Cannot be combined with `cutoff_at_ms`.
+    /// The sequence to advance the floor to. If the folded manifest head is lower, the floor
+    /// advances to the head instead. This field can't be combined with `cutoff_at_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub to_seq: Option<ChangeSeq>,
-    /// Advance the floor to the last commit committed at or before this Unix
-    /// time in milliseconds. Commits are read upward from the floor, and the
-    /// first one committed after this time ends the advance. Cannot be
-    /// combined with `to_seq`.
+    /// A Unix time in milliseconds. The floor advances to the last commit made at or before this
+    /// time. LoonFS reads commits upward from the floor, and the first commit made after this time
+    /// ends the advance. This field can't be combined with `to_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub cutoff_at_ms: Option<u64>,
 }
 
-/// Result of advancing the retention floor.
+/// The result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {
-    /// Namespace whose retention floor was advanced.
+    /// The namespace whose retention floor was advanced.
     pub namespace_id: NamespaceId,
-    /// New minimum sequence for incremental replay.
+    /// The new retention floor, which is the minimum sequence for incremental replay.
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -1566,29 +1601,31 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunMaintenanceRequest {
-    /// Folds the WAL tail and runs one bounded compaction step.
+    /// A job that folds the WAL tail and runs one bounded compaction step.
     Metadata(MetadataMaintenanceRequest),
-    /// Runs one metadata compaction unit: one bounded merge, or one streaming
-    /// compaction of a family group.
+    /// A job that runs one unit of metadata compaction, which is either one bounded merge or one
+    /// streaming compaction of a family group.
     MetadataCompaction(MetadataCompactionRequest),
-    /// Collects aged, unreferenced objects.
+    /// A garbage collection job for aged, unreferenced objects.
     Gc(GcRequest),
-    /// Collects aged, unreferenced grep index objects.
+    /// A garbage collection job for aged, unreferenced grep index objects.
     GrepGc {},
-    /// Advances the retention floor, to the folded manifest head unless the
-    /// request names a target.
+    /// A job that advances the retention floor to the folded manifest head, or to the target that
+    /// the request sets.
     Retention(AdvanceRetentionRequest),
-    /// Restores a root administrator.
+    /// A job that restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),
 }
 
-/// Grants `admin` on the root row to one principal, keeping every other
-/// root grant, through a commit that checks no subject.
+/// A request to grant `admin` on the root access row to one principal, through a commit that
+/// doesn't check any subject's rights.
+///
+/// Every other root grant stays in place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RecoverAdministratorRequest {
-    /// Principal receiving administrator rights.
+    /// The principal that receives administrator rights.
     pub principal_id: PrincipalId,
 }
 
@@ -1596,37 +1633,37 @@ pub struct RecoverAdministratorRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RecoverAdministratorResponse {
-    /// Namespace whose root grants changed.
+    /// The namespace whose root grants changed.
     pub namespace_id: NamespaceId,
-    /// Recovery commit id.
+    /// The ID of the recovery commit.
     pub commit_id: CommitId,
-    /// Sequence assigned to the recovery commit.
+    /// The sequence of the recovery commit.
     pub committed_seq: ChangeSeq,
-    /// Root access revision after recovery.
+    /// The root's access revision after the recovery.
     pub access_revision_no: AccessRevisionNo,
 }
 
-/// Overrides for the metadata-upkeep action.
+/// Overrides for the `metadata` maintenance job.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetadataMaintenanceRequest {
-    /// The WAL tail length, in WAL objects, that triggers a fold. Omit it for
-    /// the server default.
+    /// The WAL tail length, in WAL objects, that triggers a fold. Omit it to use the server
+    /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_wal_tail_objects: Option<u64>,
 }
 
-/// An option-free request for one metadata compaction unit.
+/// A request for one unit of metadata compaction, with no options.
 ///
-/// Repeat it while it publishes to compact every eligible family group.
+/// To compact every eligible family group, repeat the request while it keeps publishing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCompactionRequest {}
 
-/// What the WAL fold part of a maintenance pass did.
+/// What the WAL fold step of a maintenance pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1635,27 +1672,28 @@ pub enum WalFoldStepOutcome {
     NotNeeded,
     /// The step folded the WAL tail and published the next current manifest.
     Folded {
-        /// Sequence covered by the published manifest.
+        /// The last sequence that the published manifest includes.
         manifest_head_seq: ChangeSeq,
     },
-    /// The current manifest already covered the captured WAL tail; this step published no manifest.
+    /// The current manifest already included the captured WAL tail, so this step didn't publish a
+    /// manifest.
     AlreadyPublished {
-        /// Sequence this step attempted to fold through.
+        /// The sequence that this step tried to fold through.
         attempted_seq: ChangeSeq,
-        /// The namespace's current manifest number.
+        /// The number of the namespace's current manifest.
         current_manifest_no: ManifestNo,
     },
     /// Concurrent updates prevented every publication attempt.
     RetriesExhausted {
-        /// Head sequence observed before the step ran.
+        /// The head sequence observed before the step ran.
         observed_head_seq: ChangeSeq,
     },
-    /// An outcome added by a newer server, without its outcome-specific fields.
+    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
     Unknown,
 }
 
-/// What the bounded compaction part of a maintenance pass did.
+/// What the bounded compaction step of a maintenance pass did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1663,14 +1701,15 @@ pub enum CompactionStepOutcome {
     /// No family group had enough delta runs to merge.
     #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeNotNeeded"))]
     NotNeeded {},
-    /// One family group was merged and a manifest published.
+    /// One family group was merged, and a new manifest was published.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CompactionStepOutcomeBoundedMergePublished")
     )]
     BoundedMergePublished {},
-    /// A family group's window is too large for one bounded merge. Run the
-    /// `metadata_compaction` job, which compacts it by streaming.
+    /// A family group's window is too large for one bounded merge.
+    ///
+    /// Run the `metadata_compaction` job, which compacts the group by streaming.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CompactionStepOutcomeMetadataCompactionRequired")
@@ -1682,49 +1721,54 @@ pub enum CompactionStepOutcome {
         schema(title = "CompactionStepOutcomeManifestAdvanced")
     )]
     ManifestAdvanced {},
-    /// A newer runtime holds the compactor epoch.
+    /// A newer runtime claimed the namespace's compactor epoch, so this step published nothing.
     #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeFenced"))]
     Fenced {},
-    /// An outcome added by a newer server, without its outcome-specific fields.
+    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
     Unknown,
 }
 
-/// The result of one maintenance job. The `kind` matches the request.
+/// The result of one maintenance job.
+///
+/// The `kind` matches the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunMaintenanceResponse {
-    /// Result of the WAL fold and one bounded compaction step.
+    /// The result of the WAL fold and one bounded compaction step.
     Metadata(MetadataMaintenanceResponse),
-    /// Result of one metadata compaction unit.
+    /// The result of one unit of metadata compaction.
     MetadataCompaction(MetadataCompactionResponse),
-    /// Counts and deadlines from one collection call.
+    /// The counts and deadlines from one garbage collection call.
     Gc(GcResponse),
-    /// Counts from one grep index collection pass.
+    /// The counts from one garbage collection pass over the grep index.
     GrepGc {
-        /// Namespace whose grep-owned keyspace was inspected.
+        /// The namespace whose grep keyspace the pass inspected.
         namespace_id: NamespaceId,
-        /// Unreferenced grep segments older than the minimum segment age.
+        /// The unreferenced grep segments that the pass deleted because they were older than the
+        /// minimum segment age.
         deleted_segments: u64,
-        /// Other unreferenced grep objects deleted after the grace window.
+        /// The other unreferenced grep objects that the pass deleted after the grace window.
         deleted_other_objects: u64,
-        /// Whether an absent or tombstoned namespace had extension state reaped.
+        /// Whether the pass deleted the grep extension state of a namespace that is missing or
+        /// deleted.
         namespace_reaped: bool,
-        /// Referenced, young, or unrecognized candidates retained by the pass.
+        /// The candidates that the pass kept because they were referenced, too young, or
+        /// unrecognized.
         retained_candidates: u64,
     },
-    /// Result of advancing the retention floor.
+    /// The result of advancing the retention floor.
     Retention(AdvanceRetentionResponse),
     /// The committed administrator recovery.
     RecoverAdministrator(RecoverAdministratorResponse),
 }
 
-/// What one metadata-upkeep action did, part by part.
+/// What each step of one `metadata` maintenance job did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {
-    /// Namespace maintained by this run.
+    /// The namespace that this run maintained.
     pub namespace_id: NamespaceId,
     /// What the WAL fold did.
     pub wal_fold: WalFoldStepOutcome,
@@ -1736,9 +1780,9 @@ pub struct MetadataMaintenanceResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataCompactionResponse {
-    /// Namespace compacted by this run.
+    /// The namespace that this run compacted.
     pub namespace_id: NamespaceId,
-    /// The compaction outcome.
+    /// The outcome of the compaction.
     pub compaction: MetadataCompactionOutcome,
 }
 
@@ -1747,49 +1791,51 @@ pub struct MetadataCompactionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum MetadataCompactionOutcome {
-    /// No eligible family group was available and nothing was published.
+    /// No eligible family group was available, so nothing was published.
     NotNeeded,
-    /// The selected window fit a bounded step and this run published it.
+    /// The selected window fit in a bounded step, and this run published it.
     BoundedMergePublished,
-    /// The selected run window was replaced in a published manifest.
+    /// A streaming compaction merged the selected window and published the next manifest.
     Published {
-        /// Manifest published by the compaction.
+        /// The manifest that the compaction published.
         manifest_no: ManifestNo,
-        /// Rows read by the compaction.
+        /// The rows that the compaction read.
         rows_read: u64,
-        /// Rows written by the compaction.
+        /// The rows that the compaction wrote.
         rows_written: u64,
-        /// Input bytes read by the compaction.
+        /// The input bytes that the compaction read.
         input_bytes: u64,
-        /// Output bytes written by the compaction.
+        /// The output bytes that the compaction wrote.
         output_bytes: u64,
-        /// Output segments written by the compaction.
+        /// The output segments that the compaction wrote.
         output_segments: u64,
     },
-    /// The run was cancelled; the manifest did not move.
+    /// The run was cancelled, so the current manifest didn't change.
     Cancelled,
-    /// Inputs changed, time ran out, or publication retries were exhausted.
+    /// The run stopped because its inputs changed, time ran out, or publication retries were
+    /// exhausted.
     Abandoned,
-    /// Another process claimed the namespace compactor role; nothing was published.
+    /// Another process claimed the namespace's compactor epoch, so nothing was published.
     Fenced,
-    /// An outcome added by a newer server, without its outcome-specific fields.
+    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
     Unknown,
 }
 
-/// An empty request for one store contract probe.
+/// A request for one run of the store contract probe, with an empty body.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StoreProbeRequest {}
 
-/// The ordered results from one store contract probe.
+/// The results of one store contract probe, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StoreProbeResponse {
-    /// The server-generated label for this probe run and its objects.
+    /// The ID of this probe run. The server generates the ID and writes the probe's temporary
+    /// objects under it.
     pub run_id: ProbeRunId,
-    /// The check results in execution order.
+    /// The check results, in the order that the checks ran.
     pub checks: Vec<StoreProbeCheckResult>,
 }
 
@@ -1805,13 +1851,13 @@ impl StoreProbeResponse {
     }
 }
 
-/// One named contract check and what the store did with it.
+/// The result of one contract check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StoreProbeCheckResult {
-    /// Stable check name.
+    /// The check's stable name.
     pub name: String,
-    /// What the store did.
+    /// Whether the store passed the check, failed it, or doesn't support the capability.
     pub outcome: StoreProbeCheckOutcome,
     /// The expected and actual behavior for a failed check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1833,14 +1879,14 @@ impl StoreProbeCheckResult {
     }
 }
 
-/// What one contract check concluded about the store.
+/// What one contract check found about the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum StoreProbeCheckOutcome {
     /// The store behaved as the contract requires.
     Passed,
-    /// The store does not support this optional capability.
+    /// The store doesn't support this optional capability.
     Unsupported,
     /// The store violated the contract or the operation failed.
     Failed,

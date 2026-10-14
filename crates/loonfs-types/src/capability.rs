@@ -144,18 +144,20 @@ limit_keys! {
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES = "query.grep.tail_budget_files";
 }
 
-/// The API groups, features, and limits advertised by a deployment.
+/// The API groups, features, and limits that a deployment advertises.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
     /// The protocol version, `v0`.
     pub protocol_version: String,
-    /// The advertised `group/version` API groups, each with every required operation implemented.
+    /// The advertised API groups, as `group/version`. The deployment implements every required
+    /// operation in each group.
     pub api_groups: Vec<String>,
-    /// The named features supported by this deployment, with absent keys treated as unsupported.
+    /// Feature keys, and whether this deployment supports each one. An absent key means the feature
+    /// isn't supported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, bool>,
-    /// Advisory numeric limits clients may use to pre-validate requests.
+    /// Advisory numeric limits that clients can use to check requests before sending them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub limits: BTreeMap<String, u64>,
 }

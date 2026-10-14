@@ -824,7 +824,7 @@ In a `metadata` result, `compaction.outcome` reports the bounded compaction step
 | `bounded_merge_published` | This run published one bounded merge. |
 | `metadata_compaction_required` | A family group's window is too large for one bounded merge. The caller runs the `metadata_compaction` job instead, which compacts the group by streaming. |
 | `manifest_advanced` | Another publisher changed the current manifest first. The segments this run wrote stay unreferenced, and a later GC pass can delete them. |
-| `fenced` | A newer runtime has the compactor epoch. |
+| `fenced` | A newer runtime claimed the namespace's compactor epoch, so this step published nothing. |
 
 The bounded step in a `metadata` run never runs a streaming compaction. Only the `metadata_compaction` job does.
 
@@ -890,8 +890,8 @@ Every core GC response also includes `retained`, which counts the candidates the
 | Reason | Means |
 | --- | --- |
 | `referenced` | Protected by current roots or the shared base filter, or needed for forward manifest discovery. |
-| `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
-| `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
+| `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
+| `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a swept family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
 | `checkpoint_not_deletable` | A pin that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
@@ -1266,9 +1266,9 @@ The `NamespaceMetadata` object has exactly these fields:
 | `naming` | The naming mode, either `"case_insensitive"` or `"case_sensitive"`. It controls how sibling names are compared (see [Names and paths](format.md#14-names-and-paths)). |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. It contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The oldest position a change feed can resume after. The feed returns changes above it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 
 The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes.
 
@@ -1285,9 +1285,9 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. It contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The oldest position a change feed can resume after. The feed returns changes above it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
 | `wal_tail_objects` | The WAL tip minus the current manifest's folded WAL number, including fences. |
 | `live_snapshots` | The number of snapshots that hadn't expired when the diagnostics read began. |

@@ -216,10 +216,10 @@ pub(super) async fn get_capabilities(
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 409, description = "Namespace already exists", body = ErrorResponse),
-            (status = 410, description = "Namespace id permanently deleted (namespace_deleted)", body = ErrorResponse),
+            (status = 410, description = "The namespace ID was deleted and can't be used again (`namespace_deleted`)", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -269,10 +269,10 @@ pub(super) async fn create_namespace(
         tag = "namespaces",
         summary = "Get namespace",
         description = "Returns the current head and retention state for a namespace.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Namespace", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -303,10 +303,10 @@ pub(super) async fn get_namespace(
         tag = "maintenance",
         summary = "Get namespace diagnostics",
         description = "Returns namespace state together with the current manifest and visible WAL tail.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Namespace diagnostics", body = loonfs_types::NamespaceDiagnostics),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -339,10 +339,10 @@ pub(super) async fn get_namespace_diagnostics(
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
-        description = "Marks a namespace as deleted. The id can never be created or forked into again.",
+        description = "Marks a namespace as deleted. The namespace ID can never be used again to create or fork a namespace.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("expected_head_seq" = Option<ChangeSeq>, Query, description = "Delete only if the namespace head is still at this sequence")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("expected_head_seq" = Option<ChangeSeq>, Query, description = "The head sequence that the namespace must still have for the delete to succeed.")
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_types::DeleteNamespaceResponse),
@@ -399,16 +399,16 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
-        description = "Creates a new namespace from the source current head or a live snapshot.",
-        params(("namespace_id" = String, Path, description = "Source namespace id")),
+        description = "Creates a new namespace from the source namespace's current head or from a live snapshot.",
+        params(("namespace_id" = String, Path, description = "The source namespace ID.")),
         request_body = ForkNamespaceRequest,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Source namespace or snapshot not found", body = ErrorResponse),
             (status = 409, description = "Fork conflict", body = ErrorResponse),
-            (status = 410, description = "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone", body = ErrorResponse),
+            (status = 410, description = "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`), or the snapshot is gone", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -451,11 +451,11 @@ pub(super) async fn fork_namespace(
         tag = "namespaces",
         summary = "Create snapshot",
         description = "Creates a snapshot of the current namespace state. Every accepted call creates a new snapshot.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateSnapshotRequest,
         responses(
             (status = 200, description = "Snapshot created", body = Snapshot),
-            (status = 400, description = "Invalid namespace id, name, or ttl", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID, name, or ttl", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 409, description = "Snapshot quota exceeded", body = ErrorResponse),
@@ -507,15 +507,15 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists live snapshots in snapshot-id order. Deleted and expired snapshots are omitted.",
+        description = "Lists live snapshots in snapshot ID order. The list leaves out deleted and expired snapshots.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque snapshot-list page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "Live snapshots", body = ListSnapshotsResponse),
-            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -555,13 +555,13 @@ pub(super) async fn list_snapshots(
         summary = "Extend snapshot",
         description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
         ),
         request_body = ExtendSnapshotRequest,
         responses(
             (status = 200, description = "Snapshot extended", body = Snapshot),
-            (status = 400, description = "Invalid id or ttl", body = ErrorResponse),
+            (status = 400, description = "Invalid ID or ttl", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Snapshot not found", body = ErrorResponse),
             (status = 410, description = "Snapshot expired", body = ErrorResponse),
@@ -611,14 +611,14 @@ pub(super) async fn extend_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Retrieve snapshot",
-        description = "Returns one live snapshot, as the snapshot listing returns it. A missing id, or the id of a pin that isn't a snapshot, returns snapshot_not_found, and an expired snapshot returns snapshot_gone.",
+        description = "Returns one live snapshot, as the snapshot listing returns it. A missing ID, or the ID of a pin that isn't a snapshot, returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Live snapshot", body = Snapshot),
-            (status = 400, description = "Invalid namespace or snapshot id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Snapshot expired", body = ErrorResponse),
@@ -656,14 +656,14 @@ pub(super) async fn get_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
-        description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
+        description = "Deletes a snapshot pin. A missing ID returns `snapshot_not_found`.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),
-            (status = 400, description = "Invalid id or non-snapshot record", body = ErrorResponse),
+            (status = 400, description = "Invalid ID or non-snapshot record", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Snapshot not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -720,12 +720,12 @@ fn snapshot_expiry_from_ttl(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         tag = "maintenance",
         summary = "Create checkpoint",
-        description = "Creates a user-owned checkpoint record pinning the current namespace view. It first folds any WAL tail after the current manifest. Every call creates a new record under a new id; the name is a label, not a key. The record retains its manifest until it is deleted, either explicitly or by collection after expiry plus grace, so routine maintenance should fold the WAL instead. This is a maintenance operation, not a file mutation.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Creates a user checkpoint record that pins the current namespace view. The server first folds any WAL tail after the current manifest. Every call creates a new record with a new ID, and the name is a label, not a key. The record keeps its manifest until the record is deleted, either explicitly or by garbage collection after the record expires and its grace window passes. Because of that, routine maintenance should fold the WAL instead of creating checkpoints. This is a maintenance operation, not a file change.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
             (status = 200, description = "The created checkpoint", body = Checkpoint),
-            (status = 400, description = "Invalid namespace id, name, or lifetime", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID, name, or lifetime", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -773,15 +773,15 @@ pub(super) async fn create_checkpoint(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         tag = "maintenance",
         summary = "List checkpoints",
-        description = "Lists existing pins in checkpoint-id order. Expired pins remain visible until collection deletes them after expiry plus grace. The cursor resumes a live listing.",
+        description = "Lists existing pins in checkpoint ID order. An expired pin stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque checkpoint-list page cursor")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
         ),
         responses(
             (status = 200, description = "Existing checkpoint objects", body = ListCheckpointsResponse),
-            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -816,14 +816,14 @@ pub(super) async fn list_checkpoints(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
         tag = "maintenance",
         summary = "Retrieve checkpoint",
-        description = "Returns one existing pin as the checkpoint listing returns it, including an expired pin that collection has not deleted. A missing id returns checkpoint_not_found.",
+        description = "Returns one existing pin, as the checkpoint listing returns it, including an expired pin that garbage collection hasn't deleted. A missing ID returns `checkpoint_not_found`.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("checkpoint_id" = String, Path, description = "Checkpoint id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("checkpoint_id" = String, Path, description = "The checkpoint ID.")
         ),
         responses(
             (status = 200, description = "Existing checkpoint", body = Checkpoint),
-            (status = 400, description = "Invalid namespace or checkpoint id", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace or checkpoint ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -857,14 +857,14 @@ pub(super) async fn get_checkpoint(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
         tag = "maintenance",
         summary = "Delete checkpoint",
-        description = "Deletes a user-owned checkpoint pin. A missing id returns checkpoint_not_found. Garbage collection can reclaim its unreferenced manifest and runs.",
+        description = "Deletes a user checkpoint pin. A missing ID returns `checkpoint_not_found`. Garbage collection can then reclaim the pin's unreferenced manifest and runs.",
         params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("checkpoint_id" = String, Path, description = "Checkpoint id")
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("checkpoint_id" = String, Path, description = "The checkpoint ID.")
         ),
         responses(
             (status = 200, description = "Checkpoint pin deleted", body = DeleteCheckpointResponse),
-            (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ErrorResponse),
+            (status = 400, description = "Invalid ID, or the checkpoint belongs to another operation", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -903,17 +903,17 @@ pub(super) struct CheckpointPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation. A `retention` call advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` names.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
             (status = 200, description = "Maintenance job completed", body = RunMaintenanceResponse),
-            (status = 400, description = "Invalid namespace id or options", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID or options", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
+            (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )

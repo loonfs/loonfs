@@ -6,25 +6,26 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// One committed logical commit: its identity and the events it applied.
+/// One commit, including its identity and the events it applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Commit {
-    /// Namespace that changed.
+    /// The namespace that changed.
     pub namespace_id: NamespaceId,
-    /// The idempotency key for the commit.
+    /// The commit's idempotency key.
     pub commit_id: CommitId,
-    /// Sequence number where the commit became visible.
+    /// The sequence at which the commit became visible.
     pub committed_seq: ChangeSeq,
-    /// Actor responsible for the commit, as supplied by the application.
+    /// The actor responsible for the commit, as the application supplied it.
     pub committed_by: crate::ActorId,
-    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
+    /// The time the commit was made, in Unix milliseconds. Commit order comes from `committed_seq`,
+    /// not from this time.
     pub committed_at_ms: u64,
-    /// The optional caller annotation for the commit.
+    /// The caller's optional annotation for the commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// The semantic filesystem operations the commit applied, in request order.
+    /// The semantic filesystem changes that the commit applied, in request order.
     pub events: Vec<FilesystemChange>,
 }
 
@@ -32,20 +33,21 @@ pub struct Commit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectoryBinding {
-    /// Parent directory containing the entry.
+    /// The parent directory that contains the entry.
     #[serde(with = "crate::public_inode_id")]
     pub parent_inode_id: InodeId,
-    /// Name used to look up the entry.
+    /// The name key that lookups use to find the entry.
     pub name_key: NameKey,
-    /// Name shown to users.
+    /// The name that users see.
     pub display_name: DisplayName,
 }
 
 /// One filesystem change within a commit.
 ///
-/// One request operation can produce multiple changes.
+/// One request operation can produce several changes.
 ///
-/// Newer servers may report other event kinds; clients ignore them.
+/// A newer server can return a change kind that isn't listed here. Clients should skip a change
+/// whose kind they don't recognize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -56,86 +58,87 @@ pub enum FilesystemChange {
         schema(title = "FilesystemChangeDirectoryCreated")
     )]
     DirectoryCreated {
-        /// Newly allocated namespace-scoped inode identity.
+        /// The newly allocated inode, unique within the namespace.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory the new entry was bound under.
+        /// The directory that the new entry was bound under.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// User-facing spelling of the new entry.
+        /// The display name of the new entry.
         display_name: DisplayName,
-        /// Opaque identifier for the binding created by this event.
+        /// The binding that this event created. The value is opaque.
         binding_version: BindingVersion,
     },
     /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
     FileCreated {
-        /// Newly allocated namespace-scoped inode identity.
+        /// The newly allocated inode, unique within the namespace.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory the new entry was bound under.
+        /// The directory that the new entry was bound under.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// User-facing spelling of the new entry.
+        /// The display name of the new entry.
         display_name: DisplayName,
-        /// Opaque identifier for the binding created by this event.
+        /// The binding that this event created. The value is opaque.
         binding_version: BindingVersion,
-        /// First revision number.
+        /// The file's first revision number.
         revision_no: RevisionNo,
-        /// Content of the first revision.
+        /// The content of the first revision.
         content_ref: ContentRef,
     },
     /// A file received a new current revision from a put or revision restore.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
     ContentChanged {
-        /// File inode whose history advanced.
+        /// The file inode whose history advanced.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// New monotonic position in that file's revision history.
+        /// The file's new revision number, which is higher than the number of every earlier
+        /// revision.
         revision_no: RevisionNo,
-        /// Immutable content published by the revision.
+        /// The immutable content that the revision published.
         content_ref: ContentRef,
     },
     /// An inode moved to a new parent directory or name.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
     Moved {
-        /// Inode whose binding changed.
+        /// The inode whose binding changed.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory that held the removed binding.
+        /// The directory that contained the removed binding.
         #[serde(with = "crate::public_inode_id")]
         source_parent_inode_id: InodeId,
-        /// Spelling of the removed binding.
+        /// The display name of the removed binding.
         source_display_name: DisplayName,
-        /// Directory holding the new binding.
+        /// The directory that contains the new binding.
         #[serde(with = "crate::public_inode_id")]
         destination_parent_inode_id: InodeId,
-        /// Spelling of the new binding.
+        /// The display name of the new binding.
         destination_display_name: DisplayName,
-        /// Opaque identifier for the binding created by this event.
+        /// The binding that this event created. The value is opaque.
         binding_version: BindingVersion,
     },
     /// A file or directory subtree was deleted.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
-        /// Inode at the root of the deleted subtree.
+        /// The inode at the root of the deleted subtree.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory binding removed by the deletion.
+        /// The directory binding that the deletion removed.
         deleted_binding: DirectoryBinding,
     },
     /// A deleted inode was recovered and re-bound.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
     Undeleted {
-        /// Recovered inode.
+        /// The recovered inode.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory the recovered entry was bound under.
+        /// The directory that the recovered entry was bound under.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
-        /// Spelling of the recovered binding.
+        /// The display name of the recovered binding.
         display_name: DisplayName,
-        /// Opaque identifier for the binding created by this event.
+        /// The binding that this event created. The value is opaque.
         binding_version: BindingVersion,
     },
     /// An inode's attributes changed.
@@ -144,52 +147,54 @@ pub enum FilesystemChange {
         schema(title = "FilesystemChangeAttributesChanged")
     )]
     AttributesChanged {
-        /// Inode whose attributes advanced.
+        /// The inode whose attributes changed.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// New attribute revision for that inode.
+        /// The inode's new attribute revision.
         attributes_revision_no: AttributesRevisionNo,
-        /// The inode's complete attribute map after the update, including an empty map
-        /// when all attributes were cleared.
+        /// The inode's complete attribute map after the update. The map is empty when the update
+        /// removed every attribute.
         attributes: Attributes,
     },
-    /// An inode's access row was replaced. `grants` is the complete
-    /// direct grant map after the update.
+    /// An inode's access row was replaced.
+    ///
+    /// `grants` is the complete direct grant map after the update.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeAccessChanged"))]
     AccessChanged {
-        /// Inode whose access state advanced.
+        /// The inode whose access row changed.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Revision published by the update.
+        /// The access revision that the update published.
         access_revision_no: AccessRevisionNo,
-        /// Whether the directory stops inheritance from its ancestors.
+        /// Whether the directory stops inheriting grants from its ancestors.
         boundary: bool,
-        /// The inode's complete direct grants after this update.
+        /// Every direct grant that the inode has after this update.
         grants: AccessGrants,
     },
-    /// A kind added by a newer server, without its kind-specific fields.
+    /// A change kind from a newer server. This variant doesn't include the kind's own fields.
     ///
-    /// It serializes as `unknown` because the reported kind is not kept.
+    /// It serializes as `unknown` because the reported kind isn't kept.
     #[serde(other)]
     Unknown,
 }
 
-/// Change-feed response after a cursor.
+/// The commits after a change feed cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListChangesResponse {
-    /// Namespace whose ordered commit stream was read.
+    /// The namespace whose change feed was read.
     pub namespace_id: NamespaceId,
-    /// Exclusive cursor supplied by the caller, or the endpoint's initial position.
+    /// The exclusive cursor that this page starts after. It's the cursor that the caller supplied,
+    /// or the endpoint's initial position.
     pub after_seq: ChangeSeq,
-    /// Namespace head sequence this page was read at.
+    /// The namespace head sequence that this page was read at.
     pub head_seq: ChangeSeq,
-    /// Cursor to request when another page remains, absent on the page that
+    /// The cursor for the next page, when another page remains. It's absent on the page that
     /// reaches `head_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,
-    /// Logical commits after `after_seq`, ordered by ascending namespace sequence.
+    /// The logical commits after `after_seq`, in ascending namespace sequence order.
     pub changes: Vec<Commit>,
 }
 

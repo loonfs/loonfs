@@ -4,28 +4,30 @@ use crate::{Checksum, ChecksumAlgorithm, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The size and checksum reported for a complete direct-upload payload.
+/// The size and checksum of a complete direct upload payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UploadContentClaim {
-    /// Complete payload size in bytes.
+    /// The size of the complete payload in bytes.
     pub size_bytes: u64,
-    /// Whole-payload checksum in the algorithm required by this operation.
+    /// The checksum of the whole payload, in the algorithm that this operation requires.
     pub checksum: Checksum,
 }
 
-/// Upload transport mode.
+/// The transport that an upload uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum UploadMode {
-    /// The service receives bytes and writes content to object storage.
+    /// A transport in which the service receives the bytes and writes the content to object
+    /// storage.
     #[default]
     ServiceProxied,
-    /// The service mints a short-lived presigned PUT URL for the content object.
+    /// A transport in which the service creates a short-lived presigned PUT URL for the content
+    /// object.
     DirectPut,
-    /// The client uploads parts directly to object storage.
+    /// A transport in which the client uploads parts directly to object storage.
     DirectMultipart,
 }
 
@@ -40,28 +42,29 @@ impl UploadMode {
     }
 }
 
-/// Selects the transport for a new upload session.
+/// The transport for a new upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CreateUploadBody {
     // Empty braces make serde reject fields from another transport. A unit
     // variant would silently ignore them.
-    /// Send the bytes to the service, which writes the content object.
+    /// A transport in which the client sends the bytes to the service, which writes the content
+    /// object.
     #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyServiceProxied"))]
     ServiceProxied {},
-    /// Write the whole object through one presigned request.
+    /// A transport in which the client writes the whole object through one presigned request.
     #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyDirectPut"))]
     DirectPut {
-        /// Advisory byte length for an early provider-limit check.
+        /// An advisory byte length, which the server uses to check the provider's size limit early.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         size_bytes: Option<u64>,
     },
-    /// Write the object in parts through presigned part uploads.
+    /// A transport in which the client writes the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyDirectMultipart"))]
     DirectMultipart {
-        /// The byte length of every part except the last. Omit it for the server default.
+        /// The byte length of every part except the last. Omit it to use the server default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         part_size_bytes: Option<u64>,
@@ -79,24 +82,24 @@ impl CreateUploadBody {
     }
 }
 
-/// Client-facing direct transfer capability.
+/// A capability that lets a client transfer bytes directly to or from object storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectTransferAccess {
-    /// Short-lived URL plus required headers for one object-store read or write.
+    /// A short-lived URL, with the headers that one object store read or write requires.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "ObjectTransferAccessPresignedUrl")
     )]
     PresignedUrl {
-        /// HTTP method the client must use.
+        /// The HTTP method that the client must use.
         method: String,
-        /// Full presigned URL.
+        /// The full presigned URL.
         url: String,
-        /// Headers that are covered by the signature and must be sent.
+        /// The headers that the signature covers, which the client must send.
         headers: BTreeMap<String, String>,
-        /// Expiration timestamp in Unix milliseconds.
+        /// The time the URL expires, in Unix milliseconds.
         expires_at_ms: u64,
     },
 }
@@ -106,18 +109,19 @@ pub enum ObjectTransferAccess {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UploadPartChecksumClaim {
-    /// One-based part number, at most the provider's 10,000-part limit.
+    /// The part number, counting from 1. The number can't exceed the provider's limit of 10,000
+    /// parts.
     pub part_number: u32,
-    /// Checksum over this part's bytes.
+    /// The checksum of this part's bytes.
     pub checksum: Checksum,
 }
 
-/// Request for part-upload capabilities on an open multipart session.
+/// A request for part upload capabilities on an open multipart session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SignUploadPartsRequest {
-    /// The parts to authorize; repeated part numbers replace their previous uploads.
+    /// The parts to authorize. A repeated part number replaces the earlier upload of that part.
     pub parts: Vec<UploadPartChecksumClaim>,
 }
 
@@ -125,74 +129,75 @@ pub struct SignUploadPartsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SignedUploadPart {
-    /// Part number this capability writes.
+    /// The part number that this capability writes.
     pub part_number: u32,
-    /// Short-lived write capability for that part.
+    /// A short-lived write capability for this part.
     pub access: ObjectTransferAccess,
 }
 
-/// Response carrying one capability per requested part.
+/// One capability for each requested part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SignUploadPartsResponse {
-    /// Namespace that owns the upload session.
+    /// The namespace that the upload session belongs to.
     pub namespace_id: NamespaceId,
-    /// Session the parts belong to.
+    /// The session that the parts belong to.
     pub upload_id: UploadId,
-    /// Capabilities in the order the request asked for them.
+    /// The capabilities, in the order that the request asked for them.
     pub parts: Vec<SignedUploadPart>,
 }
 
-/// One uploaded part accepted by the object-store provider.
+/// One uploaded part that the object store provider accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompletedUploadPart {
-    /// One-based part number.
+    /// The part number, counting from 1.
     pub part_number: u32,
-    /// Entity tag the provider returned for the accepted part.
+    /// The entity tag that the provider returned for the accepted part.
     pub etag: String,
-    /// Checksum the part was signed and accepted with.
+    /// The checksum that the part was signed and accepted with.
     pub checksum: Checksum,
 }
 
-/// Proof that a specific `content_ref` may be used in a later commit.
+/// A signed token that shows a `content_ref` was verified in a completed upload, so a later
+/// commit can use that reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentToken {
-    /// Content authorized by this token.
+    /// The content that this token authorizes.
     pub content_ref: ContentRef,
-    /// The opaque server-signed token that clients must not parse.
+    /// The opaque token that the server signed. Clients must not parse it.
     pub token: String,
 }
 
-/// Completes an upload using the mode that started it.
+/// A request to complete an upload, in the mode that started it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompleteUploadBody {
-    /// Complete a service-proxied upload.
+    /// The completion of a service-proxied upload.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CompleteUploadBodyServiceProxied")
     )]
     ServiceProxied {},
-    /// Complete a direct-PUT upload.
+    /// The completion of a direct PUT upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadBodyDirectPut"))]
     DirectPut {
-        /// Expected length and checksum of the stored object.
+        /// The expected length and checksum of the stored object.
         content: UploadContentClaim,
     },
-    /// Complete a direct multipart upload.
+    /// The completion of a direct multipart upload.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CompleteUploadBodyDirectMultipart")
     )]
     DirectMultipart {
-        /// Expected length and checksum of the assembled object.
+        /// The expected length and checksum of the assembled object.
         content: UploadContentClaim,
-        /// Uploaded parts in ascending part order.
+        /// The uploaded parts, in ascending part order.
         parts: Vec<CompletedUploadPart>,
     },
 }
@@ -210,65 +215,68 @@ impl CompleteUploadBody {
 
 /// The current state of an upload session.
 ///
-/// A session starts as `Open` and permanently ends as `Completed` or `Aborted`.
+/// A session starts as `Open` and ends as `Completed` or `Aborted`. Neither end state can change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum UploadSessionStatus {
-    /// Accepting content until its lease passes.
+    /// A session that accepts content until its lease ends.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusOpen"))]
     Open {
-        /// The Unix-millisecond time after which cleanup may abort the session.
+        /// The time after which cleanup can abort the session, in Unix milliseconds.
         expires_at_ms: u64,
-        /// The store's content checksum algorithm.
+        /// The checksum algorithm that the store uses for content.
         checksum_algorithm: ChecksumAlgorithm,
-        /// Present for `direct_multipart` sessions.
+        /// The size of every part except the last, in bytes. It's present for `direct_multipart`
+        /// sessions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         part_size_bytes: Option<u64>,
-        /// Present for `direct_put` sessions; minted fresh on every read.
+        /// The capability for the direct PUT. It's present for `direct_put` sessions, and the
+        /// server creates a new one on every read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         access: Option<ObjectTransferAccess>,
-        /// Present after content is staged in a `service_proxied` session.
+        /// The staged content. It's present after content is staged in a `service_proxied` session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_ref: Option<ContentRef>,
     },
-    /// Final: the content is durable and verified.
+    /// A session that ended with durable, verified content.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusCompleted"))]
     Completed {
-        /// Unix-millisecond stamp of the completion.
+        /// The time the session completed, in Unix milliseconds.
         completed_at_ms: u64,
-        /// Verified content selected by this session.
+        /// The verified content that the session completed with.
         content_ref: ContentRef,
-        /// Fresh proof for a later commit, absent after the token minting window closes.
+        /// A new content token, which a later commit can use to reference the content. It's absent
+        /// after the window for issuing tokens closes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_token: Option<ContentToken>,
     },
-    /// Final: the session selected no content and its object is gone.
+    /// A session that was aborted before it completed. Its object no longer exists.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusAborted"))]
     Aborted {
-        /// Unix-millisecond stamp of the abort.
+        /// The time the session was aborted, in Unix milliseconds.
         aborted_at_ms: u64,
     },
-    /// A status added by a newer server, without its status-specific fields.
+    /// A status from a newer server. This variant doesn't include the status's own fields.
     #[serde(other)]
     Unknown,
 }
 
-/// Current view of one upload session.
+/// The current state of one upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadSession {
-    /// Namespace that owns the session.
+    /// The namespace that the session belongs to.
     pub namespace_id: NamespaceId,
-    /// Session represented by this view.
+    /// The upload session ID.
     pub upload_id: UploadId,
-    /// Transport selected when the session began.
+    /// The transport that was selected when the session began.
     pub mode: UploadMode,
-    /// The session lifecycle and its state-specific fields.
+    /// The session's lifecycle state and the fields specific to that state.
     #[serde(flatten)]
     pub status: UploadSessionStatus,
 }

@@ -22,10 +22,10 @@ use loonfs_types::ErrorResponse;
         path = "/v0/maintenance/store/probe",
         tag = "maintenance",
         summary = "Probe the store contract",
-        description = "Proves the configured object store honours the create-if-absent, compare-and-swap, visibility, listing, and ranged-read semantics LoonFS depends on, and reports what it found check by check. Nothing runs this implicitly: a probe writes and deletes objects, all of them under a scratch prefix that is not a durable object family, and its last check deletes them and proves the prefix empty. A store that fails a check answers 200 with that check reported `failed` — the probe ran, and the answer is that the store is wrong. Optional capabilities a store declares it lacks answer `unsupported`, which is an answer rather than a fault. This route does not decide whether the deployment may serve presigned direct uploads: that trust comes from the endpoint allowlist, because a probe exercises the server's own request path and never a presigned capability handed to a client.",
-        request_body(content = StoreProbeRequest, description = "Probe options; send `{}` for defaults"),
+        description = "Checks that the configured object store supports the create-if-absent, compare-and-swap, visibility, listing, and ranged-read behavior that LoonFS depends on, and reports the result of each check. The probe runs only when a client calls this route, because it writes and deletes objects. It writes them all under a scratch prefix that isn't a durable object family, and its last check deletes them and confirms that the prefix is empty. If the store fails a check, the response is still 200, and it reports that check as `failed`. If the store declares that it doesn't support an optional capability, the response reports that check as `unsupported`, which isn't a failure. The probe doesn't control whether the deployment can serve presigned direct uploads. The endpoint allowlist controls that, because the probe tests only the server's own requests and never a presigned capability issued to a client.",
+        request_body(content = StoreProbeRequest, description = "The probe options. Send `{}` to use the defaults."),
         responses(
-            (status = 200, description = "Probe completed; per-check outcomes are in the body", body = StoreProbeResponse),
+            (status = 200, description = "The probe completed, and the body reports each check's outcome", body = StoreProbeResponse),
             (status = 400, description = "Malformed request body", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),

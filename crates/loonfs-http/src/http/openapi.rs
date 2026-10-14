@@ -43,7 +43,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     info(
         title = "LoonFS HTTP API",
         version = env!("CARGO_PKG_VERSION"),
-        description = "Static OpenAPI document for the LoonFS v0 HTTP API."
+        description = "This static OpenAPI document describes the LoonFS v0 HTTP API."
     ),
     paths(
         host::get_health,
@@ -197,7 +197,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         (name = "system", description = "Server health, readiness, metrics, and capability discovery"),
         (name = "namespaces", description = "Namespace lifecycle and status"),
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
-        (name = "inodes", description = "Identity-oriented inode read APIs"),
+        (name = "inodes", description = "Inode-addressed read APIs"),
         (name = "uploads", description = "Upload session APIs"),
         (name = "maintenance", description = "Maintenance APIs"),
         (name = "query", description = "Derived-index query APIs")
@@ -208,7 +208,7 @@ struct LoonfsOpenApi;
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. The reference server returns `server_busy` with `Retry-After: 1` before reading a body when its request cap is full; health and readiness probes are exempt. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+    description = "The server can't complete the request now. Check `code` to find whether the cause is a deadline, shutdown, load, writer session admission, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
 )]
 #[expect(
     dead_code,
@@ -251,10 +251,11 @@ impl utoipa::Modify for BearerAuth {
                     HttpBuilder::new()
                         .scheme(HttpAuthScheme::Bearer)
                         .description(Some(
-                            "The deployment's `auth_token`, sent as \
-                             `Authorization: Bearer <token>`. A server configured \
-                             without a token accepts every request; one configured \
-                             with a token answers 401 `unauthorized` without it after request admission.",
+                            "The client sends the deployment's `auth_token` as \
+                             `Authorization: Bearer <token>`. A server without a \
+                             configured token accepts every request. A server with a \
+                             configured token returns 401 `unauthorized` when the token \
+                             is missing or wrong.",
                         ))
                         .build(),
                 ),

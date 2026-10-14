@@ -1047,19 +1047,19 @@ pub mod lookup_keys {
     }
 }
 
-/// A namespace's access mode, fixed at creation.
+/// A namespace's access mode, which can't be changed after the namespace is created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NamespaceAccess {
-    /// Every caller holding the deployment credential may do everything.
+    /// Every caller with the deployment credential can perform every operation.
     Unrestricted {},
-    /// Access rows govern every operation.
+    /// Access rows control every operation.
     Acl {
-        /// Identity domain the namespace's principal ids belong to.
+        /// The identity domain that the namespace's principal IDs belong to.
         principal_scope: PrincipalScope,
-        /// The root inode's grants at genesis, normally `admin` for each
-        /// initial administrator.
+        /// The root inode's grants when the namespace is created. Usually each initial
+        /// administrator has `admin`.
         root_grants: AccessGrants,
     },
 }
@@ -1147,9 +1147,9 @@ pub struct NamespaceManifestPayload {
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
     pub created_by: ActorId,
-    /// Access mode, fixed for the namespace.
+    /// The namespace's access mode, which can't be changed.
     pub access: NamespaceAccess,
-    /// How sibling names compare, fixed for the namespace.
+    /// How the namespace compares sibling names. The mode can't be changed.
     pub naming: NamespaceNaming,
     /// Fork provenance and source checkpoint identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
