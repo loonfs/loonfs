@@ -16,7 +16,7 @@ mod retention;
 mod streaming_compaction;
 
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
-use super::cache::{CacheScope, MetadataSegmentCache, SharedSegmentBlocks};
+use super::cache::{MetadataSegmentCache, ObjectStoreScope, SharedSegmentBlocks};
 use super::compaction_merge::locality_of;
 use super::error::ManifestLoadError;
 use super::load::{

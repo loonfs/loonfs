@@ -127,9 +127,9 @@ pub mod cache {
     pub use crate::manifest::metadata_compaction_due;
     pub use crate::manifest::{
         CacheScope, CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
-        MetadataSegmentCacheStats, NamespaceValidation, SharedHeadState, SharedSegmentBlocks,
-        StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-        StoredMetadataBlockKind, WalTailProjectionCacheKey,
+        MetadataSegmentCacheStats, NamespaceValidation, ObjectStoreScope, SharedHeadState,
+        SharedSegmentBlocks, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError,
+        StoredMetadataBlockKey, StoredMetadataBlockKind, WalTailProjectionCacheKey,
     };
     pub use crate::namespace::status::{
         load_namespace, load_namespace_diagnostics, NamespaceStorageDiagnostics,

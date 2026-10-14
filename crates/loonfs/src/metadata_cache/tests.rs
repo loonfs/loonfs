@@ -1,12 +1,14 @@
-//! One metadata cache shared by runtimes over different stores: scoping,
-//! one capacity, binding lifetimes, per-binding policy, and metrics.
+//! One metadata cache shared by runtimes over one store and over different
+//! stores: scoping, one capacity, binding lifetimes, per-binding policy, and
+//! metrics.
 
 use super::MetadataCache;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_test_support::ids::{first_page, namespace_id, test_actor, writer_id};
+use loonfs_test_support::stores::{KeyPredicate, MemoryStore, OperationSelector, RecordingStore};
+use loonfs_types::ChecksumAlgorithm;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -193,16 +195,18 @@ fn local_store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
 }
 
-/// Writes the same operations into the store under `root`, so every store
-/// this builds has the same manifest numbers, head sequences, and WAL-tail
-/// keys. Only the file bytes differ. One file sits in metadata segments and
-/// one in the WAL tail.
+/// Creates the same namespace in `store` on every call, and returns its
+/// writer.
+///
+/// Only the file bytes differ, so every store written this way has the same
+/// manifest numbers, head sequences, and WAL-tail keys. One file is in
+/// metadata segments, and one is in the WAL tail.
 async fn same_shape_store(
-    root: &Path,
+    store: &SharedObjectStore,
     cache: &MetadataCache,
     bytes: &'static [u8],
 ) -> LoonFs<Writable> {
-    let writer = LoonFs::builder_with_store(local_store(root))
+    let writer = LoonFs::builder_with_store(Arc::clone(store))
         .writer_id(loonfs_test_support::ids::writer_id("same-shape-writer"))
         .metadata_cache(cache.clone())
         .build()
@@ -229,8 +233,8 @@ async fn same_shape_store(
     writer
 }
 
-async fn reader(root: &Path, cache: &MetadataCache) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(local_store(root))
+async fn reader(store: &SharedObjectStore, cache: &MetadataCache) -> LoonFs<ReadOnly> {
+    LoonFs::builder_with_store(Arc::clone(store))
         .read_only()
         .metadata_cache(cache.clone())
         .build()
@@ -246,14 +250,18 @@ async fn assert_reads(runtime: &LoonFs<ReadOnly>, bytes: &[u8]) {
     }
 }
 
+/// Checks that runtimes over two stores with the same object keys read their
+/// own bytes through one cache.
 #[tokio::test]
 async fn two_stores_with_the_same_ids_read_their_own_bytes_through_one_cache() {
     let cache = MetadataCache::default();
     let (first_root, second_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
-    let first = same_shape_store(first_root.path(), &cache, b"first").await;
-    let second = same_shape_store(second_root.path(), &cache, b"other").await;
-    let first_reader = reader(first_root.path(), &cache).await;
-    let second_reader = reader(second_root.path(), &cache).await;
+    let first_store = local_store(first_root.path());
+    let second_store = local_store(second_root.path());
+    let first = same_shape_store(&first_store, &cache, b"first").await;
+    let second = same_shape_store(&second_store, &cache, b"other").await;
+    let first_reader = reader(&first_store, &cache).await;
+    let second_reader = reader(&second_store, &cache).await;
     let runtimes = [
         (first.read_only(), b"first"),
         (second.read_only(), b"other"),
@@ -278,20 +286,80 @@ async fn two_stores_with_the_same_ids_read_their_own_bytes_through_one_cache() {
 
     drop(runtimes);
     drop(first_reader);
-    let rebuilt = reader(first_root.path(), &cache).await;
+    let rebuilt = reader(&local_store(first_root.path()), &cache).await;
     assert_reads(&rebuilt, b"first").await;
     assert_reads(&second_reader, b"other").await;
+}
+
+/// Checks that a second runtime over the same object store reads a directory
+/// from the segment blocks and manifest that the first runtime decoded.
+#[tokio::test]
+async fn runtimes_over_one_store_share_decoded_segment_blocks() {
+    let store: SharedObjectStore = Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
+    // The writer reads through a cache of its own, so the first reader
+    // starts cold.
+    same_shape_store(&store, &MetadataCache::default(), b"file").await;
+    let cache = MetadataCache::default();
+    let (first, second) = (reader(&store, &cache).await, reader(&store, &cache).await);
+    let mut stats_after_each_read = Vec::new();
+    for runtime in [&first, &second] {
+        let page = runtime
+            .namespace(&demo())
+            .list("/folded")
+            .page(first_page())
+            .await
+            .expect("list the folded directory");
+        assert_eq!(page.entries.len(), 1);
+        stats_after_each_read.push(cache.stats());
+    }
+    let (cold, warm) = (stats_after_each_read[0], stats_after_each_read[1]);
+    assert!(
+        cold.segment_misses > 0,
+        "the first runtime reads cold: {cold:?}"
+    );
+    assert!(warm.segment_hits > cold.segment_hits, "{warm:?}");
+    assert_eq!(
+        warm.segment_misses, cold.segment_misses,
+        "the second runtime reads the blocks the first runtime decoded: {warm:?}"
+    );
+}
+
+/// Checks that clones of one object store share one scope, and that no other
+/// object store is assigned that scope, even one allocated after the first
+/// object store is dropped.
+#[test]
+fn each_object_store_allocation_has_its_own_scope() {
+    let memory_store =
+        || -> SharedObjectStore { Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme)) };
+    let mut scopes = super::ObjectStoreScopes::default();
+    let (first, second) = (memory_store(), memory_store());
+    let first_scope = scopes.scope_of(&first);
+    assert_eq!(scopes.scope_of(&Arc::clone(&first)), first_scope);
+    let second_scope = scopes.scope_of(&second);
+    assert_ne!(second_scope, first_scope);
+
+    drop(first);
+    // This call removes the entry of the dropped object store, so the
+    // allocator can reuse its address for the next object store.
+    assert_eq!(scopes.scope_of(&second), second_scope);
+    assert_eq!(scopes.stores.len(), 1);
+    let third_scope = scopes.scope_of(&memory_store());
+    assert!(![first_scope, second_scope].contains(&third_scope));
 }
 
 #[tokio::test]
 async fn bindings_share_one_capacity() {
     let (first_root, second_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        same_shape_store(root.path(), &MetadataCache::default(), bytes).await;
+        same_shape_store(&local_store(root.path()), &MetadataCache::default(), bytes).await;
     }
     // Limits that hold what one binding reads, and so not what two read.
     let measured = MetadataCache::default();
-    assert_reads(&reader(first_root.path(), &measured).await, b"first").await;
+    assert_reads(
+        &reader(&local_store(first_root.path()), &measured).await,
+        b"first",
+    )
+    .await;
     let one_binding = measured.stats();
     let cache = MetadataCache::builder()
         .max_segment_bytes(one_binding.segment_bytes)
@@ -299,7 +367,7 @@ async fn bindings_share_one_capacity() {
         .build();
 
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        assert_reads(&reader(root.path(), &cache).await, bytes).await;
+        assert_reads(&reader(&local_store(root.path()), &cache).await, bytes).await;
     }
 
     let stats = cache.stats();
@@ -319,8 +387,8 @@ async fn bindings_share_one_capacity() {
 async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
     let cache = MetadataCache::default();
     let (first_root, second_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
-    let first = same_shape_store(first_root.path(), &cache, b"first").await;
-    let second = same_shape_store(second_root.path(), &cache, b"other").await;
+    let first = same_shape_store(&local_store(first_root.path()), &cache, b"first").await;
+    let second = same_shape_store(&local_store(second_root.path()), &cache, b"other").await;
     assert_reads(&first.read_only(), b"first").await;
     assert_reads(&second.read_only(), b"other").await;
 
@@ -357,7 +425,12 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
 #[tokio::test]
 async fn read_policy_stays_with_each_binding() {
     let root = tempdir().expect("tempdir");
-    same_shape_store(root.path(), &MetadataCache::default(), b"first").await;
+    same_shape_store(
+        &local_store(root.path()),
+        &MetadataCache::default(),
+        b"first",
+    )
+    .await;
     // The cache keeps no segment blocks, so a lookup that a block memo does
     // not answer goes to the store.
     let cache = MetadataCache::builder().max_segment_bytes(0).build();
@@ -441,7 +514,7 @@ fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
 async fn the_cache_reports_its_own_metrics_once() {
     let (first_root, second_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        same_shape_store(root.path(), &MetadataCache::default(), bytes).await;
+        same_shape_store(&local_store(root.path()), &MetadataCache::default(), bytes).await;
     }
     let cache_recorder = Arc::new(DefaultMetricsRecorder::new());
     let cache = MetadataCache::builder()
@@ -516,7 +589,12 @@ async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
     use loonfs_test_support::stores::BlockingStore;
 
     let root = tempdir().expect("tempdir");
-    let writer = same_shape_store(root.path(), &MetadataCache::default(), b"file").await;
+    let writer = same_shape_store(
+        &local_store(root.path()),
+        &MetadataCache::default(),
+        b"file",
+    )
+    .await;
     writer.shutdown().await.expect("shutdown");
     let cache = MetadataCache::builder().max_segment_bytes(0).build();
     let reader = |budget: ExecutionBudget| {

@@ -1,9 +1,13 @@
 //! Caches for decoded manifest state: SST blocks keyed by owner and segment
 //! id, validated manifests, and the head state reads start from.
 //!
-//! One or more runtimes may read through one store. Each reads through its
-//! own view, which adds the runtime's [`CacheScope`] to every key, so no
-//! runtime sees another's entries. Eviction runs across every scope.
+//! One or more runtimes may read through one cache, each through its own
+//! views. The segment view adds the [`ObjectStoreScope`] of the runtime's
+//! object store to every key, so runtimes over the same object store share
+//! decoded blocks and manifests, and runtimes over different object stores
+//! never read each other's blocks. The head-state view adds the runtime's
+//! [`CacheScope`] to every key, so no runtime reads the head anchors or
+//! WAL-tail projections of another runtime. Eviction runs across every scope.
 //!
 //! The segment view also carries the handle to the optional node-local
 //! cache of the same blocks in their encoded form; see
@@ -27,12 +31,33 @@ use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Separates one runtime's entries from every other runtime's in a shared
-/// store. The owner of the store mints one per runtime.
+/// The scope under which a shared cache keeps one runtime's head state.
+///
+/// The cache mints one scope per runtime, so no runtime reads the head state
+/// of another runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheScope(u64);
 
 impl CacheScope {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// The scope under which a shared cache keeps the segment blocks and
+/// manifests read from one object store.
+///
+/// The cache mints one scope per object store, and every runtime over that
+/// object store reads under that scope. Runtimes over one object store can
+/// share these entries because segments and manifests are immutable, and
+/// each object key identifies one object within one object store. Two object
+/// stores can contain different objects under the same key (for example, the
+/// first manifest of a namespace with the same ID), so the cache keys every
+/// entry by the object store's scope as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectStoreScope(u64);
+
+impl ObjectStoreScope {
     pub fn new(value: u64) -> Self {
         Self(value)
     }
@@ -70,10 +95,11 @@ pub(crate) fn read_working_memory(
     segment_cache.map_or_else(Arc::default, |cache| Arc::clone(&cache.read_working_memory))
 }
 
-/// Decoded segment blocks and manifests for every scope, under one byte
-/// budget.
+/// Decoded segment blocks and manifests for every object store, under one
+/// byte budget.
 pub struct SharedSegmentBlocks {
-    blocks: DecodedBlockCache<(CacheScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
+    blocks:
+        DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
     filter_stats: MetadataSegmentFilterStatsInner,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
 }
@@ -125,11 +151,12 @@ impl SharedSegmentBlocks {
     }
 }
 
-/// One runtime's view of shared segment blocks, with the runtime's shared read
-/// working memory and node-local encoded tier.
+/// One runtime's view of shared segment blocks, under the scope of the
+/// runtime's object store, with the runtime's shared read working memory and
+/// node-local encoded tier.
 pub struct MetadataSegmentCache {
     blocks: Arc<SharedSegmentBlocks>,
-    scope: CacheScope,
+    scope: ObjectStoreScope,
     read_working_memory: Arc<ReadWorkingMemory>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
     /// decoded cache ensures callers use both cache tiers or neither tier.
@@ -150,7 +177,7 @@ impl std::fmt::Debug for MetadataSegmentCache {
 impl MetadataSegmentCache {
     pub fn new(
         blocks: Arc<SharedSegmentBlocks>,
-        scope: CacheScope,
+        scope: ObjectStoreScope,
         read_working_memory: Arc<ReadWorkingMemory>,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     ) -> Self {
@@ -168,7 +195,7 @@ impl MetadataSegmentCache {
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
             Arc::new(SharedSegmentBlocks::new(max_decoded_bytes, None)),
-            CacheScope::new(0),
+            ObjectStoreScope::new(0),
             Arc::default(),
             None,
         )
@@ -195,7 +222,7 @@ impl MetadataSegmentCache {
             .await
     }
 
-    /// Counters for the whole shared store, across every scope.
+    /// Counters for the whole shared cache, across every scope.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
         self.blocks.stats()
     }
@@ -422,7 +449,7 @@ impl HeadStateCache {
         )
     }
 
-    /// Counters for the whole shared store, across every scope.
+    /// Counters for the whole shared cache, across every scope.
     pub fn stats(&self) -> HeadStateCacheStats {
         self.shared.stats()
     }
@@ -506,8 +533,8 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheScope, DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache,
-        MetadataSegmentCacheKey, SharedSegmentBlocks, WalTailProjectionCacheKey,
+        DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache, MetadataSegmentCacheKey,
+        ObjectStoreScope, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
     use crate::block_cache::{DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
@@ -587,22 +614,27 @@ mod tests {
         }
     }
 
+    /// Checks that views over two object stores read their own blocks under
+    /// the same key, and that two views over one object store read the same
+    /// blocks.
     #[tokio::test]
-    async fn views_of_one_shared_store_read_only_their_own_blocks() {
+    async fn views_read_only_the_blocks_of_their_own_object_store() {
         let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, None));
         let view = |scope| {
             MetadataSegmentCache::new(
                 Arc::clone(&shared),
-                CacheScope::new(scope),
+                ObjectStoreScope::new(scope),
                 Arc::default(),
                 None,
             )
         };
-        let (first, second) = (view(1), view(2));
+        let (first, second, first_again) = (view(1), view(2), view(1));
         first.insert(key("a"), block(100));
         second.insert(key("a"), block(200));
-        for (view, decoded_bytes) in [(&first, 100), (&second, 200)] {
-            let hit = view.get(&key("a")).expect("each view reads its own block");
+        for (view, decoded_bytes) in [(&first, 100), (&second, 200), (&first_again, 100)] {
+            let hit = view
+                .get(&key("a"))
+                .expect("each view reads the block of its own object store");
             assert_eq!(hit.weight(), decoded_bytes);
         }
 

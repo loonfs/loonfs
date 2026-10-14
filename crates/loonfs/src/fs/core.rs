@@ -2,13 +2,14 @@
 //! state a writer holds.
 
 use crate::config::ReadConfig;
+use crate::metadata_cache::MetadataCacheBinding;
 use crate::metrics::RuntimeInstruments;
 use crate::{
     ChangeSeq, CoreError, ErrorCode, ExecutionBudget, InodeId, ListFileRevisionsResponse,
     MetadataCache, NamespaceId, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
-use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
+use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache};
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
@@ -37,8 +38,9 @@ pub(crate) struct RuntimeCoreInner {
     pub(crate) timer: Arc<dyn loonfs_types::MonotonicTimer>,
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
     pub(crate) metadata_cache: MetadataCache,
-    /// This core's views of `metadata_cache`, under the scope the cache
-    /// minted for this core.
+    /// This core's views of `metadata_cache`. The segment view reads under
+    /// the scope of this core's object store, and the head-state view reads
+    /// under a scope minted for this core.
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) head_state: Arc<HeadStateCache>,
     /// Publication, collection, completed-compaction, and view-read metrics.
@@ -72,22 +74,16 @@ impl RuntimeCore {
         }
     }
 
-    /// Opens a runtime core that reads through `metadata_cache` under a
-    /// scope of its own, with `stored_metadata_block_cache` as its node-local
-    /// encoded tier.
+    /// Opens a runtime core that reads through `metadata_cache`, the views
+    /// that [`MetadataCache::bind`] returned for it.
     pub(crate) fn open(
         store: SharedObjectStore,
         config: ReadConfig,
-        metadata_cache: MetadataCache,
-        stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
+        metadata_cache: MetadataCacheBinding,
         instruments: Arc<RuntimeInstruments>,
         timer: Arc<dyn loonfs_types::MonotonicTimer>,
         wall_clock: Arc<dyn crate::WallClock>,
     ) -> Self {
-        let (metadata_segment_cache, head_state) = metadata_cache.bind(
-            config.execution_budget.read_working_memory(),
-            stored_metadata_block_cache,
-        );
         Self {
             subject: None,
             inner: Arc::new(RuntimeCoreInner {
@@ -95,9 +91,9 @@ impl RuntimeCore {
                 config,
                 timer,
                 wall_clock,
-                metadata_cache,
-                metadata_segment_cache: Arc::new(metadata_segment_cache),
-                head_state: Arc::new(head_state),
+                metadata_cache: metadata_cache.cache,
+                metadata_segment_cache: Arc::new(metadata_cache.segment_blocks),
+                head_state: Arc::new(metadata_cache.head_state),
                 instruments,
             }),
         }
