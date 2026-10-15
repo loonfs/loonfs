@@ -249,6 +249,18 @@ impl HeadPositions for RegistryShared {
             .get(namespace_id)
             .map(|live| Arc::clone(&live.publisher.read_position))
     }
+
+    fn drop_position(&self, namespace_id: &NamespaceId) {
+        let publisher = self
+            .lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone());
+        if let Some(publisher) = publisher {
+            publisher.read_position.clear();
+            publisher.change_position(PositionChange::Drop);
+        }
+    }
 }
 
 /// Locks registry and publisher state, recovering a lock that a contained

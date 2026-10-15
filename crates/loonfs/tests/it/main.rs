@@ -50,3 +50,4 @@ mod standalone_maintenance;
 mod streamed_put;
 mod streamed_read;
 mod undelete;
+mod writer_position_reads;

@@ -1,9 +1,15 @@
 //! The positions of the writer sessions in this runtime, which reads of a
 //! namespace with an open writer session start from.
 
+use crate::fs::RuntimeCore;
 use crate::NamespaceId;
+use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
+use loonfs_core::time::Observation;
+use loonfs_core::{CoreError, MetadataProjectionLoadError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use tracing::Instrument;
 
 /// The writer sessions of a writable runtime, as its reads see them.
 ///
@@ -13,6 +19,11 @@ pub(crate) trait HeadPositions: Send + Sync {
     /// Returns the position slot of the namespace's writer session, or
     /// `None` when the runtime has no session for the namespace.
     fn read_position_slot(&self, namespace_id: &NamespaceId) -> Option<Arc<ReadPositionSlot>>;
+
+    /// Drops the position of the namespace's writer session, both the copy
+    /// that reads take and the commit engine's own, so the session's next
+    /// publish loads the namespace from the store.
+    fn drop_position(&self, namespace_id: &NamespaceId);
 }
 
 /// The position of one writer session's commit engine, kept where reads can
@@ -24,6 +35,9 @@ pub(crate) trait HeadPositions: Send + Sync {
 #[derive(Debug, Default)]
 pub(crate) struct ReadPositionSlot {
     position: Mutex<Option<Arc<ReadPosition>>>,
+    /// Set while one read checks the position's manifest for a successor,
+    /// so concurrent reads send one HEAD.
+    checking: AtomicBool,
 }
 
 impl ReadPositionSlot {
@@ -70,5 +84,127 @@ impl ReadPositionSlot {
     /// next release stores one again.
     pub(crate) fn clear(&self) {
         *self.lock() = None;
+    }
+
+    /// Records that a HEAD sent at `checked` found no successor of the
+    /// manifest of the position that the read took.
+    ///
+    /// The check applies to the position that the slot has now, as
+    /// [`Self::prepare`] explains, unless that position has a later check
+    /// already or the slot has none.
+    fn record_check(&self, checked: Observation) {
+        let Some(current) = self.current() else {
+            return;
+        };
+        if current.basis_checked.age_ms() <= checked.age_ms() {
+            return;
+        }
+        let updated = Arc::new(ReadPosition {
+            basis_checked: checked,
+            ..ReadPosition::clone(&current)
+        });
+        let mut slot = self.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|position| Arc::ptr_eq(position, &current))
+        {
+            *slot = Some(updated);
+        }
+    }
+
+    /// Starts a successor check of the position's manifest, or returns
+    /// `None` while another read's check runs.
+    fn start_check(&self) -> Option<PositionCheck<'_>> {
+        // Acquire pairs with the Release in `PositionCheck::drop`, so the
+        // read that starts the next check sees the check recorded before it.
+        self.checking
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| PositionCheck { slot: self })
+    }
+}
+
+/// One read's successor check of a position's manifest. Dropping it, also
+/// when the read is cancelled, lets the next read check.
+struct PositionCheck<'a> {
+    slot: &'a ReadPositionSlot,
+}
+
+impl Drop for PositionCheck<'_> {
+    fn drop(&mut self) {
+        // Release pairs with the Acquire in `ReadPositionSlot::start_check`.
+        self.slot.checking.store(false, Ordering::Release);
+    }
+}
+
+impl RuntimeCore {
+    /// Returns the position of the namespace's writer session in this
+    /// runtime for a read to start from, or `None` when the read starts from
+    /// the read cache instead.
+    ///
+    /// A read checks the position's manifest for a successor with one HEAD
+    /// once the last check is a manifest revalidation interval old. A
+    /// manifest that this runtime publishes moves the position as the
+    /// publication finishes, so a successor is almost always one that
+    /// another process published, such as a new writer's claim or a
+    /// compaction. The read then drops the position, and the read cache's
+    /// reload finds the successor. (A check that runs while this runtime's
+    /// own publication finishes drops the position too, which costs one
+    /// reload.) Concurrent reads share one check, and a read that finds
+    /// another read's check running starts from the position without
+    /// waiting. With an interval of zero, every read checks for itself, so
+    /// each read sees a successor published before the read started.
+    ///
+    /// A check is trusted only while its answer arrives less than
+    /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
+    /// section 4.2), so a position past that bound is dropped without one.
+    pub(crate) async fn checked_writer_position(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
+        let Some(positions) = self
+            .inner
+            .head_positions
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        else {
+            return Ok(None);
+        };
+        let Some(slot) = positions.read_position_slot(namespace_id) else {
+            return Ok(None);
+        };
+        let Some(position) = slot.current() else {
+            return Ok(None);
+        };
+        let checked = &position.basis_checked;
+        if !checked.is_within_revalidation_bound() {
+            positions.drop_position(namespace_id);
+            return Ok(None);
+        }
+        let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
+        if checked.age_ms() < interval_ms {
+            return Ok(Some(position));
+        }
+        let _check = match slot.start_check() {
+            Some(check) => Some(check),
+            None if interval_ms == 0 => None,
+            None => return Ok(Some(position)),
+        };
+        let observed = Observation::now(Arc::clone(&self.inner.timer));
+        let successor =
+            manifest_has_successor(self.store(), namespace_id, position.basis.manifest_no())
+                .instrument(tracing::debug_span!(
+                    target: "loonfs::page",
+                    "loonfs.phase",
+                    phase = "position_manifest_probe"
+                ))
+                .await
+                .map_err(MetadataProjectionLoadError::LoadHead)?;
+        if successor || !checked.is_within_revalidation_bound() {
+            positions.drop_position(namespace_id);
+            return Ok(None);
+        }
+        slot.record_check(observed);
+        Ok(Some(position))
     }
 }

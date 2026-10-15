@@ -125,10 +125,6 @@ impl RuntimeCore {
     /// Returns the position of the namespace's writer session in this
     /// runtime, or `None` when the runtime has no session for the namespace
     /// or the session has no position.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reads start from the position in the next change")
-    )]
     pub(crate) fn writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -139,6 +135,15 @@ impl RuntimeCore {
             .upgrade()?
             .read_position_slot(namespace_id)?
             .current()
+    }
+
+    /// Drops the position of the namespace's writer session in this runtime,
+    /// if there is one, so reads start from the read cache until the
+    /// session's next publish loads the namespace.
+    pub(crate) fn drop_writer_position(&self, namespace_id: &NamespaceId) {
+        if let Some(positions) = self.inner.head_positions.get().and_then(Weak::upgrade) {
+            positions.drop_position(namespace_id);
+        }
     }
 
     /// Reads the handle's wall clock as unix milliseconds.

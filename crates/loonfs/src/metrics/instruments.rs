@@ -120,6 +120,26 @@ impl MetricLabel for PublishOutcome {
     }
 }
 
+/// Where a read took the head it started from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadHeadSource {
+    /// The position of the namespace's writer session in this runtime.
+    Position,
+    /// The read cache's anchor.
+    Anchor,
+}
+
+impl MetricLabel for ReadHeadSource {
+    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Position => "position",
+            Self::Anchor => "anchor",
+        }
+    }
+}
+
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcKind = (&'static str, fn(&GcResponse) -> u64);
 
@@ -183,6 +203,13 @@ impl RuntimeInstruments {
     pub(crate) fn latest_metadata_view_read(&self) {
         if let Some(installed) = &self.installed {
             installed.views.latest_metadata_view_reads.increment(1);
+        }
+    }
+
+    /// Records where one read took the head it started from.
+    pub(crate) fn read_head(&self, source: ReadHeadSource) {
+        if let Some(installed) = &self.installed {
+            installed.views.read_head_sources.get(source).increment(1);
         }
     }
 
@@ -540,6 +567,7 @@ impl ObjectStoreOperationInstruments {
 struct ViewReadInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
     snapshot_view_reads: Arc<dyn CounterHandle>,
+    read_head_sources: LabeledCounters<ReadHeadSource>,
 }
 
 /// Every instrument one metadata cache reports, or nothing at all.
@@ -845,6 +873,13 @@ impl ViewReadInstruments {
             snapshot_view_reads: recorder.register_counter(
                 "loonfs.runtime_cache.snapshot_view_reads",
                 "Snapshot-backed metadata views created by the runtime",
+                &[],
+            ),
+            read_head_sources: LabeledCounters::register(
+                recorder,
+                "loonfs.read_head.source",
+                "Reads by where they took the head they started from",
+                "source",
                 &[],
             ),
         }

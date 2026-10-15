@@ -3,14 +3,15 @@
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
+use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor_cached, load_snapshot_read_basis,
-    manifest_has_successor, project_anchor_tail, CheckpointReadBasis, NamespaceReadAnchor,
-    VerifiedNamespaceCatalogEntry,
+    manifest_has_successor, project_anchor_tail, CheckpointReadBasis, MetadataBasis,
+    NamespaceReadAnchor, NamespaceReadState, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
@@ -23,12 +24,18 @@ mod read_position;
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
 
 impl RuntimeCore {
+    /// Returns the read context of the head that the namespace's next read
+    /// starts from, without checking that the head is current, or `None`
+    /// when this runtime has no head for the namespace yet.
     pub(crate) fn cached_read_context(
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<RuntimeReadContext> {
+        if let Some(position) = self.writer_position(namespace_id) {
+            return Some(self.read_context(position.head.clone(), position.basis.clone()));
+        }
         let anchor = self.inner.head_state.get_anchor(namespace_id)?;
-        Some(self.runtime_read_context(&anchor))
+        Some(self.read_context(anchor.head.clone(), anchor.basis.clone()))
     }
 
     /// Looks up the head for a load and counts the hit or miss. A
@@ -135,7 +142,7 @@ impl RuntimeCore {
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
-                    let mut context = self.runtime_read_context(&head);
+                    let mut context = self.read_context(head.head.clone(), head.basis.clone());
                     let probed = loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
                         .await;
@@ -185,32 +192,50 @@ impl RuntimeCore {
         Ok(cached_anchor(loaded, Some(observed)))
     }
 
-    /// Loads the read anchor, mapping an absent head to the one answer it
-    /// can mean: the namespace does not exist.
-    pub(crate) async fn head_for_metadata_read(
+    /// Returns the read context of the namespace's current head.
+    ///
+    /// In a runtime with the namespace's writer session, the head is the
+    /// session's position (see [`Self::checked_writer_position`]). Otherwise
+    /// it's the read cache's anchor, which the read revalidates or loads.
+    pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Arc<CachedReadAnchor>> {
-        self.load_namespace_head_cached(namespace_id)
-            .await
-            .map_err(Error::Core)
+    ) -> Result<RuntimeReadContext> {
+        let (context, source) = match self.checked_writer_position(namespace_id).await? {
+            Some(position) => (
+                self.read_context(position.head.clone(), position.basis.clone()),
+                ReadHeadSource::Position,
+            ),
+            None => {
+                let anchor = self.load_namespace_head_cached(namespace_id).await?;
+                (
+                    self.read_context(anchor.head.clone(), anchor.basis.clone()),
+                    ReadHeadSource::Anchor,
+                )
+            }
+        };
+        self.inner.instruments.read_head(source);
+        Ok(context)
     }
 
-    pub(crate) fn runtime_read_context(&self, anchor: &CachedReadAnchor) -> RuntimeReadContext {
+    pub(crate) fn read_context(
+        &self,
+        head: NamespaceReadState,
+        basis: MetadataBasis,
+    ) -> RuntimeReadContext {
         RuntimeReadContext {
-            head: anchor.head.clone(),
-            basis: anchor.basis.clone(),
+            head,
+            basis,
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             head_state: Arc::clone(&self.inner.head_state),
             object_cache: Arc::clone(&self.inner.object_cache),
         }
     }
 
-    /// The shared preamble of every pinned read: revalidate or load the head
-    /// anchor and pin the read context to it. The context's `head` is the
-    /// anchor the read is pinned to, and the namespace's immutable identity
-    /// travels inside it, so a read resolves everything it needs from one
-    /// object.
+    /// The shared preamble of every pinned read: the read context of the
+    /// namespace's current head. The context's `head` is the head the read
+    /// is pinned to, and the namespace's immutable identity travels inside
+    /// it, so a read resolves everything it needs from one object.
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
@@ -218,8 +243,7 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let anchor = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&anchor);
+        let read_context = self.current_read_context(namespace_id).await?;
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
@@ -232,7 +256,7 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id).await?;
+        let live = self.current_read_context(namespace_id).await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -241,7 +265,7 @@ impl RuntimeCore {
         )
         .await
         .map_err(Error::from)?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
+        Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
     }
 
     /// Pins a snapshot-owned checkpoint while enforcing its live lease.
@@ -253,7 +277,7 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id).await?;
+        let live = self.current_read_context(namespace_id).await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -263,29 +287,22 @@ impl RuntimeCore {
         )
         .await
         .map_err(Error::from)?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
+        Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
     }
 
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
         pinned: CheckpointReadBasis,
-        live: &CachedReadAnchor,
+        live: RuntimeReadContext,
     ) -> (
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     ) {
-        let read_context = self.runtime_read_context(&CachedReadAnchor {
-            head: pinned.head,
-            basis: pinned.basis,
-            basis_checked: None,
-            validation: Arc::default(),
-            completed_validation_no: 0,
-        });
         (
             self.reader_engine(namespace_id)
-                .with_authorization_head(self.runtime_read_context(live)),
-            read_context,
+                .with_authorization_head(live),
+            self.read_context(pinned.head, pinned.basis),
         )
     }
 
@@ -303,14 +320,14 @@ impl RuntimeCore {
         Ok(pinned)
     }
 
-    /// Returns the namespace's immutable identity, read off the cached head
-    /// anchor.
+    /// Returns the namespace's immutable identity, read off the namespace's
+    /// current head.
     pub(crate) async fn load_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let anchor = self.head_for_metadata_read(namespace_id).await?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head))
+        let context = self.current_read_context(namespace_id).await?;
+        Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
     /// Seeds the anchor of a landed publish. The publisher's engine has
