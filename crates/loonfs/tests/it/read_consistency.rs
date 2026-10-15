@@ -1,12 +1,12 @@
-//! Live reads with a freshness setting. A `latest` read confirms the
-//! namespace head before it reads, and a `bounded` read confirms it at most
-//! once per interval.
+//! Live reads with a consistency setting. A `strong` read confirms the
+//! namespace head before it reads, and an `eventual` read confirms it only
+//! when the last confirmation is older than the read's maximum staleness.
 
 use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, Error, Freshness, ListChangesOptions, ListOptions, LoonFs, ManifestNo, Namespace,
+    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, ManifestNo, Namespace,
     NamespaceId, PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
     StatOptions, Writable,
 };
@@ -112,7 +112,7 @@ impl Fixture {
                 ref other => panic!("expected a counter, found {other:?}"),
             }
         };
-        (source("anchor"), source("bounded"))
+        (source("anchor"), source("eventual"))
     }
 
     async fn shutdown(self) {
@@ -120,9 +120,9 @@ impl Fixture {
     }
 }
 
-fn bounded(interval_ms: u64) -> Freshness {
-    Freshness::Bounded {
-        interval: Some(Duration::from_millis(interval_ms)),
+fn eventual(max_staleness_ms: u64) -> Consistency {
+    Consistency::Eventual {
+        max_staleness: Some(Duration::from_millis(max_staleness_ms)),
     }
 }
 
@@ -134,25 +134,25 @@ fn assert_invalid_request(error: Option<Error>, expected: &str) {
     }
 }
 
-/// Checks that a bounded interval above the revalidation bound fails every
-/// live read with `invalid_request` for `freshness_interval_ms`, before the
+/// Checks that a maximum staleness above the revalidation bound fails every
+/// live read with `invalid_request` for `max_staleness_ms`, before the
 /// read sends a request.
 #[tokio::test]
-async fn an_interval_above_the_revalidation_bound_is_rejected_before_any_request() {
-    let fixture = fixture("interval-above-bound").await;
+async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any_request() {
+    let fixture = fixture("staleness-above-bound").await;
     let reader = &fixture.reader;
-    let freshness = bounded(READ_REVALIDATION_BOUND_MS + 1);
+    let consistency = eventual(READ_REVALIDATION_BOUND_MS + 1);
     let stat = StatOptions {
-        freshness,
+        consistency,
         ..StatOptions::default()
     };
     let list = ListOptions {
-        freshness,
+        consistency,
         ..ListOptions::default()
     };
-    let file = ReadFileOptions { freshness };
+    let file = ReadFileOptions { consistency };
     let stream = ReadFileStreamOptions {
-        freshness,
+        consistency,
         ..ReadFileStreamOptions::default()
     };
     fixture.recording.reset();
@@ -189,36 +189,36 @@ async fn an_interval_above_the_revalidation_bound_is_rejected_before_any_request
             .await
             .err(),
         reader
-            .list_changes_with_options(ChangeSeq(0), &ListChangesOptions { freshness })
+            .list_changes_with_options(ChangeSeq(0), &ListChangesOptions { consistency })
             .next()
             .await
             .and_then(Result::err),
     ];
     for error in errors {
-        assert_invalid_request(error, "freshness_interval_ms");
+        assert_invalid_request(error, "max_staleness_ms");
     }
     assert_eq!(fixture.recording.take(), []);
     fixture.shutdown().await;
 }
 
-/// Checks that a bounded read with a `snapshot_id` fails with
-/// `invalid_request` for `freshness` before the read sends a request, and
-/// that a read view refuses a bounded read too, because a pinned read has no
-/// freshness setting.
+/// Checks that an eventual read with a `snapshot_id` fails with
+/// `invalid_request` for `consistency` before the read sends a request, and
+/// that a read view refuses an eventual read too, because a pinned read has no
+/// consistency setting.
 #[tokio::test]
-async fn a_bounded_read_of_a_pinned_view_is_rejected_before_any_request() {
-    let fixture = fixture("bounded-snapshot").await;
+async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
+    let fixture = fixture("eventual-snapshot").await;
     let reader = &fixture.reader;
-    let freshness = bounded(INTERVAL_MS);
+    let consistency = eventual(INTERVAL_MS);
     let snapshot_id = Some(PinId::generate(ManifestNo(1)));
     let stat = StatOptions {
         snapshot_id: snapshot_id.clone(),
-        freshness,
+        consistency,
         ..StatOptions::default()
     };
     let list = ListOptions {
         snapshot_id,
-        freshness,
+        consistency,
         ..ListOptions::default()
     };
     fixture.recording.reset();
@@ -240,52 +240,54 @@ async fn a_bounded_read_of_a_pinned_view_is_rejected_before_any_request() {
             .and_then(Result::err),
     ];
     for error in errors {
-        assert_invalid_request(error, "freshness");
+        assert_invalid_request(error, "consistency");
     }
     assert_eq!(fixture.recording.take(), []);
 
     let view = reader.read_view().await.expect("read view");
     let stat = StatOptions {
-        freshness,
+        consistency,
         ..StatOptions::default()
     };
     let stream = ReadFileStreamOptions {
-        freshness,
+        consistency,
         ..ReadFileStreamOptions::default()
     };
     fixture.recording.reset();
     assert_invalid_request(
         view.stat_with_options("/file.txt", &stat).await.err(),
-        "freshness",
+        "consistency",
     );
     assert_invalid_request(
         view.read_file_stream_with_options("/file.txt", &stream)
             .await
             .err(),
-        "freshness",
+        "consistency",
     );
     assert_eq!(fixture.recording.take(), []);
     fixture.shutdown().await;
 }
 
-/// Checks that bounded reads in a separate reader runtime send no request
-/// while the reader's head was confirmed less than the interval ago, and
-/// that the first bounded read after the interval sends the WAL probe, plus
+/// Checks that eventual reads in a separate reader runtime send no request
+/// while the reader's head was confirmed less than the maximum staleness ago, and
+/// that the first eventual read after the maximum staleness passes sends the WAL probe, plus
 /// the manifest check because the manifest check interval has passed too.
 #[tokio::test]
-async fn a_bounded_read_sends_no_request_inside_its_interval() {
-    let fixture = fixture("bounded-interval").await;
+async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
+    let fixture = fixture("eventual-staleness").await;
     let reader = &fixture.reader;
-    let freshness = Freshness::Bounded { interval: None };
-    reader.stat("/file.txt").await.expect("latest stat");
+    let consistency = Consistency::Eventual {
+        max_staleness: None,
+    };
+    reader.stat("/file.txt").await.expect("strong stat");
     reader
         .list("/")
         .next()
         .await
         .expect("a page")
-        .expect("latest list");
-    reader.read_file("/file.txt").await.expect("latest read");
-    let (anchors, bounded_reads) = fixture.anchor_sources();
+        .expect("strong list");
+    reader.read_file("/file.txt").await.expect("strong read");
+    let (anchors, eventual_reads) = fixture.anchor_sources();
 
     fixture.recording.reset();
     fixture.clock.advance_ms(INTERVAL_MS - 1);
@@ -293,43 +295,43 @@ async fn a_bounded_read_sends_no_request_inside_its_interval() {
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                freshness,
+                consistency,
                 ..StatOptions::default()
             },
         )
         .await
-        .expect("bounded stat");
+        .expect("eventual stat");
     reader
         .list_with_options(
             "/",
             &ListOptions {
-                freshness,
+                consistency,
                 ..ListOptions::default()
             },
         )
         .next()
         .await
         .expect("a page")
-        .expect("bounded list");
+        .expect("eventual list");
     let file = reader
-        .read_file_with_options("/file.txt", &ReadFileOptions { freshness })
+        .read_file_with_options("/file.txt", &ReadFileOptions { consistency })
         .await
-        .expect("bounded read");
+        .expect("eventual read");
     assert_eq!(file.bytes, b"file");
     assert_eq!(fixture.recording.take(), []);
-    assert_eq!(fixture.anchor_sources(), (anchors, bounded_reads + 3));
+    assert_eq!(fixture.anchor_sources(), (anchors, eventual_reads + 3));
 
     fixture.clock.advance_ms(1);
     let confirmed = reader
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                freshness,
+                consistency,
                 ..StatOptions::default()
             },
         )
         .await
-        .expect("bounded stat after the interval");
+        .expect("eventual stat after the maximum staleness");
     assert_eq!(confirmed.head_seq, entry.head_seq);
     assert_matches!(
         fixture.recording.take().as_slice(),
@@ -343,27 +345,27 @@ async fn a_bounded_read_sends_no_request_inside_its_interval() {
         ] if manifest_key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
             && wal_key.starts_with(&wal_prefix(&fixture.namespace_id))
     );
-    assert_eq!(fixture.anchor_sources(), (anchors + 1, bounded_reads + 3));
+    assert_eq!(fixture.anchor_sources(), (anchors + 1, eventual_reads + 3));
     fixture.shutdown().await;
 }
 
 /// Checks that the head that reads start from never moves backwards on a
-/// runtime. A bounded read inside its interval can miss another writer's
-/// commit, but after a `latest` read sees the commit, a bounded read with a
-/// long interval reads at that commit's head or a newer one, not at the head
+/// runtime. An eventual read within its maximum staleness can miss another writer's
+/// commit, but after a `strong` read sees the commit, an eventual read with a
+/// long maximum staleness reads at that commit's head or a newer one, not at the head
 /// the reader confirmed before it.
 #[tokio::test]
-async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
-    let fixture = fixture("bounded-monotonic").await;
+async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
+    let fixture = fixture("eventual-monotonic").await;
     let reader = &fixture.reader;
     let long = StatOptions {
-        freshness: bounded(READ_REVALIDATION_BOUND_MS),
+        consistency: eventual(READ_REVALIDATION_BOUND_MS),
         ..StatOptions::default()
     };
     let before = reader
         .stat_with_options("/file.txt", &long)
         .await
-        .expect("first bounded read");
+        .expect("first eventual read");
     let commit = fixture
         .namespace
         .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
@@ -372,25 +374,25 @@ async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
     let stale = reader
         .stat_with_options("/file.txt", &long)
         .await
-        .expect("bounded read inside the interval");
+        .expect("eventual read within the maximum staleness");
     assert_eq!(stale.head_seq, before.head_seq);
 
-    let latest = reader.stat("/next.txt").await.expect("latest read");
-    assert_eq!(latest.head_seq, commit.committed_seq);
+    let strong = reader.stat("/next.txt").await.expect("strong read");
+    assert_eq!(strong.head_seq, commit.committed_seq);
     let after = reader
         .stat_with_options("/next.txt", &long)
         .await
-        .expect("bounded read after the latest read");
+        .expect("eventual read after the strong read");
     assert!(
         after.head_seq >= commit.committed_seq,
-        "a bounded read at {} after a latest read at {}",
+        "an eventual read at {} after a strong read at {}",
         after.head_seq,
         commit.committed_seq
     );
     fixture.shutdown().await;
 }
 
-/// Checks that a bounded read after another writer's takeover drops the
+/// Checks that an eventual read after another writer's takeover drops the
 /// writer's position reads at the current head, not at an anchor from before
 /// the position.
 ///
@@ -399,9 +401,9 @@ async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
 /// older than the reads from that position. The test parks that load's
 /// manifest check until the commit returns. The position's start fences the
 /// load's install, and the takeover's drop of the position leaves no anchor
-/// either, so a bounded read with a long interval loads the namespace again.
+/// either, so an eventual read with a long maximum staleness loads the namespace again.
 #[tokio::test]
-async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
+async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
     let gate = fixture.recording.inner();
     // Past the revalidation bound, the next read drops the position and
@@ -444,12 +446,12 @@ async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
         .stat_with_options(
             "/during.txt",
             &StatOptions {
-                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                consistency: eventual(READ_REVALIDATION_BOUND_MS),
                 ..StatOptions::default()
             },
         )
         .await
-        .expect("a bounded read after the takeover");
+        .expect("an eventual read after the takeover");
     assert_eq!(entry.head_seq, peer_commit.committed_seq);
 }
 
@@ -464,7 +466,7 @@ async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
 /// each drop the namespace's anchor while the slot is empty, and each drop
 /// advances the slot's absence generation, which fences the load's install.
 /// Without that advance, the load would install its older anchor, and the
-/// bounded read at the end would return the first commit's head.
+/// eventual read at the end would return the first commit's head.
 #[tokio::test]
 async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     let fixture = writer_position_reads::fixture("spanning-load", Parked::ManifestChecks).await;
@@ -507,12 +509,12 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
         .stat_with_options(
             "/small.txt",
             &StatOptions {
-                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                consistency: eventual(READ_REVALIDATION_BOUND_MS),
                 ..StatOptions::default()
             },
         )
         .await
-        .expect("a bounded read after the close");
+        .expect("an eventual read after the close");
     assert_eq!(entry.head_seq, positioned.head_seq);
 }
 
@@ -555,12 +557,12 @@ async fn an_older_cold_load_finishing_last_leaves_the_newer_head_cached() {
         .stat_with_options(
             "/next.txt",
             &StatOptions {
-                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                consistency: eventual(READ_REVALIDATION_BOUND_MS),
                 ..StatOptions::default()
             },
         )
         .await
-        .expect("a bounded read after both loads");
+        .expect("an eventual read after both loads");
     assert_eq!(entry.head_seq, newer.head_seq);
     fixture.shutdown().await;
 }

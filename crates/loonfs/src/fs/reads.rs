@@ -3,11 +3,11 @@
 use super::core::{decode_page_request, encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::execution_budget::BudgetPermit;
-use crate::options::{check_freshness, check_pinned_freshness, check_snapshot_freshness};
+use crate::options::{check_consistency, check_pinned_consistency, check_snapshot_consistency};
 use crate::Result;
 use crate::{
-    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
-    CurrentFileState, DownloadOptions, Error, FileBytes, FileContentStream, Freshness, InodeId,
+    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, Consistency, ContentRef, CoreError,
+    CurrentFileState, DownloadOptions, Error, FileBytes, FileContentStream, InodeId,
     ListChangesOptions, ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
     ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, Namespace, NamespaceId,
     PathEntry, PinId, ReadFileOptions, ReadFileStreamOptions, RevisionNo, SharedObjectStore,
@@ -150,9 +150,13 @@ impl ReadView {
 
     /// Shared read options may name the snapshot this view reads; naming any
     /// other snapshot would silently read the wrong one. A view is pinned, so
-    /// the options can't ask for a bounded read either.
-    fn ensure_pinned_options(&self, requested: Option<&PinId>, freshness: Freshness) -> Result<()> {
-        check_pinned_freshness(freshness)?;
+    /// the options can't ask for an eventual read either.
+    fn ensure_pinned_options(
+        &self,
+        requested: Option<&PinId>,
+        consistency: Consistency,
+    ) -> Result<()> {
+        check_pinned_consistency(consistency)?;
         let Some(requested) = requested else {
             return Ok(());
         };
@@ -211,7 +215,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.freshness)?;
+            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
             Ok(self
                 .engine
                 .resolve_path(absolute_path, options.clone(), &self.context)
@@ -260,7 +264,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.freshness)?;
+            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -310,7 +314,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.freshness)?;
+            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
             Ok(self
                 .engine
                 .stat_inode(inode_id, options.clone(), &self.context)
@@ -352,7 +356,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.freshness)?;
+            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -472,7 +476,7 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
-            check_pinned_freshness(options.freshness)?;
+            check_pinned_consistency(options.consistency)?;
             Ok(self
                 .engine
                 .read_file_stream(
@@ -548,7 +552,7 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
-            check_pinned_freshness(options.freshness)?;
+            check_pinned_consistency(options.consistency)?;
             Ok(self
                 .engine
                 .read_file_stream_by_inode(
@@ -647,7 +651,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
-            .pinned_metadata_read(&self.namespace_id, Freshness::Latest)
+            .pinned_metadata_read(&self.namespace_id, Consistency::Strong)
             .await?;
         Ok(self.read_view_from(engine, context, ReadSource::Head))
     }
@@ -766,7 +770,7 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        check_snapshot_freshness(options.snapshot_id.as_ref(), options.freshness)?;
+        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
@@ -780,7 +784,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| {
                     let options = options.clone();
                     async move {
@@ -819,7 +823,7 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        check_snapshot_freshness(options.snapshot_id.as_ref(), options.freshness)?;
+        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
@@ -833,7 +837,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| {
                     let options = options.clone();
                     async move {
@@ -894,7 +898,7 @@ impl<M: crate::Mode> Namespace<M> {
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
-        check_snapshot_freshness(options.snapshot_id.as_ref(), options.freshness)?;
+        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
@@ -909,7 +913,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| {
                     let request = request.clone();
                     let options = options.clone();
@@ -982,7 +986,7 @@ impl<M: crate::Mode> Namespace<M> {
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        check_snapshot_freshness(options.snapshot_id.as_ref(), options.freshness)?;
+        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
@@ -996,7 +1000,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| {
                     let request = request.clone();
                     let options = options.clone();
@@ -1047,10 +1051,10 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        check_freshness(options.freshness)?;
+        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        self.get_current_file_bytes(absolute_path, options.freshness)
+        self.get_current_file_bytes(absolute_path, options.consistency)
             .await
     }
 
@@ -1102,14 +1106,14 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        check_freshness(options.freshness)?;
+        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| async move {
                     let stream = engine
                         .read_file_stream(
@@ -1209,7 +1213,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target(
@@ -1308,7 +1312,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target_by_inode(
@@ -1380,7 +1384,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self
             .core
-            .pinned_read(&self.namespace_id, Freshness::Latest)
+            .pinned_read(&self.namespace_id, Consistency::Strong)
             .await?;
         engine
             .list_checkpoint_files_page(checkpoint_id, request, options, &read_context)
@@ -1417,7 +1421,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     let states = engine
                         .stat_current_files_by_inode(inode_ids, &read_context)
@@ -1457,7 +1461,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     Ok(engine
                         .read_content_ref(content_ref, max_bytes, &read_context)
@@ -1500,7 +1504,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| {
                     let request = request.clone();
                     async move {
@@ -1556,7 +1560,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| {
                     let request = request.clone();
                     let absolute_path = absolute_path.clone();
@@ -1615,7 +1619,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| {
                     let request = request.clone();
                     async move {
@@ -1657,7 +1661,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     let read = engine
                         .read_file_revision(
@@ -1741,13 +1745,13 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        check_freshness(options.freshness)?;
+        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, read_context| async move {
                     let read = engine
                         .read_file_by_inode(
@@ -1841,14 +1845,14 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        check_freshness(options.freshness)?;
+        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
         self.core
             .read(
                 &self.namespace_id,
-                options.freshness,
+                options.consistency,
                 |engine, context| async move {
                     Ok(engine
                         .read_file_stream_by_inode(
@@ -1888,7 +1892,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Freshness::Latest,
+                Consistency::Strong,
                 |engine, read_context| async move {
                     let bytes = engine
                         .read_file_revision_by_inode(
@@ -1912,17 +1916,17 @@ impl<M: crate::Mode> Namespace<M> {
     /// Lists the ordered change feed after `after_seq`, as `options` asks.
     ///
     /// A page whose `after_seq` is above the head it reads returns
-    /// `invalid_request`. A bounded page can read an older head than the
+    /// `invalid_request`. An eventual page can read an older head than the
     /// read that the caller learned `after_seq` from, so a caller that gets
-    /// this error from a bounded page reads the page again with
-    /// [`Freshness::Latest`].
+    /// this error from an eventual page reads the page again with
+    /// [`Consistency::Strong`].
     pub fn list_changes_with_options(
         &self,
         after_seq: ChangeSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let reader = self.read_only();
-        let freshness = options.freshness;
+        let consistency = options.consistency;
         loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let reader = reader.clone();
             async move {
@@ -1930,7 +1934,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .changes_page(
                         request.cursor.unwrap_or(after_seq),
                         request.limit,
-                        freshness,
+                        consistency,
                     )
                     .await
             }
@@ -1953,15 +1957,15 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<ListChangesResponse> {
-        check_freshness(freshness)?;
+        check_consistency(consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(
                 &self.namespace_id,
-                freshness,
+                consistency,
                 |engine, context| async move {
                     change_feed_page(&engine, &context, after_seq, limit).await
                 },

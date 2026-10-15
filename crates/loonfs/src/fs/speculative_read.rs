@@ -1,6 +1,6 @@
 //! Small buffered reads that overlap content I/O with current-path validation.
 
-use crate::{FileBytes, Freshness, Namespace, Result};
+use crate::{Consistency, FileBytes, Namespace, Result};
 use loonfs_core::{ResolvedFileContent, RuntimeReadContext};
 
 /// A path resolved in the cached view, before that view is validated.
@@ -31,12 +31,12 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         absolute_path: &str,
         cached: &CachedFileTarget,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<ResolvedFileContent> {
         self.core
             .read(
                 &self.namespace_id,
-                freshness,
+                consistency,
                 |engine, context| async move {
                     let target =
                         if context.head == cached.view.head && context.basis == cached.view.basis {
@@ -59,7 +59,7 @@ impl<M: crate::Mode> Namespace<M> {
     pub(super) async fn get_current_file_bytes(
         &self,
         absolute_path: &str,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<FileBytes> {
         let max_bytes = Some(self.core.inner.config.max_read_content_bytes);
         let Some(cached) = self.cached_file_target(absolute_path).await else {
@@ -67,7 +67,7 @@ impl<M: crate::Mode> Namespace<M> {
                 .core
                 .read(
                     &self.namespace_id,
-                    freshness,
+                    consistency,
                     |engine, context| async move {
                         Ok(engine.read_file(absolute_path, &context, max_bytes).await?)
                     },
@@ -76,7 +76,7 @@ impl<M: crate::Mode> Namespace<M> {
         };
 
         let engine = self.core.reader_engine(&self.namespace_id);
-        let current = self.current_file_target(absolute_path, &cached, freshness);
+        let current = self.current_file_target(absolute_path, &cached, consistency);
         let target = if cached.target.supports_speculative_read() {
             let content =
                 engine.read_speculative_file_content(&cached.target, &cached.view.object_cache);

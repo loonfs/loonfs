@@ -28,9 +28,9 @@ pub(super) struct TestAppOptions {
     pub(super) direct_transfers: Option<DirectTransferIssuers>,
     /// The runtime's manifest check interval, or the default when `None`.
     pub(super) manifest_revalidation_interval_ms: Option<u64>,
-    /// The runtime's default bounded read interval, or the default when
+    /// The runtime's default maximum staleness of an eventual read, or the default when
     /// `None`.
-    pub(super) bounded_read_interval_ms: Option<u64>,
+    pub(super) max_staleness_ms: Option<u64>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -70,8 +70,8 @@ pub(super) async fn test_app(
         Some(interval_ms) => builder.manifest_revalidation_interval_ms(interval_ms),
         None => builder,
     };
-    let builder = match inputs.bounded_read_interval_ms {
-        Some(interval_ms) => builder.bounded_read_interval_ms(interval_ms),
+    let builder = match inputs.max_staleness_ms {
+        Some(interval_ms) => builder.max_staleness_ms(interval_ms),
         None => builder,
     };
     let runtime = builder

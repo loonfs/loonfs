@@ -2,7 +2,7 @@
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    CreateNamespaceOptions, CurrentFile, DestinationBehavior, Freshness, LoonFs, ReadFileOptions,
+    Consistency, CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs, ReadFileOptions,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -189,30 +189,31 @@ async fn check_buffered_read_access(content_size: usize) {
     assert_eq!(state.file, CurrentFile::Hidden { readable: false });
 }
 
-/// Checks that a warmed reader's bounded reads see a revocation on the first
-/// read after the bounded interval, and not before.
+/// Checks that a warmed reader's eventual reads see a revocation on the first
+/// read after its maximum staleness passes, and not before.
 ///
-/// A bounded read inside its interval reads at the head that the reader
+/// An eventual read within its maximum staleness reads at the head that the reader
 /// confirmed last, so it still returns the file after the revocation. The
-/// first bounded read after the interval confirms the head and finds the
+/// first eventual read after the maximum staleness passes confirms the head and finds the
 /// revocation.
 #[tokio::test]
-async fn a_warmed_reader_sees_a_revocation_on_its_first_bounded_read_after_the_interval() {
+async fn a_warmed_reader_sees_a_revocation_on_its_first_eventual_read_after_its_maximum_staleness()
+{
     for content_size in [0, 5, 64 * 1024, 64 * 1024 + 1] {
-        check_bounded_read_access(content_size).await;
+        check_eventual_read_access(content_size).await;
     }
 }
 
-async fn check_bounded_read_access(content_size: usize) {
+async fn check_eventual_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("bounded-access"))
+        .writer_id(loonfs_test_support::ids::writer_id("eventual-access"))
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let namespace_id = namespace_id("bounded-access");
+    let namespace_id = namespace_id("eventual-access");
     writer
         .create_namespace_with_options(
             &namespace_id,
@@ -270,11 +271,13 @@ async fn check_bounded_read_access(content_size: usize) {
         .expect("reader")
         .with_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
-    let bounded = ReadFileOptions {
-        freshness: Freshness::Bounded { interval: None },
+    let eventual = ReadFileOptions {
+        consistency: Consistency::Eventual {
+            max_staleness: None,
+        },
     };
     let read = namespace
-        .read_file_with_options("/team/file", &bounded)
+        .read_file_with_options("/team/file", &eventual)
         .await
         .expect("warm read");
     assert_eq!(read.bytes, bytes);
@@ -283,16 +286,18 @@ async fn check_bounded_read_access(content_size: usize) {
         .await
         .expect("revoke read access");
     let read = namespace
-        .read_file_with_options("/team/file", &bounded)
+        .read_file_with_options("/team/file", &eventual)
         .await
-        .expect("a read inside the interval reads the head confirmed before the revocation");
+        .expect(
+            "a read within the maximum staleness reads the head confirmed before the revocation",
+        );
     assert_eq!(read.bytes, bytes);
     clock.advance_ms(1_000);
     assert_eq!(
         namespace
-            .read_file_with_options("/team/file", &bounded)
+            .read_file_with_options("/team/file", &eventual)
             .await
-            .expect_err("the first read after the interval observes the revocation")
+            .expect_err("the first read after the maximum staleness observes the revocation")
             .code(),
         ErrorCode::PathNotFound
     );

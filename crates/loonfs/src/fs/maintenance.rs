@@ -1049,7 +1049,7 @@ impl crate::Namespace<crate::Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
-            .pinned_metadata_read(&self.namespace_id, crate::Freshness::Latest)
+            .pinned_metadata_read(&self.namespace_id, crate::Consistency::Strong)
             .await?;
         let root = engine.root_access(&context).await?;
         let grants = root.access.grants;

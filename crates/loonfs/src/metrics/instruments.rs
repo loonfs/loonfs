@@ -127,19 +127,19 @@ pub(crate) enum ReadHeadSource {
     Position,
     /// The read cache's anchor, revalidated or loaded for the read.
     Anchor,
-    /// The read cache's anchor as it was, for a bounded read inside its
-    /// interval, with no request to confirm the head.
-    Bounded,
+    /// The read cache's anchor as it was, for an eventual read within its
+    /// maximum staleness, with no request to confirm the head.
+    Eventual,
 }
 
 impl MetricLabel for ReadHeadSource {
-    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor, Self::Bounded];
+    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor, Self::Eventual];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Position => "position",
             Self::Anchor => "anchor",
-            Self::Bounded => "bounded",
+            Self::Eventual => "eventual",
         }
     }
 }

@@ -6364,23 +6364,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -6409,7 +6409,7 @@
                 }
               }
             },
-            "description": "Invalid change cursor, limit, snapshot ID, freshness, non-snapshot checkpoint, or after_seq above the head that the request reads"
+            "description": "Invalid change cursor, limit, snapshot ID, consistency, non-snapshot checkpoint, or after_seq above the head that the request reads"
           },
           "401": {
             "content": {
@@ -6631,23 +6631,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -6681,7 +6681,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, freshness, non-snapshot checkpoint, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot ID, consistency, non-snapshot checkpoint, or revision_no combined with snapshot_id"
           },
           "401": {
             "content": {
@@ -6915,23 +6915,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -6960,7 +6960,7 @@
                 }
               }
             },
-            "description": "Invalid path, limit, cursor, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint"
+            "description": "Invalid path, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7056,23 +7056,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -7101,7 +7101,7 @@
                 }
               }
             },
-            "description": "Invalid path, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint"
+            "description": "Invalid path, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7724,23 +7724,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -7769,7 +7769,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7884,23 +7884,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -7929,7 +7929,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -8027,23 +8027,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -8077,7 +8077,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, freshness, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -8442,23 +8442,23 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval.",
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness.",
             "in": "query",
-            "name": "freshness",
+            "name": "consistency",
             "required": false,
             "schema": {
-              "default": "latest",
+              "default": "strong",
               "enum": [
-                "latest",
-                "bounded"
+                "strong",
+                "eventual"
               ],
               "type": "string"
             }
           },
           {
-            "description": "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.",
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
             "in": "query",
-            "name": "freshness_interval_ms",
+            "name": "max_staleness_ms",
             "required": false,
             "schema": {
               "format": "int64",
@@ -8492,7 +8492,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, or freshness, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, or consistency, or a snapshot_id, which can't be combined with a revision"
           },
           "401": {
             "content": {

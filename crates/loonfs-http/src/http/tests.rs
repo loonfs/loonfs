@@ -8,7 +8,7 @@ mod inline_commits;
 mod maintenance_runs;
 mod namespaces;
 mod pin_deletion;
-mod read_freshness;
+mod read_consistency;
 mod request_limit;
 mod surface;
 
@@ -43,7 +43,7 @@ use std::path::Path;
 fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
     TestAppOptions {
         manifest_revalidation_interval_ms: None,
-        bounded_read_interval_ms: None,
+        max_staleness_ms: None,
         store: Some(store),
         direct_transfers: None,
     }
@@ -75,7 +75,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "bearer_auth",
     "binding_version",
     "bounded_merge_published",
-    "bounded_read_interval_ms",
     "built_through_seq",
     "captured_seq",
     "case_insensitive",
@@ -129,7 +128,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "fenced_writer_epoch",
     "file_created",
     "file_revision",
-    "freshness_interval_ms",
     "grace_window_ms",
     "grep_gc",
     "head_drift",
@@ -147,6 +145,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "manifest_revalidation_interval_ms",
     "max_connections",
     "max_in_flight_requests",
+    "max_staleness_ms",
     "max_wal_tail_objects",
     "metadata_compaction",
     "recover_administrator",
@@ -2943,7 +2942,7 @@ mod direct_download {
             test_options(directory.path(), "download-server"),
             TestAppOptions {
                 manifest_revalidation_interval_ms: None,
-                bounded_read_interval_ms: None,
+                max_staleness_ms: None,
                 store: Some(store),
                 direct_transfers: Some(transfers),
             },
@@ -3231,7 +3230,7 @@ mod direct_download {
             test_options(directory.path(), "inode-download-bodies"),
             TestAppOptions {
                 manifest_revalidation_interval_ms: None,
-                bounded_read_interval_ms: None,
+                max_staleness_ms: None,
                 store: None,
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),
@@ -3499,7 +3498,7 @@ mod direct_download {
             config,
             TestAppOptions {
                 manifest_revalidation_interval_ms: None,
-                bounded_read_interval_ms: None,
+                max_staleness_ms: None,
                 store: Some(store),
                 direct_transfers,
             },
@@ -3742,7 +3741,7 @@ mod direct_download {
             config,
             TestAppOptions {
                 manifest_revalidation_interval_ms: None,
-                bounded_read_interval_ms: None,
+                max_staleness_ms: None,
                 store: Some(store),
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),

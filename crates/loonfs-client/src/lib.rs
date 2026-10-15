@@ -78,9 +78,9 @@ pub use transport_error::TransportError;
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
-    CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, Freshness, ListOptions, MoveOptions,
-    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
+    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 

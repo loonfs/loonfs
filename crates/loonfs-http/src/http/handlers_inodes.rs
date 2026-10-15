@@ -7,7 +7,7 @@ use super::handlers_filesystem::{
     parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, PageQuery,
 };
 use super::query_params::{
-    checked_cursor, effective_page_limit, invalid_path_id_error, parse_freshness,
+    checked_cursor, effective_page_limit, invalid_path_id_error, parse_consistency,
     parse_include_attributes, parse_revision_no,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
@@ -41,14 +41,14 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
 
 /// The query of the inode content routes. A revision route takes
 /// `snapshot_id` only to refuse a snapshot with the same error that the path
-/// routes return. The freshness parameters apply to both routes, because a
+/// routes return. The consistency parameters apply to both routes, because a
 /// revision read also finds the revision at the live head.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeContentQuery {
     pub(super) snapshot_id: Option<String>,
-    pub(super) freshness: Option<String>,
-    pub(super) freshness_interval_ms: Option<String>,
+    pub(super) consistency: Option<String>,
+    pub(super) max_staleness_ms: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -56,8 +56,8 @@ pub(super) struct InodeContentQuery {
 pub(super) struct StatInodeQuery {
     include_attributes: Option<String>,
     snapshot_id: Option<String>,
-    freshness: Option<String>,
-    freshness_interval_ms: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 #[cfg_attr(
@@ -75,12 +75,12 @@ pub(super) struct StatInodeQuery {
             ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read."),
-            ("freshness" = inline(Option<super::query_params::OpenApiFreshness>), Query, description = "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`."),
-            ("freshness_interval_ms" = inline(Option<super::query_params::OpenApiFreshnessIntervalMs>), Query, description = "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.")
+            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Path entry for the inode", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -103,9 +103,9 @@ pub(super) async fn get_inode(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.freshness = parse_freshness(
-        query.freshness.as_deref(),
-        query.freshness_interval_ms.as_deref(),
+    options.consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
@@ -123,8 +123,8 @@ pub(super) struct ListInodeChildrenQuery {
     cursor: Option<String>,
     include_attributes: Option<String>,
     snapshot_id: Option<String>,
-    freshness: Option<String>,
-    freshness_interval_ms: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 #[cfg_attr(
@@ -151,12 +151,12 @@ pub(super) struct ListInodeChildrenQuery {
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
-            ("freshness" = inline(Option<super::query_params::OpenApiFreshness>), Query, description = "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`."),
-            ("freshness_interval_ms" = inline(Option<super::query_params::OpenApiFreshnessIntervalMs>), Query, description = "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.")
+            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, freshness, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 409, description = "Inode isn't a directory", body = ErrorResponse),
@@ -180,9 +180,9 @@ pub(super) async fn list_inode_children(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.freshness = parse_freshness(
-        query.freshness.as_deref(),
-        query.freshness_interval_ms.as_deref(),
+    options.consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
@@ -267,12 +267,12 @@ pub(super) async fn list_file_revisions_by_inode(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
-            ("freshness" = inline(Option<super::query_params::OpenApiFreshness>), Query, description = "How recently the read confirms the namespace head. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval. It can't be combined with `snapshot_id`."),
-            ("freshness_interval_ms" = inline(Option<super::query_params::OpenApiFreshnessIntervalMs>), Query, description = "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.")
+            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot ID, freshness, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
@@ -293,15 +293,15 @@ pub(super) async fn get_file_content_by_inode(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let freshness = parse_freshness(
-        query.freshness.as_deref(),
-        query.freshness_interval_ms.as_deref(),
+    let consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream_by_inode(inode_id, freshness)
+        .read_file_stream_by_inode(inode_id, consistency)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(
@@ -326,12 +326,12 @@ pub(super) async fn get_file_content_by_inode(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number."),
-            ("freshness" = inline(Option<super::query_params::OpenApiFreshness>), Query, description = "How recently the read confirms the namespace head that it finds the revision in. `latest` (the default) confirms it before the read, and `bounded` reads at the head that the server confirmed last while that confirmation is younger than the interval."),
-            ("freshness_interval_ms" = inline(Option<super::query_params::OpenApiFreshnessIntervalMs>), Query, description = "With `freshness=bounded`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `bounded_read_interval_ms`.")
+            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head that it finds the revision in. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness."),
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, revision number, or freshness, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, revision number, or consistency, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
@@ -356,9 +356,9 @@ pub(super) async fn get_file_revision_content_by_inode(
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let options = ReadFileStreamOptions {
-        freshness: parse_freshness(
-            query.freshness.as_deref(),
-            query.freshness_interval_ms.as_deref(),
+        consistency: parse_consistency(
+            query.consistency.as_deref(),
+            query.max_staleness_ms.as_deref(),
             false,
         )?,
         ..ReadFileStreamOptions::default()

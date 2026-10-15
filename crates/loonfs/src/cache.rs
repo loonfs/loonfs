@@ -1,14 +1,14 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the read cache's anchor. An
 //! anchor's WAL probe finds new commits, and the interval check of either
-//! head finds a newer manifest. A bounded read skips both while the anchor's
-//! head was confirmed less than its interval ago.
+//! head finds a newer manifest. An eventual read skips both while the anchor's
+//! head was confirmed less than its maximum staleness ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
 use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
-use crate::{CoreError, Freshness, NamespaceId, PinId};
+use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
@@ -217,14 +217,14 @@ impl RuntimeCore {
     ///
     /// In a runtime with the namespace's writer session, the head is the
     /// session's position (see [`Self::checked_writer_position`]), whatever
-    /// the freshness. Otherwise it's the read cache's anchor. A bounded read
+    /// the consistency. Otherwise it's the read cache's anchor. An eventual read
     /// takes the anchor as it is while its head was confirmed less than the
-    /// read's interval ago (see [`Self::bounded_anchor`]), and every other
+    /// read's maximum staleness ago (see [`Self::eventual_anchor`]), and every other
     /// read revalidates or loads the anchor.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<RuntimeReadContext> {
         let (context, source) = match self.checked_writer_position(namespace_id).await? {
             Some(position) => (
@@ -232,8 +232,8 @@ impl RuntimeCore {
                 ReadHeadSource::Position,
             ),
             None => {
-                let (anchor, source) = match self.bounded_anchor(namespace_id, freshness) {
-                    Some(anchor) => (anchor, ReadHeadSource::Bounded),
+                let (anchor, source) = match self.eventual_anchor(namespace_id, consistency) {
+                    Some(anchor) => (anchor, ReadHeadSource::Eventual),
                     None => (
                         self.load_namespace_head_cached(namespace_id).await?,
                         ReadHeadSource::Anchor,
@@ -249,29 +249,30 @@ impl RuntimeCore {
         Ok(context)
     }
 
-    /// Returns the read cache's anchor for a bounded read that can take it
+    /// Returns the read cache's anchor for an eventual read that can take it
     /// without a request, or `None` when the read confirms the head the way a
-    /// `latest` read does.
+    /// `strong` read does.
     ///
-    /// A bounded read takes the anchor while the anchor's head was confirmed
-    /// less than the read's interval ago, so the read sees every commit
-    /// acknowledged before that confirmation. The anchor's manifest check
+    /// An eventual read takes the anchor while the anchor's head was confirmed
+    /// less than the read's maximum staleness ago, so the read sees every
+    /// commit acknowledged before that confirmation. The anchor's manifest check
     /// must also be younger than the revalidation bound, because garbage
     /// collection may delete the segments of a superseded manifest once the
     /// bound passes (format section 4.2).
-    fn bounded_anchor(
+    fn eventual_anchor(
         &self,
         namespace_id: &NamespaceId,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Option<Arc<CachedReadAnchor>> {
-        let Freshness::Bounded { interval } = freshness else {
+        let Consistency::Eventual { max_staleness } = consistency else {
             return None;
         };
-        let interval_ms = interval.map_or(self.inner.config.bounded_read_interval_ms, |interval| {
-            u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
-        });
+        let max_staleness_ms = max_staleness
+            .map_or(self.inner.config.max_staleness_ms, |max_staleness| {
+                u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
+            });
         let anchor = self.inner.head_state.get_anchor(namespace_id)?;
-        let confirmed = anchor.head_confirmed.age_ms() < interval_ms
+        let confirmed = anchor.head_confirmed.age_ms() < max_staleness_ms
             && anchor
                 .basis_checked
                 .as_ref()
@@ -306,12 +307,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let read_context = self.current_read_context(namespace_id, freshness).await?;
+        let read_context = self.current_read_context(namespace_id, consistency).await?;
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
@@ -325,7 +326,7 @@ impl RuntimeCore {
         RuntimeReadContext,
     )> {
         let live = self
-            .current_read_context(namespace_id, Freshness::Latest)
+            .current_read_context(namespace_id, Consistency::Strong)
             .await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
@@ -348,7 +349,7 @@ impl RuntimeCore {
         RuntimeReadContext,
     )> {
         let live = self
-            .current_read_context(namespace_id, Freshness::Latest)
+            .current_read_context(namespace_id, Consistency::Strong)
             .await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
@@ -383,12 +384,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
-        freshness: Freshness,
+        consistency: Consistency,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let pinned = self.pinned_read(namespace_id, freshness).await?;
+        let pinned = self.pinned_read(namespace_id, consistency).await?;
         self.inner.instruments.latest_metadata_view_read();
         Ok(pinned)
     }
@@ -400,7 +401,7 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let context = self
-            .current_read_context(namespace_id, Freshness::Latest)
+            .current_read_context(namespace_id, Consistency::Strong)
             .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }

@@ -4,7 +4,7 @@
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    Commit, ErrorCode, FoldWalOutcome, Freshness, LoonFs, Namespace, ReadOnly, SharedObjectStore,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore,
     StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
@@ -184,17 +184,19 @@ async fn reads_after_a_commit_send_no_store_request() {
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
 }
 
-/// Checks that a bounded read in the writer's runtime starts from the
-/// writer's position and sends no store request, as a `latest` read does.
+/// Checks that an eventual read in the writer's runtime starts from the
+/// writer's position and sends no store request, as a `strong` read does.
 #[tokio::test]
-async fn a_bounded_read_starts_from_the_position_with_no_store_request() {
-    let fixture = fixture("bounded-position-reads", Parked::WalPuts).await;
+async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
+    let fixture = fixture("eventual-position-reads", Parked::WalPuts).await;
     let commit = fixture.put("/next.txt").await.expect("commit");
     let (positions, anchors) = fixture.head_sources();
     let cache_lookups = fixture.head_cache_lookups();
     fixture.recording.reset();
     let options = StatOptions {
-        freshness: Freshness::Bounded { interval: None },
+        consistency: Consistency::Eventual {
+            max_staleness: None,
+        },
         ..StatOptions::default()
     };
     let entry = fixture

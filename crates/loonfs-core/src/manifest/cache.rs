@@ -303,7 +303,7 @@ pub struct CachedReadAnchor {
     /// When the WAL probe last confirmed `head`, or when the anchor was
     /// loaded. The observation is taken before the probe or the load is
     /// sent, so `head` includes every commit acknowledged before it. A
-    /// bounded read inside its interval reads at `head` without a request.
+    /// eventual read within its maximum staleness reads at `head` without a request.
     pub head_confirmed: Observation,
     pub validation: Arc<NamespaceValidation>,
     /// The number of the validation that produced this anchor.

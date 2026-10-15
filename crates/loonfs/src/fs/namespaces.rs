@@ -18,7 +18,7 @@ impl LoonFs<Writable> {
         }
         let (engine, context) = self
             .core
-            .pinned_metadata_read(namespace_id, crate::Freshness::Latest)
+            .pinned_metadata_read(namespace_id, crate::Consistency::Strong)
             .await?;
         Ok(engine.ensure_administrator(&context).await?)
     }
@@ -148,7 +148,7 @@ impl Namespace<Writable> {
         }
         let (engine, context) = self
             .core
-            .pinned_metadata_read(&self.namespace_id, crate::Freshness::Latest)
+            .pinned_metadata_read(&self.namespace_id, crate::Consistency::Strong)
             .await?;
         Ok(engine.ensure_administrator(&context).await?)
     }

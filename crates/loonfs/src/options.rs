@@ -16,9 +16,9 @@ use std::time::Duration;
 
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
-    CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, Freshness, ListOptions, MoveOptions,
-    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
+    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
@@ -170,7 +170,7 @@ pub struct ReadFileStreamOptions {
     /// nothing of the caller.
     pub start_offset: u64,
     /// How recently the read confirms the live head.
-    pub freshness: Freshness,
+    pub consistency: Consistency,
 }
 
 impl Default for ReadFileStreamOptions {
@@ -178,57 +178,57 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
-            freshness: Freshness::Latest,
+            consistency: Consistency::Strong,
         }
     }
 }
 
-/// Rejects a live read's freshness before the read sends a request, when
-/// its bounded interval is longer than the revalidation bound.
-pub(crate) fn check_freshness(freshness: Freshness) -> Result<()> {
-    if let Freshness::Bounded {
-        interval: Some(interval),
-    } = freshness
+/// Rejects a live read's consistency before the read sends a request, when
+/// its maximum staleness is longer than the revalidation bound.
+pub(crate) fn check_consistency(consistency: Consistency) -> Result<()> {
+    if let Consistency::Eventual {
+        max_staleness: Some(max_staleness),
+    } = consistency
     {
-        if interval > Duration::from_millis(READ_REVALIDATION_BOUND_MS) {
+        if max_staleness > Duration::from_millis(READ_REVALIDATION_BOUND_MS) {
             return Err(Error::InvalidRequest {
                 message: format!(
-                    "a bounded read's interval may not exceed the revalidation bound \
+                    "an eventual read's maximum staleness may not exceed the revalidation bound \
                      ({READ_REVALIDATION_BOUND_MS} ms)"
                 ),
-                param: "freshness_interval_ms",
+                param: "max_staleness_ms",
             });
         }
     }
     Ok(())
 }
 
-/// Rejects a bounded read of a pinned view (a snapshot, a checkpoint, or a
+/// Rejects an eventual read of a pinned view (a snapshot, a checkpoint, or a
 /// [`ReadView`](crate::ReadView)). The pin selects the state such a read
-/// sees, so the read has no freshness setting and takes only
-/// [`Freshness::Latest`].
-pub(crate) fn check_pinned_freshness(freshness: Freshness) -> Result<()> {
-    if freshness != Freshness::Latest {
+/// sees, so the read has no consistency setting and takes only
+/// [`Consistency::Strong`].
+pub(crate) fn check_pinned_consistency(consistency: Consistency) -> Result<()> {
+    if consistency != Consistency::Strong {
         return Err(Error::InvalidRequest {
-            message: "a read of a snapshot or a read view has no freshness setting, so it \
-                      takes only `latest`"
+            message: "a read of a snapshot or a read view has no consistency setting, so it \
+                      takes only `strong`"
                 .to_owned(),
-            param: "freshness",
+            param: "consistency",
         });
     }
     Ok(())
 }
 
-/// Checks the freshness of a read that reads a snapshot when it has a
+/// Checks the consistency of a read that reads a snapshot when it has a
 /// `snapshot_id`, and the live head otherwise, before the read sends a
 /// request.
-pub(crate) fn check_snapshot_freshness(
+pub(crate) fn check_snapshot_consistency(
     snapshot_id: Option<&PinId>,
-    freshness: Freshness,
+    consistency: Consistency,
 ) -> Result<()> {
     match snapshot_id {
-        Some(_) => check_pinned_freshness(freshness),
-        None => check_freshness(freshness),
+        Some(_) => check_pinned_consistency(consistency),
+        None => check_consistency(consistency),
     }
 }
 
@@ -236,14 +236,14 @@ pub(crate) fn check_snapshot_freshness(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
     /// How recently the read confirms the live head.
-    pub freshness: Freshness,
+    pub consistency: Consistency,
 }
 
 /// Options for reading the change feed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
     /// How recently each page confirms the live head.
-    pub freshness: Freshness,
+    pub consistency: Consistency,
 }
 
 #[cfg(test)]

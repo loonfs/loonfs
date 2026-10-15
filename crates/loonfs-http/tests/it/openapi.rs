@@ -414,15 +414,15 @@ fn openapi_documents_current_server_paths() {
             "limit",
             "cursor",
             "snapshot_id",
-            "freshness",
-            "freshness_interval_ms",
+            "consistency",
+            "max_staleness_ms",
         ],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entry",
         "get",
-        &["path", "snapshot_id", "freshness", "freshness_interval_ms"],
+        &["path", "snapshot_id", "consistency", "max_staleness_ms"],
     );
     assert_query_params(
         paths,
@@ -432,8 +432,8 @@ fn openapi_documents_current_server_paths() {
             "path",
             "revision_no",
             "snapshot_id",
-            "freshness",
-            "freshness_interval_ms",
+            "consistency",
+            "max_staleness_ms",
         ],
     );
     assert_query_params(
@@ -446,19 +446,19 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         "get",
-        &["limit", "cursor", "freshness", "freshness_interval_ms"],
+        &["limit", "cursor", "consistency", "max_staleness_ms"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         "get",
-        &["snapshot_id", "freshness", "freshness_interval_ms"],
+        &["snapshot_id", "consistency", "max_staleness_ms"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         "get",
-        &["freshness", "freshness_interval_ms"],
+        &["consistency", "max_staleness_ms"],
     );
     assert_query_params(
         paths,
@@ -480,8 +480,8 @@ fn openapi_documents_current_server_paths() {
             "after_seq",
             "limit",
             "snapshot_id",
-            "freshness",
-            "freshness_interval_ms",
+            "consistency",
+            "max_staleness_ms",
         ],
     );
     assert_query_params(
@@ -1210,23 +1210,23 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     ] {
-        let freshness = query_parameter(paths, path, "get", "freshness");
-        assert_eq!(freshness.get("required"), Some(&Value::Bool(false)));
-        let schema = freshness.get("schema").expect("freshness schema");
+        let consistency = query_parameter(paths, path, "get", "consistency");
+        assert_eq!(consistency.get("required"), Some(&Value::Bool(false)));
+        let schema = consistency.get("schema").expect("consistency schema");
         assert_eq!(schema.get("type").and_then(Value::as_str), Some("string"));
         assert_eq!(
             schema.get("enum"),
-            Some(&serde_json::json!(["latest", "bounded"]))
+            Some(&serde_json::json!(["strong", "eventual"]))
         );
         assert_eq!(
             schema.get("default").and_then(Value::as_str),
-            Some("latest")
+            Some("strong")
         );
-        let interval = query_parameter(paths, path, "get", "freshness_interval_ms");
-        assert_eq!(interval.get("required"), Some(&Value::Bool(false)));
-        let schema = interval
+        let max_staleness = query_parameter(paths, path, "get", "max_staleness_ms");
+        assert_eq!(max_staleness.get("required"), Some(&Value::Bool(false)));
+        let schema = max_staleness
             .get("schema")
-            .expect("freshness_interval_ms schema");
+            .expect("max_staleness_ms schema");
         assert_eq!(schema.get("type").and_then(Value::as_str), Some("integer"));
         assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(0));
         assert_eq!(

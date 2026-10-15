@@ -819,8 +819,8 @@ fn builders_require_identity_and_a_runtime() {
     }
 }
 
-/// Checks that a manifest check interval or a bounded read interval above
-/// the revalidation bound fails both builds with a config error that
+/// Checks that a manifest check interval or a maximum staleness above the
+/// revalidation bound fails both builds with a config error that
 /// identifies the setting, and that both builds accept the bound itself.
 #[test]
 fn builders_reject_a_read_interval_above_the_revalidation_bound() {
@@ -849,11 +849,11 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         );
         assert_rejected(
             builder()
-                .bounded_read_interval_ms(bound + 1)
+                .max_staleness_ms(bound + 1)
                 .build()
                 .await
                 .map(drop),
-            "bounded_read_interval_ms",
+            "max_staleness_ms",
         );
         assert_rejected(
             builder()
@@ -867,15 +867,15 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         assert_rejected(
             builder()
                 .read_only()
-                .bounded_read_interval_ms(bound + 1)
+                .max_staleness_ms(bound + 1)
                 .build()
                 .await
                 .map(drop),
-            "bounded_read_interval_ms",
+            "max_staleness_ms",
         );
         let writer = builder()
             .manifest_revalidation_interval_ms(bound)
-            .bounded_read_interval_ms(bound)
+            .max_staleness_ms(bound)
             .build()
             .await
             .expect("the bound itself is accepted");
@@ -883,7 +883,7 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         builder()
             .read_only()
             .manifest_revalidation_interval_ms(bound)
-            .bounded_read_interval_ms(bound)
+            .max_staleness_ms(bound)
             .build()
             .await
             .expect("the bound itself is accepted");

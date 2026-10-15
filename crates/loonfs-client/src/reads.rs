@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
-use loonfs_types::options::Freshness;
+use loonfs_types::options::Consistency;
 use loonfs_types::PageRequest;
 
 /// Options for a read of a file's content by path or by inode.
@@ -12,8 +12,8 @@ pub struct ReadFileOptions {
     /// current one.
     pub snapshot_id: Option<PinId>,
     /// How recently the server confirms the live head before the read. A
-    /// snapshot read takes only [`Freshness::Latest`].
-    pub freshness: Freshness,
+    /// snapshot read takes only [`Consistency::Strong`].
+    pub consistency: Consistency,
 }
 
 /// Options for creating a namespace.
@@ -43,17 +43,17 @@ pub struct ListChangesOptions {
     /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<PinId>,
     /// How recently the server confirms the live head before each page. A
-    /// snapshot's feed takes only [`Freshness::Latest`].
-    pub freshness: Freshness,
+    /// snapshot's feed takes only [`Consistency::Strong`].
+    pub consistency: Consistency,
 }
 
-/// Adds the freshness query parameters of a live read. A `latest` read sends
+/// Adds the consistency query parameters of a live read. A `strong` read sends
 /// neither, so the client also works with a server that doesn't accept them.
-fn push_freshness(query: &mut QueryBuilder, freshness: Freshness) {
-    if let Freshness::Bounded { interval } = freshness {
-        query.push("freshness", "bounded");
-        if let Some(interval) = interval {
-            query.push("freshness_interval_ms", interval.as_millis());
+fn push_consistency(query: &mut QueryBuilder, consistency: Consistency) {
+    if let Consistency::Eventual { max_staleness } = consistency {
+        query.push("consistency", "eventual");
+        if let Some(max_staleness) = max_staleness {
+            query.push("max_staleness_ms", max_staleness.as_millis());
         }
     }
 }
@@ -317,7 +317,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -344,7 +344,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -377,7 +377,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -431,7 +431,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -577,7 +577,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         let url = query.build();
         self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -671,7 +671,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         query.build()
     }
 
@@ -779,7 +779,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        push_freshness(&mut query, options.freshness);
+        push_consistency(&mut query, options.consistency);
         query.build()
     }
 
@@ -918,14 +918,14 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that a `latest` read sends neither freshness parameter, and
-    /// that a bounded read sends `freshness=bounded`, plus
-    /// `freshness_interval_ms` when it sets an interval.
+    /// Checks that a `strong` read sends neither consistency parameter, and
+    /// that an eventual read sends `consistency=eventual`, plus
+    /// `max_staleness_ms` when it sets a maximum staleness.
     #[tokio::test]
-    async fn bounded_reads_send_the_freshness_parameters_and_latest_reads_send_none() {
+    async fn eventual_reads_send_the_consistency_parameters_and_strong_reads_send_none() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-        let read = |freshness| ReadFileOptions {
-            freshness,
+        let read = |consistency| ReadFileOptions {
+            consistency,
             ..ReadFileOptions::default()
         };
         let transport = scripted_transport::script([
@@ -934,15 +934,17 @@ mod tests {
             Outcome::Success(b"file".to_vec()),
         ]);
         let client = client_for(&transport);
-        for freshness in [
-            Freshness::Latest,
-            Freshness::Bounded { interval: None },
-            Freshness::Bounded {
-                interval: Some(std::time::Duration::from_millis(2_500)),
+        for consistency in [
+            Consistency::Strong,
+            Consistency::Eventual {
+                max_staleness: None,
+            },
+            Consistency::Eventual {
+                max_staleness: Some(std::time::Duration::from_millis(2_500)),
             },
         ] {
             client
-                .read_file_with_options(&spec, &read(freshness))
+                .read_file_with_options(&spec, &read(consistency))
                 .await
                 .expect("read file");
         }
@@ -957,8 +959,8 @@ mod tests {
             urls,
             [
                 content.to_owned(),
-                format!("{content}&freshness=bounded"),
-                format!("{content}&freshness=bounded&freshness_interval_ms=2500"),
+                format!("{content}&consistency=eventual"),
+                format!("{content}&consistency=eventual&max_staleness_ms=2500"),
             ]
         );
     }

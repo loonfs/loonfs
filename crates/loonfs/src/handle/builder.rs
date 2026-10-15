@@ -48,7 +48,7 @@ struct CoreConfig {
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
     manifest_revalidation_interval_ms: u64,
-    bounded_read_interval_ms: u64,
+    max_staleness_ms: u64,
     execution_budget: Option<ExecutionBudget>,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
@@ -84,7 +84,7 @@ impl<M> LoonFsBuilder<M> {
                 metadata_cache: None,
                 manifest_revalidation_interval_ms:
                     crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
-                bounded_read_interval_ms: crate::config::DEFAULT_BOUNDED_READ_INTERVAL_MS,
+                max_staleness_ms: crate::config::DEFAULT_MAX_STALENESS_MS,
                 execution_budget: None,
                 timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
@@ -148,17 +148,18 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Sets the interval, in milliseconds, of a bounded read that doesn't set
-    /// its own (see [`Freshness::Bounded`](crate::Freshness::Bounded)).
+    /// Sets the maximum staleness, in milliseconds, of an eventual read that
+    /// doesn't set its own (see
+    /// [`Consistency::Eventual`](crate::Consistency::Eventual)).
     ///
-    /// In a runtime without the namespace's writer session, a bounded read
+    /// In a runtime without the namespace's writer session, an eventual read
     /// reads at the head that the runtime confirmed last, without a request,
-    /// while that confirmation is younger than the interval. Defaults to
+    /// while that confirmation is younger than the maximum staleness. Defaults to
     /// 1000, and zero confirms the head on every read. A value above
     /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`].
-    pub fn bounded_read_interval_ms(mut self, bounded_read_interval_ms: u64) -> Self {
-        self.core.bounded_read_interval_ms = bounded_read_interval_ms;
+    pub fn max_staleness_ms(mut self, max_staleness_ms: u64) -> Self {
+        self.core.max_staleness_ms = max_staleness_ms;
         self
     }
 
@@ -376,14 +377,15 @@ impl CoreConfig {
             ));
         }
         // A reader reloads a view whose manifest check is as old as the
-        // revalidation bound, whatever the interval, so a longer interval
-        // would promise something that the runtime doesn't do.
+        // revalidation bound, whatever the setting, so a longer interval or
+        // maximum staleness would promise something that the runtime doesn't
+        // do.
         for (setting, interval_ms) in [
             (
                 "manifest_revalidation_interval_ms",
                 self.manifest_revalidation_interval_ms,
             ),
-            ("bounded_read_interval_ms", self.bounded_read_interval_ms),
+            ("max_staleness_ms", self.max_staleness_ms),
         ] {
             if interval_ms > READ_REVALIDATION_BOUND_MS {
                 return Err(Error::Config(format!(
@@ -448,7 +450,7 @@ impl CoreConfig {
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
-                bounded_read_interval_ms: self.bounded_read_interval_ms,
+                max_staleness_ms: self.max_staleness_ms,
                 metadata_run_policy,
                 execution_budget,
                 trace_mode: self.trace_mode,

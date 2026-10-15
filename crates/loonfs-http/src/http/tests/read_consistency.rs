@@ -1,4 +1,4 @@
-//! The `freshness` and `freshness_interval_ms` query parameters of the live
+//! The `consistency` and `max_staleness_ms` query parameters of the live
 //! read routes.
 
 use super::fixtures::{test_app, test_options, TestAppOptions};
@@ -31,7 +31,7 @@ struct Fixture {
 /// Creates a namespace `demo` with one file through a separate writer
 /// runtime, and a server over the same store that has no writer session for
 /// the namespace, so its reads start from the read cache. The server's
-/// default bounded interval is the revalidation bound, so a bounded read
+/// default maximum staleness is the revalidation bound, so an eventual read
 /// stays inside it for the whole test.
 async fn fixture(name: &str) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -66,7 +66,7 @@ async fn fixture(name: &str) -> Fixture {
         options,
         TestAppOptions {
             store: Some(store),
-            bounded_read_interval_ms: Some(READ_REVALIDATION_BOUND_MS),
+            max_staleness_ms: Some(READ_REVALIDATION_BOUND_MS),
             ..TestAppOptions::default()
         },
     )
@@ -129,17 +129,17 @@ fn with_parameters(route: &str, parameters: &str) -> String {
     }
 }
 
-/// Checks that every live read route accepts both freshness values, with and
-/// without an interval, up to the revalidation bound.
+/// Checks that every live read route accepts both consistency values, with and
+/// without a maximum staleness, up to the revalidation bound.
 #[tokio::test]
-async fn freshness_parameters_parse_on_every_live_read_route() {
-    let fixture = fixture("freshness-parse").await;
-    let bound = format!("freshness=bounded&freshness_interval_ms={READ_REVALIDATION_BOUND_MS}");
+async fn consistency_parameters_parse_on_every_live_read_route() {
+    let fixture = fixture("consistency-parse").await;
+    let bound = format!("consistency=eventual&max_staleness_ms={READ_REVALIDATION_BOUND_MS}");
     for route in fixture.live_read_routes() {
         for parameters in [
-            "freshness=latest",
-            "freshness=bounded",
-            "freshness=bounded&freshness_interval_ms=0",
+            "consistency=strong",
+            "consistency=eventual",
+            "consistency=eventual&max_staleness_ms=0",
             bound.as_str(),
         ] {
             let uri = with_parameters(&route, parameters);
@@ -154,40 +154,37 @@ async fn freshness_parameters_parse_on_every_live_read_route() {
     }
 }
 
-/// Checks that each live read route rejects an interval without
-/// `freshness=bounded`, an interval above the revalidation bound, an unknown
-/// freshness value, and `freshness` together with `snapshot_id`, with
+/// Checks that each live read route rejects `max_staleness_ms` without
+/// `consistency=eventual`, a maximum staleness above the revalidation bound, an unknown
+/// consistency value, and `consistency` together with `snapshot_id`, with
 /// `invalid_request` for the parameter at fault and before any store
 /// request.
 #[tokio::test]
-async fn freshness_rejections_identify_the_parameter() {
-    let fixture = fixture("freshness-rejections").await;
+async fn consistency_rejections_identify_the_parameter() {
+    let fixture = fixture("consistency-rejections").await;
     let above = format!(
-        "freshness=bounded&freshness_interval_ms={}",
+        "consistency=eventual&max_staleness_ms={}",
         READ_REVALIDATION_BOUND_MS + 1
     );
-    let snapshot_bounded = format!("freshness=bounded&snapshot_id={SNAPSHOT_ID}");
-    let snapshot_latest = format!("freshness=latest&snapshot_id={SNAPSHOT_ID}");
+    let snapshot_eventual = format!("consistency=eventual&snapshot_id={SNAPSHOT_ID}");
+    let snapshot_strong = format!("consistency=strong&snapshot_id={SNAPSHOT_ID}");
     for route in fixture.live_read_routes() {
         // The revision routes refuse a snapshot on its own, so they never
-        // reach the freshness check with one.
+        // reach the consistency check with one.
         let takes_snapshot = !route.contains("revision");
         let mut cases = vec![
-            ("freshness_interval_ms=10", "freshness_interval_ms"),
+            ("max_staleness_ms=10", "max_staleness_ms"),
+            ("consistency=strong&max_staleness_ms=10", "max_staleness_ms"),
+            (above.as_str(), "max_staleness_ms"),
             (
-                "freshness=latest&freshness_interval_ms=10",
-                "freshness_interval_ms",
+                "consistency=eventual&max_staleness_ms=soon",
+                "max_staleness_ms",
             ),
-            (above.as_str(), "freshness_interval_ms"),
-            (
-                "freshness=bounded&freshness_interval_ms=soon",
-                "freshness_interval_ms",
-            ),
-            ("freshness=sometimes", "freshness"),
+            ("consistency=sometimes", "consistency"),
         ];
         if takes_snapshot {
-            cases.push((snapshot_bounded.as_str(), "freshness"));
-            cases.push((snapshot_latest.as_str(), "freshness"));
+            cases.push((snapshot_eventual.as_str(), "consistency"));
+            cases.push((snapshot_strong.as_str(), "consistency"));
         }
         for (parameters, param) in cases {
             let uri = with_parameters(&route, parameters);
@@ -202,12 +199,12 @@ async fn freshness_rejections_identify_the_parameter() {
     }
 }
 
-/// Checks that a bounded read through the server inside its interval sends
-/// no store request, while a `latest` read of the same entry confirms the
+/// Checks that an eventual read through the server within its maximum staleness sends
+/// no store request, while a `strong` read of the same entry confirms the
 /// head with the store.
 #[tokio::test]
-async fn a_bounded_read_inside_its_interval_sends_no_store_request() {
-    let fixture = fixture("freshness-no-request").await;
+async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() {
+    let fixture = fixture("consistency-no-request").await;
     let entry = "/v0/namespaces/demo/filesystem/entry?path=/file.txt";
     let children = "/v0/namespaces/demo/inodes/ino_1/children?include_attributes=false";
     for uri in [entry, children] {
@@ -216,7 +213,7 @@ async fn a_bounded_read_inside_its_interval_sends_no_store_request() {
     }
     fixture.recording.reset();
     for uri in [entry, children] {
-        let uri = with_parameters(uri, "freshness=bounded");
+        let uri = with_parameters(uri, "consistency=eventual");
         let (status, _) = fixture.get(&uri).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
     }
@@ -225,6 +222,6 @@ async fn a_bounded_read_inside_its_interval_sends_no_store_request() {
     assert_eq!(status, StatusCode::OK);
     assert!(
         !fixture.recording.take().is_empty(),
-        "a latest read confirms the head with the store"
+        "a strong read confirms the head with the store"
     );
 }

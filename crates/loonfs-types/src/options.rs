@@ -31,22 +31,23 @@ impl std::fmt::Display for AttributeInclusion {
 
 /// How recently a live read confirms the namespace head before it reads.
 ///
-/// A pinned read (a snapshot or a checkpoint) has no freshness setting,
+/// A pinned read (a snapshot or a checkpoint) has no consistency setting,
 /// because the pin selects the state it reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Freshness {
+pub enum Consistency {
     /// Confirm the head before the read, so the read sees every commit
     /// acknowledged before it started.
     #[default]
-    Latest,
-    /// Confirm the head at most once per interval, and read at the head that
-    /// was confirmed last inside it. The read sees every commit acknowledged
-    /// before that confirmation, and it may miss commits acknowledged since.
-    Bounded {
+    Strong,
+    /// Read at the head that was confirmed last while that confirmation is
+    /// younger than the maximum staleness, and confirm the head again after
+    /// that. The read sees every commit acknowledged before the last
+    /// confirmation, and it may miss commits acknowledged since.
+    Eventual {
         /// How old the last confirmation can be, or `None` for the runtime's
-        /// default bounded interval. No interval may exceed the revalidation
-        /// bound (`READ_REVALIDATION_BOUND_MS`).
-        interval: Option<Duration>,
+        /// default maximum staleness. No maximum staleness may exceed the
+        /// revalidation bound (`READ_REVALIDATION_BOUND_MS`).
+        max_staleness: Option<Duration>,
     },
 }
 
@@ -71,8 +72,8 @@ pub struct StatOptions {
     /// Read the entry from this snapshot.
     pub snapshot_id: Option<PinId>,
     /// How recently the read confirms the live head. A snapshot read takes
-    /// only [`Freshness::Latest`].
-    pub freshness: Freshness,
+    /// only [`Consistency::Strong`].
+    pub consistency: Consistency,
 }
 
 impl Default for StatOptions {
@@ -80,7 +81,7 @@ impl Default for StatOptions {
         Self {
             include_attributes: AttributeInclusion::Include,
             snapshot_id: None,
-            freshness: Freshness::Latest,
+            consistency: Consistency::Strong,
         }
     }
 }
@@ -93,8 +94,8 @@ pub struct ListOptions {
     /// Read the directory from this snapshot.
     pub snapshot_id: Option<PinId>,
     /// How recently each page confirms the live head. A snapshot read takes
-    /// only [`Freshness::Latest`].
-    pub freshness: Freshness,
+    /// only [`Consistency::Strong`].
+    pub consistency: Consistency,
 }
 
 /// The attribute writes and removals one update applies.
@@ -381,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn read_options_default_to_latest_reads() {
-        assert_eq!(Freshness::default(), Freshness::Latest);
-        assert_eq!(StatOptions::default().freshness, Freshness::Latest);
-        assert_eq!(ListOptions::default().freshness, Freshness::Latest);
+    fn read_options_default_to_strong_reads() {
+        assert_eq!(Consistency::default(), Consistency::Strong);
+        assert_eq!(StatOptions::default().consistency, Consistency::Strong);
+        assert_eq!(ListOptions::default().consistency, Consistency::Strong);
     }
 }

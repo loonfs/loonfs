@@ -39,7 +39,7 @@ mod naming;
 mod pagination;
 mod publication;
 mod publish_discovery;
-mod read_freshness;
+mod read_consistency;
 mod read_view;
 mod request_accounting;
 mod retained_views;

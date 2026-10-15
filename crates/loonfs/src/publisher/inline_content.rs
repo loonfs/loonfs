@@ -100,7 +100,7 @@ impl NamespacePublisher {
         }
         let (reader, context) = self
             .runtime_core
-            .pinned_read(namespace_id, crate::Freshness::Latest)
+            .pinned_read(namespace_id, crate::Consistency::Strong)
             .await?;
         if reader
             .find_commit_receipt(&context, candidate.commit_id())
