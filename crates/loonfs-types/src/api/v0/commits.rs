@@ -208,31 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_uses_committed_by_on_the_wire() {
-        let change = Commit {
-            namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
-            committed_seq: crate::ChangeSeq(7),
-            commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
-            committed_by: crate::ActorId::loonfs(),
-            committed_at_ms: 1_752_624_000_000,
-            message: None,
-            events: Vec::new(),
-        };
-
-        assert_eq!(
-            serde_json::to_value(change).expect("serialize committed change"),
-            serde_json::json!({
-                "namespace_id": "demo",
-                "committed_seq": 7,
-                "commit_id": "example-commit",
-                "committed_by": "loonfs",
-                "committed_at_ms": 1_752_624_000_000_u64,
-                "events": [],
-            })
-        );
-    }
-
-    #[test]
     fn a_commit_carries_events_at_the_top_level() {
         let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),

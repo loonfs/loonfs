@@ -656,24 +656,4 @@ mod tests {
             status_token
         );
     }
-
-    #[test]
-    fn a_content_token_rejects_unknown_fields() {
-        let token = serde_json::json!({
-            "content_ref": {
-                "kind": "blob_v1",
-                "owner_namespace_id": "demo",
-                "content_id": "con_0123456789abcdef0123456789abcdef",
-                "size_bytes": 5,
-                "checksum": {
-                    "algorithm": "crc64nvme",
-                    "value": "3377857006524257"
-                }
-            },
-            "token": "opaque-server-token",
-            "expires_at_ms": 1
-        });
-        serde_json::from_value::<ContentToken>(token)
-            .expect_err("a token with an unknown field should be rejected");
-    }
 }

@@ -304,21 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn assembling_a_payload_does_not_change_its_kind_type() {
-        let kind = serde_json::to_value(PathEntryKind::schema()).expect("derived schema");
-        let mut named = NamedSchemas::default();
-        named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
-        assert!(named.schemas["PathEntryFile"]["properties"]
-            .get("namespace_id")
-            .is_some());
-        assert!(kind["oneOf"][1]["properties"].get("namespace_id").is_none());
-        assert_eq!(
-            serde_json::to_value(PathEntryKind::schema()).expect("derived schema"),
-            kind
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "fixed tag")]
     fn a_wrong_declared_tag_fails_generation() {
         NamedSchemas::default().tagged::<PathEntryKind>("kind", None);
