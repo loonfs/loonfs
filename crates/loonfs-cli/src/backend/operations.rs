@@ -81,6 +81,7 @@ impl ResolvedTarget {
             &StatOptions {
                 include_attributes: loonfs_types::AttributeInclusion::Omit,
                 snapshot_id: snapshot_id.cloned(),
+                ..StatOptions::default()
             },
         )
         .await

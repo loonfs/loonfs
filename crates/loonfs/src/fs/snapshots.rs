@@ -76,7 +76,7 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         if self.core.subject.is_some() {
             self.core
-                .read(&self.namespace_id, |engine, context| async move {
+                .read(&self.namespace_id, crate::Freshness::Latest, |engine, context| async move {
                     Ok(engine.ensure_administrator(&context).await?)
                 })
                 .await?;
@@ -121,7 +121,7 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         if self.core.subject.is_some() {
             self.core
-                .read(&self.namespace_id, |engine, context| async move {
+                .read(&self.namespace_id, crate::Freshness::Latest, |engine, context| async move {
                     Ok(engine.ensure_administrator(&context).await?)
                 })
                 .await?;

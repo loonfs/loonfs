@@ -173,7 +173,7 @@ impl NamespaceReadView<'_> {
                 absolute_path.as_str(),
                 &StatOptions {
                     include_attributes: loonfs_types::AttributeInclusion::Omit,
-                    snapshot_id: None,
+                    ..Default::default()
                 },
             )
             .await?)
@@ -187,7 +187,7 @@ impl NamespaceReadView<'_> {
                 inode_id,
                 &StatOptions {
                     include_attributes: loonfs_types::AttributeInclusion::Omit,
-                    snapshot_id: None,
+                    ..Default::default()
                 },
             )
             .await?)

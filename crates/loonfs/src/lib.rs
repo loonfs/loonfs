@@ -230,10 +230,10 @@ pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
     AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, DownloadOptions,
-    ForkNamespaceOptions, ListOptions, MaintainMetadataOptions, MoveOptions, PutFileOptions,
-    ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    ForkNamespaceOptions, Freshness, ListChangesOptions, ListOptions, MaintainMetadataOptions,
+    MoveOptions, PutFileOptions, ReadFileOptions, ReadFileStreamOptions, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use trace::TraceMode;

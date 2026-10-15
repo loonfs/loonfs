@@ -79,8 +79,8 @@ pub use transport_error::TransportError;
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, Freshness, ListOptions, MoveOptions,
+    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 

@@ -98,7 +98,10 @@ impl NamespacePublisher {
                 return Ok(());
             }
         }
-        let (reader, context) = self.runtime_core.pinned_read(namespace_id).await?;
+        let (reader, context) = self
+            .runtime_core
+            .pinned_read(namespace_id, crate::Freshness::Latest)
+            .await?;
         if reader
             .find_commit_receipt(&context, candidate.commit_id())
             .await?

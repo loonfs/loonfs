@@ -7,7 +7,7 @@ use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
 use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
-use crate::{CoreError, NamespaceId, PinId};
+use crate::{CoreError, Freshness, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
@@ -202,6 +202,7 @@ impl RuntimeCore {
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
+        _freshness: Freshness,
     ) -> Result<RuntimeReadContext> {
         let (context, source) = match self.checked_writer_position(namespace_id).await? {
             Some(position) => (
@@ -241,11 +242,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
+        freshness: Freshness,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let read_context = self.current_read_context(namespace_id).await?;
+        let read_context = self.current_read_context(namespace_id, freshness).await?;
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
@@ -258,7 +260,9 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.current_read_context(namespace_id).await?;
+        let live = self
+            .current_read_context(namespace_id, Freshness::Latest)
+            .await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -279,7 +283,9 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.current_read_context(namespace_id).await?;
+        let live = self
+            .current_read_context(namespace_id, Freshness::Latest)
+            .await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -313,11 +319,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
+        freshness: Freshness,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let pinned = self.pinned_read(namespace_id).await?;
+        let pinned = self.pinned_read(namespace_id, freshness).await?;
         self.inner.instruments.latest_metadata_view_read();
         Ok(pinned)
     }
@@ -328,7 +335,9 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let context = self.current_read_context(namespace_id).await?;
+        let context = self
+            .current_read_context(namespace_id, Freshness::Latest)
+            .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
