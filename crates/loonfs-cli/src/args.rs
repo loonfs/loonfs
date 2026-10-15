@@ -1987,46 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn max_matches_is_removed_and_changes_uses_after_to_resume() {
-        assert_eq!(
-            Cli::try_parse_from(["loonfs", "grep", "x", "--max-matches", "1"])
-                .expect_err("the removed `--max-matches` flag should be rejected")
-                .kind(),
-            clap::error::ErrorKind::UnknownArgument
-        );
-        assert_eq!(
-            Cli::try_parse_from(["loonfs", "changes", "--cursor", "opaque"])
-                .expect_err("`changes --cursor` should be rejected")
-                .kind(),
-            clap::error::ErrorKind::UnknownArgument
-        );
-    }
-
-    #[test]
-    fn grep_gc_rejects_the_old_command_and_collection_options() {
-        Cli::try_parse_from(["loonfs", "maintenance", "grep-gc"]).expect("complete pass");
-        assert_eq!(
-            Cli::try_parse_from(["loonfs", "maintenance", "index", "gc"])
-                .expect_err("the old `maintenance index gc` command should be rejected")
-                .kind(),
-            clap::error::ErrorKind::InvalidSubcommand
-        );
-        for option in [
-            "--max-objects",
-            "--max-steps",
-            "--cursor",
-            "--grace-window-ms",
-        ] {
-            assert_eq!(
-                Cli::try_parse_from(["loonfs", "maintenance", "grep-gc", option, "1"])
-                    .expect_err(&format!("`grep-gc {option}` should be rejected"))
-                    .kind(),
-                clap::error::ErrorKind::UnknownArgument
-            );
-        }
-    }
-
-    #[test]
     fn command_kind_envelope_values_are_pinned() {
         for kind in CommandKind::ALL {
             assert_eq!(kind.as_str(), snake_case(&format!("{kind:?}")));

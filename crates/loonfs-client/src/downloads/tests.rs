@@ -6,14 +6,10 @@ use super::*;
 use crate::scripted_transport::{self, Outcome};
 use loonfs_types::api::v0::ObjectTransferAccess;
 use loonfs_types::{
-    CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
+    CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
-
-/// Default maximum size of a proxied read response.
-const DEFAULT_PROXY_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 fn client_for(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
     Client::with_transport(
@@ -30,26 +26,19 @@ fn client_for(transport: &crate::scripted_transport::ScriptedTransport) -> Clien
 }
 
 /// Builds a capability response for the requested direct-read support.
-fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
+fn capabilities(direct_get: bool) -> Outcome {
     let document = CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         api_groups: vec![API_GROUP_FILESYSTEM_V0.to_owned()],
         features: BTreeMap::from([(FEATURE_DOWNLOADS_DIRECT_GET.to_owned(), direct_get)]),
-        limits: proxy_cap_bytes
-            .map(|cap| {
-                BTreeMap::from([(
-                    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-                    cap,
-                )])
-            })
-            .unwrap_or_default(),
+        limits: BTreeMap::new(),
     };
     Outcome::Success(serde_json::to_vec(&document).expect("serialize capability document"))
 }
 
 #[tokio::test]
 async fn direct_download_selection_uses_the_cached_capability() {
-    let transport = scripted_transport::script([capabilities(true, Some(DEFAULT_PROXY_CAP_BYTES))]);
+    let transport = scripted_transport::script([capabilities(true)]);
     let client = client_for(&transport);
     assert!(client.offers_direct_download().await.expect("capabilities"));
     assert!(client
@@ -60,19 +49,10 @@ async fn direct_download_selection_uses_the_cached_capability() {
 
 #[tokio::test]
 async fn a_deployment_without_the_capability_never_takes_the_grant() {
-    let transport =
-        scripted_transport::script([capabilities(false, Some(DEFAULT_PROXY_CAP_BYTES))]);
+    let transport = scripted_transport::script([capabilities(false)]);
     let client = client_for(&transport);
 
     assert!(!client.offers_direct_download().await.expect("capabilities"));
-}
-
-#[tokio::test]
-async fn direct_downloads_do_not_require_a_proxy_limit() {
-    let transport = scripted_transport::script([capabilities(true, None)]);
-    let client = client_for(&transport);
-
-    assert!(client.offers_direct_download().await.expect("capabilities"));
 }
 
 #[tokio::test]

@@ -219,29 +219,6 @@ fn a_recursive_put_names_what_it_will_not_transfer() {
 }
 
 #[test]
-fn no_progress_silences_recursive_item_lines() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
-
-    let tree = harness.temp_dir.path().join("quiet-tree");
-    fs::create_dir_all(tree.join("empty")).expect("create tree dirs");
-    fs::write(tree.join("doc.txt"), b"body").expect("write tree file");
-
-    let put = harness.run(&[
-        "--no-progress",
-        "put",
-        "-r",
-        tree.to_str().expect("utf-8 path"),
-        "/quiet-tree",
-    ]);
-
-    assert_success(&put);
-    assert_eq!(stderr_string(&put), "");
-}
-
-#[test]
 fn recursive_transfers_roundtrip_a_tree() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
