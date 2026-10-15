@@ -340,6 +340,7 @@ impl PublisherRegistry {
                         namespace_id: namespace_id.clone(),
                     });
                 }
+                live.publisher.read_position.clear();
                 state.sessions.remove(namespace_id);
             }
         }
@@ -867,6 +868,10 @@ enum SubmissionAdmission {
 impl NamespacePublisher {
     fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
         let session = SharedWriterSessionStatus::default();
+        let read_position = Arc::new(ReadPositionSlot::new(
+            namespace_id.clone(),
+            registry.runtime_core.head_state(),
+        ));
         Self {
             namespace_id,
             runtime_core: registry.runtime_core.clone(),
@@ -889,7 +894,7 @@ impl NamespacePublisher {
                 last_known_wal_tail_inline_bytes: None,
             })),
             pending_position: Arc::new(Mutex::new(None)),
-            read_position: Arc::default(),
+            read_position,
             session,
             shared: Arc::downgrade(&registry.shared),
             runtime: registry.runtime.clone(),
@@ -977,6 +982,9 @@ impl NamespacePublisher {
         if !self.lock_state().has_ended(held) {
             return;
         }
+        // Reads stop finding the session once it's removed, so its position
+        // ends here, and the anchor with it.
+        self.read_position.clear();
         registry.sessions.remove(&self.namespace_id);
         self.runtime_core
             .instruments()
@@ -1085,11 +1093,13 @@ impl NamespacePublisher {
     /// Applies the position change that waited for the engine, stores the
     /// engine's position for reads, and releases the engine.
     ///
-    /// The position is stored while `pending_position` is locked. A drop
-    /// that [`Self::change_position`] queues after the take below then either
-    /// finds the slot cleared here, or clears the slot itself after this
-    /// release, so reads never start from a position that a queued drop is
-    /// about to remove.
+    /// The position is stored while `pending_position` is locked, and only
+    /// when no drop is queued. A drop that [`Self::change_position`] queues
+    /// clears the slot itself, either at once or through the next release,
+    /// so a release never puts back a position that a queued drop removed.
+    /// An engine with no position clears the slot before the lock is taken,
+    /// because clearing the slot drops the read cache's anchor, which calls
+    /// into the cache's metrics.
     fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
@@ -1109,10 +1119,16 @@ impl NamespacePublisher {
             }
         };
         let position = self.read_position.prepare(position);
+        if position.is_none() {
+            self.read_position.clear();
+        }
         let started = {
             let pending = lock_state(&self.pending_position);
             let drops = matches!(*pending, Some(PositionChange::Drop));
-            self.read_position.store(position.filter(|_| !drops))
+            match position.filter(|_| !drops) {
+                Some(position) => self.read_position.store(position),
+                None => false,
+            }
         };
         drop(slot);
         if started {

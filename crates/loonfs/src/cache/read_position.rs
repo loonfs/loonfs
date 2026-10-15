@@ -3,6 +3,7 @@
 
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
+use loonfs_core::cache::HeadStateCache;
 use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -38,8 +39,13 @@ pub(crate) trait HeadPositions: Send + Sync {
 /// The publisher stores the engine's position here each time a task
 /// releases the engine, so a read after a commit's acknowledgement sees the
 /// commit.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ReadPositionSlot {
+    /// The namespace of the writer session.
+    namespace_id: NamespaceId,
+    /// The runtime's read cache, whose anchor for the namespace
+    /// [`Self::clear`] drops.
+    head_state: Arc<HeadStateCache>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
@@ -57,6 +63,18 @@ pub(crate) struct ReadPositionSlot {
 const MAX_PUBLISHED_AHEAD: usize = 16;
 
 impl ReadPositionSlot {
+    /// Returns an empty slot for the writer session of `namespace_id`, in the
+    /// runtime whose read cache is `head_state`.
+    pub(crate) fn new(namespace_id: NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
+        Self {
+            namespace_id,
+            head_state,
+            position: Mutex::default(),
+            checking: AtomicBool::default(),
+            published: Mutex::default(),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Option<Arc<ReadPosition>>> {
         // A critical section under this lock only moves an `Arc`, so it can't
         // panic and poison the lock.
@@ -88,22 +106,29 @@ impl ReadPositionSlot {
     }
 
     /// Stores a position that [`Self::prepare`] returned, and returns whether
-    /// the slot had no position before.
-    pub(crate) fn store(&self, position: Option<Arc<ReadPosition>>) -> bool {
-        if let Some(position) = &position {
-            let basis_no = position.basis.manifest_no();
-            self.lock_published()
-                .retain(|manifest_no| *manifest_no > basis_no);
-        }
-        let mut current = self.lock();
-        let started = current.is_none() && position.is_some();
-        *current = position;
-        started
+    /// the slot had no position before. Only [`Self::clear`] removes a
+    /// position.
+    pub(crate) fn store(&self, position: Arc<ReadPosition>) -> bool {
+        let basis_no = position.basis.manifest_no();
+        self.lock_published()
+            .retain(|manifest_no| *manifest_no > basis_no);
+        self.lock().replace(position).is_none()
     }
 
     /// Removes the position, so reads take the read cache until the engine's
     /// next release stores one again.
+    ///
+    /// When the slot has a position, the read cache's anchor for the
+    /// namespace is dropped first, so the first read after the position
+    /// loads or confirms the head. A read that was already confirming an
+    /// anchor when the position started can store that anchor after the
+    /// position started, while reads take the position. Without the drop, a
+    /// bounded read after the position ends could read at that anchor's
+    /// head, which is older than the reads from the position returned.
     pub(crate) fn clear(&self) {
+        if self.current().is_some() {
+            self.head_state.invalidate_anchor(&self.namespace_id);
+        }
         *self.lock() = None;
     }
 

@@ -17,27 +17,27 @@ use loonfs_types::{ChecksumAlgorithm, NamespaceId};
 use std::sync::Arc;
 use std::time::Duration;
 
-const INTERVAL_MS: u64 = 1_000;
+pub(crate) const INTERVAL_MS: u64 = 1_000;
 
 /// How long a read that must not wait for the store gets before the test
 /// fails.
 const NO_WAIT: Duration = Duration::from_secs(10);
 
-struct Fixture {
+pub(crate) struct Fixture {
     /// Records every request, and can park the operations the fixture
     /// selected.
-    recording: Arc<RecordingStore<BlockingStore<MemoryStore>>>,
+    pub(crate) recording: Arc<RecordingStore<BlockingStore<MemoryStore>>>,
     recorder: Arc<DefaultMetricsRecorder>,
-    clock: Arc<ManualClock>,
-    namespace_id: NamespaceId,
+    pub(crate) clock: Arc<ManualClock>,
+    pub(crate) namespace_id: NamespaceId,
     namespace: Namespace<Writable>,
-    reader: Namespace<ReadOnly>,
+    pub(crate) reader: Namespace<ReadOnly>,
     writer: LoonFs<Writable>,
 }
 
 /// The requests that a fixture's store parks once a test calls
 /// `block_next`.
-enum Parked {
+pub(crate) enum Parked {
     /// The namespace's WAL puts.
     WalPuts,
     /// HEAD requests for the namespace's manifests.
@@ -46,7 +46,7 @@ enum Parked {
 
 /// Creates a writer runtime with a one-second manifest check interval, a
 /// namespace with a 1 KiB file, and a reader on the writer's runtime.
-async fn fixture(name: &str, parked: Parked) -> Fixture {
+pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
     let namespace_id = namespace_id(name);
     let (keys, operation) = match parked {
         Parked::WalPuts => (
@@ -102,7 +102,7 @@ async fn fixture(name: &str, parked: Parked) -> Fixture {
 }
 
 /// Opens another writer runtime over the fixture's store.
-async fn peer(fixture: &Fixture, name: &str) -> LoonFs<Writable> {
+pub(crate) async fn peer(fixture: &Fixture, name: &str) -> LoonFs<Writable> {
     let store: SharedObjectStore = fixture.recording.clone();
     LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
@@ -113,7 +113,7 @@ async fn peer(fixture: &Fixture, name: &str) -> LoonFs<Writable> {
 }
 
 impl Fixture {
-    async fn put(&self, path: &str) -> loonfs::Result<Commit> {
+    pub(crate) async fn put(&self, path: &str) -> loonfs::Result<Commit> {
         self.namespace
             .put_file(path, b"file", &loonfs_test_support::test_actor())
             .await
@@ -136,6 +136,14 @@ impl Fixture {
     fn head_sources(&self) -> (u64, u64) {
         let source = |label| self.counter("loonfs.read_head.source", &[("source", label)]);
         (source("position"), source("anchor"))
+    }
+
+    /// Returns how many read cache lookups of a namespace head hit and how
+    /// many missed.
+    fn head_cache_lookups(&self) -> (u64, u64) {
+        let lookups =
+            |result| self.counter("loonfs.namespace_head_cache.gets", &[("result", result)]);
+        (lookups("hit"), lookups("miss"))
     }
 
     fn tail_replays(&self) -> u64 {
@@ -183,6 +191,7 @@ async fn a_bounded_read_starts_from_the_position_with_no_store_request() {
     let fixture = fixture("bounded-position-reads", Parked::WalPuts).await;
     let commit = fixture.put("/next.txt").await.expect("commit");
     let (positions, anchors) = fixture.head_sources();
+    let cache_lookups = fixture.head_cache_lookups();
     fixture.recording.reset();
     let options = StatOptions {
         freshness: Freshness::Bounded { interval: None },
@@ -196,6 +205,11 @@ async fn a_bounded_read_starts_from_the_position_with_no_store_request() {
     assert_eq!(entry.head_seq, commit.committed_seq);
     assert_eq!(fixture.recording.take(), []);
     assert_eq!(fixture.head_sources(), (positions + 1, anchors));
+    assert_eq!(
+        fixture.head_cache_lookups(),
+        cache_lookups,
+        "a read from the position doesn't look up the read cache"
+    );
 }
 
 /// Checks that a read while a publish waits for its WAL put starts from the

@@ -2,6 +2,7 @@
 //! namespace head before it reads, and a `bounded` read confirms it at most
 //! once per interval.
 
+use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -379,4 +380,67 @@ async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
         commit.committed_seq
     );
     fixture.shutdown().await;
+}
+
+/// Checks that a bounded read after another writer's takeover drops the
+/// writer's position reads at the current head, not at an anchor from before
+/// the position.
+///
+/// A read that loads the namespace while the writer has no position can
+/// store its anchor after the writer's next commit starts a new position.
+/// The test parks that load's manifest check until the commit returns, so
+/// the anchor's head is older than the reads from the new position. When
+/// the takeover drops the position, the anchor goes with it, so a bounded
+/// read with a long interval loads the namespace again.
+#[tokio::test]
+async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
+    let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
+    let gate = fixture.recording.inner();
+    // Past the revalidation bound, the next read drops the position and
+    // loads the namespace from the store.
+    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    gate.block_next();
+    let (loaded, commit) = futures::join!(fixture.reader.stat("/small.txt"), async {
+        gate.wait_until_blocked().await;
+        let commit = fixture
+            .put("/during.txt")
+            .await
+            .expect("a commit while the load waits");
+        gate.release();
+        commit
+    });
+    let loaded = loaded.expect("the load");
+    assert!(
+        loaded.head_seq < commit.committed_seq,
+        "the load's head {} is from before the commit at {}",
+        loaded.head_seq,
+        commit.committed_seq
+    );
+    let positioned = fixture
+        .reader
+        .stat("/during.txt")
+        .await
+        .expect("a read from the new position");
+    assert_eq!(positioned.head_seq, commit.committed_seq);
+
+    let peer = writer_position_reads::peer(&fixture, "dropped-position-peer").await;
+    let peer_commit = peer
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .put_file("/peer.txt", b"peer", &loonfs_test_support::test_actor())
+        .await
+        .expect("the peer takes over");
+    fixture.clock.advance_ms(writer_position_reads::INTERVAL_MS);
+    let entry = fixture
+        .reader
+        .stat_with_options(
+            "/during.txt",
+            &StatOptions {
+                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("a bounded read after the takeover");
+    assert_eq!(entry.head_seq, peer_commit.committed_seq);
 }
