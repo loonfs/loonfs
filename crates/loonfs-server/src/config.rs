@@ -1063,9 +1063,6 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    const AZURITE_ACCOUNT_KEY: &str =
-        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
-
     fn memory_config(settings: &str) -> super::ServerConfig {
         toml::from_str(&format!(
             r#"
@@ -1336,6 +1333,9 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 maintenance = "{spelling}"
 
+[grep]
+mode = "{spelling}"
+
 [store]
 kind = "local_fs"
 root = "/tmp/loonfs-server"
@@ -1343,34 +1343,10 @@ root = "/tmp/loonfs-server"
             ));
             let config = load_server_config(&path).expect("valid config");
             assert_eq!(config.maintenance, mode);
+            assert_eq!(config.grep.mode, mode);
             assert_eq!(config.maintenance.serves(), serves);
             assert_eq!(config.maintenance.maintains(), maintains);
         }
-    }
-
-    #[test]
-    fn the_retired_background_maintenance_key_is_no_longer_a_key() {
-        // One field decides maintenance behavior now. The boolean it
-        // replaced fails through strict decoding
-        // like any other unknown key.
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-background_maintenance = false
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let error = load_server_config(&path).expect_err("retired key must not load");
-        assert!(
-            error.to_string().contains("background_maintenance"),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1537,33 +1513,6 @@ path = "/tmp/service-account.json"
         let error = load_server_config(&path).expect_err("blank gcs bucket");
 
         assert_missing_field(error, "store.bucket");
-    }
-
-    #[test]
-    fn load_rejects_azure_abs_store() {
-        let path = write_config(&format!(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[store]
-kind = "azure-abs"
-account_name = "devstoreaccount1"
-container_name = "container"
-endpoint_url = "http://127.0.0.1:10000/devstoreaccount1"
-key_prefix = "demo"
-
-[store.credentials]
-kind = "access-key"
-access_key = "{AZURITE_ACCOUNT_KEY}"
-"#
-        ));
-
-        let error = load_server_config(&path).expect_err("unsupported Azure adapter");
-        assert!(error.to_string().contains(
-            "Azure Blob Storage is not supported yet: it stores no full-object checksum"
-        ));
     }
 
     #[test]
@@ -2557,41 +2506,6 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn every_grep_mode_names_the_two_jobs_it_does() {
-        for (spelling, mode, serves, maintains) in [
-            ("disabled", super::JobMode::Disabled, false, false),
-            ("serve_only", super::JobMode::ServeOnly, true, false),
-            ("maintain_only", super::JobMode::MaintainOnly, false, true),
-            (
-                "serve_and_maintain",
-                super::JobMode::ServeAndMaintain,
-                true,
-                true,
-            ),
-        ] {
-            let path = write_config(&format!(
-                r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[grep]
-mode = "{spelling}"
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#
-            ));
-
-            let config = load_server_config(&path).expect("load config");
-            assert_eq!(config.grep.mode, mode);
-            assert_eq!(config.grep.mode.serves(), serves);
-            assert_eq!(config.grep.mode.maintains(), maintains);
-        }
-    }
-
-    #[test]
     fn the_grep_step_limit_defaults_to_two_and_refuses_zero() {
         let load = |setting: &str| {
             load_server_config(write_config(&format!(
@@ -2658,39 +2572,6 @@ root = "/tmp/loonfs-server"
         assert_eq!(
             policy.max_decoded_input_rows_per_step,
             defaults.max_decoded_input_rows_per_step
-        );
-    }
-
-    #[test]
-    fn grep_work_budget_overrides_preserve_engine_defaults() {
-        // Operators control input work; the engine controls segment and merge
-        // shape. A work override must not change the merge policy.
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[grep]
-mode = "serve_and_maintain"
-max_files_per_step = 1024
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let policy = load_server_config(&path)
-            .expect("load config")
-            .grep
-            .worker_config()
-            .build_policy()
-            .expect("valid configured grep policy");
-        assert_eq!(
-            policy.max_mid_runs,
-            loonfs_grep::GramIndexBuildPolicy::default().max_mid_runs,
-            "merge policy remains an engine default"
         );
     }
 

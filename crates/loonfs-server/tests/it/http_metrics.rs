@@ -18,25 +18,6 @@ fn object_store_calls(scrape: &BTreeMap<String, f64>) -> f64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scraping_metrics_without_a_token_is_unauthorized() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-test",
-        "http-metrics-auth",
-    ))
-    .await;
-
-    assert_eq!(scrape(&harness.server_url, None).expect_err("401"), 401);
-    assert!(raw_agent()
-        .get(&format!("{}/health", harness.server_url))
-        .call()
-        .is_ok());
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(

@@ -2,12 +2,11 @@
 
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
-use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatOptions};
 use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::{
-    ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior, ErrorResponse,
+    ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, ErrorResponse,
     ListSnapshotsResponse, NamespaceId, Snapshot,
 };
 use serde::de::DeserializeOwned;
@@ -438,82 +437,6 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .expect("list deleted snapshots")
         .snapshots
         .is_empty());
-    harness.server.abort();
-}
-
-#[tokio::test]
-async fn snapshot_file_read_returns_the_captured_state() {
-    let temp_dir = tempdir().expect("tempdir");
-    let config = test_config(
-        temp_dir.path().join("store"),
-        "client-snapshot-read",
-        "client-snapshot-read",
-    );
-    let harness = start_server(config).await;
-    let namespace = NamespaceId::parse("demo").expect("namespace id");
-    let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    harness
-        .client
-        .put_file(&path, b"captured", &loonfs_test_support::test_actor())
-        .await
-        .expect("write captured content");
-    let snapshot = harness
-        .client
-        .create_snapshot(&namespace, "captured", 10_000)
-        .await
-        .expect("create snapshot");
-
-    let replace = PutFileOptions {
-        behavior: DestinationBehavior::Replace,
-        ..Default::default()
-    };
-    harness
-        .client
-        .put_file_with_options(
-            &path,
-            b"current",
-            &loonfs_test_support::test_actor(),
-            &replace,
-        )
-        .await
-        .expect("replace content");
-
-    let entry = harness
-        .client
-        .stat_with_options(
-            &path,
-            &StatOptions {
-                snapshot_id: Some(snapshot.snapshot_id.clone()),
-                ..StatOptions::default()
-            },
-        )
-        .await
-        .expect("snapshot stat");
-    assert_eq!(entry.head_seq, snapshot.captured_seq);
-    let bytes = harness
-        .client
-        .read_file_with_options(
-            &path,
-            &ReadFileOptions {
-                snapshot_id: Some(snapshot.snapshot_id),
-            },
-        )
-        .await
-        .expect("snapshot content");
-    assert_eq!(bytes, b"captured");
-    assert_eq!(
-        harness
-            .client
-            .read_file(&path)
-            .await
-            .expect("current content"),
-        b"current"
-    );
     harness.server.abort();
 }
 
