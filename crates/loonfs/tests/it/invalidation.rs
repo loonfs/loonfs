@@ -1,6 +1,6 @@
-//! Post-publish cache behavior: a landed publish seeds the read caches
-//! instead of dropping them, and no cache lifecycle event — invalidation,
-//! LRU eviction, or running with zero cache limits — erases writer fencing.
+//! Cache behavior around publishes: reads in the writer's runtime start from
+//! the writer session's position, and no cache lifecycle event (invalidation,
+//! LRU eviction, or running with zero cache limits) erases writer fencing.
 
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
@@ -9,7 +9,6 @@ use loonfs::{
     SnapshotPolicy, Writable, WriterFence,
 };
 use loonfs_core::control::NamespaceReadState;
-use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::clock::ManualClock;
@@ -456,7 +455,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     namespace
         .stat("/file.txt")
         .await
-        .expect("seed reader cache");
+        .expect("warm the reader cache");
 
     recording.reset();
     timer.advance_ms(READ_REVALIDATION_BOUND_MS);
@@ -724,18 +723,6 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
     entry.expect("reload the view instead of returning the probe's error");
 }
 
-async fn writer_with_timer(
-    store: &SharedObjectStore,
-    writer_id: &str,
-    timer: &Arc<ManualClock>,
-    cache: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
-) -> LoonFs<Writable> {
-    writer_with_cache(store, writer_id, |builder| {
-        cache(builder.monotonic_timer(timer.clone()))
-    })
-    .await
-}
-
 /// Creates `other_id` from a writer of its own and gives it one 16 KiB
 /// inline file, so its head state outweighs a namespace of a few small files.
 async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
@@ -777,198 +764,20 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
     reader.metadata_cache().stats().head_state_bytes
 }
 
+/// Checks that a read after a write in the writer's runtime sends no
+/// request and reads the WAL tail that the write cached, even after a
+/// snapshot read that loads another view.
 #[tokio::test]
-async fn a_seeded_view_carries_the_writers_basis_confirmation() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("seeded-check").expect("namespace");
-    let blocking = BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-            &namespace_id,
-        )),
-        OperationSelector::Head,
-    );
-    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
-    let store: SharedObjectStore = recording.clone();
-    let timer = Arc::new(ManualClock::new(0));
-    let interval_ms = 1_000;
-    let writer = writer_with_timer(&store, "seeded-check-writer", &timer, |builder| {
-        builder.manifest_revalidation_interval_ms(interval_ms)
-    })
-    .await;
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let reader = writer.read_only();
-    let namespace = reader.namespace(&namespace_id);
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let actor = loonfs_test_support::test_actor();
-    let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
-    let read = || namespace.stat("/file.txt");
-    let next_wal_no = || async {
-        head_state(&store, &namespace_id)
-            .await
-            .wal_no
-            .successor()
-            .expect("next WAL number")
-    };
-
-    // The first put discovers the namespace, which confirms its basis, and
-    // the read right after it probes only the WAL.
-    put("/file.txt").await.expect("first put");
-    writer.drain().await.expect("finish hints");
-    let wal_no = next_wal_no().await;
-    recording.reset();
-    read().await.expect("read after the first put");
-    crate::common::assert_wal_probe(recording.take(), &namespace_id, wal_no);
-
-    // A seed on the same basis keeps a later check by the reader, so a read
-    // right after a put in a busy writer still probes only the WAL.
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 2 * interval_ms);
-    read().await.expect("a due check");
-    timer.advance_ms(interval_ms - 1);
-    put("/two.txt").await.expect("second put");
-    writer.drain().await.expect("finish hints");
-    let wal_no = next_wal_no().await;
-    recording.reset();
-    read().await.expect("read after the second put");
-    crate::common::assert_wal_probe(recording.take(), &namespace_id, wal_no);
-
-    // A collection pass drops the cached view but not the writer's tail.
-    // The third put still plans against the basis confirmed at zero, and
-    // seeds a new view.
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("seeded-check-gc"))
-        .gc(&namespace_id)
-        .await
-        .expect("drop the cached view");
-    timer.advance_ms(interval_ms);
-    put("/three.txt").await.expect("third put");
-    writer.drain().await.expect("finish hints");
-    let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
-        .await
-        .expect("current manifest")
-        .state
-        .manifest()
-        .manifest_no;
-    let wal_no = next_wal_no().await;
-
-    // The seeded view is younger than the bound, but its basis was confirmed
-    // a bound before the answers arrive, so the view is not served.
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS - WAL_PUBLISH_BUDGET_MS);
-    recording.reset();
-    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
-    let operations = recording.take();
-    assert_eq!(
-        operations[..2],
-        [
-            RecordedOperation::Head {
-                key: loonfs_objectstore::keys::metadata_manifest_object(
-                    &namespace_id,
-                    &manifest_no.successor().expect("next manifest number"),
-                ),
-            },
-            crate::common::wal_probe(&namespace_id, wal_no),
-        ],
-        "{operations:?}"
-    );
-    assert_matches!(
-        operations.get(2),
-        Some(RecordedOperation::GetWithMetadata { key, .. })
-            if key == &loonfs_objectstore::keys::hint(&namespace_id),
-        "the seed claimed a later check: {operations:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("reseeded").expect("namespace");
-    let hint_key = loonfs_objectstore::keys::hint(&namespace_id);
-    let blocking = BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::manifest(&namespace_id),
-        OperationSelector::Head,
-    );
-    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
-    let store: SharedObjectStore = recording.clone();
-    let timer = Arc::new(ManualClock::new(0));
-    let writer = writer_with_timer(&store, "reseeded-writer", &timer, |builder| {
-        builder.manifest_revalidation_interval_ms(1_000)
-    })
-    .await;
-    let reader = writer.read_only();
-    let namespace = reader.namespace(&namespace_id);
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("reseeded-maintenance"))
-        .build()
-        .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("reseeded-maintenance"));
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer
-        .put_file("/a.txt", b"a", &loonfs_test_support::test_actor())
-        .await
-        .expect("first put");
-    writer.drain().await.expect("finish hints");
-
-    // The quiet writer confirms its tip. Hold the successor HEAD while the
-    // reader checks the old basis and a fold publishes a new one. The held
-    // HEAD then finds that fold and the writer reloads.
-    let check_after_attempt_ms = 10_000;
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
-    recording.inner().block_next();
-    let actor = loonfs_test_support::test_actor();
-    let (put, ()) = futures::join!(namespace_writer.put_file("/b.txt", b"b", &actor), async {
-        recording.inner().wait_until_blocked().await;
-        timer.advance_ms(check_after_attempt_ms);
-        namespace.stat("/a.txt").await.expect("check the old basis");
-        maintenance
-            .fold_wal(&namespace_id)
-            .await
-            .expect("publish a new basis");
-        recording.inner().release();
-    });
-    put.expect("put on the new basis");
-    writer.drain().await.expect("finish hints");
-
-    // The seeded view stands on the new basis, confirmed when the put's
-    // attempt began. A bound after that, it is rediscovered, although the
-    // reader checked the old basis later.
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS - check_after_attempt_ms);
-    recording.reset();
-    namespace
-        .stat("/b.txt")
-        .await
-        .expect("read on the new basis");
-    let operations = recording.take();
-    assert_matches!(
-        operations.first(),
-        Some(RecordedOperation::GetWithMetadata { key, .. }) if key == &hint_key,
-        "the seed kept the old basis's check: {operations:?}"
-    );
-}
-
-#[tokio::test]
-async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
+async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let namespace_id = NamespaceId::parse("seeded").expect("valid namespace id");
+    let namespace_id = NamespaceId::parse("read-after-write").expect("valid namespace id");
 
-    let writer = writer_with_cache(&store, "seed-writer", |builder| {
+    let writer = writer_with_cache(&store, "read-after-write-writer", |builder| {
         builder.manifest_revalidation_interval_ms(u64::MAX)
     })
     .await;
@@ -1013,12 +822,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     let _view = namespace
         .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
-        .expect("a snapshot read view keeps the live read cache");
-    let next_wal_no = head_state(&store, &namespace_id)
-        .await
-        .wal_no
-        .successor()
-        .expect("next WAL number");
+        .expect("a snapshot read view keeps the writer's tail");
     recording.reset();
     let before_read = reader.metadata_cache().stats();
 
@@ -1026,12 +830,15 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .stat("/docs/fresh.txt")
         .await
         .expect("read after write");
-    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+    assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }
 
+/// Checks that reads in the writer's runtime after a fold see the folded
+/// manifest, and that the next read sends no request and reuses the tail
+/// that the fold left in the cache.
 #[tokio::test]
 async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1049,9 +856,10 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer
         .open_namespace(&namespace_id)
-        .expect("open namespace")
+        .expect("open namespace");
+    namespace_writer
         .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("put file");
@@ -1060,7 +868,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     namespace
         .stat("/file.txt")
         .await
-        .expect("read the seeded view");
+        .expect("read at the writer's position");
 
     writer
         .maintenance(loonfs_test_support::ids::writer_id("maintained-writer"))
@@ -1074,15 +882,10 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     assert_eq!(file.bytes, b"file");
 
     writer.drain().await.expect("finish hints");
-    let next_wal_no = head_state(&store, &namespace_id)
-        .await
-        .wal_no
-        .successor()
-        .expect("next WAL number");
     recording.reset();
     let before_read = reader.metadata_cache().stats();
     namespace.stat("/file.txt").await.expect("next read");
-    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+    assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);

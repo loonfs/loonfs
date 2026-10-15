@@ -2860,6 +2860,9 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     writer.shutdown().await.expect("drain settles both units");
 }
 
+/// Checks that a maintenance call that publishes no manifest leaves the
+/// writer's position, which reads start from, and the tail that the writer
+/// publishes from.
 #[tokio::test]
 async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2874,6 +2877,7 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     maintenance
         .publisher
         .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged);
+    assert!(writer.core.writer_position(&namespace_id).is_some());
     namespaces[0]
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after", "after",
@@ -2930,6 +2934,9 @@ async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() 
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that the writer and the reads in its runtime share one WAL tail
+/// under the key that the writer's position points to, that the runtime
+/// keeps no anchor for the namespace, and that the cache counts the tail once.
 #[tokio::test]
 async fn a_writer_and_its_reader_share_one_counted_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2956,23 +2963,22 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
     );
     assert_eq!(stats.wal_tail_misses, 0, "the read starts from that tail");
     let head_state = &writer.core.inner.head_state;
-    let anchor = head_state
-        .peek_anchor(&namespace_id)
-        .expect("the publish seeds the anchor");
-    let tail_key = loonfs_core::cache::WalTailProjectionCacheKey {
-        namespace_id: namespace_id.clone(),
-        manifest_no: anchor.basis.manifest_no(),
-        head_seq: anchor.head.seq,
-    };
+    assert!(
+        head_state.peek_anchor(&namespace_id).is_none(),
+        "reads in the writer's runtime keep no anchor"
+    );
+    let position = writer
+        .core
+        .writer_position(&namespace_id)
+        .expect("the publish stores the writer's position");
     let tail = head_state
-        .get_tail(&tail_key)
-        .expect("the anchor names the writer's tail");
+        .get_tail(&position.tail_key)
+        .expect("the position points to the writer's tail");
     assert_eq!(
         Arc::strong_count(&tail),
         2,
         "between publishes only the cache and this test hold the tail"
     );
-    writer.core.invalidate_namespace_read_cache(&namespace_id);
     let retained = writer.metadata_cache().stats().head_state_bytes;
     assert!(
         retained >= tail.decoded_bytes() && retained < 2 * tail.decoded_bytes(),
@@ -3086,8 +3092,9 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
         .expect("drain settles every publisher");
 }
 
-/// What one namespace's head anchor and tail weigh after a single publish, so
-/// a budget can be stated in whole namespaces instead of a guessed constant.
+/// What one namespace's WAL tail weighs after a single publish, so a budget
+/// can be stated in whole namespaces instead of a guessed constant. The
+/// writer's runtime keeps no anchor for a namespace with a writer session.
 async fn one_namespace_head_state_bytes() -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;

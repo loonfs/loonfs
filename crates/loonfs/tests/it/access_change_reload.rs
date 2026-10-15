@@ -296,10 +296,15 @@ impl Fixture {
 
 const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "regrant"];
 
-/// Checks that later commits keep the newer manifest in the read cache.
+/// Checks that after a compaction that also claims the compactor epoch on
+/// the same runtime, commits and the reads after them reload nothing.
+///
+/// The compaction publishes two manifests, and the writer's position moves
+/// to each. The revalidation interval is zero, so every read checks the
+/// position's manifest for a successor.
 #[tokio::test]
-async fn commits_on_an_older_basis_keep_the_reads_newer_manifest() {
-    let fixture = fixture("anchor-seed-guard", 0, false).await;
+async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
+    let fixture = fixture("own-compaction-claim", 0, false).await;
     fixture.compact().await;
     fixture.commit("put_file", 0).await;
     fixture.user.stat("/m/doc").await.expect("reload");
@@ -353,24 +358,25 @@ async fn reads_past_the_revalidation_interval_reload_nothing_after_a_compaction(
     }
 }
 
-/// Checks that commits on a manifest that another runtime replaced keep the
-/// read's newer manifest in the read cache.
+/// Checks that after another runtime's compaction, the writer's runtime
+/// reloads once, and that later commits and the reads after them reload
+/// nothing.
 ///
-/// The writer's runtime doesn't learn of another runtime's compaction, so its
-/// publisher keeps planning against the older manifest while its reads load
-/// the newer one.
+/// The first read's manifest check finds the compaction's manifest, drops
+/// the writer's position, and reloads. The next commit loads the namespace,
+/// so the position moves to the compaction's manifest.
 #[tokio::test]
-async fn commits_on_a_manifest_another_runtime_replaced_keep_the_reads_newer_manifest() {
-    let fixture = fixture("anchor-seed-guard-other", 0, false).await;
+async fn reads_reload_once_after_another_runtimes_compaction() {
+    let fixture = fixture("other-compaction", 0, false).await;
     let other_store: SharedObjectStore = fixture.recording.clone();
     let other = LoonFs::builder_with_store(other_store)
-        .writer_id(writer_id("anchor-seed-guard-maintenance"))
+        .writer_id(writer_id("other-compaction-maintenance"))
         .monotonic_timer(fixture.clock.clone())
         .build()
         .await
         .expect("maintenance runtime");
     let outcome = other
-        .maintenance(writer_id("anchor-seed-guard-maintenance"))
+        .maintenance(writer_id("other-compaction-maintenance"))
         .compact_metadata(&fixture.namespace_id, &MaintenanceCancellation::new())
         .await
         .expect("compact");
@@ -450,7 +456,8 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 }
 
 /// Checks that a publish in flight while a checkpoint folds the WAL tail
-/// moves to the checkpoint's manifest before it seeds the read cache.
+/// moves to the checkpoint's manifest before it releases the engine, so
+/// reads start from the checkpoint's manifest.
 ///
 /// The publish's WAL put waits until the checkpoint has folded the commits
 /// before it, so the checkpoint's manifest misses the publish's own commit.
@@ -474,10 +481,10 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
     let checkpoint = checkpoint.expect("checkpoint");
     fixture.recording.reset();
     fixture.user.stat("/m/doc").await.expect("read");
-    // A read cache seeded with the replaced manifest would find the
-    // checkpoint's manifest as its successor and reload. A read cache seeded
-    // with the checkpoint's manifest checks the manifest after it, and loads
-    // the checkpoint's manifest once.
+    // A position left on the replaced manifest would find the checkpoint's
+    // manifest as its successor and reload. A position on the checkpoint's
+    // manifest checks the manifest after it, and reads no other manifest or
+    // hint.
     let operations = fixture.recording.take();
     let manifest = |manifest_no| metadata_manifest_object(&fixture.namespace_id, &manifest_no);
     let successor = manifest(checkpoint.manifest_no.successor().expect("next manifest"));

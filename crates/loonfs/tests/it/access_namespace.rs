@@ -47,14 +47,22 @@ fn access_mode() -> NamespaceAccessMode {
 }
 
 async fn create_namespace() -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
+    create_namespace_with(|builder| builder).await
+}
+
+/// Creates an ACL namespace from a writer runtime that `configure` sets up.
+async fn create_namespace_with(
+    configure: impl FnOnce(loonfs::LoonFsBuilder<Writable>) -> loonfs::LoonFsBuilder<Writable>,
+) -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let writer =
+    let writer = configure(
         LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
             .writer_id(loonfs_test_support::ids::writer_id("access-namespace"))
-            .min_publish_interval_ms(0)
-            .build()
-            .await
-            .expect("writer");
+            .min_publish_interval_ms(0),
+    )
+    .build()
+    .await
+    .expect("writer");
     let namespace_id = namespace_id("access-namespace");
     writer
         .create_namespace_with_options(
@@ -304,9 +312,19 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     assert_eq!(again.access_revision_no, AccessRevisionNo(3));
 }
 
+/// Checks that an administrator whom another writer revoked can't delete a
+/// snapshot through the former writer's runtime, when that runtime checks
+/// for a newer manifest on every read.
+///
+/// The deletion authorizes against the head that the former writer's reads
+/// start from, its session's position. Only the manifest check finds the
+/// new writer's claim, so with the default interval the revocation applies
+/// in the former writer's runtime within one manifest check interval, and
+/// with an interval of 0 it applies at once.
 #[tokio::test]
 async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_writer() {
-    let (_temp_dir, writer, namespace) = create_namespace().await;
+    let (_temp_dir, writer, namespace) =
+        create_namespace_with(|builder| builder.manifest_revalidation_interval_ms(0)).await;
     let root = writer.with_subject(subject("root", "prn_root"));
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     let now_ms = loonfs_core::time::current_time_ms();

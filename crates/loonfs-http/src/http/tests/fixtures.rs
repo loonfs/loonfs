@@ -26,6 +26,8 @@ pub(super) struct TestOptions {
 pub(super) struct TestAppOptions {
     pub(super) store: Option<SharedObjectStore>,
     pub(super) direct_transfers: Option<DirectTransferIssuers>,
+    /// The runtime's manifest check interval, or the default when `None`.
+    pub(super) manifest_revalidation_interval_ms: Option<u64>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -60,7 +62,12 @@ pub(super) async fn test_app(
 ) -> loonfs::Result<(axum::Router, BindingState)> {
     let options = Arc::new(config.binding);
     let metrics = HttpMetrics::new();
-    let runtime = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store))
+    let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store));
+    let builder = match inputs.manifest_revalidation_interval_ms {
+        Some(interval_ms) => builder.manifest_revalidation_interval_ms(interval_ms),
+        None => builder,
+    };
+    let runtime = builder
         .writer_id(loonfs_test_support::ids::writer_id(
             config.writer_id.as_str(),
         ))
