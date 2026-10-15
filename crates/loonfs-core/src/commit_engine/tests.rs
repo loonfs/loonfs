@@ -18,6 +18,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{
     ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
     WriterEpoch,
@@ -970,7 +971,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_cached_tail() {
     let (mut engine, _timer, writer, manifest) =
         writer_after_own_compaction(&store, &namespace_id).await;
 
-    engine.record_metadata_compaction(manifest.clone());
+    engine.record_manifest_published(PublishedManifest::SameHead(manifest.clone()));
     store.reset();
     let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
     assert_eq!(
@@ -989,6 +990,65 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_cached_tail() {
                     && matches!(operation, RecordedOperation::Get { .. }))
         }),
         "the publish reads neither the WAL tail nor the hint: {operations:?}"
+    );
+}
+
+/// Checks that a writer moved to a fold that missed its newest commit keeps
+/// that commit as its tail, and publishes on the fold's manifest without
+/// reading the WAL tail or the hint again.
+#[tokio::test]
+async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commit() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    publish_one(&mut engine, &store, &writer, "beta").await;
+    // A maintenance call folds the tail through beta. The writer then
+    // commits gamma on the manifest that the fold replaced.
+    let folded = crate::manifest::fold_wal_with_deadline(
+        &store,
+        &namespace_id,
+        &Deadline::start(timer.clone()),
+        crate::manifest::MetadataRunPolicy::default(),
+        None,
+        &tokio::sync::Semaphore::new(32),
+    )
+    .await
+    .expect("fold");
+    let published = folded.published.expect("the fold publishes a manifest");
+    publish_one(&mut engine, &store, &writer, "gamma").await;
+
+    engine.record_manifest_published(published.clone());
+    let moved = engine.wal_fold_input().expect("the position moved");
+    assert_eq!(moved.basis.manifest(), published.manifest());
+    assert_eq!(moved.wal_tail_objects, 1);
+    assert_eq!(moved.tail_state.chunks().len(), 1);
+    let receipt =
+        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    assert!(receipt("gamma") && !receipt("beta"));
+    store.reset();
+    let delta = publish_one(&mut engine, &store, &writer, "delta").await;
+    assert_eq!(
+        delta.wal_tail.map(|tail| tail.source),
+        Some(TailSource::Cached)
+    );
+    let written = delta.resulting_read_state.expect("put succeeded");
+    assert_eq!(written.basis.manifest(), published.manifest());
+    let operations = store.take();
+    assert!(
+        operations.iter().all(|operation| {
+            operation.key() != loonfs_objectstore::keys::hint(&namespace_id)
+                && !(operation.key().starts_with(&wal_prefix(&namespace_id))
+                    && matches!(operation, RecordedOperation::Get { .. }))
+        }),
+        "the publish reads neither the WAL tail nor the hint: {operations:?}"
+    );
+    let loaded = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+        .await
+        .expect("head");
+    assert_eq!(
+        written.head, loaded,
+        "a reader loads the head the writer has"
     );
 }
 
@@ -1258,7 +1318,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
     .expect("checkpoint");
 
     // Without a cache, every publish view re-fetches the segment blocks

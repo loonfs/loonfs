@@ -2937,7 +2937,8 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         crate::test_support::std_timer(),
     )
     .await
-    .expect("claim");
+    .expect("claim")
+    .response;
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let input = input_keys_now(&store, &namespace, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
@@ -2962,7 +2963,8 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         crate::test_support::std_timer(),
     )
     .await
-    .expect("another claim");
+    .expect("another claim")
+    .response;
     assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = finalize_metadata_compaction(
@@ -3092,7 +3094,8 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
         crate::test_support::std_timer(),
     )
     .await
-    .expect("claim");
+    .expect("claim")
+    .response;
     let before = current_manifest_number(&store, &namespace).await;
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let second =
@@ -3205,7 +3208,8 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         crate::test_support::std_timer(),
     )
     .await
-    .expect("claim");
+    .expect("claim")
+    .response;
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());

@@ -345,7 +345,8 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
             crate::test_support::std_timer(),
         )
         .await
-        .expect("pin");
+        .expect("pin")
+        .response;
         pins.push(pin.pin_id);
     }
     let [user, snapshot, fork] = &pins[..] else {

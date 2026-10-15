@@ -103,7 +103,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         crate::test_support::std_timer(),
     )
     .await
-    .expect("pin the original history");
+    .expect("pin the original history")
+    .response;
     let floor = advance_retention_floor(
         &store,
         None,
@@ -112,7 +113,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         crate::test_support::std_timer(),
     )
     .await
-    .expect("floor exactly at original commit");
+    .expect("floor exactly at original commit")
+    .response;
     assert_eq!(floor.retention_floor_seq, original.committed_seq);
     compact_and_check_pair(
         &store,
@@ -174,6 +176,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         )
         .await
         .expect("advance floor")
+        .response
         .retention_floor_seq,
         later.committed_seq
     );

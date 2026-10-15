@@ -70,6 +70,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             Arc::clone(&timer),
         )
         .await?
+        .response
     };
     let source_manifest = load_namespace_manifest_envelope(
         store,

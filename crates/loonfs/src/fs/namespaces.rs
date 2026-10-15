@@ -1,6 +1,7 @@
 //! Namespace lifecycle: create, fork, and delete.
 
-use super::core::{should_invalidate_after_result, RuntimeCore, WriterBits};
+use super::core::{RuntimeCore, WriterBits};
+use crate::publisher::NamespaceChange;
 use crate::{
     ActorId, CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
     ForkNamespaceOptions, NamespaceId,
@@ -60,7 +61,9 @@ impl LoonFs<Writable> {
             .bootstrap_namespace(actor, options)
             .await
             .map_err(Error::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.mode
+            .publisher
+            .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unknown)
     }
 
     /// Forks `source_namespace_id` into `new_namespace_id` at its current head.
@@ -116,11 +119,18 @@ impl LoonFs<Writable> {
                 .await
         }
         .map_err(Error::from);
-        if should_invalidate_after_result(&result) {
-            self.invalidate_namespace(source_namespace_id);
-        }
+        // The fold of the source's tail that a fork of the current head runs
+        // isn't reported, so the source's publisher drops its position.
+        let result =
+            self.mode
+                .publisher
+                .finish_namespace_mutation(source_namespace_id, result, |_| {
+                    NamespaceChange::Unknown
+                });
         if result.is_ok() {
-            self.invalidate_namespace(new_namespace_id);
+            self.mode
+                .publisher
+                .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown);
         }
         result
     }

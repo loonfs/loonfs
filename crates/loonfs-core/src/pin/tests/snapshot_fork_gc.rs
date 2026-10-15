@@ -54,7 +54,8 @@ impl Fixture {
             crate::test_support::std_timer(),
         )
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
         let selected = load_current_manifest(&store, &source)
             .await
             .expect("snapshot manifest");
@@ -383,7 +384,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         crate::test_support::std_timer(),
     )
     .await
-    .expect("snapshot");
+    .expect("snapshot")
+    .response;
     let store = BlockingStore::new(
         RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
         KeyPredicate::exact(hint(&target)),

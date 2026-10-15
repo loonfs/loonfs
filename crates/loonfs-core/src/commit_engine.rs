@@ -6,7 +6,7 @@ use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{HeadStateCache, MetadataSegmentCache};
+use crate::manifest::{HeadStateCache, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -16,6 +16,7 @@ use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
     load_publish_metadata_view, PublishTailPosition, PublishTailProjection, PublishViewEffect,
+    ReanchorOutcome,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
@@ -24,7 +25,6 @@ use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
@@ -637,6 +637,9 @@ pub struct NamespaceCommitEngine {
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
     fold_observed: Option<Observation>,
+    /// The newest manifest this runtime published while a fold was in
+    /// progress. [`Self::record_wal_fold`] applies it once the fold finishes.
+    published_during_fold: Option<PublishedManifest>,
     /// When a store observation last confirmed the projection's basis manifest
     /// current: the discovery that loaded it, or a HEAD that found no successor.
     basis_checked: Option<Observation>,
@@ -662,6 +665,7 @@ impl NamespaceCommitEngine {
             projection_observed: None,
             acquired_anchor: None,
             fold_observed: None,
+            published_during_fold: None,
             basis_checked: None,
             session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
@@ -719,6 +723,7 @@ impl NamespaceCommitEngine {
         self.acquired_anchor = None;
         self.projection_observed = None;
         self.basis_checked = None;
+        self.published_during_fold = None;
     }
 
     /// The basis manifest that needs a successor check, either because its
@@ -834,6 +839,7 @@ impl NamespaceCommitEngine {
 
     pub fn record_wal_fold(&mut self, folded: Option<&crate::manifest::FoldedWalTail>) {
         let fold_observed = self.fold_observed.take();
+        let published_during_fold = self.published_during_fold.take();
         let since = match (folded, &mut self.publish_tail) {
             (Some(folded), Some(position))
                 if fold_observed.is_some()
@@ -850,29 +856,81 @@ impl NamespaceCommitEngine {
             }
             _ => self.invalidate_projection(),
         }
+        if let Some(published) = published_during_fold {
+            self.record_manifest_published(published);
+        }
     }
 
-    /// Moves the position to a manifest that a compaction published, as
-    /// [`Self::record_wal_fold`] does after a fold.
+    /// Moves the position to a manifest that this runtime published, as
+    /// [`Self::record_wal_fold`] does after the session's own fold, or drops
+    /// the position when it can't move there (see
+    /// `PublishTailProjection::reanchor_after_publish` for the rule).
     ///
     /// Later commits then plan against the new manifest and seed the read
     /// cache with it, so a read doesn't find the new manifest as a successor
     /// and reload. The cached WAL tail is stored again under the new
     /// manifest's number. The time of the last manifest check stays the
     /// same. That check found no successor of the old manifest, so it
-    /// happened before the compaction published the new manifest, and no
+    /// happened before this runtime published the new manifest, and no
     /// manifest after the new one existed then either.
-    pub fn record_metadata_compaction(&mut self, published: ManifestRef) {
+    ///
+    /// A manifest that arrives during a fold waits for the fold to finish,
+    /// because the fold's outcome decides which manifest the position uses
+    /// first. Only the newest such manifest is kept, because applying it
+    /// alone either moves the position to it or drops the position.
+    pub fn record_manifest_published(&mut self, published: PublishedManifest) {
+        if self
+            .publish_tail
+            .as_ref()
+            .is_some_and(PublishTailPosition::is_folding)
+        {
+            let newest = match self.published_during_fold.take() {
+                Some(earlier)
+                    if earlier.manifest().manifest_no > published.manifest().manifest_no =>
+                {
+                    earlier
+                }
+                _ => published,
+            };
+            self.published_during_fold = Some(newest);
+            return;
+        }
         let Some(mut projection) = self.take_cached_projection() else {
             return;
         };
-        if projection
-            .position
-            .reanchor_after_compaction(MetadataBasis(published))
-        {
-            self.insert_tail(&projection.position, projection.tail_state);
+        let outcome = projection.reanchor_after_publish(&published);
+        let PublishTailProjection {
+            position,
+            tail_state,
+        } = projection;
+        match outcome {
+            ReanchorOutcome::Kept => {}
+            ReanchorOutcome::Moved => self.insert_tail(&position, tail_state),
+            ReanchorOutcome::Superseded => {
+                self.invalidate_projection();
+                return;
+            }
         }
-        self.publish_tail = Some(projection.position);
+        self.publish_tail = Some(position);
+    }
+
+    /// Returns the read state that a publish seeds after its put succeeds,
+    /// on the manifest the position uses now, or `None` when the engine
+    /// dropped the position. `written` is the read state the put produced.
+    ///
+    /// A manifest that this runtime published during the put can move the
+    /// position after the put (see [`Self::record_manifest_published`]).
+    /// The seed then uses the new manifest, so the read cache doesn't take a
+    /// manifest that a newer one replaced.
+    pub fn reanchored_read_state(&self, written: ResultingReadState) -> Option<ResultingReadState> {
+        let position = self.publish_tail.as_ref()?;
+        (position.head.seq == written.head.seq && position.head.wal_no == written.head.wal_no).then(
+            || ResultingReadState {
+                head: position.head.clone(),
+                basis: position.basis().clone(),
+                basis_checked: written.basis_checked,
+            },
+        )
     }
 
     /// Returns the session's writer epoch, acquiring it on first use. A fenced

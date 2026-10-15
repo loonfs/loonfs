@@ -36,9 +36,9 @@ use loonfs_core::publish::{
     SharedWriterSessionStatus, TailSource, WalPublishError, WriterSessionStatus,
 };
 use loonfs_core::time::{Deadline, Observation};
+use loonfs_core::{PublicationReport, PublishedManifest};
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
 use std::collections::{HashMap, VecDeque};
@@ -343,14 +343,55 @@ impl PublisherRegistry {
         Ok(session)
     }
 
-    /// Drops the position the namespace's engine keeps for its WAL tail,
-    /// without changing its writer epoch or fencing state.
+    /// Drops the namespace's read anchor, and tells the namespace's publisher
+    /// how a mutation outside the publisher changed the namespace.
     ///
-    /// If an operation currently holds the engine, invalidation is skipped.
-    /// That operation validates the live head.
-    pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
+    /// The anchor is dropped first, so a publish that is in flight seeds the
+    /// read cache after the publisher's position has moved.
+    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId, change: NamespaceChange) {
+        self.runtime_core
+            .invalidate_namespace_read_cache(namespace_id);
+        match change {
+            NamespaceChange::Published(published) => {
+                self.record_manifest_published(namespace_id, published);
+            }
+            NamespaceChange::Unchanged => {}
+            NamespaceChange::Unknown => {
+                if let Some(publisher) = self.live_publisher(namespace_id) {
+                    publisher.change_position(PositionChange::Drop);
+                }
+            }
+        }
+    }
+
+    /// Runs [`Self::invalidate_namespace`] after a mutation's result when
+    /// [`should_invalidate_after_result`](crate::fs::should_invalidate_after_result)
+    /// selects it. `change` describes a successful result. A failed result
+    /// may have changed the namespace in ways this runtime doesn't know.
+    pub(crate) fn finish_namespace_mutation<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        result: Result<T, Error>,
+        change: impl FnOnce(&T) -> NamespaceChange,
+    ) -> Result<T, Error> {
+        if crate::fs::should_invalidate_after_result(&result) {
+            let change = result.as_ref().map_or(NamespaceChange::Unknown, change);
+            self.invalidate_namespace(namespace_id, change);
+        }
+        result
+    }
+
+    /// Moves the namespace's publisher to a manifest that this runtime
+    /// published, or drops the publisher's position when it can't move
+    /// there, so that later commits seed the read cache with the newest
+    /// manifest.
+    pub(crate) fn record_manifest_published(
+        &self,
+        namespace_id: &NamespaceId,
+        published: PublishedManifest,
+    ) {
         if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.invalidate_projection();
+            publisher.change_position(PositionChange::Reanchor(published));
         }
     }
 
@@ -364,29 +405,8 @@ impl PublisherRegistry {
 
     pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
         let publisher = self.live_publisher(namespace_id)?;
-        let slot = publisher.engine.lock().await;
+        let slot = publisher.lock_engine().await;
         slot.wal_tail_inline_bytes()
-    }
-
-    pub(crate) async fn record_fold_outcome(&self, namespace_id: &NamespaceId) {
-        if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.engine.lock().await.record_fold_outcome(None);
-        }
-    }
-
-    /// Moves the cached position of the namespace's commit engine to a
-    /// manifest that a compaction published, so that later commits seed the
-    /// read cache with that manifest.
-    pub(crate) async fn record_metadata_compaction(
-        &self,
-        namespace_id: &NamespaceId,
-        published: ManifestRef,
-    ) {
-        if let Some(publisher) = self.live_publisher(namespace_id) {
-            if let Some(engine) = publisher.engine.lock().await.engine.as_mut() {
-                engine.record_metadata_compaction(published);
-            }
-        }
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail
@@ -455,6 +475,70 @@ impl PublisherRegistry {
     }
 }
 
+/// How a mutation outside the publisher, such as a maintenance call, changed
+/// a namespace, as the namespace's publisher needs to know it.
+#[derive(Debug, Clone)]
+pub(crate) enum NamespaceChange {
+    /// The mutation published this manifest. The publisher moves to it, or
+    /// drops its position when it can't move there.
+    Published(PublishedManifest),
+    /// The mutation published no manifest, such as a garbage collection pass
+    /// or a change to a pin. The publisher keeps its position.
+    Unchanged,
+    /// The mutation may have changed the namespace in ways this runtime
+    /// doesn't know, such as creating it or failing with a stale head. The
+    /// publisher drops its position.
+    Unknown,
+}
+
+impl NamespaceChange {
+    /// Returns the change that a maintenance call's report describes.
+    pub(crate) fn of_report<T>(report: &PublicationReport<T>) -> Self {
+        report
+            .published
+            .clone()
+            .map_or(Self::Unchanged, Self::Published)
+    }
+}
+
+/// A change to the engine's position that a mutation outside the publisher
+/// asked for.
+#[derive(Debug)]
+enum PositionChange {
+    /// Moves the position to a manifest this runtime published, or drops the
+    /// position when it can't move there.
+    Reanchor(PublishedManifest),
+    /// Drops the position.
+    Drop,
+}
+
+impl PositionChange {
+    /// Combines two changes that wait for the same engine into one.
+    ///
+    /// A drop replaces a move. Of two moves, the move to the newer manifest
+    /// is kept, because applying it alone either moves the position to that
+    /// manifest or drops the position.
+    fn then(self, later: Self) -> Self {
+        match (self, later) {
+            (Self::Reanchor(earlier), Self::Reanchor(later)) => {
+                if earlier.manifest().manifest_no > later.manifest().manifest_no {
+                    Self::Reanchor(earlier)
+                } else {
+                    Self::Reanchor(later)
+                }
+            }
+            _ => Self::Drop,
+        }
+    }
+
+    fn apply(self, engine: &mut NamespaceCommitEngine) {
+        match self {
+            Self::Reanchor(published) => engine.record_manifest_published(published),
+            Self::Drop => engine.invalidate_projection(),
+        }
+    }
+}
+
 /// The commit queue and publication worker for one namespace's writer
 /// session.
 #[derive(Clone)]
@@ -468,7 +552,13 @@ struct NamespacePublisher {
     state: Arc<Mutex<NamespacePublisherState>>,
     /// Admission holds this lock until it reserves bytes against the observed
     /// tail, so a publication cannot change that tail before the reservation.
+    /// Lock it through [`Self::lock_engine`].
     engine: Arc<AsyncMutex<EngineSlot>>,
+    /// A change to the engine's position that arrived while a publish, a
+    /// delete, or a fold had the engine locked. The next task that locks the
+    /// engine applies it, and a publish also applies it after its put,
+    /// before it seeds the read cache.
+    pending_position: Arc<Mutex<Option<PositionChange>>>,
     session: SharedWriterSessionStatus,
     /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
@@ -722,6 +812,7 @@ impl NamespacePublisher {
                 session: Arc::clone(&session),
                 last_known_wal_tail_inline_bytes: None,
             })),
+            pending_position: Arc::new(Mutex::new(None)),
             session,
             shared: Arc::downgrade(&registry.shared),
             runtime: registry.runtime.clone(),
@@ -845,14 +936,45 @@ impl NamespacePublisher {
         matches!(*lock_state(&self.session), WriterSessionStatus::Fenced(_))
     }
 
-    /// Drops the engine's tail position unless a publication or delete holds
-    /// the engine.
-    fn invalidate_projection(&self) {
+    /// Applies `change` to the engine's position now, or leaves it for the
+    /// task that has the engine locked.
+    ///
+    /// The change waits in `pending_position` first, so the task that has
+    /// the engine locked applies it before it releases the engine, or the
+    /// next task to lock the engine applies it. Nothing is skipped.
+    fn change_position(&self, change: PositionChange) {
+        {
+            let mut pending = lock_state(&self.pending_position);
+            let change = match pending.take() {
+                Some(earlier) => earlier.then(change),
+                None => change,
+            };
+            *pending = Some(change);
+        }
         if let Ok(mut slot) = self.engine.try_lock() {
             if let Some(engine) = slot.engine.as_mut() {
-                engine.invalidate_projection();
+                self.apply_pending_position(engine);
             }
         }
+    }
+
+    /// Applies the position change that waited for the engine, if any.
+    fn apply_pending_position(&self, engine: &mut NamespaceCommitEngine) {
+        let change = lock_state(&self.pending_position).take();
+        if let Some(change) = change {
+            change.apply(engine);
+        }
+    }
+
+    /// Locks the engine and applies the position change that waited for it.
+    async fn lock_engine(&self) -> tokio::sync::MutexGuard<'_, EngineSlot> {
+        let mut slot = self.engine.lock().await;
+        match slot.engine.as_mut() {
+            Some(engine) => self.apply_pending_position(engine),
+            // An engine built later starts without a position to change.
+            None => drop(lock_state(&self.pending_position).take()),
+        }
+        slot
     }
 
     /// Places the candidate's inline content, then admits it before awaiting
@@ -1146,7 +1268,7 @@ impl NamespacePublisher {
         }
         self.record_panic();
         // A panic can follow the WAL put, so the cached tail may omit committed bytes.
-        if let Some(engine) = self.engine.lock().await.engine.as_mut() {
+        if let Some(engine) = self.lock_engine().await.engine.as_mut() {
             engine.invalidate_projection();
         }
         let orphaned_waiters = {
@@ -1264,7 +1386,7 @@ impl NamespacePublisher {
         context: &loonfs_core::MutationContext,
         batch: &Deadline,
     ) -> Vec<Result<Commit, CoreError>> {
-        let mut slot = self.engine.lock().await;
+        let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
         let publish = crate::fs::publish_batch_with_engine(
             &self.runtime_core,
@@ -1273,6 +1395,7 @@ impl NamespacePublisher {
             candidates,
             context,
             batch,
+            |engine| self.apply_pending_position(engine),
         )
         .await;
         if publish
@@ -1519,7 +1642,7 @@ impl NamespacePublisher {
         };
         let _permit = writer.execution_budget.fold_permit().await;
         let input = {
-            let mut slot = self.engine.lock().await;
+            let mut slot = self.lock_engine().await;
             let fold_at_bytes = self.inline_content.inline_content_fold_at_bytes;
             if slot.engine.as_ref().is_some_and(|engine| {
                 engine
@@ -1559,8 +1682,7 @@ impl NamespacePublisher {
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
-        self.engine
-            .lock()
+        self.lock_engine()
             .await
             .record_fold_outcome(result.as_ref().ok());
         let published = match result {
@@ -1637,7 +1759,7 @@ impl NamespacePublisher {
             return Err(CoreError::ShuttingDown.into());
         };
         let _permit = writer.execution_budget.fold_permit().await;
-        let mut slot = self.engine.lock().await;
+        let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(
             &self.runtime_core,

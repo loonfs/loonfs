@@ -1,5 +1,6 @@
 //! Snapshot reads and mutations.
 
+use crate::publisher::NamespaceChange;
 use crate::{
     DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, Snapshot, Writable,
 };
@@ -207,7 +208,11 @@ impl Namespace<Writable> {
             engine.create_snapshot(name.to_owned(), expires_at_ms).await
         }
         .map_err(Error::from);
-        let snapshot = self.finish_namespace_mutation(result)?;
+        let snapshot = self
+            .mode
+            .publisher
+            .finish_namespace_mutation(&self.namespace_id, result, NamespaceChange::of_report)?
+            .response;
         if let Err(error) = self
             .ensure_live_snapshot_limit(policy.max_live_per_namespace, 0)
             .await
@@ -294,7 +299,9 @@ impl Namespace<Writable> {
             .extend_snapshot(snapshot_id, requested_expires_at_ms, policy.max_age_ms)
             .await
             .map_err(Error::from);
-        self.finish_namespace_mutation(result)
+        self.mode
+            .publisher
+            .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
@@ -320,6 +327,8 @@ impl Namespace<Writable> {
             .delete_snapshot(snapshot_id)
             .await
             .map_err(Error::from);
-        self.finish_namespace_mutation(result)
+        self.mode
+            .publisher
+            .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
     }
 }

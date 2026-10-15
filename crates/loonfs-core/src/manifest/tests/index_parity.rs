@@ -230,7 +230,8 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         crate::test_support::std_timer(),
     )
     .await
-    .expect("advance floor");
+    .expect("advance floor")
+    .response;
     let floor = advanced.retention_floor_seq;
     assert_eq!(
         floor,

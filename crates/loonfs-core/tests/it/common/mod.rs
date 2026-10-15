@@ -231,6 +231,7 @@ pub(crate) mod commit_split_support {
         namespace_engine(store, namespace_id, context)
             .create_checkpoint("test-pin".to_owned(), None)
             .await
+            .map(|report| report.response)
     }
 
     pub(crate) fn test_commit_id(commit_id: Option<&str>) -> CommitId {
