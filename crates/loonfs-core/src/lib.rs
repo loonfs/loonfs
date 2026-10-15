@@ -119,7 +119,8 @@ pub mod time;
 pub mod cache {
     pub use crate::block_cache::{
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-        DecodedBlockCacheStats, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+        DecodedBlockCacheStats, DecodedBlockKey, DecodedSegmentBlock, SegmentBlockKind,
+        SegmentCacheKey,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
     pub use crate::object_cache::{ObjectCache, ObjectCacheStats, SharedObjects};

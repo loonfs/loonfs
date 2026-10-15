@@ -10,6 +10,7 @@
 #![allow(clippy::print_stdout)]
 
 use bytes::Bytes;
+use loonfs::engine::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig};
 use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation, InlineContent,
 };
@@ -406,8 +407,45 @@ fn ratio(heap: usize, accounted: usize) -> f64 {
     heap as f64 / accounted.max(1) as f64
 }
 
+fn small_entries_charge_cache_bookkeeping() {
+    #[derive(Clone)]
+    struct Empty;
+    impl DecodedBlock for Empty {
+        fn weight(&self) -> usize {
+            0
+        }
+    }
+
+    let keys: Vec<_> = (0..10_000)
+        .map(|index| format!("namespaces/demo/content/{index:032}/{}", "x".repeat(40)))
+        .collect();
+    let budget = 1024 * 1024;
+    let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+    let baseline = LIVE.load(Ordering::Relaxed);
+    for key in &keys {
+        assert!(cache.insert(key.clone(), Empty));
+    }
+    for _ in 0..3 {
+        for key in &keys {
+            let _ = cache.get(key);
+        }
+        let heap = LIVE.load(Ordering::Relaxed).saturating_sub(baseline);
+        let accounted = cache.stats().cached_decoded_bytes;
+        assert!(accounted <= budget, "{accounted} charged against {budget}");
+        assert!(
+            ratio(heap, accounted) <= 1.0 + TOLERANCE,
+            "cache bookkeeping: {heap} allocated, {accounted} accounted"
+        );
+    }
+    for key in &keys {
+        cache.invalidate(key);
+    }
+    assert_eq!(cache.stats().cached_decoded_bytes, 0);
+}
+
 #[tokio::test]
 async fn cache_budgets_charge_the_heap_their_contents_hold() {
+    small_entries_charge_cache_bookkeeping();
     let shapes = [
         Shape {
             label: "directories",

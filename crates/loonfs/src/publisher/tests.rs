@@ -2916,12 +2916,13 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
     let anchor = head_state
         .peek_anchor(&namespace_id)
         .expect("the publish seeds the anchor");
+    let tail_key = loonfs_core::cache::WalTailProjectionCacheKey {
+        namespace_id: namespace_id.clone(),
+        manifest_no: anchor.basis.manifest_no(),
+        head_seq: anchor.head.seq,
+    };
     let tail = head_state
-        .get_tail(&loonfs_core::cache::WalTailProjectionCacheKey {
-            namespace_id: namespace_id.clone(),
-            manifest_no: anchor.basis.manifest_no(),
-            head_seq: anchor.head.seq,
-        })
+        .get_tail(&tail_key)
         .expect("the anchor names the writer's tail");
     assert_eq!(
         Arc::strong_count(&tail),
@@ -2929,10 +2930,10 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
         "between publishes only the cache and this test hold the tail"
     );
     writer.core.invalidate_namespace_read_cache(&namespace_id);
-    assert_eq!(
-        writer.metadata_cache().stats().head_state_bytes,
-        tail.decoded_bytes(),
-        "with the anchor gone, the cache counts the shared tail once"
+    let retained = writer.metadata_cache().stats().head_state_bytes;
+    assert!(
+        retained >= tail.decoded_bytes() && retained < 2 * tail.decoded_bytes(),
+        "the cache holds one tail plus its table and queue: {retained} bytes"
     );
     writer.shutdown().await.expect("shutdown");
 }

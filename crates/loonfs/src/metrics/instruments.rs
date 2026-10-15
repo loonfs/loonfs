@@ -901,7 +901,7 @@ impl MetadataSegmentCacheInstruments {
             ),
             retained_decoded_bytes: recorder.register_gauge(
                 "loonfs.metadata_segment_cache.retained_decoded_bytes",
-                "Decoded bytes currently retained in the metadata-segment cache",
+                "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
                 &[],
             ),
         }
@@ -983,7 +983,7 @@ impl HeadStateCacheInstruments {
             ),
             evicted_decoded_bytes: recorder.register_counter(
                 "loonfs.head_state_cache.evicted_decoded_bytes",
-                "Decoded bytes dropped with evicted head state",
+                "Bytes charged to evicted head state entries, including keys and per-entry bookkeeping",
                 &[],
             ),
             rejections: recorder.register_counter(
@@ -993,12 +993,12 @@ impl HeadStateCacheInstruments {
             ),
             rejected_decoded_bytes: recorder.register_counter(
                 "loonfs.head_state_cache.rejected_decoded_bytes",
-                "Decoded bytes in rejected head state",
+                "Bytes charged to rejected head state entries, including keys and per-entry bookkeeping",
                 &[],
             ),
             retained_decoded_bytes: recorder.register_gauge(
                 "loonfs.head_state_cache.retained_decoded_bytes",
-                "Decoded bytes currently retained as head anchors and WAL-tail projections",
+                "Bytes currently charged to head anchors and WAL-tail projections, including keys and per-entry bookkeeping",
                 &[],
             ),
         }
@@ -1033,7 +1033,7 @@ impl ObjectCacheInstruments {
             ),
             retained_decoded_bytes: recorder.register_gauge(
                 "loonfs.object_cache.retained_decoded_bytes",
-                "Decoded bytes currently retained as WAL objects and content objects",
+                "Bytes currently charged to WAL objects and content objects, including keys and per-entry bookkeeping",
                 &[],
             ),
         }

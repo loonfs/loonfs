@@ -126,7 +126,7 @@ mod tests {
         let recorder = DefaultMetricsRecorder::new();
         let cache = GrepBlockCache::new(loonfs::engine::DecodedBlockCacheConfig {
             observer: Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
-            ..loonfs::engine::DecodedBlockCacheConfig::new(1_000)
+            ..loonfs::engine::DecodedBlockCacheConfig::new(1_600)
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));

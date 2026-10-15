@@ -115,7 +115,8 @@ pub use loonfs_types::{
 pub mod engine {
     pub use loonfs_core::cache::{
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-        DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
+        DecodedBlockCacheStats, DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind,
+        SegmentCacheKey,
     };
     pub use loonfs_core::limits::{
         METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS,

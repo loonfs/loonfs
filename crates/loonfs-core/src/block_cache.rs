@@ -1,10 +1,12 @@
 //! Shared cache for decoded immutable objects.
 
+use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
@@ -14,13 +16,31 @@ pub trait DecodedBlock: Clone {
     fn weight(&self) -> usize;
 }
 
+/// A key of a [`DecodedBlockCache`].
+///
+/// The cache charges each entry the heap of its key as well as the weight of
+/// its value, so that a cache of small values stays within its budget.
+pub trait DecodedBlockKey: Clone + Eq + Hash {
+    /// Returns the heap the key owns outside its inline size, which the cache
+    /// charges with the entry.
+    fn heap_bytes(&self) -> usize;
+}
+
 /// Receives decoded-block cache events for metrics.
+///
+/// Retained bytes include the values, keys, table, and recency queue.
+/// Evicted bytes count the key and value released with an entry; unused
+/// table and queue capacity remains charged until it is released.
 pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
     fn hit(&self) {}
     fn miss(&self) {}
     fn insert(&self) {}
+    /// Reports an evicted entry and the bytes it was charged.
     fn evict(&self, _decoded_bytes: usize) {}
+    /// Reports an entry the cache didn't keep because its charge was more
+    /// than the whole budget, and that charge.
     fn reject(&self, _decoded_bytes: usize) {}
+    /// Reports total retained bytes after a cache allocation or removal.
     fn retained(&self, _decoded_bytes: usize) {}
     fn filter_skip(&self) {}
     fn filter_false_positive(&self) {}
@@ -52,6 +72,10 @@ impl DecodedBlockCacheConfig {
     }
 }
 
+/// Counters and occupancy of a [`DecodedBlockCache`].
+///
+/// Retained bytes include the values, keys, table, and recency queue.
+/// Evicted bytes count the key and value released with an entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodedBlockCacheStats {
     pub hits: usize,
@@ -59,7 +83,31 @@ pub struct DecodedBlockCacheStats {
     pub inserts: usize,
     pub evictions: usize,
     pub evicted_decoded_bytes: usize,
+    /// Entries the cache didn't keep, because each one's charge was more
+    /// than the whole budget.
+    pub rejections: usize,
+    pub rejected_decoded_bytes: usize,
+    /// Retained allocations, including unused table and queue capacity.
     pub cached_decoded_bytes: usize,
+}
+
+/// Returns the initial table, queue, and queued key allocations.
+fn initial_overhead<K: DecodedBlockKey, V>(key: &K) -> usize {
+    let bucket_bytes = size_of::<(K, CacheSlot<V>)>() + 1;
+    key.heap_bytes()
+        .saturating_add(4 * bucket_bytes + 16 + 4 * size_of::<(K, u64)>())
+}
+
+/// Returns the bytes needed to cache an entry on its own.
+///
+/// The table and the entry's recency position each store a copy of the key,
+/// so the key's heap is charged twice.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn charged_bytes<K: DecodedBlockKey, V: DecodedBlock>(key: &K, block: &V) -> usize {
+    block
+        .weight()
+        .saturating_add(key.heap_bytes())
+        .saturating_add(initial_overhead::<K, V>(key))
 }
 
 pub struct DecodedBlockCache<K, V> {
@@ -108,12 +156,19 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 struct Inner<K, V> {
     entries: HashMap<K, CacheSlot<V>>,
     order: Recency<K>,
-    decoded_bytes: usize,
+    /// Key and value allocations owned by live entries.
+    charged_bytes: usize,
+    order_key_bytes: usize,
+    /// Deletion can reduce `HashMap::capacity` without releasing its table.
+    /// Keep the largest allocation until the table is explicitly shrunk.
+    table_bytes: usize,
 }
 
 #[derive(Debug)]
 struct CacheSlot<V> {
     block: V,
+    /// The key and value allocations released when the entry leaves.
+    charged_bytes: usize,
     last_touch: u64,
 }
 
@@ -124,16 +179,20 @@ struct StatsInner {
     inserts: AtomicUsize,
     evictions: AtomicUsize,
     evicted_decoded_bytes: AtomicUsize,
+    rejections: AtomicUsize,
+    rejected_decoded_bytes: AtomicUsize,
 }
 
-impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
+impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     pub fn new(config: DecodedBlockCacheConfig) -> Self {
         Self {
             config,
             inner: Mutex::new(Inner {
                 entries: HashMap::new(),
                 order: Recency::default(),
-                decoded_bytes: 0,
+                charged_bytes: 0,
+                order_key_bytes: 0,
+                table_bytes: 0,
             }),
             stats: StatsInner::default(),
             in_flight: Mutex::new(HashMap::new()),
@@ -197,7 +256,9 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             inserts: self.stats.inserts.load(Ordering::Relaxed),
             evictions: self.stats.evictions.load(Ordering::Relaxed),
             evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::Relaxed),
-            cached_decoded_bytes: inner.decoded_bytes,
+            rejections: self.stats.rejections.load(Ordering::Relaxed),
+            rejected_decoded_bytes: self.stats.rejected_decoded_bytes.load(Ordering::Relaxed),
+            cached_decoded_bytes: inner.retained_bytes(),
         }
     }
 
@@ -217,6 +278,8 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             return None;
         };
         inner.touch(key);
+        self.evict_over_budget(&mut inner);
+        self.record_retained(inner.retained_bytes());
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.hit();
@@ -235,32 +298,50 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             .map(|slot| slot.block.clone())
     }
 
-    pub fn insert(&self, key: K, block: V) {
+    /// Inserts `block` under `key`, then evicts the least recently used
+    /// entries until the cache is within its budget again.
+    ///
+    /// Returns whether the cache kept the entry. A disabled cache keeps
+    /// nothing. The cache also doesn't keep an entry whose charge is more
+    /// than the whole budget, because inserting it would evict every other
+    /// entry first and then the entry itself. When the cache doesn't keep
+    /// the entry, the entry that the key already had stays.
+    pub fn insert(&self, key: K, block: V) -> bool {
         if self.disabled() {
-            return;
+            return false;
+        }
+        let stored_key = key.clone();
+        let entry_charge = block.weight().saturating_add(stored_key.heap_bytes());
+        let charged_bytes = entry_charge.saturating_add(initial_overhead::<K, V>(&stored_key));
+        if charged_bytes > self.config.max_decoded_bytes {
+            self.record_rejection(charged_bytes);
+            return false;
         }
         let mut inner = self
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        let decoded_bytes = block.weight();
-        if let Some(previous) = inner.entries.insert(
-            key.clone(),
+        if let Some(previous) = inner.entries.remove(&key) {
+            inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
+        }
+        inner.entries.insert(
+            stored_key,
             CacheSlot {
                 block,
+                charged_bytes: entry_charge,
                 last_touch: 0,
             },
-        ) {
-            inner.decoded_bytes = inner.decoded_bytes.saturating_sub(previous.block.weight());
-        }
-        inner.decoded_bytes = inner.decoded_bytes.saturating_add(decoded_bytes);
+        );
+        inner.table_bytes = inner.table_bytes.max(hash_map_table_bytes(&inner.entries));
+        inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.insert();
         }
         self.evict_over_budget(&mut inner);
-        self.record_retained(inner.decoded_bytes);
+        self.record_retained(inner.retained_bytes());
+        inner.entries.contains_key(&key)
     }
 
     /// Drops one entry without counting an eviction.
@@ -270,8 +351,9 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             .lock()
             .expect("decoded block cache lock should not be poisoned");
         if let Some(slot) = inner.entries.remove(key) {
-            inner.decoded_bytes = inner.decoded_bytes.saturating_sub(slot.block.weight());
-            self.record_retained(inner.decoded_bytes);
+            inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
+            inner.shrink_if_sparse();
+            self.record_retained(inner.retained_bytes());
         }
     }
 
@@ -280,17 +362,27 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
-        while inner.decoded_bytes > self.config.max_decoded_bytes {
-            let Inner { entries, order, .. } = &mut *inner;
-            let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
-            else {
+        while inner.retained_bytes() > self.config.max_decoded_bytes {
+            let Some((candidate, stamp)) = inner.order.pop_front() else {
                 break;
             };
-            if let Some(slot) = entries.remove(&candidate) {
-                let decoded_bytes = slot.block.weight();
-                inner.decoded_bytes = inner.decoded_bytes.saturating_sub(decoded_bytes);
-                self.record_eviction(decoded_bytes);
+            inner.order_key_bytes -= candidate.heap_bytes();
+            if slot_is_live(&inner.entries, &candidate, stamp) {
+                let slot = inner.entries.remove(&candidate).expect("live entry");
+                inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
+                self.record_eviction(slot.charged_bytes);
             }
+            inner.shrink_if_sparse();
+        }
+    }
+
+    fn record_rejection(&self, charged_bytes: usize) {
+        self.stats.rejections.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .rejected_decoded_bytes
+            .fetch_add(charged_bytes, Ordering::Relaxed);
+        if let Some(observer) = &self.config.observer {
+            observer.reject(charged_bytes);
         }
     }
 
@@ -311,16 +403,46 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 }
 
-impl<K: Clone + Eq + Hash, V> Inner<K, V> {
+impl<K: DecodedBlockKey, V> Inner<K, V> {
+    fn retained_bytes(&self) -> usize {
+        self.charged_bytes
+            .saturating_add(self.order_key_bytes)
+            .saturating_add(self.table_bytes)
+            .saturating_add(self.order.allocation_bytes())
+    }
+
     fn touch(&mut self, key: &K) {
-        let stamp = self.order.touch(key);
+        let queued_key = key.clone();
+        self.order_key_bytes += queued_key.heap_bytes();
+        let stamp = self.order.touch(queued_key);
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
         let entries = &self.entries;
         self.order.compact(entries.len(), |key, stamp| {
-            slot_is_live(entries, key, stamp)
+            let live = slot_is_live(entries, key, stamp);
+            if !live {
+                self.order_key_bytes -= key.heap_bytes();
+            }
+            live
         });
+    }
+
+    fn shrink_if_sparse(&mut self) {
+        if self.entries.is_empty() {
+            self.entries = HashMap::new();
+            self.order = Recency::default();
+            self.table_bytes = 0;
+            self.order_key_bytes = 0;
+            return;
+        }
+        // Shrink only after most entries have left, so eviction doesn't
+        // rebuild the table on every removal.
+        if self.entries.len() * size_of::<(K, CacheSlot<V>)>() < self.table_bytes / 4 {
+            self.entries.shrink_to_fit();
+            self.table_bytes = hash_map_table_bytes(&self.entries);
+        }
+        self.order.shrink_if_sparse();
     }
 }
 
@@ -344,6 +466,24 @@ pub struct SegmentCacheKey {
     pub identity: String,
     pub block_kind: SegmentBlockKind,
     pub block_offset: u64,
+}
+
+impl DecodedBlockKey for SegmentCacheKey {
+    fn heap_bytes(&self) -> usize {
+        HeapBytes::heap_bytes(&self.identity)
+    }
+}
+
+impl DecodedBlockKey for String {
+    fn heap_bytes(&self) -> usize {
+        HeapBytes::heap_bytes(self)
+    }
+}
+
+impl<A: DecodedBlockKey, B: DecodedBlockKey> DecodedBlockKey for (A, B) {
+    fn heap_bytes(&self) -> usize {
+        DecodedBlockKey::heap_bytes(&self.0) + DecodedBlockKey::heap_bytes(&self.1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -449,7 +589,11 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig};
+    use super::{
+        charged_bytes, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig,
+        DecodedBlockCacheObserver, DecodedBlockKey,
+    };
+    use crate::heap_bytes::HeapBytes;
     use bytes::Bytes;
     use futures::poll;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -459,6 +603,7 @@ mod tests {
     };
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct Block(usize);
@@ -469,9 +614,29 @@ mod tests {
         }
     }
 
+    impl DecodedBlockKey for MetadataSegmentId {
+        fn heap_bytes(&self) -> usize {
+            HeapBytes::heap_bytes(self)
+        }
+    }
+
+    #[derive(Default)]
+    struct RejectionObserver {
+        rejected_bytes: Mutex<Vec<usize>>,
+    }
+
+    impl DecodedBlockCacheObserver for RejectionObserver {
+        fn reject(&self, decoded_bytes: usize) {
+            self.rejected_bytes
+                .lock()
+                .expect("observer lock")
+                .push(decoded_bytes);
+        }
+    }
+
     #[tokio::test]
     async fn cancelled_loads_release_entries_after_the_last_waiter_leaves() {
-        for max_decoded_bytes in [0, 64] {
+        for max_decoded_bytes in [0, 1_024] {
             let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes));
             let directory = tempfile::tempdir().expect("temporary directory");
             let store = RecordingStore::new(
@@ -555,6 +720,60 @@ mod tests {
             inner.order.positions() <= (inner.entries.len() * 2).max(16),
             "hits must not grow the recency queue unboundedly, queue = {}",
             inner.order.positions()
+        );
+    }
+
+    /// Checks that entries whose values weigh nothing are charged their keys
+    /// and the cache's own allocation, so a budget that fits a few of them
+    /// keeps a bounded number and evicts the rest.
+    #[test]
+    fn entries_with_weightless_values_are_charged_and_evicted() {
+        let keys: Vec<String> = (0..32).map(|index| format!("key {index:02}")).collect();
+        let budget = 1_024;
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+        let key_count = keys.len();
+        for key in keys {
+            assert!(cache.insert(key, Block(0)));
+        }
+        let live_entries = cache.inner.lock().expect("cache lock").entries.len();
+        let stats = cache.stats();
+        assert!(live_entries > 0 && live_entries < key_count);
+        assert_eq!(stats.evictions, key_count - live_entries);
+        assert!(stats.cached_decoded_bytes > 0 && stats.cached_decoded_bytes <= budget);
+    }
+
+    /// Checks that an entry whose charge is more than the whole budget isn't
+    /// kept, that the entries already in the cache stay, and that an
+    /// observer sees the entry rejected.
+    #[test]
+    fn an_entry_heavier_than_the_budget_is_rejected_without_evictions() {
+        let observer = Arc::new(RejectionObserver::default());
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig {
+            max_decoded_bytes: 1_000,
+            observer: Some(Arc::clone(&observer) as Arc<dyn DecodedBlockCacheObserver>),
+        });
+        let (kept, heavy) = ("kept".to_owned(), "heavy".to_owned());
+        assert!(cache.insert(kept.clone(), Block(100)));
+        // The value alone fits the budget, but its key and the cache's own
+        // allocation for the entry don't.
+        assert!(!cache.insert(heavy.clone(), Block(1_000)));
+        assert!(cache.peek(&kept).is_some());
+        assert!(cache.peek(&heavy).is_none());
+
+        let stats = cache.stats();
+        let rejected_bytes = charged_bytes(&heavy, &Block(1_000));
+        assert_eq!(
+            (stats.inserts, stats.evictions, stats.rejections),
+            (1, 0, 1)
+        );
+        assert_eq!(stats.rejected_decoded_bytes, rejected_bytes);
+        assert_eq!(
+            stats.cached_decoded_bytes,
+            charged_bytes(&kept, &Block(100))
+        );
+        assert_eq!(
+            *observer.rejected_bytes.lock().expect("observer lock"),
+            [rejected_bytes]
         );
     }
 }
