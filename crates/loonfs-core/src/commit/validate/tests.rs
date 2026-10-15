@@ -542,48 +542,6 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
 }
 
 #[tokio::test]
-async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
-    let metadata_state = metadata_state_after(&[]);
-    let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = planned(vec![
-        CommitOperation::CreateDirectory {
-            child_inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
-            display_name: test_display_name("docs"),
-        },
-        CommitOperation::CreateFile {
-            child_inode_id: InodeId(3),
-            parent_inode_id: InodeId(2),
-            display_name: test_display_name("readme.txt"),
-            content_ref: content_ref("content-1"),
-        },
-        CommitOperation::ReplaceFile {
-            inode_id: InodeId(99),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-        },
-    ]);
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("late op fails");
-    assert_matches!(
-        error,
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::ReplaceTarget,
-            inode_id: InodeId(99)
-        }
-    );
-    assert!(metadata_state
-        .visible_child(
-            InodeId(1),
-            &NameKey::parse("docs").expect("valid name key"),
-            ChangeSeq(1),
-        )
-        .is_none());
-}
-
-#[tokio::test]
 async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),

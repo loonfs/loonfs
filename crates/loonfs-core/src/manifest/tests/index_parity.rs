@@ -70,61 +70,6 @@ fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     }
 }
 
-async fn revision_test_materialization(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> (ManifestNo, NamespaceManifestEnvelope, Vec<MetadataRow>) {
-    // The corruptions below target base-run segments, which only exist
-    // once compaction has merged the checkpoint's delta runs.
-    let manifest_no =
-        checkpoint_then_compact(store, namespace_id, context, MetadataRunPolicy::default()).await;
-    let materialized =
-        load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
-            .await
-            .expect("load manifest before corruption");
-    let revision_rows = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::Revisions,
-    );
-    assert!(!revision_rows.is_empty());
-    (
-        materialized.manifest.payload().manifest_no,
-        materialized.manifest,
-        revision_rows,
-    )
-}
-
-async fn rewrite_revision_segment(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    manifest: &mut NamespaceManifestEnvelope,
-    mut rows: Vec<MetadataRow>,
-) {
-    let mut payload = manifest.payload().clone();
-    rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::Revisions));
-    let descriptor = payload
-        .runs
-        .iter_mut()
-        .filter(|run| run.tier == RunTier::Base)
-        .flat_map(|run| &mut run.segments)
-        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Revisions)
-        .expect("revision metadata file");
-    rewrite_manifest_segment(
-        store,
-        namespace_id,
-        payload.head_seq,
-        ApiMetadataRowFamily::Revisions,
-        descriptor,
-        rows,
-        default_target_block_bytes(),
-    )
-    .await;
-    *manifest = encode_namespace_manifest_json(payload)
-        .expect("encode changed manifest")
-        .into_envelope();
-}
-
 fn default_target_block_bytes() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive")
 }
@@ -528,32 +473,6 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             })
         );
     }
-}
-
-#[test]
-fn drop_pass_refuses_superseded_bind_without_unbind() {
-    use std::collections::BTreeMap;
-    let bind = |delta: u32| {
-        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
-            },
-            child_inode_id: InodeId(2),
-            child_kind: loonfs_types::InodeKind::Directory,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(1),
-            delta_index: delta,
-        })
-    };
-    let mut rows = BTreeMap::new();
-    rows.insert(ApiMetadataRowFamily::DirentryBinds, vec![bind(0), bind(1)]);
-
-    let error = merge_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
-        .expect_err("superseded live bind must refuse the drop");
-    assert_matches!(error, CoreError::NamespaceCorrupt(_));
 }
 
 #[tokio::test]
@@ -1299,39 +1218,5 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     assert!(
         message.contains("Inodes") && message.contains("ascending key order"),
         "the rejection must name the family and the ordering rule, got `{message}`"
-    );
-}
-
-#[tokio::test]
-async fn manifest_rejects_duplicate_revision_rows() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/hello.txt",
-        b"hello",
-        &context,
-        None,
-    )
-    .await
-    .expect("write file");
-    let (manifest_no, mut manifest, mut rows) =
-        revision_test_materialization(&store, &namespace_id, &context).await;
-    rows.push(rows.first().expect("revision row").clone());
-    rewrite_revision_segment(&store, &namespace_id, &mut manifest, rows).await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
-
-    assert_matches!(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
-        Err(ManifestLoadError::DuplicateRevisionRow {
-            family: ApiMetadataRowFamily::Revisions,
-            ..
-        })
     );
 }

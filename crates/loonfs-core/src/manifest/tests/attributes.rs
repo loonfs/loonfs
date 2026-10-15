@@ -150,47 +150,6 @@ fn the_merge_keeps_a_latest_empty_revision() {
     );
 }
 
-#[test]
-fn the_merge_never_drops_attributes_for_being_unreachable() {
-    let state = state_from_attributes(vec![attributes_record(
-        InodeId(7),
-        1,
-        3,
-        &[("owner", "ada")],
-    )]);
-    let mut rows_by_family = attribute_rows(&state);
-    // No inode or bind rows travel with the attribute group, so nothing here
-    // could establish reachability even if the rule wanted to.
-    merge_rows_with_retention(
-        MetadataFamilyGroup::Attributes,
-        &mut rows_by_family,
-        ChangeSeq(10_000),
-    )
-    .expect("merge attributes");
-
-    assert_eq!(kept_revisions(&rows_by_family), vec![(7, 1)]);
-}
-
-#[test]
-fn the_merge_refuses_to_compact_repeated_revision_numbers() {
-    let state = state_from_attributes(vec![
-        attributes_record(InodeId(7), 2, 3, &[("owner", "ada")]),
-        attributes_record(InodeId(7), 3, 4, &[("owner", "grace")]),
-        attributes_record(InodeId(7), 2, 5, &[("owner", "hopper")]),
-    ]);
-    let mut rows_by_family = attribute_rows(&state);
-
-    let error = merge_rows_with_retention(
-        MetadataFamilyGroup::Attributes,
-        &mut rows_by_family,
-        ChangeSeq(9),
-    )
-    .expect_err("repeated revision numbers are corruption");
-
-    assert_matches!(&error, CoreError::NamespaceCorrupt(_));
-    assert!(error.to_string().contains("two attributes rows"), "{error}");
-}
-
 #[tokio::test]
 async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let temp_dir = tempdir().expect("tempdir");

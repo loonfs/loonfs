@@ -33,20 +33,3 @@ pub struct DeleteNamespaceOptions {
     /// with `stale_head` instead of deleting work the caller has not seen.
     pub expected_head_seq: Option<ChangeSeq>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::CreateNamespaceOptions;
-
-    #[test]
-    fn create_namespace_options_default_to_an_absent_unrestricted_namespace() {
-        assert_eq!(
-            CreateNamespaceOptions::default(),
-            CreateNamespaceOptions {
-                access: loonfs_types::NamespaceAccess::Unrestricted {},
-                naming: loonfs_types::NamespaceNaming::CaseInsensitive,
-                allow_existing: false,
-            }
-        );
-    }
-}

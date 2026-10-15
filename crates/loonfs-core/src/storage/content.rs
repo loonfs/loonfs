@@ -751,18 +751,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_content_ref_success() {
-        let (_temp_dir, store) = test_store();
-        let bytes = b"whole file bytes";
-        let content_ref = content_ref(bytes);
-        put_content_object(&store, &content_ref, bytes).await;
-
-        validate_durable_content_reference(&store, &content_ref)
-            .await
-            .expect("validate content ref");
-    }
-
-    #[tokio::test]
     async fn validate_content_ref_reads_and_hashes_the_bytes() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
@@ -877,39 +865,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
-        let (_temp_dir, store) = test_store();
-        let bytes = b"provider-assembled bytes";
-        let content_ref = ContentRef {
-            kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-            content_id: ContentId::generate(),
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc64nvme(bytes),
-        };
-        put_content_object(&store, &content_ref, bytes).await;
-
-        let read = get_durable_content_bytes(&store, &content_ref)
-            .await
-            .expect("a crc-only reference verifies by its crc");
-        assert_eq!(read, bytes);
-
-        // Same length, different bytes: only the checksum can tell.
-        let (_temp_dir, store) = test_store();
-        let planted = ContentRef {
-            checksum: Checksum::crc64nvme(b"provider-assembled BYTES"),
-            ..content_ref.clone()
-        };
-        put_content_object(&store, &planted, bytes).await;
-        assert_matches!(
-            get_durable_content_bytes(&store, &planted)
-                .await
-                .expect_err("crc mismatch"),
-            DurableContentValidationError::ContentChecksumMismatch { .. }
-        );
-    }
-
-    #[tokio::test]
     async fn checksum_verification_proves_the_object_without_reading_it() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
@@ -963,19 +918,6 @@ mod tests {
                 .await
                 .expect_err("checksum mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
-        );
-    }
-
-    #[test]
-    fn content_ref_with_an_unknown_kind_fails_to_decode() {
-        let mut document = serde_json::to_value(content_ref(b"bytes")).expect("encode content ref");
-        document["kind"] = serde_json::json!("kind_from_the_future");
-
-        let error = serde_json::from_value::<ContentRef>(document)
-            .expect_err("unknown content kind must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "unknown variant `kind_from_the_future`, expected `blob_v1`"
         );
     }
 

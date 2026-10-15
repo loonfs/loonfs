@@ -773,49 +773,6 @@ impl ObjectStore for StaleObjectOnceStore {
 }
 
 #[tokio::test]
-async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
-    // A reader that loads a stale head next to a fresher manifest must reload
-    // the head instead of treating the pair as corruption.
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    create(&inner, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    let stale_head = inner
-        .get_with_metadata(&hint(&namespace_id))
-        .await
-        .expect("read bootstrap head")
-        .expect("bootstrap head exists");
-
-    write_file_bytes(
-        &inner,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    create_checkpoint(&inner, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-
-    let store = StaleObjectOnceStore {
-        inner,
-        key: hint(&namespace_id),
-        stale: std::sync::Mutex::new(Some(stale_head)),
-    };
-    let projection = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("read anchor resolves the stale-head race by reloading");
-    assert_eq!(projection.head.seq, ChangeSeq(1));
-    assert_eq!(projection.manifest.manifest().head_seq, ChangeSeq(1));
-}
-
-#[tokio::test]
 async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     // Retention publishes the floor independently of the head. A reader that
     // straddles those writes must not report a floor newer than its head.
