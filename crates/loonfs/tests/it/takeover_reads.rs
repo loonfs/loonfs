@@ -157,6 +157,10 @@ fn parked_folds(
     Box::new(fold_manifest_put(namespace_id))
 }
 
+fn parked_commits(namespace_id: &NamespaceId) -> Selector {
+    Box::new(data_wal_put(namespace_id))
+}
+
 /// An inline policy under which every commit with inline bytes starts the
 /// session's own fold.
 fn fold_every_inline_commit() -> InlineContentPolicy {
@@ -268,5 +272,111 @@ async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_cl
         fixture.gate.release();
     });
     assert_eq!(folded.expect("fold").outcome, FoldWalOutcome::Published);
+    fixture.assert_sees_the_takeover().await;
+}
+
+impl Takeover {
+    /// Parks A's next commit at its WAL put, runs `during` while it waits,
+    /// and checks that A's commit then fails with `writer_fenced`, because B
+    /// took over meanwhile.
+    async fn while_a_commit_waits(&self, during: impl std::future::Future<Output = ()>) {
+        self.gate.block_next();
+        let actor = loonfs_test_support::test_actor();
+        let (parked, ()) =
+            futures::join!(self.namespace.create_directory("/during", &actor), async {
+                bounded(STEP, self.gate.wait_until_blocked())
+                    .await
+                    .expect("A's commit waits at its WAL put");
+                during.await;
+                self.gate.release();
+            });
+        assert_eq!(
+            parked.expect_err("B took over during A's commit").code(),
+            ErrorCode::WriterFenced
+        );
+    }
+
+    /// Runs a fold through A's maintenance, which any process may run, and
+    /// returns the manifest it published.
+    async fn maintenance_fold(&self) -> ManifestNo {
+        let folded = self
+            .writer
+            .maintenance(writer_id("takeover-maintenance"))
+            .fold_wal(&self.namespace_id)
+            .await
+            .expect("fold");
+        assert_eq!(folded.outcome, FoldWalOutcome::Published);
+        folded.manifest_no
+    }
+
+    /// Lets B claim the namespace and commit `/b`.
+    async fn peer_commits(&self) {
+        self.peer(None)
+            .await
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .put_file("/b", b"b", &loonfs_test_support::test_actor())
+            .await
+            .expect("B takes over and commits");
+    }
+}
+
+/// Checks that a read in A's runtime with an interval of 0 sees B's commit
+/// at once when B claims the namespace after a manifest of A's own that A's
+/// position hasn't moved to yet.
+///
+/// A's fold through maintenance publishes A's manifest while A's commit
+/// waits at its WAL put, so the move of A's position waits for the engine.
+/// The read's check finds A's own manifest first and goes on to the next
+/// number, which is B's claim.
+#[tokio::test]
+async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
+    let fixture = takeover(
+        "past-own-manifest",
+        parked_commits,
+        InlineContentPolicy::default(),
+    )
+    .await;
+    fixture
+        .while_a_commit_waits(async {
+            let own = fixture.maintenance_fold().await;
+            fixture.peer_commits().await;
+            assert!(fixture.current_manifest_no().await > own);
+            bounded(STEP, fixture.reader.stat("/b"))
+                .await
+                .expect("the read doesn't wait for A's commit")
+                .expect("a read in A's runtime sees B's commit");
+        })
+        .await;
+    fixture.assert_sees_the_takeover().await;
+}
+
+/// Checks that B's claim at a manifest number below A's newest own manifest
+/// isn't taken as A's own.
+///
+/// B claims the namespace while A's commit waits at its WAL put, and then a
+/// fold through A's maintenance folds over B's claim, so A's own manifest
+/// follows B's claim. The read's check finds B's claim right after A's
+/// position, and drops the position.
+#[tokio::test]
+async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
+    let fixture = takeover(
+        "claim-below-own",
+        parked_commits,
+        InlineContentPolicy::default(),
+    )
+    .await;
+    fixture
+        .while_a_commit_waits(async {
+            fixture.peer_commits().await;
+            let claim = fixture.current_manifest_no().await;
+            let own = fixture.maintenance_fold().await;
+            assert!(own > claim);
+            bounded(STEP, fixture.reader.stat("/b"))
+                .await
+                .expect("the read doesn't wait for A's commit")
+                .expect("a read in A's runtime sees B's commit");
+        })
+        .await;
     fixture.assert_sees_the_takeover().await;
 }

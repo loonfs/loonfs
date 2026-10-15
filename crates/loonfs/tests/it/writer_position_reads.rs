@@ -289,8 +289,9 @@ async fn another_runtimes_fold_is_seen_within_one_interval() {
 
 /// Checks that a manifest check that finds a fold this runtime published,
 /// while a publish keeps the engine locked so the position can't move yet,
-/// keeps the position without reloading, and that once the publish releases
-/// the engine, reads start from the fold's manifest.
+/// goes on to the manifest after the fold's, finds nothing there, and keeps
+/// the position without reloading, and that once the publish releases the
+/// engine, reads start from the fold's manifest.
 ///
 /// The fold runs through maintenance while the publish waits for its WAL
 /// put, so the fold's move of the position waits for the engine.
@@ -318,10 +319,15 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
             .await
             .expect("the read doesn't wait for the publish")
             .expect("stat");
+        let after_fold = folded
+            .manifest_no
+            .successor()
+            .expect("next manifest number");
         assert_eq!(
             fixture.recording.take(),
-            [manifest(folded.manifest_no)],
-            "one HEAD finds the fold's manifest, and the read reloads nothing"
+            [manifest(folded.manifest_no), manifest(after_fold)],
+            "one HEAD finds the fold's manifest, one more finds nothing after it, and the \
+             read reloads nothing"
         );
         assert_eq!(fixture.head_sources(), (positions + 1, anchors));
         gate.release();

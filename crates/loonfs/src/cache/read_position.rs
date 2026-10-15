@@ -8,7 +8,7 @@ use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::{CoreError, MetadataProjectionLoadError};
 use loonfs_types::ManifestNo;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
@@ -44,11 +44,17 @@ pub(crate) struct ReadPositionSlot {
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
     checking: AtomicBool,
-    /// The newest manifest number that this runtime published for the
-    /// namespace, recorded before the engine's position moves to that
-    /// manifest. It starts at 0, below every manifest number.
-    published_manifest_no: AtomicU64,
+    /// The numbers of the manifests above the position's manifest that this
+    /// runtime published for the namespace, in order, recorded before the
+    /// engine's position moves to them. At most [`MAX_PUBLISHED_AHEAD`].
+    published: Mutex<Vec<ManifestNo>>,
 }
+
+/// The most manifests above the position's that a slot remembers as this
+/// runtime's own. A runtime publishes a few manifests between two releases
+/// of the engine at most, and a check that finds a manifest the slot forgot
+/// drops the position, which costs one reload.
+const MAX_PUBLISHED_AHEAD: usize = 16;
 
 impl ReadPositionSlot {
     fn lock(&self) -> MutexGuard<'_, Option<Arc<ReadPosition>>> {
@@ -84,6 +90,11 @@ impl ReadPositionSlot {
     /// Stores a position that [`Self::prepare`] returned, and returns whether
     /// the slot had no position before.
     pub(crate) fn store(&self, position: Option<Arc<ReadPosition>>) -> bool {
+        if let Some(position) = &position {
+            let basis_no = position.basis.manifest_no();
+            self.lock_published()
+                .retain(|manifest_no| *manifest_no > basis_no);
+        }
         let mut current = self.lock();
         let started = current.is_none() && position.is_some();
         *current = position;
@@ -122,17 +133,44 @@ impl ReadPositionSlot {
         }
     }
 
+    fn lock_published(&self) -> MutexGuard<'_, Vec<ManifestNo>> {
+        // A critical section under this lock only edits a short vector, so it
+        // can't panic and poison the lock.
+        self.published
+            .lock()
+            .expect("the published manifest lock should not be poisoned")
+    }
+
     /// Records that this runtime published manifest `manifest_no` for the
     /// namespace, before anything waits for the engine to move the position
     /// there.
     pub(crate) fn record_published(&self, manifest_no: ManifestNo) {
-        self.published_manifest_no
-            .fetch_max(manifest_no.0, Ordering::SeqCst);
+        let mut published = self.lock_published();
+        if let Err(index) = published.binary_search(&manifest_no) {
+            published.insert(index, manifest_no);
+        }
+        if published.len() > MAX_PUBLISHED_AHEAD {
+            published.remove(0);
+        }
     }
 
     /// Whether this runtime published manifest `manifest_no` itself.
     fn published_here(&self, manifest_no: ManifestNo) -> bool {
-        manifest_no.0 <= self.published_manifest_no.load(Ordering::SeqCst)
+        self.lock_published().binary_search(&manifest_no).is_ok()
+    }
+
+    /// Returns the newest manifest in the run of consecutive manifests that
+    /// this runtime published, starting at `first`.
+    fn published_run_end(&self, first: ManifestNo) -> ManifestNo {
+        let published = self.lock_published();
+        let mut end = first;
+        while let Ok(next) = end.successor() {
+            if published.binary_search(&next).is_err() {
+                break;
+            }
+            end = next;
+        }
+        end
     }
 
     /// Starts a successor check of the position's manifest, or returns
@@ -178,14 +216,11 @@ impl RuntimeCore {
     /// A successor can also be a manifest that this runtime published
     /// itself (a fold, a compaction, a checkpoint, a snapshot, or a
     /// retention advance) whose move of the position still waits for the
-    /// engine. The read then applies the waiting change if the engine is
-    /// free, and starts from the moved position. While a task has the
-    /// engine locked, the read starts from the old position without
-    /// recording the check, so the next read checks again, and the release
-    /// of the engine moves the position. A new writer's claim that follows a
-    /// manifest of this runtime is then found one check later, so the
-    /// takeover window is one interval plus the time a publish keeps the
-    /// engine locked.
+    /// engine. The check then goes on past this runtime's own manifests (see
+    /// `position_past_own_manifests`), so a new writer's claim after them
+    /// still drops the position. The takeover window is one interval either
+    /// way, and with an interval of zero a read sees every manifest that
+    /// another process published before the read started.
     ///
     /// A check is trusted only while its answer arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
@@ -238,21 +273,66 @@ impl RuntimeCore {
         }
         if successor {
             let successor_no = position.basis.manifest_no().successor().ok();
-            if let Some(successor_no) = successor_no.filter(|no| slot.published_here(*no)) {
-                if !positions.apply_pending_position(namespace_id) {
-                    return Ok(Some(position));
+            let kept = match successor_no.filter(|no| slot.published_here(*no)) {
+                Some(successor_no) => {
+                    self.position_past_own_manifests(
+                        namespace_id,
+                        positions.as_ref(),
+                        &slot,
+                        position,
+                        successor_no,
+                    )
+                    .await?
                 }
-                let moved = slot
-                    .current()
-                    .filter(|moved| moved.basis.manifest_no() >= successor_no);
-                if moved.is_some() {
-                    return Ok(moved);
-                }
+                None => None,
+            };
+            if kept.is_none() {
+                positions.drop_position(namespace_id);
             }
-            positions.drop_position(namespace_id);
-            return Ok(None);
+            return Ok(kept);
         }
         slot.record_check(observed);
+        Ok(Some(position))
+    }
+
+    /// Returns the position for a read whose check found `successor_no`, a
+    /// manifest that this runtime published itself, or `None` when the read
+    /// drops the position.
+    ///
+    /// The check goes on past this runtime's own manifests with one HEAD,
+    /// for the first manifest number that this runtime didn't publish. A
+    /// manifest there is another process's, such as a new writer's claim.
+    /// Otherwise the read starts from the position, moved to this runtime's
+    /// manifest if the engine is free to apply the move, and records no
+    /// check, because the position's manifest has a successor.
+    async fn position_past_own_manifests(
+        &self,
+        namespace_id: &NamespaceId,
+        positions: &dyn HeadPositions,
+        slot: &ReadPositionSlot,
+        position: Arc<ReadPosition>,
+        successor_no: ManifestNo,
+    ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
+        let newest_own = slot.published_run_end(successor_no);
+        let foreign = manifest_has_successor(self.store(), namespace_id, newest_own)
+            .instrument(tracing::debug_span!(
+                target: "loonfs::page",
+                "loonfs.phase",
+                phase = "position_manifest_probe"
+            ))
+            .await
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
+        if foreign || !position.basis_checked.is_within_revalidation_bound() {
+            return Ok(None);
+        }
+        if positions.apply_pending_position(namespace_id) {
+            let moved = slot
+                .current()
+                .filter(|moved| moved.basis.manifest_no() >= successor_no);
+            if moved.is_some() {
+                return Ok(moved);
+            }
+        }
         Ok(Some(position))
     }
 }
