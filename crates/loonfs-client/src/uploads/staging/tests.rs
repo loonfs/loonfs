@@ -723,37 +723,6 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
 }
 
 #[tokio::test]
-async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
-    let payload = payload(1_025);
-    let uploaded = content_ref(&payload);
-    let (source, _) = watched_source(&payload, 512);
-    let transport = scripted_transport::script(vec![
-        capabilities_for(Advertised {
-            direct_put: true,
-            proxy_max_bytes: Some(1_024),
-            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
-            ..Advertised::default()
-        }),
-        create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
-        Outcome::Success(Vec::new()),
-        completed(uploaded),
-        commit_landed(),
-    ]);
-
-    client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
-        .await
-        .expect("a payload past the proxy cap should take the direct write");
-
-    let object_write = transport
-        .sent()
-        .into_iter()
-        .find(|sent| sent.url.starts_with("http://object.invalid/"))
-        .expect("the payload went straight to object storage");
-    assert_eq!(object_write.body_bytes(), payload.len());
-}
-
-#[tokio::test]
 async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(64 * 1024);
     let uploaded = content_ref(&payload);

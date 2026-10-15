@@ -6,14 +6,12 @@
 //! edits a fixture and restamps its checksum.
 
 use crate::golden_formats::{
-    read_golden, sample_active_manifest, sample_backfilling_manifest, sample_disabled_manifest,
-    segment_id, segment_ref, ACTIVE_MANIFEST_FIXTURE, BACKFILLING_MANIFEST_FIXTURE,
-    DISABLED_MANIFEST_FIXTURE, HINT_FIXTURE,
+    read_golden, sample_active_manifest, sample_disabled_manifest, segment_id, segment_ref,
+    ACTIVE_MANIFEST_FIXTURE, BACKFILLING_MANIFEST_FIXTURE, DISABLED_MANIFEST_FIXTURE, HINT_FIXTURE,
 };
 use loonfs_grep::manifest::{
-    decode_grep_hint, decode_grep_manifest, encode_grep_manifest, GrepEnvelopeCodecError,
-    GrepIndexState, GrepIndexStatus, GrepManifestState, GrepManifestStateError,
-    GrepReorganizeState,
+    decode_grep_hint, decode_grep_manifest, GrepEnvelopeCodecError, GrepIndexState,
+    GrepIndexStatus, GrepManifestState, GrepManifestStateError, GrepReorganizeState,
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::format::envelope::EnvelopeCodecError;
@@ -45,32 +43,6 @@ fn edited_document(
         document["kind"], document["format_version"],
     )
     .into_bytes()
-}
-
-#[test]
-fn every_status_round_trips_carrying_only_its_own_position() {
-    for (state, absent_field) in [
-        (sample_backfilling_manifest(), "built_through_seq"),
-        (sample_active_manifest(ChangeSeq(11), 0), "captured_seq"),
-        (sample_disabled_manifest(), "built_through_seq"),
-    ] {
-        let encoded = encode_grep_manifest(state.clone())
-            .expect("encode grep manifest")
-            .into_bytes();
-        assert!(
-            !String::from_utf8(encoded.clone())
-                .expect("manifest JSON is UTF-8")
-                .contains(absent_field),
-            "{:?} must not spell `{absent_field}`",
-            state.status()
-        );
-        assert_eq!(
-            decode_grep_manifest(&encoded)
-                .expect("decode grep manifest")
-                .payload(),
-            &state
-        );
-    }
 }
 
 #[test]

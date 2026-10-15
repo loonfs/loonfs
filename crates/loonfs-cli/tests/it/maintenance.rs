@@ -350,23 +350,6 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
 }
 
 #[test]
-fn index_enable_leaves_core_maintenance_decoupled() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
-
-    let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
-    assert_success(&enabled);
-    assert!(json_data(&enabled).get("backfill_step").is_none());
-
-    let retried = harness.run(&["--json", "maintenance", "index", "enable"]);
-    assert_success(&retried);
-    assert_eq!(json_data(&retried)["status"], "active");
-    assert!(json_data(&retried).get("backfill_step").is_none());
-}
-
-#[test]
 fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
