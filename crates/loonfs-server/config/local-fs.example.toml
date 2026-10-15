@@ -106,8 +106,15 @@ memory_limit_bytes = 4294967296
 #idle_session_close_after_ms = 1800000
 
 # Minimum interval between checks for a successor to a cached manifest, in
-# milliseconds. Zero checks on every read. Defaults to 1000.
+# milliseconds. Zero checks on every read. Defaults to 1000, and can't exceed
+# 1155000 (the revalidation bound).
 #manifest_revalidation_interval_ms = 1000
+
+# The interval, in milliseconds, of a bounded read that doesn't set its own
+# `freshness_interval_ms`. Inside it, a bounded read reads at the namespace
+# head that the server confirmed last, without a request. Zero confirms the
+# head on every read. Defaults to 1000, and can't exceed 1155000.
+#bounded_read_interval_ms = 1000
 
 # How old a namespace's newest commit must be before maintenance folds a WAL
 # tail that is below the fold thresholds, in milliseconds. The maintenance

@@ -337,6 +337,9 @@ pub(super) async fn build_handles(
     if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
         builder = builder.manifest_revalidation_interval_ms(interval_ms);
     }
+    if let Some(interval_ms) = config.bounded_read_interval_ms {
+        builder = builder.bounded_read_interval_ms(interval_ms);
+    }
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }

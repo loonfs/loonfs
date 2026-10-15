@@ -5,6 +5,7 @@ writer_id = "loonfs-server-gcp"
 # Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
 memory_limit_bytes = 4294967296
 #manifest_revalidation_interval_ms = 1000
+#bounded_read_interval_ms = 1000
 
 # Serving beyond loopback requires TLS. Either terminate it here by
 # uncommenting [tls] below, or set allow_remote_without_tls = true when a

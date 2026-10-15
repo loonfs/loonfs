@@ -30,7 +30,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     ));
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
-        builder.manifest_revalidation_interval_ms(u64::MAX)
+        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -462,7 +462,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder
-            .manifest_revalidation_interval_ms(u64::MAX)
+            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
             .metadata_cache(
                 MetadataCache::builder()
                     .max_head_state_bytes(budget)
@@ -531,7 +531,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
     let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
-        builder.manifest_revalidation_interval_ms(u64::MAX)
+        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -722,7 +722,7 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
-        builder.manifest_revalidation_interval_ms(u64::MAX)
+        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
     });
     let writer = open_runtime(object_store, "control-cache-writer");
 

@@ -778,7 +778,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let namespace_id = NamespaceId::parse("read-after-write").expect("valid namespace id");
 
     let writer = writer_with_cache(&store, "read-after-write-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(u64::MAX)
+        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
     })
     .await;
     writer
@@ -849,7 +849,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
     let writer = writer_with_cache(&store, "maintained-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(u64::MAX)
+        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
     })
     .await;
     writer
