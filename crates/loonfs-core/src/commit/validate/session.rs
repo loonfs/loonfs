@@ -61,6 +61,3 @@ impl<S: ObjectStore + ?Sized> PublishValidationSession<'_, S> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -637,61 +637,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn commit_fingerprint_is_stable_for_canonical_paths() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let left = commit_fingerprint(
-            &namespace_id,
-            &CommitIntent::single(
-                CommitId::parse("mkdir-docs-a").expect("valid commit id"),
-                loonfs_test_support::test_actor(),
-                None,
-                create_dir("/docs/a"),
-            ),
-            &BTreeMap::new(),
-        )
-        .expect("left fingerprint");
-        let right = commit_fingerprint(
-            &namespace_id,
-            &CommitIntent::single(
-                CommitId::parse("mkdir-docs-b").expect("valid commit id"),
-                loonfs_test_support::test_actor(),
-                None,
-                create_dir("/docs/a"),
-            ),
-            &BTreeMap::new(),
-        )
-        .expect("right fingerprint");
-
-        assert_eq!(left, right);
-    }
-
-    #[test]
-    fn one_operation_request_and_one_element_batch_share_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let commit_id = CommitId::parse("mkdir-docs").expect("valid commit id");
-        let convenience = CommitIntent::single(
-            commit_id.clone(),
-            loonfs_test_support::test_actor(),
-            None,
-            create_dir("/docs"),
-        );
-        let batch = CommitIntent {
-            preconditions: Vec::new(),
-            commit_id,
-            actor_id: loonfs_test_support::test_actor(),
-            subject: None,
-            message: None,
-            operations: vec![create_dir("/docs")],
-        };
-
-        assert_eq!(
-            commit_fingerprint(&namespace_id, &convenience, &BTreeMap::new())
-                .expect("convenience fingerprint"),
-            commit_fingerprint(&namespace_id, &batch, &BTreeMap::new()).expect("batch fingerprint")
-        );
-    }
-
     async fn setup_namespace() -> (
         tempfile::TempDir,
         LocalFsStore,

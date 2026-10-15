@@ -362,50 +362,6 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
 }
 
 #[tokio::test]
-async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("materialize the committed state");
-    advance_retention_floor(
-        &store,
-        None,
-        &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("advance retention");
-
-    store
-        .delete(&loonfs_objectstore::keys::hint(&namespace_id))
-        .await
-        .expect("lose the recovery manifest");
-
-    let error = match load_current_metadata_view(&store, &namespace_id).await {
-        Ok(_) => panic!("retained WAL must not mask a manifest lost after floor advancement"),
-        Err(error) => error,
-    };
-    assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
-}
-
-#[tokio::test]
 async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

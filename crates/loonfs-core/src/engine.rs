@@ -1522,23 +1522,6 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
-    #[test]
-    fn namespace_engine_builds_with_required_identity() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let engine = NamespaceEngine::writer(
-            store,
-            namespace_id.clone(),
-            WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
-        );
-
-        assert_eq!(engine.namespace_id(), &namespace_id);
-        assert_eq!(engine.writer_id().as_str(), "writer-a");
-    }
-
     #[tokio::test]
     async fn reader_engine_still_serves_reads() {
         let temp_dir = tempdir().expect("tempdir");

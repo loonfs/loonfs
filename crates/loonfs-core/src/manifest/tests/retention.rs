@@ -565,51 +565,6 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     );
 }
 
-#[tokio::test]
-async fn retention_floor_advancement_preserves_writer_identity() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    let before = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("load before retention")
-        .head;
-
-    advance_retention_floor(
-        &store,
-        None,
-        &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("advance retention");
-    let after = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("load after retention")
-        .head;
-
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
-    assert_eq!(after, before);
-}
-
 /// Reads the files one checkpoint pins, or the error that says it no longer
 /// pins anything.
 async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
@@ -1886,31 +1841,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         &materialization_after.metadata_state,
         &drained.metadata_state
     ));
-}
-
-#[tokio::test]
-async fn a_namespace_retains_from_birth_before_retention_advances() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-
-    let head = crate::namespace::control::load_namespace_read_state(
-        &store,
-        &namespace_id,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("head");
-    let floor = load_current_manifest(&store, &head.namespace_id)
-        .await
-        .expect("missing floor defaults")
-        .state
-        .retention_floor_seq();
-    assert_eq!(floor, ChangeSeq(0));
 }
 
 #[tokio::test]

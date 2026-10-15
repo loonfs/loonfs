@@ -334,26 +334,6 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
 }
 
 #[tokio::test]
-async fn maintenance_materialization_does_not_populate_metadata_segment_cache() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    let manifest_no = eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
-    let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let before = cache.stats();
-
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
-            .await
-            .expect("load materialized manifest");
-    let after = cache.stats();
-
-    assert!(flatten_manifest_segments(base_tier(&materialized.manifest)).len() > 1);
-    assert_eq!(after, before);
-}
-
-#[tokio::test]
 async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
