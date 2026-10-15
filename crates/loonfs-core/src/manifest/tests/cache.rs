@@ -141,9 +141,18 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         .await
         .expect("get inode")
         .is_some());
+    // Every block is heavier than the budget, so the cache keeps none of
+    // them and the lookup reads each block from the store.
     let degenerate_stats = degenerate.stats();
-    assert!(degenerate_stats.inserts > 0);
-    assert!(degenerate_stats.evictions > 0);
+    assert!(degenerate_stats.misses > 0);
+    assert_eq!(
+        (
+            degenerate_stats.inserts,
+            degenerate_stats.evictions,
+            degenerate_stats.cached_decoded_bytes
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[tokio::test]

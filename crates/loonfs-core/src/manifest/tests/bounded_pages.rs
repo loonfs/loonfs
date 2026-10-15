@@ -71,7 +71,10 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
     let store = LocalFsStore::new(temp.path()).expect("store");
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
-    for budget in [1, 8 * 1024 * 1024] {
+    // A one-byte budget keeps no block, and a 64 KiB budget keeps a few data
+    // blocks and evicts them during the wide ranges.
+    const EVICTING_BUDGET: usize = 64 * 1024;
+    for budget in [1, EVICTING_BUDGET, 8 * 1024 * 1024] {
         let cache = MetadataSegmentCache::unshared(budget);
         for (start, end, limit) in [
             (0, 1024, 0),
@@ -113,8 +116,12 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
                 );
             }
         }
-        if budget == 1 {
-            assert!(cache.stats().evictions > 0, "exercise real cache eviction");
+        match budget {
+            1 => assert_eq!(cache.stats().inserts, 0, "a block is heavier than one byte"),
+            EVICTING_BUDGET => {
+                assert!(cache.stats().evictions > 0, "exercise real cache eviction");
+            }
+            _ => {}
         }
     }
 }

@@ -859,3 +859,41 @@ async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
         cache.stats()
     );
 }
+
+/// Checks that reads of folded empty files keep no content objects in the
+/// object cache, under a budget of one byte and under the default budget.
+#[tokio::test]
+async fn reads_of_empty_files_keep_no_content_objects() {
+    for max_object_bytes in [1, crate::DEFAULT_MAX_OBJECT_BYTES] {
+        let cache = MetadataCache::builder()
+            .max_object_bytes(max_object_bytes)
+            .build();
+        let (writer, _store, _root) = recorded_writer(cache.clone()).await;
+        let namespace = writer.open_namespace(&demo()).expect("open namespace");
+        let paths: Vec<String> = (0..32).map(|index| format!("/empty-{index}")).collect();
+        for path in &paths {
+            namespace
+                .put_file(path, b"", &test_actor())
+                .await
+                .expect("put an empty file");
+        }
+        // A read of an empty file in the WAL tail reads no content object,
+        // so the files are folded first.
+        writer
+            .maintenance(writer_id("object-cache-maintenance"))
+            .fold_wal(&demo())
+            .await
+            .expect("fold");
+        for path in &paths {
+            assert!(namespace
+                .read_file(path)
+                .await
+                .expect("read")
+                .bytes
+                .is_empty());
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.content_object_inserts, 0, "{stats:?}");
+        assert!(stats.object_bytes <= max_object_bytes, "{stats:?}");
+    }
+}

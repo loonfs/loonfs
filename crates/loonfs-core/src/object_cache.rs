@@ -16,6 +16,7 @@
 
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
+    DecodedBlockKey,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::ObjectStoreScope;
@@ -34,6 +35,15 @@ enum ObjectKey {
     Content {
         object_key: String,
     },
+}
+
+impl DecodedBlockKey for ObjectKey {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Wal { namespace_id, .. } => HeapBytes::heap_bytes(namespace_id),
+            Self::Content { object_key } => HeapBytes::heap_bytes(object_key),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,9 +117,6 @@ impl KindCounters {
 
 /// Decoded WAL objects and small content objects for every runtime, under
 /// one byte budget and one recency order.
-///
-/// An object heavier than the whole budget isn't kept, because inserting it
-/// would evict everything else first.
 pub struct SharedObjects {
     entries: DecodedBlockCache<(ObjectStoreScope, ObjectKey), CachedObject>,
     max_decoded_bytes: usize,
@@ -166,14 +173,6 @@ impl SharedObjects {
             evictions: entries.evictions,
             cached_decoded_bytes: entries.cached_decoded_bytes,
         }
-    }
-
-    fn insert(&self, key: (ObjectStoreScope, ObjectKey), object: CachedObject) -> bool {
-        if self.max_decoded_bytes == 0 || object.weight() > self.max_decoded_bytes {
-            return false;
-        }
-        self.entries.insert(key, object);
-        true
     }
 }
 
@@ -254,7 +253,7 @@ impl ObjectCache {
     /// of its key.
     pub(crate) fn insert_wal_object(&self, envelope: &Arc<WalObjectEnvelope>) {
         let payload = envelope.payload();
-        if self.shared.insert(
+        if self.shared.entries.insert(
             self.wal_key(&payload.namespace_id, payload.wal_no),
             CachedObject::Wal(Arc::clone(envelope)),
         ) {
@@ -277,9 +276,13 @@ impl ObjectCache {
     }
 
     /// Keeps the first bytes of a content object after a read verified them
-    /// against a content reference, unless the cache already has as many.
+    /// against a content reference, unless the bytes are empty or the cache
+    /// already has as many.
     pub(crate) fn insert_content(&self, object_key: &str, bytes: &[u8]) {
-        if bytes.len() as u64 > self.shared.max_cached_object_bytes {
+        // A read of no bytes sends no store request, because `read_range`
+        // builds no requests for an empty range. So an empty entry would
+        // charge the budget for a hit that saves nothing.
+        if bytes.is_empty() || bytes.len() as u64 > self.shared.max_cached_object_bytes {
             return;
         }
         let key = self.content_key(object_key);
@@ -292,6 +295,7 @@ impl ObjectCache {
         // weight, whatever buffer the store returned the bytes in.
         if self
             .shared
+            .entries
             .insert(key, CachedObject::Content(Bytes::copy_from_slice(bytes)))
         {
             self.shared.content.record_insert();
@@ -301,18 +305,36 @@ impl ObjectCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectCache, ObjectStoreScope, SharedObjects};
+    use super::{CachedObject, ObjectCache, ObjectKey, ObjectStoreScope, SharedObjects};
+    use crate::block_cache::charged_bytes;
+    use bytes::Bytes;
     use std::sync::Arc;
 
-    /// Checks that each content object is charged its length, that the least
-    /// recently used object is evicted to stay within the budget, and that
-    /// an object over the size cap isn't kept.
+    /// Returns the charge of a content entry of `len` bytes under
+    /// `object_key`, which includes the key and the cache's own allocation.
+    fn content_charge(object_key: &str, len: usize) -> usize {
+        let key = (
+            ObjectStoreScope::new(0),
+            ObjectKey::Content {
+                object_key: object_key.to_owned(),
+            },
+        );
+        charged_bytes(&key, &CachedObject::Content(Bytes::from(vec![0; len])))
+    }
+
+    /// Checks that each content object is charged its length with its key
+    /// and the cache's own allocation, that the least recently used object
+    /// is evicted to stay within the budget, and that an object over the
+    /// size cap isn't kept.
     #[test]
     fn content_inserts_are_charged_and_evicted_under_the_budget() {
-        let cache = ObjectCache::unshared(1_000, 600);
+        let entry = content_charge("a", 400);
+        assert!(entry > 400);
+        // The budget fits two entries but not three.
+        let cache = ObjectCache::unshared(2 * entry + entry / 2, 600);
         cache.insert_content("a", &[1; 400]);
         cache.insert_content("b", &[2; 400]);
-        assert_eq!(cache.stats().cached_decoded_bytes, 800);
+        assert_eq!(cache.stats().cached_decoded_bytes, 2 * entry);
 
         cache.insert_content("large", &[3; 700]);
         assert!(
@@ -324,7 +346,10 @@ mod tests {
         assert!(cache.get_content("a", 400).is_some());
         cache.insert_content("c", &[4; 400]);
         let stats = cache.stats();
-        assert_eq!((stats.evictions, stats.cached_decoded_bytes), (1, 800));
+        assert_eq!(
+            (stats.evictions, stats.cached_decoded_bytes),
+            (1, 2 * entry)
+        );
         assert!(
             cache.get_content("b", 1).is_none(),
             "the least recently used object is evicted first"
@@ -366,7 +391,26 @@ mod tests {
         ] {
             assert_eq!(view.get_content("key", 5).as_deref(), Some(&bytes[..]));
         }
-        assert_eq!(shared.stats().cached_decoded_bytes, 10);
+        assert_eq!(
+            shared.stats().cached_decoded_bytes,
+            2 * content_charge("key", 5)
+        );
+    }
+
+    /// Checks that an empty content object isn't kept, because a read of no
+    /// bytes sends no store request that an entry could save.
+    #[test]
+    fn an_empty_content_object_is_not_kept() {
+        let cache = ObjectCache::unshared(1_000, 1_000);
+        cache.insert_content("empty", &[]);
+        assert!(cache
+            .shared
+            .entries
+            .peek(&cache.content_key("empty"))
+            .is_none());
+        assert!(cache.get_content("empty", 0).is_none());
+        let stats = cache.stats();
+        assert_eq!((stats.content_inserts, stats.cached_decoded_bytes), (0, 0));
     }
 
     /// Checks that a zero budget keeps no objects and records no lookups.

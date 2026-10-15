@@ -17,7 +17,7 @@ use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedSegmentBlock, SegmentCacheKey,
+    DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
@@ -44,6 +44,12 @@ impl CacheScope {
     }
 }
 
+impl DecodedBlockKey for CacheScope {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+}
+
 /// The scope under which a shared cache keeps the segment blocks, manifests,
 /// WAL objects, and content objects read from one object store.
 ///
@@ -60,6 +66,12 @@ pub struct ObjectStoreScope(u64);
 impl ObjectStoreScope {
     pub fn new(value: u64) -> Self {
         Self(value)
+    }
+}
+
+impl DecodedBlockKey for ObjectStoreScope {
+    fn heap_bytes(&self) -> usize {
+        0
     }
 }
 
@@ -305,6 +317,17 @@ enum HeadStateKey {
     Tail(WalTailProjectionCacheKey),
 }
 
+impl DecodedBlockKey for HeadStateKey {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Anchor(namespace_id)
+            | Self::Tail(WalTailProjectionCacheKey { namespace_id, .. }) => {
+                HeapBytes::heap_bytes(namespace_id)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum HeadStateEntry {
     Anchor(Arc<CachedReadAnchor>),
@@ -343,13 +366,9 @@ impl DecodedBlock for HeadStateEntry {
 
 /// Namespace head anchors and WAL-tail projections for every scope, under one
 /// byte budget and one recency order.
-///
-/// An entry heavier than the whole budget is not kept, because inserting it
-/// would evict everything else first.
 pub struct SharedHeadState {
     entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
     max_decoded_bytes: usize,
-    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     counters: HeadStateCounters,
 }
@@ -369,8 +388,6 @@ struct HeadStateCounters {
     tail_hits: AtomicUsize,
     tail_misses: AtomicUsize,
     tail_inserts: AtomicUsize,
-    rejections: AtomicUsize,
-    rejected_decoded_bytes: AtomicUsize,
 }
 
 impl SharedHeadState {
@@ -384,10 +401,9 @@ impl SharedHeadState {
         Self {
             entries: DecodedBlockCache::new(DecodedBlockCacheConfig {
                 max_decoded_bytes,
-                observer: observer.clone(),
+                observer,
             }),
             max_decoded_bytes,
-            observer,
             tail_observer,
             counters: HeadStateCounters::default(),
         }
@@ -402,29 +418,10 @@ impl SharedHeadState {
             tail_inserts: counters.tail_inserts.load(Ordering::Relaxed),
             evictions: entries.evictions,
             evicted_decoded_bytes: entries.evicted_decoded_bytes,
-            rejections: counters.rejections.load(Ordering::Relaxed),
-            rejected_decoded_bytes: counters.rejected_decoded_bytes.load(Ordering::Relaxed),
+            rejections: entries.rejections,
+            rejected_decoded_bytes: entries.rejected_decoded_bytes,
             cached_decoded_bytes: entries.cached_decoded_bytes,
         }
-    }
-
-    fn insert(&self, key: (CacheScope, HeadStateKey), entry: HeadStateEntry) -> bool {
-        if self.max_decoded_bytes == 0 {
-            return false;
-        }
-        let decoded_bytes = entry.weight();
-        if decoded_bytes > self.max_decoded_bytes {
-            self.counters.rejections.fetch_add(1, Ordering::Relaxed);
-            self.counters
-                .rejected_decoded_bytes
-                .fetch_add(decoded_bytes, Ordering::Relaxed);
-            if let Some(observer) = &self.observer {
-                observer.reject(decoded_bytes);
-            }
-            return false;
-        }
-        self.entries.insert(key, entry);
-        true
     }
 }
 
@@ -475,7 +472,7 @@ impl HeadStateCache {
     }
 
     pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
-        self.shared.insert(
+        self.shared.entries.insert(
             self.anchor_key(&anchor.head.namespace_id),
             HeadStateEntry::Anchor(anchor),
         );
@@ -512,7 +509,7 @@ impl HeadStateCache {
 
     pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
         let shared = &self.shared;
-        if shared.insert(
+        if shared.entries.insert(
             (self.scope, HeadStateKey::Tail(key)),
             HeadStateEntry::Tail(tail),
         ) {
@@ -528,6 +525,20 @@ impl HeadStateCache {
             .entries
             .invalidate(&(self.scope, HeadStateKey::Tail(key.clone())));
     }
+
+    /// Returns the bytes a WAL-tail projection under `key` is charged, which
+    /// include the key and the cache's own allocation for the entry.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tail_charged_bytes(
+        &self,
+        key: &WalTailProjectionCacheKey,
+        tail: &Arc<ProjectedWalTail>,
+    ) -> usize {
+        crate::block_cache::charged_bytes(
+            &(self.scope, HeadStateKey::Tail(key.clone())),
+            &HeadStateEntry::Tail(Arc::clone(tail)),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -536,7 +547,7 @@ mod tests {
         DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache, MetadataSegmentCacheKey,
         ObjectStoreScope, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
-    use crate::block_cache::{DecodedBlock, SegmentBlockKind};
+    use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
     use loonfs_types::format::segment_blocks::DecodedDataBlock;
@@ -598,7 +609,7 @@ mod tests {
             cache.insert_tail(key.clone(), Arc::clone(&tail));
             assert_eq!(
                 cache.stats().cached_decoded_bytes,
-                tail.decoded_bytes(),
+                cache.tail_charged_bytes(&key, &tail),
                 "the same key replaces its entry"
             );
             assert_eq!(
@@ -678,7 +689,13 @@ mod tests {
 
     #[test]
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
-        let cache = MetadataSegmentCache::unshared(1000);
+        let charge = |identity, decoded_bytes| {
+            charged_bytes(
+                &(ObjectStoreScope::new(0), key(identity)),
+                &block(decoded_bytes),
+            )
+        };
+        let cache = MetadataSegmentCache::unshared(charge("a", 100) + charge("b", 600));
         cache.insert(key("a"), block(600));
         cache.insert(key("a"), block(100));
         // 600 was released on replace: another 600 fits without eviction.

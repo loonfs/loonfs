@@ -353,7 +353,8 @@ pub struct MetadataCacheStats {
     pub segment_filter_skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.
     pub segment_filter_false_positives: usize,
-    /// Decoded bytes of segment blocks and manifests held now.
+    /// Bytes charged to segment blocks and manifests now, including their
+    /// keys and the cache's own allocation for each entry.
     pub segment_bytes: usize,
     /// Head anchor lookups a read could start from.
     pub head_anchor_hits: usize,
@@ -371,7 +372,8 @@ pub struct MetadataCacheStats {
     /// Head anchors and WAL-tail projections heavier than the whole
     /// head-state limit, which are never kept.
     pub head_state_rejections: usize,
-    /// Decoded bytes of head anchors and WAL-tail projections held now.
+    /// Bytes charged to head anchors and WAL-tail projections now, including
+    /// their keys and the cache's own allocation for each entry.
     pub head_state_bytes: usize,
     /// WAL object lookups that found the object in the cache.
     pub wal_object_hits: usize,
@@ -388,6 +390,7 @@ pub struct MetadataCacheStats {
     /// WAL objects and content objects evicted to stay within the object
     /// limit.
     pub object_evictions: usize,
-    /// Decoded bytes of WAL objects and content objects in the cache now.
+    /// Bytes charged to WAL objects and content objects now, including their
+    /// keys and the cache's own allocation for each entry.
     pub object_bytes: usize,
 }

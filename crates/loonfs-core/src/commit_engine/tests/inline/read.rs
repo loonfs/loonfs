@@ -226,7 +226,12 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
                 .sum::<usize>()
                 + value.bytes().len()
     );
-    assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
+    assert_eq!(
+        context.head_state.stats().cached_decoded_bytes,
+        context
+            .head_state
+            .tail_charged_bytes(&cache_key(&context), &tail)
+    );
     let cloned = tail.as_ref().clone();
     assert_eq!(
         tail.content(value.content_ref()).expect("bytes").pieces[0]
