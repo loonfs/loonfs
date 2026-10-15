@@ -3,7 +3,7 @@
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::{
-    load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
+    load_basis_metadata_segments, metadata_basis_from_manifest, FoldedWalTail, LoadedMetadataBasis,
     MetadataSegmentCache, PublishedManifest, VerifiedMetadataSegments, WalTailProjectionCacheKey,
 };
 use crate::metadata::{CommitReceiptRecord, MetadataView};
@@ -112,17 +112,30 @@ impl PublishTailPosition {
     }
 
     /// Moves the position onto the manifest a fold published, and returns
-    /// the commits published since the fold began: the tail that position
-    /// now names.
+    /// the commits published since the fold began, which are the tail above
+    /// the moved position, or `None` when the manifest isn't the fold of
+    /// this position's tail.
+    ///
+    /// The manifest has to fold exactly the head the fold started from: the
+    /// same sequence and the same WAL number, under the position's writer
+    /// epoch. A new writer's claim changes the epoch, and its fence moves
+    /// the WAL number without moving the sequence, so a fold that another
+    /// process ran over a claim never moves the position. A manifest that
+    /// the fold skipped while it retried (a compaction, a compactor claim,
+    /// or a retention advance) keeps the epoch and the head, so the position
+    /// still moves past it.
     pub(crate) fn reanchor_after_fold(
         &mut self,
-        basis: MetadataBasis,
+        folded: &FoldedWalTail,
     ) -> Option<Arc<ProjectedWalTail>> {
         let fold = self.fold.take()?;
-        if basis.0.head_seq != fold.from.seq {
+        if folded.writer_epoch != self.head.writer_epoch
+            || folded.basis.0.head_seq != fold.from.seq
+            || folded.folded_wal_no != fold.from.wal_no
+        {
             return None;
         }
-        self.basis = basis;
+        self.basis = folded.basis.clone();
         self.wal_tail_objects = fold.wal_objects_since;
         self.wal_tail_inline_bytes = fold.since.inline_bytes();
         self.head.folded_wal_no = fold.from.wal_no;

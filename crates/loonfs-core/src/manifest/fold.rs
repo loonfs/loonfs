@@ -12,6 +12,7 @@ use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
+use crate::error::WriterFence;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
@@ -26,10 +27,10 @@ use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::control::{ManifestRef, WriterBlock};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo};
+use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo, WriterEpoch};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -75,6 +76,9 @@ pub(crate) struct FoldedBasis {
     /// Sequence covered by `current_manifest_no`.
     pub(super) current_manifest_head_seq: ChangeSeq,
     pub(super) outcome: FoldWalOutcome,
+    /// The writer epoch of `manifest`, and the writer block that claimed it.
+    writer_epoch: WriterEpoch,
+    writer: Option<WriterBlock>,
 }
 
 impl FoldedBasis {
@@ -130,6 +134,7 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
         policy,
         segment_cache,
         content_writes,
+        None,
     )
     .await?;
     Ok(PublicationReport {
@@ -138,6 +143,12 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     })
 }
 
+/// Folds the current tail from a fresh load, again after each lost race.
+///
+/// `session_epoch` is the writer epoch of the session whose fold this is, or
+/// `None` for a fold that any process may run. A session's fold fails with
+/// `writer_fenced` when a load finds a newer writer's manifest, so it never
+/// folds over that writer's claim.
 async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -145,12 +156,18 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
+    session_epoch: Option<WriterEpoch>,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
         // the rule that keeps a held tail.
         let projection =
             load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?;
+        ensure_session_epoch(
+            session_epoch,
+            projection.head.writer_epoch,
+            projection.head.writer.as_ref(),
+        )?;
         Result::Ok(
             match try_fold_wal_projection(
                 store,
@@ -318,6 +335,8 @@ fn already_current<S: ObjectStore + ?Sized>(
         current_manifest_no: basis_manifest.manifest_no,
         current_manifest_head_seq: head_seq,
         outcome: FoldWalOutcome::AlreadyCurrent,
+        writer_epoch: projection.head.writer_epoch,
+        writer: projection.head.writer.clone(),
     })))
 }
 
@@ -355,6 +374,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
             return Ok(TryFoldWalOutcome::RaceLost(current));
         }
     };
+    let payload = current.envelope.payload();
     Ok(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
@@ -362,6 +382,8 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         folded_wal_no: current.folded_wal_no(),
         target_head_seq: projection.head.seq,
         outcome,
+        writer_epoch: payload.writer_epoch,
+        writer: payload.writer.clone(),
     })))
 }
 
@@ -408,6 +430,10 @@ pub struct FoldedWalTail {
     /// The manifest that covers the tail after the call: the one it published,
     /// or the current one that already covered it.
     pub basis: MetadataBasis,
+    /// The writer epoch of `basis`.
+    pub writer_epoch: WriterEpoch,
+    /// The WAL number that `basis` folds through.
+    pub folded_wal_no: WalNo,
 }
 
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
@@ -419,6 +445,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
     let policy = MetadataRunPolicy::default();
+    let session_epoch = input.as_ref().map(|input| input.head.writer_epoch);
     let folded = if let Some(input) = input {
         let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
         let manifest_projection = ManifestProjection {
@@ -440,7 +467,9 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         .await?
         {
             TryFoldWalOutcome::Settled(basis) => *basis,
-            TryFoldWalOutcome::RaceLost(_) => {
+            TryFoldWalOutcome::RaceLost(winner) => {
+                let payload = winner.envelope.payload();
+                ensure_session_epoch(session_epoch, payload.writer_epoch, payload.writer.as_ref())?;
                 fold_wal_basis_with_deadline(
                     store,
                     namespace_id,
@@ -448,6 +477,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
                     policy,
                     segment_cache,
                     content_writes,
+                    session_epoch,
                 )
                 .await?
             }
@@ -460,13 +490,43 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             policy,
             segment_cache,
             content_writes,
+            None,
         )
         .await?
     };
+    ensure_session_epoch(session_epoch, folded.writer_epoch, folded.writer.as_ref())?;
     Ok(FoldedWalTail {
         basis: MetadataBasis(folded.manifest.clone()),
+        writer_epoch: folded.writer_epoch,
+        folded_wal_no: folded.folded_wal_no,
         response: fold_wal_response(namespace_id, folded),
     })
+}
+
+/// Returns `writer_fenced` when a session folds its own tail and a manifest
+/// it loaded belongs to a newer writer session.
+///
+/// A session's fold keeps its writer epoch the way its publishes do, so it
+/// learns of a takeover from the manifest it loads, and it never folds over
+/// the new writer's claim. `session_epoch` is `None` for a fold that any
+/// process may run, which folds whatever the current manifest's writer
+/// committed.
+fn ensure_session_epoch(
+    session_epoch: Option<WriterEpoch>,
+    writer_epoch: WriterEpoch,
+    writer: Option<&WriterBlock>,
+) -> Result<()> {
+    match session_epoch {
+        Some(fenced_epoch) if writer_epoch > fenced_epoch => {
+            Err(CoreError::WriterFenced(WriterFence {
+                fenced_epoch,
+                active_epoch: writer_epoch,
+                active_writer_id: writer.map(|writer| writer.writer_id.clone()),
+                active_acquired_at_ms: writer.map(|writer| writer.acquired_at_ms),
+            }))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn fold_wal_response(namespace_id: &NamespaceId, basis: FoldedBasis) -> FoldWalResponse {

@@ -843,7 +843,7 @@ async fn writer_after_own_compaction(
         )
         .await
         .expect("own fold");
-        engine.record_wal_fold(Some(&folded));
+        engine.record_wal_fold(Ok(&folded));
     }
     let before = engine.wal_fold_input().expect("re-anchored tail");
     let current = crate::namespace::control::load_current_manifest(store, namespace_id)

@@ -635,7 +635,10 @@ impl EngineSlot {
             .or(self.last_known_wal_tail_inline_bytes)
     }
 
-    fn record_fold_outcome(&mut self, folded: Option<&loonfs_core::FoldedWalTail>) {
+    fn record_fold_outcome(
+        &mut self,
+        folded: std::result::Result<&loonfs_core::FoldedWalTail, &CoreError>,
+    ) {
         if let Some(engine) = self.engine.as_mut() {
             engine.record_wal_fold(folded);
         }
@@ -1830,7 +1833,7 @@ impl NamespacePublisher {
         }
         self.lock_engine()
             .await
-            .record_fold_outcome(result.as_ref().ok());
+            .record_fold_outcome(result.as_ref());
         let published = match result {
             Ok(folded) => {
                 self.runtime_core.instruments().publisher_wal_fold();

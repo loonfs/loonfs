@@ -838,15 +838,26 @@ impl NamespaceCommitEngine {
         Some(input)
     }
 
-    pub fn record_wal_fold(&mut self, folded: Option<&crate::manifest::FoldedWalTail>) {
+    /// Records how the session's own fold ended: moves the position to the
+    /// fold's manifest, or drops the position when it can't move there.
+    ///
+    /// A fold that found a newer writer's manifest fences the session, as a
+    /// publish that finds one does.
+    pub fn record_wal_fold(
+        &mut self,
+        folded: std::result::Result<&crate::manifest::FoldedWalTail, &CoreError>,
+    ) {
+        if let Err(CoreError::WriterFenced(fence)) = folded {
+            *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
+        }
         let fold_observed = self.fold_observed.take();
         let published_during_fold = self.published_during_fold.take();
         let since = match (folded, &mut self.publish_tail) {
-            (Some(folded), Some(position))
+            (Ok(folded), Some(position))
                 if fold_observed.is_some()
                     && folded.response.outcome == crate::FoldWalOutcome::Published =>
             {
-                position.reanchor_after_fold(folded.basis.clone())
+                position.reanchor_after_fold(folded)
             }
             _ => None,
         };

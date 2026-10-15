@@ -10,7 +10,7 @@ use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
-use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior};
+use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 use std::path::Path;
 
 /// A manifest another process publishes while a fold waits at its
@@ -217,7 +217,7 @@ impl Writer {
             }
         );
         let folded = folded.expect("fold");
-        self.engine.record_wal_fold(Some(&folded));
+        self.engine.record_wal_fold(Ok(&folded));
         folded
     }
 
@@ -486,4 +486,123 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
     .expect("pin record")
     .expect("pin");
     assert_eq!(pin.state.manifest().manifest_no, ManifestNo(basis.0 + 2));
+}
+
+/// Checks that a session's fold that loses its manifest number to another
+/// writer's epoch claim fails with `writer_fenced` instead of folding over
+/// the claim, and that recording that outcome fences the session and drops
+/// its position.
+#[tokio::test]
+async fn a_fold_that_loses_to_a_writer_claim_fences_the_session() {
+    let content_writes = tokio::sync::Semaphore::new(32);
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let input = writer.engine.begin_wal_fold().expect("tail");
+    let claim_no = input
+        .basis
+        .manifest_no()
+        .successor()
+        .expect("next manifest number");
+    let gate = BlockingStore::new(
+        writer.store.clone(),
+        KeyPredicate::exact(metadata_manifest_object(&writer.namespace_id, &claim_no)),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    gate.block_next();
+    let other = writer.other_process();
+    let fold_deadline = deadline();
+    let (folded, ()) = futures::join!(
+        fold_wal_tail(
+            &gate,
+            None,
+            &writer.namespace_id,
+            Some(input),
+            &fold_deadline,
+            &content_writes,
+        ),
+        async {
+            gate.wait_until_blocked().await;
+            crate::namespace::writer_epoch::acquire_writer_epoch(
+                &other,
+                &writer.namespace_id,
+                &crate::test_support::mutation_context("other-writer", 2_000),
+            )
+            .await
+            .expect("another writer claims the namespace");
+            gate.release();
+        }
+    );
+    let Err(error) = folded else {
+        panic!("the fold should end fenced");
+    };
+    assert_matches!(&error, CoreError::WriterFenced(_));
+    let current = crate::namespace::control::load_current_manifest(&other, &writer.namespace_id)
+        .await
+        .expect("current manifest");
+    assert_eq!(
+        current.state.manifest().manifest_no,
+        claim_no,
+        "the fold published nothing over the claim"
+    );
+
+    writer.engine.record_wal_fold(Err(&error));
+    assert!(writer.engine.read_position().is_none());
+    let results = writer
+        .engine
+        .publish_batch(
+            &*writer.store,
+            [CommitCandidate::new(CommitIntent {
+                commit_id: CommitId::parse("after").expect("commit id"),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                preconditions: Vec::new(),
+                operations: vec![FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/after").expect("path"),
+                    parents: false,
+                }],
+            })],
+            &writer.context,
+            &deadline(),
+        )
+        .await
+        .results;
+    assert_matches!(results.as_slice(), [Err(CoreError::WriterFenced(_))]);
+}
+
+/// Checks that a session's position moves to its fold's manifest only when
+/// that manifest folds the head the fold started from under the session's
+/// writer epoch, and that a manifest of another epoch, or one that folds
+/// another WAL number, drops the position.
+#[tokio::test]
+async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
+    let content_writes = tokio::sync::Semaphore::new(32);
+    for (epoch_after, wal_after, moves) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+        let mut writer = Writer::open().await;
+        writer.commit("first", Vec::new(), &["/a"]).await;
+        let input = writer.engine.begin_wal_fold().expect("tail");
+        let folded = fold_wal_tail(
+            &*writer.store,
+            None,
+            &writer.namespace_id,
+            Some(input),
+            &deadline(),
+            &content_writes,
+        )
+        .await
+        .expect("fold");
+        let recorded = FoldedWalTail {
+            response: folded.response.clone(),
+            basis: folded.basis.clone(),
+            writer_epoch: WriterEpoch(folded.writer_epoch.0 + epoch_after),
+            folded_wal_no: WalNo(folded.folded_wal_no.0 + wal_after),
+        };
+        writer.engine.record_wal_fold(Ok(&recorded));
+        let position = writer.engine.read_position();
+        assert_eq!(
+            position.as_ref().map(|position| &position.basis),
+            moves.then_some(&folded.basis),
+            "epoch +{epoch_after}, WAL number +{wal_after}"
+        );
+    }
 }

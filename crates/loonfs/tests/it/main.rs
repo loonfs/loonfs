@@ -49,5 +49,6 @@ mod staged_content_reclamation;
 mod standalone_maintenance;
 mod streamed_put;
 mod streamed_read;
+mod takeover_reads;
 mod undelete;
 mod writer_position_reads;
