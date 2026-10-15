@@ -526,8 +526,7 @@ impl HeadStateCache {
             .invalidate(&(self.scope, HeadStateKey::Tail(key.clone())));
     }
 
-    /// Returns the bytes a WAL-tail projection under `key` is charged, which
-    /// include the key and the cache's own allocation for the entry.
+    /// Returns the budget needed to cache this WAL-tail projection on its own.
     #[cfg(any(test, feature = "test-support"))]
     pub fn tail_charged_bytes(
         &self,
@@ -608,11 +607,6 @@ mod tests {
             let tail = Arc::new(ProjectedWalTail::from_rows(rows));
             cache.insert_tail(key.clone(), Arc::clone(&tail));
             assert_eq!(
-                cache.stats().cached_decoded_bytes,
-                cache.tail_charged_bytes(&key, &tail),
-                "the same key replaces its entry"
-            );
-            assert_eq!(
                 cache
                     .get_tail(&key)
                     .expect("same projection cache key should hit")
@@ -676,7 +670,8 @@ mod tests {
 
     #[test]
     fn byte_budget_evicts_the_oldest_block() {
-        let cache = MetadataSegmentCache::unshared(1000);
+        let budget = charged_bytes(&(ObjectStoreScope::new(0), key("a")), &block(600));
+        let cache = MetadataSegmentCache::unshared(budget);
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
         assert!(

@@ -1,6 +1,6 @@
 //! Shared cache for decoded immutable objects.
 
-use crate::heap_bytes::HeapBytes;
+use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
@@ -28,9 +28,9 @@ pub trait DecodedBlockKey: Clone + Eq + Hash {
 
 /// Receives decoded-block cache events for metrics.
 ///
-/// The bytes that an event reports are what the cache charges its entries.
-/// An entry's charge includes its value's weight, its key's heap, and the
-/// cache's own allocation for the entry.
+/// Retained bytes include the values, keys, table, and recency queue.
+/// Evicted bytes count the key and value released with an entry; unused
+/// table and queue capacity remains charged until it is released.
 pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
     fn hit(&self) {}
     fn miss(&self) {}
@@ -40,8 +40,7 @@ pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
     /// Reports an entry the cache didn't keep because its charge was more
     /// than the whole budget, and that charge.
     fn reject(&self, _decoded_bytes: usize) {}
-    /// Reports the bytes that every entry in the cache is charged, in total,
-    /// after an insert or a removal.
+    /// Reports total retained bytes after a cache allocation or removal.
     fn retained(&self, _decoded_bytes: usize) {}
     fn filter_skip(&self) {}
     fn filter_false_positive(&self) {}
@@ -75,9 +74,8 @@ impl DecodedBlockCacheConfig {
 
 /// Counters and occupancy of a [`DecodedBlockCache`].
 ///
-/// The byte fields report what the cache charges its entries. An entry's
-/// charge includes its value's weight, its key's heap, and the cache's own
-/// allocation for the entry.
+/// Retained bytes include the values, keys, table, and recency queue.
+/// Evicted bytes count the key and value released with an entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodedBlockCacheStats {
     pub hits: usize,
@@ -89,34 +87,27 @@ pub struct DecodedBlockCacheStats {
     /// than the whole budget.
     pub rejections: usize,
     pub rejected_decoded_bytes: usize,
-    /// The bytes that every entry in the cache is charged, in total.
+    /// Retained allocations, including unused table and queue capacity.
     pub cached_decoded_bytes: usize,
 }
 
-/// Returns the bytes the cache allocates for one entry, apart from the
-/// key's heap and the value's weight.
-///
-/// Each entry takes one hash-table bucket for its key and slot, with the
-/// bucket's control byte, at eight buckets for every seven entries (the
-/// layout that `hash_table_bytes` in `heap_bytes.rs` describes). Each entry
-/// also takes one recency position for its key and stamp. Ghost recency
-/// positions, which compaction keeps to about as many as the live entries,
-/// and the spare buckets of a table that grew ahead of its entries stay
-/// outside the budget, as allocator rounding does.
-pub(crate) const fn entry_bytes<K, V>() -> usize {
+/// Returns the initial table, queue, and queued key allocations.
+fn initial_overhead<K: DecodedBlockKey, V>(key: &K) -> usize {
     let bucket_bytes = size_of::<(K, CacheSlot<V>)>() + 1;
-    (bucket_bytes * 8).div_ceil(7) + size_of::<(K, u64)>()
+    key.heap_bytes()
+        .saturating_add(4 * bucket_bytes + 16 + 4 * size_of::<(K, u64)>())
 }
 
-/// Returns the bytes the cache charges an entry against its budget.
+/// Returns the bytes needed to cache an entry on its own.
 ///
 /// The table and the entry's recency position each store a copy of the key,
 /// so the key's heap is charged twice.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn charged_bytes<K: DecodedBlockKey, V: DecodedBlock>(key: &K, block: &V) -> usize {
     block
         .weight()
-        .saturating_add(DecodedBlockKey::heap_bytes(key).saturating_mul(2))
-        .saturating_add(entry_bytes::<K, V>())
+        .saturating_add(key.heap_bytes())
+        .saturating_add(initial_overhead::<K, V>(key))
 }
 
 pub struct DecodedBlockCache<K, V> {
@@ -165,17 +156,18 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 struct Inner<K, V> {
     entries: HashMap<K, CacheSlot<V>>,
     order: Recency<K>,
+    /// Key and value allocations owned by live entries.
     charged_bytes: usize,
+    order_key_bytes: usize,
+    /// Deletion can reduce `HashMap::capacity` without releasing its table.
+    /// Keep the largest allocation until the table is explicitly shrunk.
+    table_bytes: usize,
 }
 
 #[derive(Debug)]
 struct CacheSlot<V> {
     block: V,
-    /// What the entry was charged when it was inserted.
-    ///
-    /// The cache subtracts exactly this when the entry leaves, instead of
-    /// recomputing the charge from the key that the table kept (a
-    /// replacement keeps the earlier copy of the key).
+    /// The key and value allocations released when the entry leaves.
     charged_bytes: usize,
     last_touch: u64,
 }
@@ -199,6 +191,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 entries: HashMap::new(),
                 order: Recency::default(),
                 charged_bytes: 0,
+                order_key_bytes: 0,
+                table_bytes: 0,
             }),
             stats: StatsInner::default(),
             in_flight: Mutex::new(HashMap::new()),
@@ -264,7 +258,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::Relaxed),
             rejections: self.stats.rejections.load(Ordering::Relaxed),
             rejected_decoded_bytes: self.stats.rejected_decoded_bytes.load(Ordering::Relaxed),
-            cached_decoded_bytes: inner.charged_bytes,
+            cached_decoded_bytes: inner.retained_bytes(),
         }
     }
 
@@ -284,6 +278,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             return None;
         };
         inner.touch(key);
+        self.evict_over_budget(&mut inner);
+        self.record_retained(inner.retained_bytes());
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.hit();
@@ -314,7 +310,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         if self.disabled() {
             return false;
         }
-        let charged_bytes = charged_bytes(&key, &block);
+        let stored_key = key.clone();
+        let entry_charge = block.weight().saturating_add(stored_key.heap_bytes());
+        let charged_bytes = entry_charge.saturating_add(initial_overhead::<K, V>(&stored_key));
         if charged_bytes > self.config.max_decoded_bytes {
             self.record_rejection(charged_bytes);
             return false;
@@ -323,25 +321,27 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        if let Some(previous) = inner.entries.insert(
-            key.clone(),
-            CacheSlot {
-                block,
-                charged_bytes,
-                last_touch: 0,
-            },
-        ) {
+        if let Some(previous) = inner.entries.remove(&key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
         }
-        inner.charged_bytes = inner.charged_bytes.saturating_add(charged_bytes);
+        inner.entries.insert(
+            stored_key,
+            CacheSlot {
+                block,
+                charged_bytes: entry_charge,
+                last_touch: 0,
+            },
+        );
+        inner.table_bytes = inner.table_bytes.max(hash_map_table_bytes(&inner.entries));
+        inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.insert();
         }
         self.evict_over_budget(&mut inner);
-        self.record_retained(inner.charged_bytes);
-        true
+        self.record_retained(inner.retained_bytes());
+        inner.entries.contains_key(&key)
     }
 
     /// Drops one entry without counting an eviction.
@@ -352,7 +352,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             .expect("decoded block cache lock should not be poisoned");
         if let Some(slot) = inner.entries.remove(key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
-            self.record_retained(inner.charged_bytes);
+            inner.shrink_if_sparse();
+            self.record_retained(inner.retained_bytes());
         }
     }
 
@@ -361,16 +362,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
-        while inner.charged_bytes > self.config.max_decoded_bytes {
-            let Inner { entries, order, .. } = &mut *inner;
-            let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
-            else {
+        while inner.retained_bytes() > self.config.max_decoded_bytes {
+            let Some((candidate, stamp)) = inner.order.pop_front() else {
                 break;
             };
-            if let Some(slot) = entries.remove(&candidate) {
+            inner.order_key_bytes -= candidate.heap_bytes();
+            if slot_is_live(&inner.entries, &candidate, stamp) {
+                let slot = inner.entries.remove(&candidate).expect("live entry");
                 inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
                 self.record_eviction(slot.charged_bytes);
             }
+            inner.shrink_if_sparse();
         }
     }
 
@@ -401,16 +403,46 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 }
 
-impl<K: Clone + Eq + Hash, V> Inner<K, V> {
+impl<K: DecodedBlockKey, V> Inner<K, V> {
+    fn retained_bytes(&self) -> usize {
+        self.charged_bytes
+            .saturating_add(self.order_key_bytes)
+            .saturating_add(self.table_bytes)
+            .saturating_add(self.order.allocation_bytes())
+    }
+
     fn touch(&mut self, key: &K) {
-        let stamp = self.order.touch(key);
+        let queued_key = key.clone();
+        self.order_key_bytes += queued_key.heap_bytes();
+        let stamp = self.order.touch(queued_key);
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
         let entries = &self.entries;
         self.order.compact(entries.len(), |key, stamp| {
-            slot_is_live(entries, key, stamp)
+            let live = slot_is_live(entries, key, stamp);
+            if !live {
+                self.order_key_bytes -= key.heap_bytes();
+            }
+            live
         });
+    }
+
+    fn shrink_if_sparse(&mut self) {
+        if self.entries.is_empty() {
+            self.entries = HashMap::new();
+            self.order = Recency::default();
+            self.table_bytes = 0;
+            self.order_key_bytes = 0;
+            return;
+        }
+        // Shrink only after most entries have left, so eviction doesn't
+        // rebuild the table on every removal.
+        if self.entries.len() * size_of::<(K, CacheSlot<V>)>() < self.table_bytes / 4 {
+            self.entries.shrink_to_fit();
+            self.table_bytes = hash_map_table_bytes(&self.entries);
+        }
+        self.order.shrink_if_sparse();
     }
 }
 
@@ -558,7 +590,7 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 #[cfg(test)]
 mod tests {
     use super::{
-        charged_bytes, entry_bytes, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig,
+        charged_bytes, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig,
         DecodedBlockCacheObserver, DecodedBlockKey,
     };
     use crate::heap_bytes::HeapBytes;
@@ -697,13 +729,7 @@ mod tests {
     #[test]
     fn entries_with_weightless_values_are_charged_and_evicted() {
         let keys: Vec<String> = (0..32).map(|index| format!("key {index:02}")).collect();
-        // The table and the recency position each store a copy of the key.
-        let charges: Vec<usize> = keys
-            .iter()
-            .map(|key| entry_bytes::<String, Block>() + 2 * key.capacity())
-            .collect();
-        let smallest_charge = *charges.iter().min().expect("keys");
-        let budget = 4 * smallest_charge;
+        let budget = 1_024;
         let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
         let key_count = keys.len();
         for key in keys {
@@ -711,16 +737,9 @@ mod tests {
         }
         let live_entries = cache.inner.lock().expect("cache lock").entries.len();
         let stats = cache.stats();
-        assert!(
-            live_entries <= budget / smallest_charge,
-            "{live_entries} entries of at least {smallest_charge} bytes under a budget of {budget}"
-        );
+        assert!(live_entries > 0 && live_entries < key_count);
         assert_eq!(stats.evictions, key_count - live_entries);
         assert!(stats.cached_decoded_bytes > 0 && stats.cached_decoded_bytes <= budget);
-        assert_eq!(
-            stats.cached_decoded_bytes + stats.evicted_decoded_bytes,
-            charges.iter().sum::<usize>()
-        );
     }
 
     /// Checks that an entry whose charge is more than the whole budget isn't

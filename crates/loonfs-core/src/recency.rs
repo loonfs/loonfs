@@ -12,7 +12,7 @@ const MIN_COMPACTION_POSITIONS: usize = 16;
 /// A hit appends the key with a fresh stamp in constant time and leaves its
 /// old position behind as a ghost. The caller stores the returned stamp on
 /// its own entry and answers `is_live` from it, so this holds no second copy
-/// of the entry table and never duplicates whatever hangs off a key.
+/// of the entry table.
 /// Eviction skips ghosts as it pops them, and ghosts are dropped in bulk
 /// once they outnumber the live entries they shadow — amortized constant,
 /// like a vector reallocation. Nothing is scheduled.
@@ -31,16 +31,16 @@ impl<K> Default for Recency<K> {
     }
 }
 
-impl<K: Clone> Recency<K> {
+impl<K> Recency<K> {
     /// Records an access and returns the stamp the caller must store on its
     /// entry before calling anything else here: until the entry carries it,
     /// the position just appended reads as a ghost.
     ///
     /// Stamps start at 1, so an entry that has never been touched can carry
     /// 0 and read as a ghost.
-    pub fn touch(&mut self, key: &K) -> u64 {
+    pub fn touch(&mut self, key: K) -> u64 {
         self.counter = self.counter.saturating_add(1);
-        self.order.push_back((key.clone(), self.counter));
+        self.order.push_back((key, self.counter));
         self.counter
     }
 
@@ -49,12 +49,17 @@ impl<K: Clone> Recency<K> {
     /// `None` means the queue holds no live position at all, so an eviction
     /// loop must stop: popping again cannot make progress.
     pub fn pop_oldest(&mut self, mut is_live: impl FnMut(&K, u64) -> bool) -> Option<K> {
-        while let Some((key, stamp)) = self.order.pop_front() {
+        while let Some((key, stamp)) = self.pop_front() {
             if is_live(&key, stamp) {
                 return Some(key);
             }
         }
         None
+    }
+
+    /// Removes the oldest position, including a stale one.
+    pub(crate) fn pop_front(&mut self) -> Option<(K, u64)> {
+        self.order.pop_front()
     }
 
     /// Drops ghost positions in place once they outnumber the `live_len`
@@ -70,6 +75,18 @@ impl<K: Clone> Recency<K> {
     /// Queue positions held, live and ghost alike.
     pub fn positions(&self) -> usize {
         self.order.len()
+    }
+
+    /// Returns the allocation for queue positions, including unused capacity.
+    pub(crate) fn allocation_bytes(&self) -> usize {
+        self.order.capacity() * std::mem::size_of::<(K, u64)>()
+    }
+
+    /// Releases unused capacity after the queue loses most of its positions.
+    pub(crate) fn shrink_if_sparse(&mut self) {
+        if self.order.len() < self.order.capacity() / 4 {
+            self.order.shrink_to_fit();
+        }
     }
 }
 
@@ -90,7 +107,7 @@ mod tests {
     }
 
     fn touch(recency: &mut Recency<&'static str>, entries: &mut Entries, key: &'static str) {
-        let stamp = recency.touch(&key);
+        let stamp = recency.touch(key);
         entries.0.insert(key, stamp);
         recency.compact(entries.0.len(), |key, stamp| entries.is_live(key, stamp));
     }

@@ -3026,10 +3026,10 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
         "between publishes only the cache and this test hold the tail"
     );
     writer.core.invalidate_namespace_read_cache(&namespace_id);
-    assert_eq!(
-        writer.metadata_cache().stats().head_state_bytes,
-        head_state.tail_charged_bytes(&tail_key, &tail),
-        "with the anchor gone, the cache counts the shared tail once"
+    let retained = writer.metadata_cache().stats().head_state_bytes;
+    assert!(
+        retained >= tail.decoded_bytes() && retained < 2 * tail.decoded_bytes(),
+        "the cache holds one tail plus its table and queue: {retained} bytes"
     );
     writer.shutdown().await.expect("shutdown");
 }
