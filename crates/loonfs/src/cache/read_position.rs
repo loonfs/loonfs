@@ -7,7 +7,8 @@ use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::{CoreError, MetadataProjectionLoadError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use loonfs_types::ManifestNo;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
@@ -24,6 +25,11 @@ pub(crate) trait HeadPositions: Send + Sync {
     /// that reads take and the commit engine's own, so the session's next
     /// publish loads the namespace from the store.
     fn drop_position(&self, namespace_id: &NamespaceId);
+
+    /// Applies a position change that waits for the namespace's commit
+    /// engine, if no task has the engine locked, and returns whether the
+    /// engine was free. It never waits for the engine.
+    fn apply_pending_position(&self, namespace_id: &NamespaceId) -> bool;
 }
 
 /// The position of one writer session's commit engine, kept where reads can
@@ -38,6 +44,10 @@ pub(crate) struct ReadPositionSlot {
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
     checking: AtomicBool,
+    /// The newest manifest number that this runtime published for the
+    /// namespace, recorded before the engine's position moves to that
+    /// manifest. It starts at 0, below every manifest number.
+    published_manifest_no: AtomicU64,
 }
 
 impl ReadPositionSlot {
@@ -112,6 +122,19 @@ impl ReadPositionSlot {
         }
     }
 
+    /// Records that this runtime published manifest `manifest_no` for the
+    /// namespace, before anything waits for the engine to move the position
+    /// there.
+    pub(crate) fn record_published(&self, manifest_no: ManifestNo) {
+        self.published_manifest_no
+            .fetch_max(manifest_no.0, Ordering::SeqCst);
+    }
+
+    /// Whether this runtime published manifest `manifest_no` itself.
+    fn published_here(&self, manifest_no: ManifestNo) -> bool {
+        manifest_no.0 <= self.published_manifest_no.load(Ordering::SeqCst)
+    }
+
     /// Starts a successor check of the position's manifest, or returns
     /// `None` while another read's check runs.
     fn start_check(&self) -> Option<PositionCheck<'_>> {
@@ -144,16 +167,25 @@ impl RuntimeCore {
     ///
     /// A read checks the position's manifest for a successor with one HEAD
     /// once the last check is a manifest revalidation interval old. A
-    /// manifest that this runtime publishes moves the position as the
-    /// publication finishes, so a successor is almost always one that
-    /// another process published, such as a new writer's claim or a
-    /// compaction. The read then drops the position, and the read cache's
-    /// reload finds the successor. (A check that runs while this runtime's
-    /// own publication finishes drops the position too, which costs one
-    /// reload.) Concurrent reads share one check, and a read that finds
-    /// another read's check running starts from the position without
-    /// waiting. With an interval of zero, every read checks for itself, so
-    /// each read sees a successor published before the read started.
+    /// successor that another process published, such as a new writer's
+    /// claim or a compaction, drops the position, and the read cache's
+    /// reload finds the successor. Concurrent reads share one check, and a
+    /// read that finds another read's check running starts from the
+    /// position without waiting. With an interval of zero, every read checks
+    /// for itself, so each read sees a successor published before the read
+    /// started.
+    ///
+    /// A successor can also be a manifest that this runtime published
+    /// itself (a fold, a compaction, a checkpoint, a snapshot, or a
+    /// retention advance) whose move of the position still waits for the
+    /// engine. The read then applies the waiting change if the engine is
+    /// free, and starts from the moved position. While a task has the
+    /// engine locked, the read starts from the old position without
+    /// recording the check, so the next read checks again, and the release
+    /// of the engine moves the position. A new writer's claim that follows a
+    /// manifest of this runtime is then found one check later, so the
+    /// takeover window is one interval plus the time a publish keeps the
+    /// engine locked.
     ///
     /// A check is trusted only while its answer arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
@@ -200,7 +232,23 @@ impl RuntimeCore {
                 ))
                 .await
                 .map_err(MetadataProjectionLoadError::LoadHead)?;
-        if successor || !checked.is_within_revalidation_bound() {
+        if !checked.is_within_revalidation_bound() {
+            positions.drop_position(namespace_id);
+            return Ok(None);
+        }
+        if successor {
+            let successor_no = position.basis.manifest_no().successor().ok();
+            if let Some(successor_no) = successor_no.filter(|no| slot.published_here(*no)) {
+                if !positions.apply_pending_position(namespace_id) {
+                    return Ok(Some(position));
+                }
+                let moved = slot
+                    .current()
+                    .filter(|moved| moved.basis.manifest_no() >= successor_no);
+                if moved.is_some() {
+                    return Ok(moved);
+                }
+            }
             positions.drop_position(namespace_id);
             return Ok(None);
         }

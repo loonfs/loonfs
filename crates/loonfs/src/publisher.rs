@@ -262,6 +262,15 @@ impl HeadPositions for RegistryShared {
             publisher.change_position(PositionChange::Drop);
         }
     }
+
+    fn apply_pending_position(&self, namespace_id: &NamespaceId) -> bool {
+        let publisher = self
+            .lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone());
+        publisher.is_some_and(|publisher| publisher.release_engine_if_free())
+    }
 }
 
 /// Locks registry and publisher state, recovering a lock that a contained
@@ -1013,6 +1022,10 @@ impl NamespacePublisher {
     /// replaced still reads correctly, because garbage collection keeps that
     /// manifest's objects for at least one grace.
     fn change_position(&self, change: PositionChange) {
+        if let PositionChange::Reanchor(published) = &change {
+            self.read_position
+                .record_published(published.manifest().manifest_no);
+        }
         let drops = {
             let mut pending = lock_state(&self.pending_position);
             let change = match pending.take() {
@@ -1023,13 +1036,24 @@ impl NamespacePublisher {
             *pending = Some(change);
             drops
         };
+        if !self.release_engine_if_free() && drops {
+            self.read_position.clear();
+        }
+    }
+
+    /// Locks the engine if no task has it locked and releases it at once,
+    /// which applies a position change that waited for it. Returns whether
+    /// the engine was free.
+    fn release_engine_if_free(&self) -> bool {
         match self.engine.try_lock() {
-            Ok(slot) => drop(LockedEngine {
-                publisher: self,
-                slot: Some(slot),
-            }),
-            Err(_) if drops => self.read_position.clear(),
-            Err(_) => {}
+            Ok(slot) => {
+                drop(LockedEngine {
+                    publisher: self,
+                    slot: Some(slot),
+                });
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -1796,6 +1820,14 @@ impl NamespacePublisher {
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
+        if let Ok(folded) = &result {
+            if folded.response.outcome == FoldWalOutcome::Published {
+                // Reads that find this manifest before the engine moves the
+                // position to it keep the position.
+                self.read_position
+                    .record_published(folded.response.manifest_no);
+            }
+        }
         self.lock_engine()
             .await
             .record_fold_outcome(result.as_ref().ok());

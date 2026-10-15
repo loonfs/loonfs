@@ -6,7 +6,7 @@ use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     Commit, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore, Writable,
 };
-use loonfs_objectstore::keys::{hint, metadata_manifest_prefix};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -31,7 +31,7 @@ struct Fixture {
     namespace_id: NamespaceId,
     namespace: Namespace<Writable>,
     reader: Namespace<ReadOnly>,
-    _writer: LoonFs<Writable>,
+    writer: LoonFs<Writable>,
 }
 
 /// The requests that a fixture's store parks once a test calls
@@ -96,7 +96,7 @@ async fn fixture(name: &str, parked: Parked) -> Fixture {
         clock,
         namespace_id,
         namespace,
-        _writer: writer,
+        writer,
     }
 }
 
@@ -285,6 +285,80 @@ async fn another_runtimes_fold_is_seen_within_one_interval() {
     let entry = fixture.reader.stat("/after.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
     assert_eq!(fixture.recording.take(), []);
+}
+
+/// Checks that a manifest check that finds a fold this runtime published,
+/// while a publish keeps the engine locked so the position can't move yet,
+/// keeps the position without reloading, and that once the publish releases
+/// the engine, reads start from the fold's manifest.
+///
+/// The fold runs through maintenance while the publish waits for its WAL
+/// put, so the fold's move of the position waits for the engine.
+#[tokio::test]
+async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
+    let fixture = fixture("own-fold-check", Parked::WalPuts).await;
+    let maintenance = fixture.writer.maintenance(writer_id("own-fold-check"));
+    let replays = fixture.tail_replays();
+    let manifest = |manifest_no| RecordedOperation::Head {
+        key: metadata_manifest_object(&fixture.namespace_id, &manifest_no),
+    };
+    let gate = fixture.recording.inner();
+    gate.block_next();
+    let (during, folded) = futures::join!(fixture.put("/during.txt"), async {
+        gate.wait_until_blocked().await;
+        let folded = maintenance
+            .fold_wal(&fixture.namespace_id)
+            .await
+            .expect("fold");
+        assert_eq!(folded.outcome, FoldWalOutcome::Published);
+        fixture.clock.advance_ms(INTERVAL_MS);
+        let (positions, anchors) = fixture.head_sources();
+        fixture.recording.reset();
+        bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
+            .await
+            .expect("the read doesn't wait for the publish")
+            .expect("stat");
+        assert_eq!(
+            fixture.recording.take(),
+            [manifest(folded.manifest_no)],
+            "one HEAD finds the fold's manifest, and the read reloads nothing"
+        );
+        assert_eq!(fixture.head_sources(), (positions + 1, anchors));
+        gate.release();
+        folded
+    });
+    let during = during.expect("the publish succeeds");
+    assert_eq!(fixture.tail_replays(), replays);
+
+    fixture.recording.reset();
+    let entry = fixture.reader.stat("/during.txt").await.expect("stat");
+    assert_eq!(entry.head_seq, during.committed_seq);
+    // The read checks the manifest after the fold's, and it reads the fold's
+    // manifest the first time it starts from that manifest.
+    let next = manifest(
+        folded
+            .manifest_no
+            .successor()
+            .expect("next manifest number"),
+    );
+    let fold_manifest = metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no);
+    let operations = fixture.recording.take();
+    assert!(
+        operations.contains(&next)
+            && operations.iter().all(|operation| {
+                *operation == next
+                    || matches!(
+                        operation,
+                        RecordedOperation::Get { key, .. } if *key == fold_manifest
+                    )
+            }),
+        "the read starts from the fold's manifest: {operations:?}"
+    );
+    fixture
+        .put("/after.txt")
+        .await
+        .expect("commit after the fold");
+    assert_eq!(fixture.tail_replays(), replays);
 }
 
 /// Checks that once a session finds that it was fenced, the next read in its
