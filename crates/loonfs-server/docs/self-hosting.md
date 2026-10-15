@@ -294,7 +294,7 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs_server_in_flight_requests` | Gauge | Requests that have a slot, until their responses complete. |
 | `loonfs_server_connection_accept_waiting` | Gauge | 1 while TCP accept waits for a free connection slot, and 0 otherwise. This isn't a count of the OS backlog, because that count isn't available to the server. |
 | `loonfs_server_busy_rejections_total` | Counter, `kind` label | A concurrency refusal: `request`, `upload`, or `download`. Connections wait instead, so they don't increment this counter. |
-| `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
+| `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read that starts from the read cache looks up its namespace head: `hit` or `miss`. |
 | `loonfs.read_head.source` | Counter, `source` label | A read takes the namespace head it starts from: `position` when the server has the namespace's writer session, so the read sends no request to confirm the head, or `anchor` when the head comes from the read cache. |
 | `loonfs.head_state_cache.evictions` | Counter | A head anchor or WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. The tails that writers publish from are evicted the same way. |
 | `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Bytes charged to the head anchors and WAL-tail projections in the cache now, including writers' tails. Each entry's charge includes its key and the cache's own allocation for the entry. |

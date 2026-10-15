@@ -389,7 +389,7 @@ The protocol guarantees the following:
 2. Every acknowledged commit is in that sequence or folded into the current manifest (because of the publication budget and the grace, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 3. Writer epochs never decrease along the sequence, and they never exceed the current manifest's epoch. Once a newer writer's fence is written, no older writer commits (because of the claim and the fence, see [Writer ownership](#61-writer-ownership) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 4. A fresh discovery sees every commit that was acknowledged before it began (because of the successor check within the revalidation bound, see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
-5. A cached view never moves backward, and a read served from it reflects a successor check no older than the revalidation bound (because of the successor probe and the revalidation bound, see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+5. A cached view or a writer position never moves backward, and a read served from either one reflects a successor check no older than the revalidation bound (because of the successor probe and the revalidation bound, see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 6. Pieces stay readable, in the WAL until a fold has written them as extents, and through the layout after that (because content is written before the manifest, see [Publishing a materialized file set](#72-publishing-a-materialized-file-set) and [File contents and ownership](#15-file-contents-and-ownership)).
 7. A retry with the same commit ID and request doesn't commit twice while its receipt is kept (because of the commit receipt, see [Commit identity and retries](#65-commit-identity-and-retries)).
 8. A view that revalidates within its bound never lists a deleted segment. Its manifest was current at its last successor check, so the manifest and its segments are kept for at least one grace after that check (because of the superseded-manifest root and the revalidation bound, see [Reference roots](#112-reference-roots) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
@@ -543,7 +543,9 @@ A warm read is a read from a cached view. The reference runtime checks a cached 
 
 The reader also runs discovery again if an answer to either probe arrives `READ_REVALIDATION_BOUND_MS` or more after the previous successor probe was sent, whatever the answer is. The time is measured when the answer arrives, and against the previous successor probe, not the one being answered. A successor probe that finds nothing becomes the previous successor probe for later reads only after both answers have arrived in time. This is how cached readers notice deletions and retention changes. The hint isn't used to validate a cached view.
 
-After a commit, the runtime that acknowledged it seeds its read caches from the publication. The seeded view's previous successor probe is the writer's last confirmation that its planning manifest had no successor (not the publication itself), and that confirmation can be up to about two WAL publish budgets older than the publication. If the cached view being replaced is on the same manifest, and its tip isn't past the published WAL object, the seeded view keeps the later of the two checks. Its next read probes the next WAL number like any warm read. If the manifest and the WAL tip haven't changed and the seeded projection is still cached, the read replays nothing and doesn't reload the manifest.
+In a runtime with an open writer session for the namespace, reads start from the session's [writer position](glossary.md#writer-position) instead of a cached view. The runtime moves the position to each commit before it acknowledges the commit, and to each manifest that it publishes itself (a fold, a compaction, a checkpoint, a snapshot, or a retention advance). A read from the position sends no WAL probe, because another writer has to publish a claim manifest before it can write a WAL object. The read runs the successor probe on the same revalidation interval, and a read that finds another read's probe running starts from the position without waiting for it. The previous successor probe of a new position is the writer's last confirmation of its manifest (see [Publication and group commit](#63-publication-and-group-commit)), or a later successor probe that a read sent. If the probe finds a successor, the reader drops the position and runs discovery, and the session's next publish runs discovery too. A read doesn't start from a position whose previous successor probe is `READ_REVALIDATION_BOUND_MS` old or older. The reader drops the position and runs discovery instead, because a probe's answer couldn't confirm the position then. A runtime without the namespace's writer session, or a session that's fenced, closed, or hasn't published yet, reads from a cached view.
+
+For example, after another writer takes over the namespace, a read in the old writer's runtime that starts within one revalidation interval of the position's last successor probe returns the old writer's head. The first read after the interval finds the new writer's claim manifest and returns the new writer's commits, including any access changes. With an interval of 0, every read sends its own successor probe, even while another read's probe runs, so every read returns them.
 
 ### 4.3 Visible metadata
 
@@ -766,7 +768,7 @@ To publish a batch, a writer:
 2. Refuses new commits with `maintenance_required` when the unfolded WAL reaches its write-stop threshold. Fence objects count toward that threshold.
 3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id`.
 4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
-5. On success, updates its local read state and acknowledges the requests.
+5. On success, moves its [writer position](glossary.md#writer-position) to the new head and acknowledges the requests.
 
 Writing several requests in one WAL object is called "group commit". For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Successfully writing that object commits all three. They're still three separate commits, and a request with several operations is still one commit.
 
@@ -2078,7 +2080,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
 | `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | The derived minimum ordinary garbage collection grace. |
-| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a view's previous basis confirmation and the answer to its next successor check. |
+| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, or a writer position. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a streaming compaction starts its publication. |
@@ -2157,7 +2159,7 @@ These are defaults for the reference producer and runtime. A target size can be 
 | `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 
-`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest.
+`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the manifest of a cached view or a writer position.
 
 A decoder can't use the target block or segment sizes as hard allocation limits. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB, and further allocation follows the bytes actually decompressed. Output stops at the declared length plus one byte (see [Block-segment encoding](#a7-block-segment-encoding)), and vector capacity can be larger than that output length. This doesn't impose a smaller maximum block size. The [API specification][api-spec] specifies request admission limits.
 

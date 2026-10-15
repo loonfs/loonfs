@@ -222,9 +222,13 @@ A pin that applications use to read a namespace as it was at one point in time. 
 
 A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
 
+### Writer position
+
+The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no request to confirm the head. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, a `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. A manifest check once per revalidation interval finds a manifest that another process published, such as a new writer's claim. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). After that, the reader checks again before it serves a read. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view and to a [writer position](#writer-position). After that, the reader loads the current manifest again before it serves a read. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 

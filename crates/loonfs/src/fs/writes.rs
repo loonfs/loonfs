@@ -1,9 +1,7 @@
 //! The writable [`Namespace`] handle's path mutations and commits, and the
 //! publication pipeline they go through.
 
-use super::core::RuntimeCore;
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
-use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::Result;
 use crate::{
@@ -1048,45 +1046,4 @@ impl Namespace<Writable> {
         ))
         .await
     }
-}
-
-/// Publishes already-classified candidates as one batch — one WAL
-/// object, one numbered WAL put — through the namespace
-/// publisher's own commit engine, and seeds the read cache with the
-/// state the batch produced.
-///
-/// Only the publication service calls this: it owns the engine, and
-/// borrowing it here keeps engine construction and locking in that one
-/// place. Results match candidates in order.
-///
-/// `before_seed` runs after the put and before the seed. A maintenance call
-/// can publish a manifest while the put runs, and moving the engine to that
-/// manifest first keeps the replaced manifest out of the read cache.
-pub(crate) async fn publish_batch_with_engine(
-    core: &RuntimeCore,
-    namespace_id: &NamespaceId,
-    engine: &mut loonfs_core::publish::NamespaceCommitEngine,
-    candidates: &[CommitCandidate],
-    context: &loonfs_core::MutationContext,
-    batch: &loonfs_core::time::Deadline,
-    before_seed: impl FnOnce(&mut loonfs_core::publish::NamespaceCommitEngine),
-) -> loonfs_core::publish::NamespaceCommitEnginePublishResult {
-    let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-    let store = core.store();
-    // Boxing erases the engine's deeply nested publish future; without
-    // it, callers awaiting a put or commit (CLI, server, embedding
-    // crates) exceed rustc's type-recursion depth.
-    let mut publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
-    before_seed(engine);
-    {
-        let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
-        if let Some(state) = publish
-            .resulting_read_state
-            .take()
-            .and_then(|written| engine.reanchored_read_state(written))
-        {
-            core.seed_namespace_read_cache(namespace_id, state);
-        }
-    }
-    publish
 }

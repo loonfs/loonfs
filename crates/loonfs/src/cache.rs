@@ -1,5 +1,7 @@
-//! The head anchors and WAL-tail projections runtime reads start from.
-//! WAL probes observe commits; interval checks observe manifest changes.
+//! The heads that runtime reads start from: the position of the namespace's
+//! writer session in this runtime, or else the read cache's anchor. An
+//! anchor's WAL probe finds new commits, and the interval check of either
+//! head finds a newer manifest.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -82,11 +84,11 @@ impl RuntimeCore {
                     && head.completed_validation_no > observed_validation_no
             });
         if let Some(head) = reusable {
-            // A successful remote validation STARTED after this read
-            // arrived. Its observation is inside our read interval. A
-            // probe already in flight when we arrived cannot authorize
-            // this shortcut: it may have observed before an intervening
-            // write completed. Local publication is not a remote proof.
+            // A successful validation started after this read arrived, so
+            // its observation is inside our read interval. A probe already
+            // in flight when we arrived can't authorize this shortcut,
+            // because it may have observed the store before an intervening
+            // write completed.
             let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
             self.inner
                 .metadata_cache
@@ -328,52 +330,6 @@ impl RuntimeCore {
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let context = self.current_read_context(namespace_id).await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
-    }
-
-    /// Seeds the anchor of a landed publish. The publisher's engine has
-    /// already put the WAL tail it names in the head-state cache.
-    pub(crate) fn seed_namespace_read_cache(
-        &self,
-        namespace_id: &NamespaceId,
-        state: loonfs_core::publish::ResultingReadState,
-    ) {
-        let cached = self.inner.head_state.peek_anchor(namespace_id);
-        // The publisher can use an older manifest even after a read has loaded a
-        // newer manifest. Keep the newer manifest in the read cache to avoid
-        // reloading metadata. The next read checks the WAL for the new commit.
-        if cached
-            .as_ref()
-            .is_some_and(|cached| cached.basis.manifest_no() > state.basis.manifest_no())
-        {
-            return;
-        }
-        let (cached_check, validation) = cached
-            .map(|cached| {
-                // The cached check also confirms the seeded view only if it checked
-                // the same basis and the seeded tip is not behind the cached one.
-                // Otherwise it says nothing about the seeded basis, or about the WAL
-                // numbers just after the seeded tip.
-                let confirms_seed =
-                    cached.basis == state.basis && cached.head.wal_no <= state.head.wal_no;
-                (
-                    cached.basis_checked.clone().filter(|_| confirms_seed),
-                    Arc::clone(&cached.validation),
-                )
-            })
-            .unwrap_or_default();
-        let basis_checked = cached_check
-            .into_iter()
-            .chain([state.basis_checked])
-            .min_by_key(Observation::age_ms);
-        self.inner
-            .head_state
-            .insert_anchor(Arc::new(CachedReadAnchor {
-                head: state.head,
-                basis: state.basis,
-                basis_checked,
-                validation,
-                completed_validation_no: 0,
-            }));
     }
 
     /// Drops the namespace's head anchor, so its next read revalidates from

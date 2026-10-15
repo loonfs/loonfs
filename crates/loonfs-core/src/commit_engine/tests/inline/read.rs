@@ -206,7 +206,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         )
         .await;
     assert!(result.results[0].is_ok());
-    let state = result.resulting_read_state.expect("published state");
+    let state = publisher.read_position().expect("published state");
     let context = RuntimeReadContext {
         head_state: Arc::clone(publisher.head_state.as_ref().expect("head state")),
         ..read_context(state.head, state.basis)
@@ -270,16 +270,16 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     // Holding the tail here would make the publish copy it.
     drop(tail);
     let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
-    let later = publisher
+    let published = publisher
         .publish_batch(
             &store,
             [candidate("later", vec![later])],
             &mutation_context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
-        .await
-        .resulting_read_state
-        .expect("later state");
+        .await;
+    assert!(published.results[0].is_ok());
+    let later = publisher.read_position().expect("later state");
     let new_key = cache_key(&read_context(later.head, later.basis));
     assert!(context.head_state.get_tail(&old_key).is_none());
     assert_eq!(
@@ -300,16 +300,16 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
     let mut tails = Vec::new();
     for name in ["first", "second"] {
         let value = inline(&publisher.namespace_id, Bytes::from_static(b"bytes"));
-        let state = publisher
+        let published = publisher
             .publish_batch(
                 &store,
                 [candidate(name, vec![value])],
                 &mutation_context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
-            .await
-            .resulting_read_state
-            .expect("published state");
+            .await;
+        assert!(published.results[0].is_ok());
+        let state = publisher.read_position().expect("published state");
         tails.push(
             publisher
                 .head_state

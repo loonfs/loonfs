@@ -300,7 +300,7 @@ pub struct CachedReadAnchor {
     /// The successor check that last confirmed `basis`.
     pub basis_checked: Option<Observation>,
     pub validation: Arc<NamespaceValidation>,
-    /// The validation that produced this anchor; a seeded anchor carries zero.
+    /// The number of the validation that produced this anchor.
     pub completed_validation_no: u64,
 }
 

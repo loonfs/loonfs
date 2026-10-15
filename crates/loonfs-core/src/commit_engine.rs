@@ -555,9 +555,6 @@ pub struct NamespaceCommitEnginePublishResult {
     /// The WAL tail this attempt loaded, for opportunistic maintenance
     /// scheduling, or `None` when it loaded no projection.
     pub wal_tail: Option<WalTailReport>,
-    /// Read state produced by a successful, unambiguous WAL put. Callers can
-    /// use it to update read caches without reloading from object storage.
-    pub resulting_read_state: Option<ResultingReadState>,
 }
 
 /// The WAL tail one publish attempt loaded.
@@ -591,20 +588,6 @@ pub struct WalFoldInput {
     pub tail_state: Arc<ProjectedWalTail>,
     pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
-}
-
-/// The read anchor of one landed publish. The engine has already put the
-/// WAL tail this anchor names in its head-state cache.
-#[derive(Debug, Clone)]
-pub struct ResultingReadState {
-    pub head: NamespaceReadState,
-    /// Metadata basis used for replay. The published head still references this
-    /// basis, so a seeded read cache matches the next store-backed read.
-    pub basis: MetadataBasis,
-    /// When the writer last confirmed `basis` current, which may be well
-    /// before the put. A read view seeded from this state takes it as its
-    /// last check.
-    pub basis_checked: Observation,
 }
 
 /// The head that reads in a writer session's runtime start from, taken from
@@ -884,11 +867,11 @@ impl NamespaceCommitEngine {
     /// the position when it can't move there (see
     /// `PublishTailProjection::reanchor_after_publish` for the rule).
     ///
-    /// Later commits then plan against the new manifest and seed the read
-    /// cache with it, so a read doesn't find the new manifest as a successor
-    /// and reload. The cached WAL tail is stored again under the new
-    /// manifest's number. The time of the last manifest check stays the
-    /// same. That check found no successor of the old manifest, so it
+    /// Later commits then plan against the new manifest, and reads in this
+    /// runtime start from it, so a read's manifest check doesn't find the
+    /// new manifest as a successor and drop the position. The cached WAL
+    /// tail is stored again under the new manifest's number. The time of the
+    /// last manifest check stays the same. That check found no successor of the old manifest, so it
     /// happened before this runtime published the new manifest, and no
     /// manifest after the new one existed then either.
     ///
@@ -930,25 +913,6 @@ impl NamespaceCommitEngine {
             }
         }
         self.publish_tail = Some(position);
-    }
-
-    /// Returns the read state that a publish seeds after its put succeeds,
-    /// on the manifest the position uses now, or `None` when the engine
-    /// dropped the position. `written` is the read state the put produced.
-    ///
-    /// A manifest that this runtime published during the put can move the
-    /// position after the put (see [`Self::record_manifest_published`]).
-    /// The seed then uses the new manifest, so the read cache doesn't take a
-    /// manifest that a newer one replaced.
-    pub fn reanchored_read_state(&self, written: ResultingReadState) -> Option<ResultingReadState> {
-        let position = self.publish_tail.as_ref()?;
-        (position.head.seq == written.head.seq && position.head.wal_no == written.head.wal_no).then(
-            || ResultingReadState {
-                head: position.head.clone(),
-                basis: position.basis().clone(),
-                basis_checked: written.basis_checked,
-            },
-        )
     }
 
     /// Returns the position that reads in this runtime start from, or `None`
@@ -1047,7 +1011,6 @@ impl NamespaceCommitEngine {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
                 wal_tail: None,
-                resulting_read_state: None,
             };
         }
 
@@ -1058,7 +1021,6 @@ impl NamespaceCommitEngine {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
                     wal_tail: None,
-                    resulting_read_state: None,
                 };
             }
         };
@@ -1125,7 +1087,6 @@ impl NamespaceCommitEngine {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
                     wal_tail: None,
-                    resulting_read_state: None,
                 };
             }
         };
@@ -1162,7 +1123,7 @@ impl NamespaceCommitEngine {
             self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if update.resulting_read_state.is_some() && self.publish_tail.is_some() {
+        if update.landed && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
@@ -1176,7 +1137,6 @@ impl NamespaceCommitEngine {
                     TailSource::Cached
                 },
             }),
-            resulting_read_state: update.resulting_read_state,
         }
     }
 
@@ -1191,14 +1151,14 @@ impl NamespaceCommitEngine {
         tail_discovered: bool,
     ) -> TailProjectionUpdate {
         let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
-        let state = match effect {
-            PublishViewEffect::Unchanged => None,
+        match effect {
+            PublishViewEffect::Unchanged => {}
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
                     wal_tail_objects: projection.position.wal_tail_objects,
                     wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
-                    resulting_read_state: None,
+                    landed: false,
                 };
             }
             PublishViewEffect::Advanced { records, head } => {
@@ -1219,22 +1179,12 @@ impl NamespaceCommitEngine {
                     return TailProjectionUpdate {
                         wal_tail_objects: projection.position.wal_tail_objects,
                         wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
-                        resulting_read_state: None,
+                        landed: false,
                     };
                 }
-                projection.reanchor(head.clone());
-                // A put lands only from a view whose basis was confirmed, so this is
-                // always present. If it ever is not, no read state is offered: a
-                // reader must not take a check that did not happen.
-                self.basis_checked
-                    .clone()
-                    .map(|basis_checked| ResultingReadState {
-                        head,
-                        basis: projection.position.basis().clone(),
-                        basis_checked,
-                    })
+                projection.reanchor(head);
             }
-        };
+        }
         let (position, tail_state) = projection.into_position();
         if advanced || tail_discovered {
             self.insert_tail(&position, tail_state);
@@ -1242,7 +1192,7 @@ impl NamespaceCommitEngine {
         let update = TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects,
             wal_tail_inline_bytes: position.wal_tail_inline_bytes,
-            resulting_read_state: state,
+            landed: advanced,
         };
         self.publish_tail = Some(position);
         update
@@ -1250,12 +1200,12 @@ impl NamespaceCommitEngine {
 }
 
 /// What folding one batch into the tail projection left: the WAL-tail length
-/// the caller schedules maintenance on, and the read state a landed put
-/// produced.
+/// the caller schedules maintenance on, and whether the batch's put landed
+/// and moved the position.
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_inline_bytes: usize,
-    resulting_read_state: Option<ResultingReadState>,
+    landed: bool,
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {

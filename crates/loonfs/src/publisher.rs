@@ -91,8 +91,9 @@ pub enum NamespaceSessionStatus {
 pub(crate) struct PublisherRegistry {
     shared: Arc<RegistryShared>,
     /// Strong: the runtime core owns neither this registry nor the writer, so
-    /// holding it here cannot cycle. Publications read through its caches
-    /// and seed them with what they produce.
+    /// holding it here cannot cycle. Publications read through its caches,
+    /// and the core keeps only a weak reference back (see
+    /// [`Self::head_positions`]).
     runtime_core: RuntimeCore,
     /// Weak: the writer owns its bits, and a publication is the writer's
     /// work. Publish work upgrades per unit and reports `shutting_down`
@@ -367,9 +368,6 @@ impl PublisherRegistry {
 
     /// Drops the namespace's read anchor, and tells the namespace's publisher
     /// how a mutation outside the publisher changed the namespace.
-    ///
-    /// The anchor is dropped first, so a publish that is in flight seeds the
-    /// read cache after the publisher's position has moved.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId, change: NamespaceChange) {
         self.runtime_core
             .invalidate_namespace_read_cache(namespace_id);
@@ -405,8 +403,8 @@ impl PublisherRegistry {
 
     /// Moves the namespace's publisher to a manifest that this runtime
     /// published, or drops the publisher's position when it can't move
-    /// there, so that later commits seed the read cache with the newest
-    /// manifest.
+    /// there, so that later commits and reads in this runtime start from the
+    /// newest manifest.
     pub(crate) fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
@@ -584,8 +582,7 @@ struct NamespacePublisher {
     /// A change to the engine's position that arrived while a publish, a
     /// delete, or a fold had the engine locked. The task that has the engine
     /// locked applies it when it releases the engine, or the next task to
-    /// lock the engine does. A publish also applies it after its put, before
-    /// it seeds the read cache.
+    /// lock the engine does.
     pending_position: Arc<Mutex<Option<PositionChange>>>,
     /// The engine's position as of the last release of the engine, which
     /// reads in this runtime start from.
@@ -1085,12 +1082,18 @@ impl NamespacePublisher {
             }
         };
         let position = self.read_position.prepare(position);
-        {
+        let started = {
             let pending = lock_state(&self.pending_position);
             let drops = matches!(*pending, Some(PositionChange::Drop));
-            self.read_position.store(position.filter(|_| !drops));
-        }
+            self.read_position.store(position.filter(|_| !drops))
+        };
         drop(slot);
+        if started {
+            // Reads start from the position from now on, so the anchor that
+            // reads used before it would only be a second copy of the head.
+            self.runtime_core
+                .invalidate_namespace_read_cache(&self.namespace_id);
+        }
     }
 
     /// Places the candidate's inline content, then admits it before awaiting
@@ -1504,16 +1507,11 @@ impl NamespacePublisher {
     ) -> Vec<Result<Commit, CoreError>> {
         let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
-        let publish = crate::fs::publish_batch_with_engine(
-            &self.runtime_core,
-            &self.namespace_id,
-            engine,
-            candidates,
-            context,
-            batch,
-            |engine| self.apply_pending_position(engine),
-        )
-        .await;
+        let store = self.runtime_core.store();
+        // Boxing erases the engine's deeply nested publish future. Without
+        // it, callers awaiting a put or commit (CLI, server, embedding
+        // crates) exceed rustc's type-recursion depth.
+        let publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
         if publish
             .wal_tail
             .is_some_and(|tail| tail.source == TailSource::Store)
