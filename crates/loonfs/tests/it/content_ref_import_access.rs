@@ -65,6 +65,17 @@ async fn open_writer() -> (
     Arc<RecordingStore<LocalFsStore>>,
     LoonFs<Writable>,
 ) {
+    open_writer_on(Arc::new(loonfs_types::StdMonotonicTimer::default())).await
+}
+
+/// Creates a writer runtime whose reads measure time on `timer`.
+async fn open_writer_on(
+    timer: Arc<dyn loonfs_types::MonotonicTimer>,
+) -> (
+    tempfile::TempDir,
+    Arc<RecordingStore<LocalFsStore>>,
+    LoonFs<Writable>,
+) {
     let directory = tempfile::tempdir().expect("directory");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -76,6 +87,7 @@ async fn open_writer() -> (
             "content-ref-import-access",
         ))
         .min_publish_interval_ms(0)
+        .monotonic_timer(timer)
         .build()
         .await
         .expect("writer");
@@ -316,7 +328,8 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
 
 #[tokio::test]
 async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
-    let (_directory, recording, writer) = open_writer().await;
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
+    let (_directory, recording, writer) = open_writer_on(clock.clone()).await;
     let source = namespace_id("reclaimed-source");
     let destination = namespace_id("destination");
     create_namespace(&writer, &source, acl("administrator")).await;
@@ -345,6 +358,10 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     .await
     .expect("collect retired content");
     assert_eq!(report.deleted.retired_content_objects, 1);
+    // Retirement comes long after the revalidation bound, so by then the
+    // runtime no longer trusts its cached view of the deleted owner, which
+    // collection may have outdated.
+    clock.advance_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS);
 
     recording.reset();
     let error = destination_writer

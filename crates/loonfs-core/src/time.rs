@@ -3,6 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::limits::{METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS};
 use loonfs_types::NamespaceId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,15 +14,18 @@ pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 pub struct Deadline {
     timer: Arc<dyn MonotonicTimer>,
     started_at_ms: u64,
+    started_order: u64,
 }
 
 impl Deadline {
     /// Starts a deadline at the timer's current time.
     pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
+        let started_order = next_observation_order();
         let started_at_ms = timer.monotonic_now_ms();
         Self {
             timer,
             started_at_ms,
+            started_order,
         }
     }
 
@@ -44,6 +48,7 @@ impl Deadline {
         Observation {
             timer: Arc::clone(&self.timer),
             at_ms: self.started_at_ms,
+            order: self.started_order,
         }
     }
 
@@ -71,18 +76,34 @@ impl Deadline {
     }
 }
 
+/// The order of the next observation that the process takes.
+static NEXT_OBSERVATION_ORDER: AtomicU64 = AtomicU64::new(0);
+
+fn next_observation_order() -> u64 {
+    NEXT_OBSERVATION_ORDER.fetch_add(1, Ordering::SeqCst)
+}
+
 /// One reading of a monotonic timer, used to measure the age of a check.
 #[derive(Debug, Clone)]
 pub struct Observation {
     timer: Arc<dyn MonotonicTimer>,
     at_ms: u64,
+    /// Where this observation falls among every observation that the
+    /// process takes. Two readings in the same millisecond have the same
+    /// time, so the order is what tells which one was taken first.
+    order: u64,
 }
 
 impl Observation {
     /// Reads the timer's current time.
     pub fn now(timer: Arc<dyn MonotonicTimer>) -> Self {
+        let order = next_observation_order();
         let at_ms = timer.monotonic_now_ms();
-        Self { timer, at_ms }
+        Self {
+            timer,
+            at_ms,
+            order,
+        }
     }
 
     /// Reads the same timer again.
@@ -101,6 +122,22 @@ impl Observation {
     /// [`READ_REVALIDATION_BOUND_MS`] after the view's previous check (format section 4.2).
     pub fn is_within_revalidation_bound(&self) -> bool {
         self.age_ms() < READ_REVALIDATION_BOUND_MS
+    }
+
+    /// Returns whether this observation was taken after `other`. When one
+    /// observation was taken before the other began, the order of the two
+    /// observations follows, also within one millisecond.
+    pub fn is_after(&self, other: &Self) -> bool {
+        self.order > other.order
+    }
+
+    /// Returns the newer of this observation and `other`.
+    pub fn newer(self, other: Self) -> Self {
+        if other.is_after(&self) {
+            other
+        } else {
+            self
+        }
     }
 
     pub(crate) fn age_at(&self, observation: &Self) -> u64 {

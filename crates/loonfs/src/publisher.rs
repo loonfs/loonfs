@@ -376,8 +376,9 @@ impl PublisherRegistry {
         Ok(session)
     }
 
-    /// Drops the namespace's read anchor, and tells the namespace's publisher
-    /// how a mutation outside the publisher changed the namespace.
+    /// Marks the namespace's cached head unconfirmed, and tells the
+    /// namespace's publisher how a mutation outside the publisher changed
+    /// the namespace.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId, change: NamespaceChange) {
         self.runtime_core
             .invalidate_namespace_read_cache(namespace_id);
@@ -983,7 +984,7 @@ impl NamespacePublisher {
             return;
         }
         // Reads stop finding the session once it's removed, so its position
-        // ends here, and the anchor with it.
+        // ends here and becomes the namespace's cached head.
         self.read_position.clear();
         registry.sessions.remove(&self.namespace_id);
         self.runtime_core
@@ -1098,13 +1099,13 @@ impl NamespacePublisher {
     /// clears the slot itself, either at once or through the next release,
     /// so a release never puts back a position that a queued drop removed.
     /// An engine with no position clears the slot before the lock is taken,
-    /// because clearing the slot drops the read cache's anchor, which calls
-    /// into the cache's metrics.
+    /// because clearing the slot installs the position as the namespace's
+    /// cached head, which calls into the cache's metrics.
     fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
-            // from the read cache until the next release, and the change
-            // waits for the next task that locks the engine.
+            // from the namespace's cached head until the next release, and
+            // the change waits for the next task that locks the engine.
             self.read_position.clear();
             return;
         }
@@ -1119,24 +1120,20 @@ impl NamespacePublisher {
             }
         };
         let position = self.read_position.prepare(position);
-        if position.is_none() {
-            self.read_position.clear();
-        }
-        let started = {
-            let pending = lock_state(&self.pending_position);
-            let drops = matches!(*pending, Some(PositionChange::Drop));
-            match position.filter(|_| !drops) {
-                Some(position) => self.read_position.store(position),
-                None => false,
-            }
-        };
-        drop(slot);
-        if started {
-            // Reads start from the position from now on, so the anchor that
-            // reads used before it would only be a second copy of the head.
+        if position.is_none() && self.read_position.clear() && self.session_is_fenced() {
+            // Another writer took the namespace over, so the position that
+            // just became the cached head is out of date.
             self.runtime_core
                 .invalidate_namespace_read_cache(&self.namespace_id);
         }
+        {
+            let pending = lock_state(&self.pending_position);
+            let drops = matches!(*pending, Some(PositionChange::Drop));
+            if let Some(position) = position.filter(|_| !drops) {
+                self.read_position.store(position);
+            }
+        }
+        drop(slot);
     }
 
     /// Places the candidate's inline content, then admits it before awaiting

@@ -14,6 +14,13 @@ use tokio::sync::OnceCell;
 pub trait DecodedBlock: Clone {
     /// The decoded bytes this value holds, charged against the cache budget.
     fn weight(&self) -> usize;
+
+    /// Whether eviction must skip this value because something outside the
+    /// cache still uses it. A pinned value can keep the cache over its
+    /// budget until it's unpinned.
+    fn pinned(&self) -> bool {
+        false
+    }
 }
 
 /// A key of a [`DecodedBlockCache`].
@@ -362,17 +369,10 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
 
     /// Drops one entry without counting an eviction.
     pub fn invalidate(&self, key: &K) {
-        self.invalidate_with(key, || {});
-    }
-
-    /// Drops one entry as [`Self::invalidate`] does, after running `before`
-    /// in the same critical section, also when the key has no entry.
-    pub fn invalidate_with(&self, key: &K, before: impl FnOnce()) {
         let mut inner = self
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        before();
         if let Some(slot) = inner.entries.remove(key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
             inner.shrink_if_sparse();
@@ -384,18 +384,28 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.config.max_decoded_bytes == 0
     }
 
+    /// Evicts the least recently used entries until the cache is within its
+    /// budget, skipping pinned entries, which keep their place in the order.
     fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
+        let mut pinned = Vec::new();
         while inner.retained_bytes() > self.config.max_decoded_bytes {
             let Some((candidate, stamp)) = inner.order.pop_front() else {
                 break;
             };
             inner.order_key_bytes -= candidate.heap_bytes();
             if slot_is_live(&inner.entries, &candidate, stamp) {
+                if inner.entries[&candidate].block.pinned() {
+                    pinned.push(candidate);
+                    continue;
+                }
                 let slot = inner.entries.remove(&candidate).expect("live entry");
                 inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
                 self.record_eviction(slot.charged_bytes);
             }
             inner.shrink_if_sparse();
+        }
+        for key in pinned {
+            inner.touch(&key);
         }
     }
 

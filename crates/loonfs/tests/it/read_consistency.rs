@@ -393,15 +393,16 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
 }
 
 /// Checks that an eventual read after another writer's takeover drops the
-/// writer's position reads at the current head, not at an anchor from before
+/// writer's position reads at the current head, not at a head from before
 /// the position.
 ///
 /// A read that loads the namespace while the writer has no position can
 /// finish after the writer's next commit starts a new position, with a head
 /// older than the reads from that position. The test parks that load's
-/// manifest check until the commit returns. The position's start fences the
-/// load's install, and the takeover's drop of the position leaves no anchor
-/// either, so an eventual read with a long maximum staleness loads the namespace again.
+/// manifest check until the commit returns. When the takeover's check finds
+/// the new writer's claim, the position becomes the namespace's cached head
+/// and is marked unconfirmed, so an eventual read with a long maximum
+/// staleness confirms the head and loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
@@ -462,11 +463,10 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
 /// The steps follow the race. The load reads the WAL at the first commit's
 /// head and waits on its manifest check. The writer commits again, a read
 /// from the writer's position returns that newer head, the session closes,
-/// and then the load finishes. The position's start and the session's close
-/// each drop the namespace's anchor while the slot is empty, and each drop
-/// advances the slot's absence generation, which fences the load's install.
-/// Without that advance, the load would install its older anchor, and the
-/// eventual read at the end would return the first commit's head.
+/// and then the load finishes. The session's close makes its position the
+/// namespace's cached head, and the load's older result doesn't replace a
+/// newer head, so the load starts from the position's head, and so does the
+/// eventual read at the end.
 #[tokio::test]
 async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     let fixture = writer_position_reads::fixture("spanning-load", Parked::ManifestChecks).await;
@@ -498,11 +498,9 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
         positioned
     });
     let loaded = loaded.expect("the load");
-    assert!(
-        loaded.head_seq < positioned.head_seq,
-        "the load's head {} is older than the position's {}",
-        loaded.head_seq,
-        positioned.head_seq
+    assert_eq!(
+        loaded.head_seq, positioned.head_seq,
+        "the load starts from the head that the session's close installed"
     );
     let entry = fixture
         .reader
@@ -518,40 +516,41 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     assert_eq!(entry.head_seq, positioned.head_seq);
 }
 
-/// Checks that of two cold loads of one namespace in a reader runtime, the
-/// older one finishing last doesn't replace the newer head in the read
-/// cache.
+/// Checks that cold loads of one namespace in a reader runtime run one at a
+/// time, so the newer head stays cached whatever order the loads started in.
 ///
 /// The first load reads the WAL and waits on its manifest check. The writer
-/// commits, and a second load reads the newer head and installs it. Both
-/// loads found the slot empty, so the first load's install is fenced when it
-/// finishes, and that read starts from the newer anchor instead.
+/// commits, and a second read of the namespace waits for the first load to
+/// finish, then confirms the head from the first load's tip and finds the
+/// commit.
 #[tokio::test]
-async fn an_older_cold_load_finishing_last_leaves_the_newer_head_cached() {
+async fn concurrent_cold_loads_of_one_namespace_leave_the_newer_head_cached() {
     let fixture = fixture("concurrent-cold-loads").await;
     let gate = fixture.recording.inner();
     gate.block_next();
-    let (older, newer) = futures::join!(fixture.reader.stat("/file.txt"), async {
+    let (first, (second, commit)) = futures::join!(fixture.reader.stat("/file.txt"), async {
         gate.wait_until_blocked().await;
         let commit = fixture
             .namespace
             .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
             .await
             .expect("a commit while the first load waits");
-        let newer = fixture
-            .reader
-            .stat("/next.txt")
-            .await
-            .expect("a second cold load");
-        assert_eq!(newer.head_seq, commit.committed_seq);
-        gate.release();
-        newer
+        // The second read waits for the first load's refresh, and the
+        // release below lets the first load finish.
+        let (second, ()) = futures::join!(fixture.reader.stat("/next.txt"), async {
+            gate.release();
+        });
+        (second, commit)
     });
-    let older = older.expect("the first cold load");
-    assert_eq!(
-        older.head_seq, newer.head_seq,
-        "the fenced load starts from the newer anchor"
+    let first = first.expect("the first cold load");
+    let second = second.expect("the second read");
+    assert!(
+        first.head_seq < commit.committed_seq,
+        "the first load's head {} is from before the commit at {}",
+        first.head_seq,
+        commit.committed_seq
     );
+    assert_eq!(second.head_seq, commit.committed_seq);
     let entry = fixture
         .reader
         .stat_with_options(
@@ -563,6 +562,54 @@ async fn an_older_cold_load_finishing_last_leaves_the_newer_head_cached() {
         )
         .await
         .expect("an eventual read after both loads");
-    assert_eq!(entry.head_seq, newer.head_seq);
+    assert_eq!(entry.head_seq, commit.committed_seq);
     fixture.shutdown().await;
+}
+
+/// Checks that a writer session's position becomes the namespace's cached
+/// head when the session closes. An eventual read within its maximum
+/// staleness then sends no request, and the next strong read sends only the
+/// WAL probe, without loading the namespace from the store.
+#[tokio::test]
+async fn a_closed_sessions_position_becomes_the_cached_head() {
+    let fixture = writer_position_reads::fixture("closed-session", Parked::WalPuts).await;
+    let commit = fixture.put("/next.txt").await.expect("commit");
+    fixture
+        .writer
+        .open_namespace(&fixture.namespace_id)
+        .expect("a handle on the session")
+        .close()
+        .await
+        .expect("close the session");
+    fixture.recording.reset();
+    let entry = fixture
+        .reader
+        .stat_with_options(
+            "/next.txt",
+            &StatOptions {
+                consistency: Consistency::Eventual {
+                    max_staleness: None,
+                },
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("an eventual read after the close");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    assert_eq!(fixture.recording.take(), []);
+
+    let entry = fixture
+        .reader
+        .stat("/next.txt")
+        .await
+        .expect("a strong read after the close");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    assert_matches!(
+        fixture.recording.take().as_slice(),
+        [RecordedOperation::Get {
+            key,
+            range: None,
+            result_bytes: 0,
+        }] if key.starts_with(&wal_prefix(&fixture.namespace_id))
+    );
 }

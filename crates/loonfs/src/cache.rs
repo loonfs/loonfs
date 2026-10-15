@@ -1,8 +1,8 @@
 //! The heads that runtime reads start from: the position of the namespace's
-//! writer session in this runtime, or else the read cache's anchor. An
-//! anchor's WAL probe finds new commits, and the interval check of either
-//! head finds a newer manifest. An eventual read skips both while the anchor's
-//! head was confirmed less than its maximum staleness ago.
+//! writer session in this runtime, or else the namespace's cached head. A
+//! cached head's WAL probe finds new commits, and the interval check of
+//! either head finds a newer manifest. An eventual read skips both while the
+//! cached head was confirmed less than its maximum staleness ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -10,7 +10,7 @@ use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
 use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
-use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
+use loonfs_core::cache::{CachedHead, WalTailProjectionCacheKey};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor_cached, load_snapshot_read_basis,
     manifest_has_successor, project_anchor_tail, CheckpointReadBasis, MetadataBasis,
@@ -37,48 +37,41 @@ impl RuntimeCore {
         if let Some(position) = self.writer_position(namespace_id) {
             return Some(self.read_context(position.head.clone(), position.basis.clone()));
         }
-        let anchor = self.inner.head_state.get_anchor(namespace_id)?;
-        Some(self.read_context(anchor.head.clone(), anchor.basis.clone()))
+        let cached = self.inner.head_state.peek_head(namespace_id)?.current()?;
+        Some(self.read_context(cached.head, cached.basis))
     }
 
-    /// Looks up the head for a load and counts the hit or miss. A
-    /// speculative read peeks first and then loads, so only the load counts.
-    fn find_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
-        let head = self.inner.head_state.get_anchor(namespace_id);
+    /// Records whether a load found the namespace's head in the read cache.
+    /// A speculative read peeks first and then loads, so only the load is
+    /// recorded.
+    fn record_head_lookup(&self, found: bool) {
         self.inner
             .metadata_cache
-            .record_head_anchor_lookup(if head.is_some() {
+            .record_head_anchor_lookup(if found {
                 CacheLookup::Hit
             } else {
                 CacheLookup::Miss
             });
-        head
     }
 
-    /// Returns the namespace's anchor, revalidated or loaded for this read.
+    /// Returns the namespace's cached head, confirmed or loaded for this
+    /// read.
     ///
-    /// The read takes the slot's ticket before it sends any request, and it
-    /// installs its result only if the slot hasn't changed since (see
-    /// [`HeadStateCache::replace_anchor`](loonfs_core::cache::HeadStateCache::replace_anchor)).
-    /// Loads of one namespace can run at once, for example when the slot is
-    /// empty, and the ticket keeps the order they finish in from mattering.
-    /// A refused install doesn't fail the read. The read starts from the
-    /// slot's anchor, which is at least as new as its own result, or from
-    /// its own result when the slot is empty.
+    /// Refreshes of one namespace take its head's refresh lock, so they run
+    /// one at a time, and a read that waited for a refresh that started
+    /// after the read arrived starts from that refresh's result. A refresh
+    /// installs its result through
+    /// [`NamespaceHead::replace`](loonfs_core::cache::NamespaceHead::replace),
+    /// which keeps the newer of the result and the current head, and the
+    /// read starts from whichever head is current afterwards.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<Arc<CachedReadAnchor>, CoreError> {
-        let ticket = self.inner.head_state.anchor_ticket(namespace_id);
-        let validation = self
-            .inner
-            .head_state
-            .peek_anchor(namespace_id)
-            .map(|head| Arc::clone(&head.validation))
-            .unwrap_or_default();
-        let observed_validation_no = validation.started.load(Ordering::SeqCst);
-        let _validation = validation
-            .lock
+    ) -> std::result::Result<CachedHead, CoreError> {
+        let namespace_head = self.inner.head_state.namespace_head(namespace_id);
+        let observed_validation_no = namespace_head.started.load(Ordering::SeqCst);
+        let _refresh = namespace_head
+            .refresh
             .lock()
             .instrument(tracing::debug_span!(
                 target: "loonfs::page",
@@ -87,64 +80,80 @@ impl RuntimeCore {
                 namespace_id = %namespace_id,
             ))
             .await;
-        let reusable = self
-            .inner
-            .head_state
-            .get_anchor(namespace_id)
-            .filter(|head| {
-                Arc::ptr_eq(&head.validation, &validation)
-                    && head.completed_validation_no > observed_validation_no
-            });
+        let reusable = (namespace_head
+            .completed_validation_no
+            .load(Ordering::SeqCst)
+            > observed_validation_no)
+            .then(|| namespace_head.current())
+            .flatten()
+            .filter(|current| current.head_confirmed.is_some());
         if let Some(head) = reusable {
-            // A successful validation started after this read arrived, so
-            // its observation is inside our read interval. A probe already
-            // in flight when we arrived can't authorize this shortcut,
-            // because it may have observed the store before an intervening
-            // write completed.
+            // A successful refresh started after this read arrived, so its
+            // observation is inside our read interval, and no change marked
+            // the head unconfirmed since. A probe already in flight when we
+            // arrived can't authorize this shortcut, because it may have
+            // observed the store before an intervening write completed.
             let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
-            self.inner
-                .metadata_cache
-                .record_head_anchor_lookup(CacheLookup::Hit);
+            self.record_head_lookup(true);
             return Ok(head);
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
         // sharing, since no later validation number can exceed the observed one.
-        let validation_no = validation
+        let validation_no = namespace_head
             .started
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map(|previous| previous + 1)
             .unwrap_or(u64::MAX);
         let result = self
-            .refresh_namespace_head(namespace_id)
+            .refresh_namespace_head(namespace_id, namespace_head.current())
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
             .await;
         match result {
-            Ok(mut head) => {
-                head.validation = Arc::clone(&validation);
-                head.completed_validation_no = validation_no;
-                let head = Arc::new(head);
-                match self
-                    .inner
+            Ok(candidate) => {
+                let current = namespace_head.replace(candidate);
+                namespace_head
+                    .completed_validation_no
+                    .store(validation_no, Ordering::SeqCst);
+                self.inner
                     .head_state
-                    .replace_anchor(ticket, Arc::clone(&head))
-                {
-                    Ok(head) => Ok(head),
-                    Err(fenced) => Ok(fenced.current.unwrap_or(head)),
-                }
+                    .recharge_head(namespace_id, &namespace_head);
+                Ok(current)
             }
             Err(error) => {
-                self.inner.head_state.invalidate_anchor(namespace_id);
+                namespace_head.unconfirm(Observation::now(Arc::clone(&self.inner.timer)));
                 Err(error)
             }
         }
     }
 
+    /// Loads the namespace's head from the store, without starting from the
+    /// cached head, and installs it through
+    /// [`NamespaceHead::replace`](loonfs_core::cache::NamespaceHead::replace).
+    ///
+    /// A read that finds a segment of its basis missing reloads this way,
+    /// because the newer manifest that replaced its basis is what it needs,
+    /// and a refresh from the cached head would read the same basis again.
+    pub(crate) async fn reload_namespace_head(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> std::result::Result<CachedHead, CoreError> {
+        let namespace_head = self.inner.head_state.namespace_head(namespace_id);
+        let _refresh = namespace_head.refresh.lock().await;
+        let loaded = self.refresh_namespace_head(namespace_id, None).await?;
+        let current = namespace_head.replace(loaded);
+        self.inner
+            .head_state
+            .recharge_head(namespace_id, &namespace_head);
+        Ok(current)
+    }
+
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedReadAnchor, CoreError> {
-        if let Some(cached) = self.find_namespace_head(namespace_id) {
-            let mut head = CachedReadAnchor::clone(&cached);
+        cached: Option<CachedHead>,
+    ) -> std::result::Result<CachedHead, CoreError> {
+        self.record_head_lookup(cached.is_some());
+        if let Some(mut head) = cached {
             // Measure every answer against the previous check, not against the probe
             // it answers. A successor published after that check cannot be collected
             // within the bound. An answer that arrives later may miss one, however
@@ -156,7 +165,10 @@ impl RuntimeCore {
                 .filter(Observation::is_within_revalidation_bound)
             {
                 let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
-                let check_due = checked.age_ms() >= interval_ms;
+                // An unconfirmed head checks for a successor whatever the
+                // interval, because the runtime learned of a change since the
+                // last check.
+                let check_due = head.head_confirmed.is_none() || checked.age_ms() >= interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
@@ -174,7 +186,7 @@ impl RuntimeCore {
                     if checked.is_within_revalidation_bound()
                         && probed.map_err(MetadataProjectionLoadError::LoadHead)?
                     {
-                        head.head_confirmed = observed.clone();
+                        head.head_confirmed = Some(observed.clone());
                         if check_due {
                             head.basis_checked = Some(observed);
                         }
@@ -210,17 +222,18 @@ impl RuntimeCore {
                 tail,
             );
         }
-        Ok(cached_anchor(loaded, observed))
+        Ok(cached_head(loaded, observed))
     }
 
     /// Returns the read context of the namespace's current head.
     ///
     /// In a runtime with the namespace's writer session, the head is the
     /// session's position (see [`Self::checked_writer_position`]), whatever
-    /// the consistency. Otherwise it's the read cache's anchor. An eventual read
-    /// takes the anchor as it is while its head was confirmed less than the
-    /// read's maximum staleness ago (see [`Self::eventual_anchor`]), and every other
-    /// read revalidates or loads the anchor.
+    /// the consistency. Otherwise it's the namespace's cached head. An
+    /// eventual read takes the cached head as it is while it was confirmed
+    /// less than the read's maximum staleness ago (see
+    /// [`Self::eventual_head`]), and every other read confirms or loads the
+    /// head.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
@@ -232,38 +245,35 @@ impl RuntimeCore {
                 ReadHeadSource::Position,
             ),
             None => {
-                let (anchor, source) = match self.eventual_anchor(namespace_id, consistency) {
-                    Some(anchor) => (anchor, ReadHeadSource::Eventual),
+                let (head, source) = match self.eventual_head(namespace_id, consistency) {
+                    Some(head) => (head, ReadHeadSource::Eventual),
                     None => (
                         self.load_namespace_head_cached(namespace_id).await?,
                         ReadHeadSource::Anchor,
                     ),
                 };
-                (
-                    self.read_context(anchor.head.clone(), anchor.basis.clone()),
-                    source,
-                )
+                (self.read_context(head.head, head.basis), source)
             }
         };
         self.inner.instruments.read_head(source);
         Ok(context)
     }
 
-    /// Returns the read cache's anchor for an eventual read that can take it
-    /// without a request, or `None` when the read confirms the head the way a
-    /// `strong` read does.
+    /// Returns the namespace's cached head for an eventual read that can take
+    /// it without a request, or `None` when the read confirms the head the
+    /// way a `strong` read does.
     ///
-    /// An eventual read takes the anchor while the anchor's head was confirmed
+    /// An eventual read takes the cached head while the head was confirmed
     /// less than the read's maximum staleness ago, so the read sees every
-    /// commit acknowledged before that confirmation. The anchor's manifest check
-    /// must also be younger than the revalidation bound, because garbage
-    /// collection may delete the segments of a superseded manifest once the
-    /// bound passes (format section 4.2).
-    fn eventual_anchor(
+    /// commit acknowledged before that confirmation. The head's manifest
+    /// check must also be younger than the revalidation bound, because
+    /// garbage collection may delete the segments of a superseded manifest
+    /// once the bound passes (format section 4.2).
+    fn eventual_head(
         &self,
         namespace_id: &NamespaceId,
         consistency: Consistency,
-    ) -> Option<Arc<CachedReadAnchor>> {
+    ) -> Option<CachedHead> {
         let Consistency::Eventual { max_staleness } = consistency else {
             return None;
         };
@@ -271,19 +281,20 @@ impl RuntimeCore {
             .map_or(self.inner.config.max_staleness_ms, |max_staleness| {
                 u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
             });
-        let anchor = self.inner.head_state.get_anchor(namespace_id)?;
-        let confirmed = anchor.head_confirmed.age_ms() < max_staleness_ms
-            && anchor
+        let cached = self.inner.head_state.get_head(namespace_id)?.current()?;
+        let confirmed = cached
+            .head_confirmed
+            .as_ref()
+            .is_some_and(|confirmed| confirmed.age_ms() < max_staleness_ms)
+            && cached
                 .basis_checked
                 .as_ref()
                 .is_some_and(Observation::is_within_revalidation_bound);
         if !confirmed {
             return None;
         }
-        self.inner
-            .metadata_cache
-            .record_head_anchor_lookup(CacheLookup::Hit);
-        Some(anchor)
+        self.record_head_lookup(true);
+        Some(cached)
     }
 
     pub(crate) fn read_context(
@@ -406,33 +417,42 @@ impl RuntimeCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
-    /// Drops the namespace's head anchor, so its next read revalidates from
-    /// the store. A writer runtime calls `PublisherRegistry::invalidate_namespace`
+    /// Marks the namespace's cached head unconfirmed, after this runtime
+    /// learns of a change to the namespace, so the next strong read confirms
+    /// the head from its known tip, and an eventual read doesn't read at it
+    /// until then (see
+    /// [`NamespaceHead::unconfirm`](loonfs_core::cache::NamespaceHead::unconfirm)).
+    /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
     /// instead, which also tells the namespace's publisher what changed.
     ///
     /// Cached WAL-tail projections stay, the tails writers publish from
     /// included. A tail is keyed by namespace, manifest number, and head
-    /// sequence, and that key names one immutable fact: a namespace id names
-    /// one lifetime, each manifest and WAL number names one object that is
-    /// never replaced or recreated, a fence adds no rows, and a writer inserts
-    /// only a tail it read from the store, a put it saw land, or the commits
-    /// since a fold it published. A tail whose key the reloaded anchor no
-    /// longer uses is never wrong, only unused, and recency evicts it.
+    /// sequence, and that key identifies one immutable fact: a namespace id
+    /// identifies one lifetime, each manifest and WAL number identifies one
+    /// object that is never replaced or recreated, a fence adds no rows, and
+    /// a writer inserts only a tail it read from the store, a put it saw
+    /// written, or the commits since a fold it published. A tail whose key
+    /// the confirmed head no longer uses is never wrong, only unused, and
+    /// recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
-        self.inner.head_state.invalidate_anchor(namespace_id);
+        // The head is created when the cache has none, so that a head the
+        // position installs later doesn't keep a confirmation from before
+        // this change.
+        self.inner
+            .head_state
+            .namespace_head(namespace_id)
+            .unconfirm(Observation::now(Arc::clone(&self.inner.timer)));
     }
 }
 
-/// Returns the anchor that a load observed at `observed` read, with both its
+/// Returns the head that a load observed at `observed` read, with both its
 /// manifest check and its head confirmed at that observation.
-fn cached_anchor(anchor: NamespaceReadAnchor, observed: Observation) -> CachedReadAnchor {
-    CachedReadAnchor {
+fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead {
+    CachedHead {
         basis: anchor.basis(),
         head: anchor.read_state,
         basis_checked: Some(observed.clone()),
-        head_confirmed: observed,
-        validation: Arc::default(),
-        completed_validation_no: 0,
+        head_confirmed: Some(observed),
     }
 }

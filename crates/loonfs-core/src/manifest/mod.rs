@@ -49,9 +49,9 @@ pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{
-    AnchorFenced, AnchorTicket, CacheScope, CachedReadAnchor, HeadStateCache, HeadStateCacheStats,
-    MetadataSegmentCache, MetadataSegmentCacheStats, NamespaceValidation, ObjectStoreScope,
-    SharedHeadState, SharedSegmentBlocks, WalTailProjectionCacheKey,
+    CacheScope, CachedHead, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
+    MetadataSegmentCacheStats, NamespaceHead, ObjectStoreScope, SharedHeadState,
+    SharedSegmentBlocks, WalTailProjectionCacheKey,
 };
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
