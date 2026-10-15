@@ -412,6 +412,7 @@ impl CoreConfig {
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
+                bounded_read_interval_ms: crate::config::DEFAULT_BOUNDED_READ_INTERVAL_MS,
                 metadata_run_policy,
                 execution_budget,
                 trace_mode: self.trace_mode,

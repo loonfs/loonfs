@@ -299,6 +299,11 @@ pub struct CachedReadAnchor {
     pub basis: MetadataBasis,
     /// The successor check that last confirmed `basis`.
     pub basis_checked: Option<Observation>,
+    /// When the WAL probe last confirmed `head`, or when the anchor was
+    /// loaded. The observation is taken before the probe or the load is
+    /// sent, so `head` includes every commit acknowledged before it. A
+    /// bounded read inside its interval reads at `head` without a request.
+    pub head_confirmed: Observation,
     pub validation: Arc<NamespaceValidation>,
     /// The number of the validation that produced this anchor.
     pub completed_validation_no: u64,
@@ -471,11 +476,23 @@ impl HeadStateCache {
             .and_then(HeadStateEntry::into_anchor)
     }
 
+    /// Stores the namespace's anchor, unless the cached anchor is at a
+    /// higher head sequence. A refresh that started before another one can
+    /// finish after it, and keeping the higher head means the head that reads
+    /// start from never moves backwards on a runtime.
     pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
-        self.shared.entries.insert(
-            self.anchor_key(&anchor.head.namespace_id),
-            HeadStateEntry::Anchor(anchor),
-        );
+        let key = self.anchor_key(&anchor.head.namespace_id);
+        let newer = self
+            .shared
+            .entries
+            .peek(&key)
+            .and_then(HeadStateEntry::into_anchor)
+            .is_some_and(|cached| cached.head.seq > anchor.head.seq);
+        if !newer {
+            self.shared
+                .entries
+                .insert(key, HeadStateEntry::Anchor(anchor));
+        }
     }
 
     pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
@@ -543,14 +560,17 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache, MetadataSegmentCacheKey,
-        ObjectStoreScope, SharedSegmentBlocks, WalTailProjectionCacheKey,
+        CachedReadAnchor, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
+        MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState, ObjectStoreScope,
+        SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
+    use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
     use loonfs_types::format::segment_blocks::DecodedDataBlock;
     use loonfs_types::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
+    use loonfs_types::{WalNo, WriterEpoch};
     use std::sync::Arc;
 
     fn block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
@@ -726,6 +746,58 @@ mod tests {
             shares_allocation,
             "a cache hit should share the decoded rows, not clone them"
         );
+    }
+
+    /// Creates an anchor for namespace `demo` at head sequence `seq`.
+    fn anchor_at(seq: u64) -> Arc<CachedReadAnchor> {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        Arc::new(CachedReadAnchor {
+            head: NamespaceReadState {
+                namespace_id: namespace_id.clone(),
+                created_at_ms: 1_000,
+                created_by: loonfs_test_support::test_actor(),
+                access: loonfs_types::NamespaceAccess::Unrestricted {},
+                naming: loonfs_types::NamespaceNaming::CaseInsensitive,
+                fork_basis: None,
+                status: NamespaceStatus::Active {},
+                writer_epoch: WriterEpoch(1),
+                writer: None,
+                seq: ChangeSeq(seq),
+                next_inode_id: InodeId(2),
+                wal_no: WalNo(seq),
+                folded_wal_no: WalNo(0),
+            },
+            basis: MetadataBasis(ManifestRef {
+                owner_namespace_id: namespace_id,
+                manifest_no: ManifestNo(1),
+                head_seq: ChangeSeq(0),
+                payload_checksum: "checksum".to_owned(),
+            }),
+            basis_checked: Some(crate::test_support::observed_now()),
+            head_confirmed: crate::test_support::observed_now(),
+            validation: Arc::default(),
+            completed_validation_no: 0,
+        })
+    }
+
+    /// Checks that an anchor at a lower head sequence doesn't replace the
+    /// cached anchor, and that an anchor at the same or a higher sequence
+    /// does.
+    #[test]
+    fn an_anchor_at_a_lower_head_does_not_replace_the_cached_anchor() {
+        let cache = HeadStateCache::unshared(1 << 20);
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let cached = |cache: &HeadStateCache| cache.get_anchor(&namespace_id).expect("an anchor");
+        let newer = anchor_at(5);
+        cache.insert_anchor(Arc::clone(&newer));
+        cache.insert_anchor(anchor_at(4));
+        assert!(Arc::ptr_eq(&cached(&cache), &newer));
+        let same = anchor_at(5);
+        cache.insert_anchor(Arc::clone(&same));
+        assert!(Arc::ptr_eq(&cached(&cache), &same));
+        let higher = anchor_at(6);
+        cache.insert_anchor(Arc::clone(&higher));
+        assert!(Arc::ptr_eq(&cached(&cache), &higher));
     }
 
     #[tokio::test]

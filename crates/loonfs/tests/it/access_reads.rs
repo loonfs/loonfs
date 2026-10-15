@@ -1,7 +1,9 @@
 //! Subject reads observe access changes through the runtime cache.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs};
+use loonfs::{
+    CreateNamespaceOptions, CurrentFile, DestinationBehavior, Freshness, LoonFs, ReadFileOptions,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -185,6 +187,116 @@ async fn check_buffered_read_access(content_size: usize) {
     let state = &states[0];
     assert_eq!(state.inode_id, inode_id);
     assert_eq!(state.file, CurrentFile::Hidden { readable: false });
+}
+
+/// Checks that a warmed reader's bounded reads see a revocation on the first
+/// read after the bounded interval, and not before.
+///
+/// A bounded read inside its interval reads at the head that the reader
+/// confirmed last, so it still returns the file after the revocation. The
+/// first bounded read after the interval confirms the head and finds the
+/// revocation.
+#[tokio::test]
+async fn a_warmed_reader_sees_a_revocation_on_its_first_bounded_read_after_the_interval() {
+    for content_size in [0, 5, 64 * 1024, 64 * 1024 + 1] {
+        check_bounded_read_access(content_size).await;
+    }
+}
+
+async fn check_bounded_read_access(content_size: usize) {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("bounded-access"))
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("bounded-access");
+    writer
+        .create_namespace_with_options(
+            &namespace_id,
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", AccessRight::Admin),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let bytes = vec![b'a'; content_size];
+    namespace_writer
+        .with_subject(subject("prn_root"))
+        .put_file_with_options(
+            "/team/file",
+            &bytes,
+            &loonfs_test_support::test_actor(),
+            &loonfs::PutFileOptions::default(),
+        )
+        .await
+        .expect("publish file");
+    let access = |grants| {
+        CommitIntent::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::UpdateAccess {
+                path: AbsolutePath::parse("/team").expect("path"),
+                boundary: true,
+                grants,
+                expected_inode_id: None,
+                expected_access_revision_no: None,
+            },
+        )
+        .with_subject(subject("prn_root"))
+    };
+    namespace_writer
+        .commit(access(grants("viewer", AccessRight::Read)))
+        .await
+        .expect("grant read access");
+    // A separate runtime, so the reader confirms the head from the store.
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
+        .monotonic_timer(clock.clone())
+        .build()
+        .await
+        .expect("reader")
+        .with_subject(subject("viewer"));
+    let namespace = reader.namespace(&namespace_id);
+    let bounded = ReadFileOptions {
+        freshness: Freshness::Bounded { interval: None },
+    };
+    let read = namespace
+        .read_file_with_options("/team/file", &bounded)
+        .await
+        .expect("warm read");
+    assert_eq!(read.bytes, bytes);
+    namespace_writer
+        .commit(access(AccessGrants::default()))
+        .await
+        .expect("revoke read access");
+    let read = namespace
+        .read_file_with_options("/team/file", &bounded)
+        .await
+        .expect("a read inside the interval reads the head confirmed before the revocation");
+    assert_eq!(read.bytes, bytes);
+    clock.advance_ms(1_000);
+    assert_eq!(
+        namespace
+            .read_file_with_options("/team/file", &bounded)
+            .await
+            .expect_err("the first read after the interval observes the revocation")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// The manifest check interval of the former writer's runtime in

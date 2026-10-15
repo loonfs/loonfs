@@ -1,7 +1,8 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the read cache's anchor. An
 //! anchor's WAL probe finds new commits, and the interval check of either
-//! head finds a newer manifest.
+//! head finds a newer manifest. A bounded read skips both while the anchor's
+//! head was confirmed less than its interval ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -156,6 +157,7 @@ impl RuntimeCore {
                     if checked.is_within_revalidation_bound()
                         && probed.map_err(MetadataProjectionLoadError::LoadHead)?
                     {
+                        head.head_confirmed = observed.clone();
                         if check_due {
                             head.basis_checked = Some(observed);
                         }
@@ -191,18 +193,21 @@ impl RuntimeCore {
                 tail,
             );
         }
-        Ok(cached_anchor(loaded, Some(observed)))
+        Ok(cached_anchor(loaded, observed))
     }
 
     /// Returns the read context of the namespace's current head.
     ///
     /// In a runtime with the namespace's writer session, the head is the
-    /// session's position (see [`Self::checked_writer_position`]). Otherwise
-    /// it's the read cache's anchor, which the read revalidates or loads.
+    /// session's position (see [`Self::checked_writer_position`]), whatever
+    /// the freshness. Otherwise it's the read cache's anchor. A bounded read
+    /// takes the anchor as it is while its head was confirmed less than the
+    /// read's interval ago (see [`Self::bounded_anchor`]), and every other
+    /// read revalidates or loads the anchor.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
-        _freshness: Freshness,
+        freshness: Freshness,
     ) -> Result<RuntimeReadContext> {
         let (context, source) = match self.checked_writer_position(namespace_id).await? {
             Some(position) => (
@@ -210,15 +215,57 @@ impl RuntimeCore {
                 ReadHeadSource::Position,
             ),
             None => {
-                let anchor = self.load_namespace_head_cached(namespace_id).await?;
+                let (anchor, source) = match self.bounded_anchor(namespace_id, freshness) {
+                    Some(anchor) => (anchor, ReadHeadSource::Bounded),
+                    None => (
+                        self.load_namespace_head_cached(namespace_id).await?,
+                        ReadHeadSource::Anchor,
+                    ),
+                };
                 (
                     self.read_context(anchor.head.clone(), anchor.basis.clone()),
-                    ReadHeadSource::Anchor,
+                    source,
                 )
             }
         };
         self.inner.instruments.read_head(source);
         Ok(context)
+    }
+
+    /// Returns the read cache's anchor for a bounded read that can take it
+    /// without a request, or `None` when the read confirms the head the way a
+    /// `latest` read does.
+    ///
+    /// A bounded read takes the anchor while the anchor's head was confirmed
+    /// less than the read's interval ago, so the read sees every commit
+    /// acknowledged before that confirmation. The anchor's manifest check
+    /// must also be younger than the revalidation bound, because garbage
+    /// collection may delete the segments of a superseded manifest once the
+    /// bound passes (format section 4.2).
+    fn bounded_anchor(
+        &self,
+        namespace_id: &NamespaceId,
+        freshness: Freshness,
+    ) -> Option<Arc<CachedReadAnchor>> {
+        let Freshness::Bounded { interval } = freshness else {
+            return None;
+        };
+        let interval_ms = interval.map_or(self.inner.config.bounded_read_interval_ms, |interval| {
+            u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
+        });
+        let anchor = self.inner.head_state.get_anchor(namespace_id)?;
+        let confirmed = anchor.head_confirmed.age_ms() < interval_ms
+            && anchor
+                .basis_checked
+                .as_ref()
+                .is_some_and(Observation::is_within_revalidation_bound);
+        if !confirmed {
+            return None;
+        }
+        self.inner
+            .metadata_cache
+            .record_head_anchor_lookup(CacheLookup::Hit);
+        Some(anchor)
     }
 
     pub(crate) fn read_context(
@@ -359,14 +406,14 @@ impl RuntimeCore {
     }
 }
 
-fn cached_anchor(
-    anchor: NamespaceReadAnchor,
-    basis_checked: Option<Observation>,
-) -> CachedReadAnchor {
+/// Returns the anchor that a load observed at `observed` read, with both its
+/// manifest check and its head confirmed at that observation.
+fn cached_anchor(anchor: NamespaceReadAnchor, observed: Observation) -> CachedReadAnchor {
     CachedReadAnchor {
         basis: anchor.basis(),
         head: anchor.read_state,
-        basis_checked,
+        basis_checked: Some(observed.clone()),
+        head_confirmed: observed,
         validation: Arc::default(),
         completed_validation_no: 0,
     }

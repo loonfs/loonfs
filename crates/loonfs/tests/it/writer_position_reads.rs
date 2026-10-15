@@ -4,7 +4,8 @@
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    Commit, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore, Writable,
+    Commit, ErrorCode, FoldWalOutcome, Freshness, LoonFs, Namespace, ReadOnly, SharedObjectStore,
+    StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
@@ -173,6 +174,28 @@ async fn reads_after_a_commit_send_no_store_request() {
     assert_eq!(file.bytes, [b's'; 1024]);
     assert_eq!(fixture.recording.take(), []);
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
+}
+
+/// Checks that a bounded read in the writer's runtime starts from the
+/// writer's position and sends no store request, as a `latest` read does.
+#[tokio::test]
+async fn a_bounded_read_starts_from_the_position_with_no_store_request() {
+    let fixture = fixture("bounded-position-reads", Parked::WalPuts).await;
+    let commit = fixture.put("/next.txt").await.expect("commit");
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    let options = StatOptions {
+        freshness: Freshness::Bounded { interval: None },
+        ..StatOptions::default()
+    };
+    let entry = fixture
+        .reader
+        .stat_with_options("/next.txt", &options)
+        .await
+        .expect("stat");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    assert_eq!(fixture.recording.take(), []);
+    assert_eq!(fixture.head_sources(), (positions + 1, anchors));
 }
 
 /// Checks that a read while a publish waits for its WAL put starts from the

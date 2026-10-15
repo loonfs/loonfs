@@ -3,15 +3,18 @@
 //! once per interval.
 
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     ChangeSeq, Error, Freshness, ListChangesOptions, ListOptions, LoonFs, ManifestNo, Namespace,
-    PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore, StatOptions,
-    Writable,
+    NamespaceId, PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
+    StatOptions, Writable,
 };
+use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordedOperation, RecordingStore};
 use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
+use std::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +24,13 @@ const INTERVAL_MS: u64 = 1_000;
 struct Fixture {
     /// Records every request that either runtime sends.
     recording: Arc<RecordingStore<MemoryStore>>,
+    /// The reader runtime's monotonic clock.
+    clock: Arc<ManualClock>,
+    /// The reader runtime's metrics.
+    recorder: Arc<DefaultMetricsRecorder>,
+    namespace_id: NamespaceId,
+    /// The namespace in the writer runtime.
+    namespace: Namespace<Writable>,
     /// The namespace in a separate read-only runtime, which reads from its
     /// read cache's anchor.
     reader: Namespace<ReadOnly>,
@@ -57,22 +67,45 @@ async fn fixture(name: &str) -> Fixture {
         .expect("commit file");
     writer.drain().await.expect("finish hints");
     let clock = Arc::new(ManualClock::new(1_000_000));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let reader = LoonFs::builder_with_store(store)
         .read_only()
         .monotonic_timer(clock.clone())
         .manifest_revalidation_interval_ms(INTERVAL_MS)
+        .metrics_recorder(recorder.clone())
         .build()
         .await
         .expect("reader")
         .namespace(&namespace_id);
     Fixture {
         recording,
+        clock,
+        recorder,
+        namespace_id,
+        namespace,
         reader,
         writer,
     }
 }
 
 impl Fixture {
+    /// Returns how many reader runtime reads took the anchor after
+    /// confirming its head, and how many took it as it was.
+    fn anchor_sources(&self) -> (u64, u64) {
+        let snapshot = self.recorder.snapshot();
+        let source = |label| {
+            let entry = snapshot
+                .by_name("loonfs.read_head.source")
+                .find(|entry| entry.labels == [("source", label)])
+                .unwrap_or_else(|| panic!("no `{label}` read head source"));
+            match entry.value {
+                MetricValue::Counter(value) => value,
+                ref other => panic!("expected a counter, found {other:?}"),
+            }
+        };
+        (source("anchor"), source("bounded"))
+    }
+
     async fn shutdown(self) {
         self.writer.shutdown().await.expect("writer shutdown");
     }
@@ -223,5 +256,127 @@ async fn a_bounded_read_of_a_pinned_view_is_rejected_before_any_request() {
         "freshness",
     );
     assert_eq!(fixture.recording.take(), []);
+    fixture.shutdown().await;
+}
+
+/// Checks that bounded reads in a separate reader runtime send no request
+/// while the reader's head was confirmed less than the interval ago, and
+/// that the first bounded read after the interval sends the WAL probe, plus
+/// the manifest check because the manifest check interval has passed too.
+#[tokio::test]
+async fn a_bounded_read_sends_no_request_inside_its_interval() {
+    let fixture = fixture("bounded-interval").await;
+    let reader = &fixture.reader;
+    let freshness = Freshness::Bounded { interval: None };
+    reader.stat("/file.txt").await.expect("latest stat");
+    reader
+        .list("/")
+        .next()
+        .await
+        .expect("a page")
+        .expect("latest list");
+    reader.read_file("/file.txt").await.expect("latest read");
+    let (anchors, bounded_reads) = fixture.anchor_sources();
+
+    fixture.recording.reset();
+    fixture.clock.advance_ms(INTERVAL_MS - 1);
+    let entry = reader
+        .stat_with_options(
+            "/file.txt",
+            &StatOptions {
+                freshness,
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("bounded stat");
+    reader
+        .list_with_options(
+            "/",
+            &ListOptions {
+                freshness,
+                ..ListOptions::default()
+            },
+        )
+        .next()
+        .await
+        .expect("a page")
+        .expect("bounded list");
+    let file = reader
+        .read_file_with_options("/file.txt", &ReadFileOptions { freshness })
+        .await
+        .expect("bounded read");
+    assert_eq!(file.bytes, b"file");
+    assert_eq!(fixture.recording.take(), []);
+    assert_eq!(fixture.anchor_sources(), (anchors, bounded_reads + 3));
+
+    fixture.clock.advance_ms(1);
+    let confirmed = reader
+        .stat_with_options(
+            "/file.txt",
+            &StatOptions {
+                freshness,
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("bounded stat after the interval");
+    assert_eq!(confirmed.head_seq, entry.head_seq);
+    assert_matches!(
+        fixture.recording.take().as_slice(),
+        [
+            RecordedOperation::Head { key: manifest_key },
+            RecordedOperation::Get {
+                key: wal_key,
+                range: None,
+                result_bytes: 0,
+            },
+        ] if manifest_key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
+            && wal_key.starts_with(&wal_prefix(&fixture.namespace_id))
+    );
+    assert_eq!(fixture.anchor_sources(), (anchors + 1, bounded_reads + 3));
+    fixture.shutdown().await;
+}
+
+/// Checks that the head that reads start from never moves backwards on a
+/// runtime. A bounded read inside its interval can miss another writer's
+/// commit, but after a `latest` read sees the commit, a bounded read with a
+/// long interval reads at that commit's head or a newer one, not at the head
+/// the reader confirmed before it.
+#[tokio::test]
+async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
+    let fixture = fixture("bounded-monotonic").await;
+    let reader = &fixture.reader;
+    let long = StatOptions {
+        freshness: bounded(READ_REVALIDATION_BOUND_MS),
+        ..StatOptions::default()
+    };
+    let before = reader
+        .stat_with_options("/file.txt", &long)
+        .await
+        .expect("first bounded read");
+    let commit = fixture
+        .namespace
+        .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
+        .await
+        .expect("commit");
+    let stale = reader
+        .stat_with_options("/file.txt", &long)
+        .await
+        .expect("bounded read inside the interval");
+    assert_eq!(stale.head_seq, before.head_seq);
+
+    let latest = reader.stat("/next.txt").await.expect("latest read");
+    assert_eq!(latest.head_seq, commit.committed_seq);
+    let after = reader
+        .stat_with_options("/next.txt", &long)
+        .await
+        .expect("bounded read after the latest read");
+    assert!(
+        after.head_seq >= commit.committed_seq,
+        "a bounded read at {} after a latest read at {}",
+        after.head_seq,
+        commit.committed_seq
+    );
     fixture.shutdown().await;
 }
