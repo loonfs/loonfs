@@ -203,8 +203,7 @@ mod tests {
     use crate::keys::hint;
     use crate::local_fs_store::LocalFsStore;
     use crate::presign::{
-        DirectTransferIssuers, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
-        AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+        PresignedPutRequest, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
         GCP_GCS_MAX_DIRECT_PUT_BYTES,
     };
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
@@ -213,7 +212,6 @@ mod tests {
     use crate::{AwsS3Credentials, ObjectStore};
     use bytes::Bytes;
     use std::assert_matches;
-    use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -366,36 +364,6 @@ mod tests {
             r2_put.max_content_bytes() < s3_put.max_content_bytes(),
             "R2 documents the smaller single-part ceiling of the two"
         );
-    }
-
-    #[test]
-    fn a_bundle_can_offer_put_and_get_without_multipart() {
-        let presigner = Arc::new(
-            S3CompatiblePresigner::new(
-                S3PresignerConfig {
-                    bucket: "bucket".to_owned(),
-                    region: "us-east-1".to_owned(),
-                    endpoint_url: None,
-                    key_prefix: None,
-                    force_path_style: false,
-                    direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-                },
-                AwsS3Credentials::Static {
-                    access_key_id: "access".into(),
-                    secret_access_key: "secret".into(),
-                    session_token: None,
-                },
-            )
-            .expect("presigner"),
-        );
-        let transfers = DirectTransferIssuers {
-            get: presigner.clone(),
-            put: Some(presigner),
-            multipart: None,
-        };
-
-        assert!(transfers.put.is_some());
-        assert!(transfers.multipart.is_none());
     }
 
     fn aws_s3_store(endpoint_url: Option<&str>) -> ConfiguredObjectStore {

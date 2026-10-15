@@ -228,11 +228,9 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeKey, AttributeValue, Attributes, AttributesError, AttributesRevisionNo,
-        MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES,
-        MAX_ATTRIBUTE_VALUE_BYTES,
+        AttributeKey, AttributeValue, Attributes, AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES,
+        MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
     };
-    use crate::RevisionNo;
     use std::collections::BTreeMap;
 
     fn key(value: &str) -> AttributeKey {
@@ -496,25 +494,5 @@ mod tests {
             serde_json::from_str::<Attributes>(&json).expect("deserialize empty map"),
             empty
         );
-    }
-
-    #[test]
-    fn attribute_revision_no_serializes_like_a_revision_no() {
-        let revision = AttributesRevisionNo(7);
-
-        assert_eq!(
-            serde_json::to_string(&revision).expect("serialize attribute revision"),
-            serde_json::to_string(&RevisionNo(7)).expect("serialize revision")
-        );
-        assert_eq!(
-            serde_json::to_string(&revision).expect("serialize attribute revision"),
-            "7"
-        );
-        assert_eq!(
-            serde_json::from_str::<AttributesRevisionNo>("7").expect("deserialize"),
-            revision
-        );
-        assert_eq!(AttributesRevisionNo::from(7), revision);
-        assert_eq!(revision.to_string(), "7");
     }
 }

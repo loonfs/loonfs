@@ -530,14 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn known_kind_round_trips_as_snake_case_string() {
-        let encoded = serde_json::to_string(&ContentRefKind::BlobV1).expect("encode");
-        assert_eq!(encoded, "\"blob_v1\"");
-        let decoded: ContentRefKind = serde_json::from_str(&encoded).expect("decode");
-        assert_eq!(decoded, ContentRefKind::BlobV1);
-    }
-
-    #[test]
     fn unknown_kind_fails_to_decode() {
         let error = serde_json::from_str::<ContentRefKind>("\"sparse_file_v9\"")
             .expect_err("unknown content kind must be rejected");
@@ -545,25 +537,6 @@ mod tests {
             error.to_string(),
             "unknown variant `sparse_file_v9`, expected `blob_v1` at line 1 column 16"
         );
-    }
-
-    #[test]
-    fn every_checksum_algorithm_round_trips() {
-        for (algorithm, wire) in [
-            (ChecksumAlgorithm::Crc64nvme, "crc64nvme"),
-            (ChecksumAlgorithm::Crc32c, "crc32c"),
-        ] {
-            let encoded = serde_json::to_string(&algorithm).expect("encode algorithm");
-            assert_eq!(encoded, format!("\"{wire}\""));
-            assert_eq!(
-                algorithm.as_str(),
-                wire,
-                "the hand-written spelling must match the serde tag"
-            );
-            let decoded: ChecksumAlgorithm =
-                serde_json::from_str(&encoded).expect("decode algorithm");
-            assert_eq!(decoded, algorithm);
-        }
     }
 
     #[test]

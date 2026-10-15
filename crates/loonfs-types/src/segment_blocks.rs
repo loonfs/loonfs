@@ -1296,61 +1296,43 @@ mod tests {
 
     #[test]
     fn decoding_rejects_out_of_order_index_entries() {
-        let entries = vec![
-            index_entry("inode-00000000000000000009", 0, 1),
-            index_entry("inode-00000000000000000003", 0, 1),
-        ];
-        let (bytes, handle) = encode_index(&entries);
+        for (entries, expected) in [
+            (
+                [
+                    index_entry("inode-00000000000000000009", 0, 1),
+                    index_entry("inode-00000000000000000003", 0, 1),
+                ],
+                "key order",
+            ),
+            (
+                [index_entry("a", 10, 1), index_entry("b", 5, 1)],
+                "does not start where",
+            ),
+            (
+                [index_entry("a", 10, 5), index_entry("b", 14, 1)],
+                "does not start where",
+            ),
+            (
+                [index_entry("a", 0, 10), index_entry("b", 20, 1)],
+                "does not start where",
+            ),
+            (
+                [
+                    index_entry("a", u64::MAX - 110, 100),
+                    index_entry("b", u64::MAX - 10, 100),
+                ],
+                "byte range overflows",
+            ),
+        ] {
+            let (bytes, handle) = encode_index(&entries);
 
-        let error =
-            decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("key order"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn decoding_rejects_out_of_order_index_offsets() {
-        let entries = [index_entry("a", 10, 1), index_entry("b", 5, 1)];
-        let (bytes, handle) = encode_index(&entries);
-
-        let error = decode_index_block(&bytes, &handle)
-            .expect_err("descending block offsets should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn decoding_rejects_overlapping_index_ranges() {
-        let entries = [index_entry("a", 10, 5), index_entry("b", 14, 1)];
-        let (bytes, handle) = encode_index(&entries);
-
-        let error = decode_index_block(&bytes, &handle)
-            .expect_err("overlapping block ranges should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn decoding_rejects_a_gap_between_index_blocks() {
-        let entries = [index_entry("a", 0, 10), index_entry("b", 20, 1)];
-        let (bytes, handle) = encode_index(&entries);
-
-        let error = decode_index_block(&bytes, &handle)
-            .expect_err("a gap between block ranges should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
-            "unexpected error: {error}"
-        );
+            let error = decode_index_block(&bytes, &handle).expect_err(expected);
+            assert_matches!(
+                &error,
+                SegmentBlockCodecError::Malformed(message) if message.contains(expected),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1360,23 +1342,6 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("an overflowing single range should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn decoding_rejects_a_final_block_range_past_the_integer_edge() {
-        let entries = [
-            index_entry("a", u64::MAX - 110, 100),
-            index_entry("b", u64::MAX - 10, 100),
-        ];
-        let (bytes, handle) = encode_index(&entries);
-
-        let error = decode_index_block(&bytes, &handle)
-            .expect_err("a trailing overflowing range should be rejected");
         assert_matches!(
             &error,
             SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),

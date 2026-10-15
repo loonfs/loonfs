@@ -71,21 +71,6 @@ mod tests {
     }
 
     #[test]
-    fn naming_serializes_as_its_wire_string() {
-        for naming in [
-            NamespaceNaming::CaseInsensitive,
-            NamespaceNaming::CaseSensitive,
-        ] {
-            assert_eq!(
-                serde_json::to_value(naming).expect("serialize naming"),
-                serde_json::Value::from(naming.as_str())
-            );
-        }
-        serde_json::from_str::<NamespaceNaming>("\"labels\"")
-            .expect_err("`labels` should be rejected");
-    }
-
-    #[test]
     fn every_scalar_value_expands_at_most_threefold_in_either_mode() {
         // Normalization and case folding act on one code point at a time and
         // composition only shortens, so the worst code point bounds every

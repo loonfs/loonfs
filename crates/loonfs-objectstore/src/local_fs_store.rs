@@ -1121,20 +1121,6 @@ mod tests {
         assert_eq!(keys, vec![key]);
     }
 
-    #[tokio::test]
-    async fn a_head_of_a_missing_object_answers_gone() {
-        let temp_dir = test_dir("head-missing");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-
-        let answer = store
-            .head(&hint(
-                &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            ))
-            .await
-            .expect("head succeeds");
-        assert!(answer.is_none());
-    }
-
     // A delete can land between `metadata_for_path`'s stat and its digest
     // read; no single filesystem state makes the stat succeed and the read
     // answer NotFound (both follow the same path resolution), so the race

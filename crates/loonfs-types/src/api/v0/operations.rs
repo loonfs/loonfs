@@ -2810,25 +2810,15 @@ mod tests {
 
     #[test]
     fn a_wal_fold_outcome_from_a_newer_server_decodes_as_unknown() {
+        let newer = serde_json::json!({"outcome": "deferred", "until_ms": 5});
         let outcome: WalFoldStepOutcome =
-            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
-                .expect("a newer outcome decodes");
+            serde_json::from_value(newer.clone()).expect("a newer outcome decodes");
         assert_eq!(outcome, WalFoldStepOutcome::Unknown);
-    }
-
-    #[test]
-    fn a_compaction_step_outcome_from_a_newer_server_decodes_as_unknown() {
         let outcome: CompactionStepOutcome =
-            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
-                .expect("a newer outcome decodes");
+            serde_json::from_value(newer.clone()).expect("a newer outcome decodes");
         assert_eq!(outcome, CompactionStepOutcome::Unknown);
-    }
-
-    #[test]
-    fn a_metadata_compaction_outcome_from_a_newer_server_decodes_as_unknown() {
         let outcome: MetadataCompactionOutcome =
-            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
-                .expect("a newer outcome decodes");
+            serde_json::from_value(newer).expect("a newer outcome decodes");
         assert_eq!(outcome, MetadataCompactionOutcome::Unknown);
     }
 

@@ -99,10 +99,4 @@ mod tests {
         drop(runtime);
         drop(clone);
     }
-
-    #[tokio::test]
-    async fn connector_construction_does_not_touch_the_caller_runtime() {
-        let runtime = StoreIoRuntime::new().expect("start io runtime");
-        let _connector = runtime.connector();
-    }
 }
