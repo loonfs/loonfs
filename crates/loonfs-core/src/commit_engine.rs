@@ -6,7 +6,9 @@ use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{HeadStateCache, MetadataSegmentCache, PublishedManifest};
+use crate::manifest::{
+    HeadStateCache, MetadataSegmentCache, PublishedManifest, WalTailProjectionCacheKey,
+};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -605,6 +607,22 @@ pub struct ResultingReadState {
     pub basis_checked: Observation,
 }
 
+/// The head that reads in a writer session's runtime start from, taken from
+/// the session's commit engine.
+///
+/// The engine put the WAL tail above `basis` at `head` in its head-state
+/// cache under `tail_key`. A read that finds the tail evicted replays it from
+/// the store and inserts it under the same key.
+#[derive(Debug, Clone)]
+pub struct ReadPosition {
+    pub head: NamespaceReadState,
+    pub basis: MetadataBasis,
+    pub tail_key: WalTailProjectionCacheKey,
+    /// When a store observation last confirmed `basis` current: the
+    /// discovery that loaded it, or a HEAD that found no successor.
+    pub basis_checked: Observation,
+}
+
 /// Tracks writer state for one namespace session: unacquired, acquired, or
 /// permanently fenced.
 ///
@@ -931,6 +949,24 @@ impl NamespaceCommitEngine {
                 basis_checked: written.basis_checked,
             },
         )
+    }
+
+    /// Returns the position that reads in this runtime start from, or `None`
+    /// when the engine has no position or its session is fenced.
+    ///
+    /// A fenced session publishes nothing more, so its position would stay
+    /// on a head that the new writer has moved past.
+    pub fn read_position(&self) -> Option<ReadPosition> {
+        if matches!(*self.lock_session(), WriterSessionStatus::Fenced(_)) {
+            return None;
+        }
+        let position = self.publish_tail.as_ref()?;
+        Some(ReadPosition {
+            head: position.head.clone(),
+            basis: position.basis().clone(),
+            tail_key: position.tail_key(&self.namespace_id),
+            basis_checked: self.basis_checked.clone()?,
+        })
     }
 
     /// Returns the session's writer epoch, acquiring it on first use. A fenced

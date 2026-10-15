@@ -333,6 +333,7 @@ impl LoonFsBuilder<Writable> {
             writer.publication_policy,
             execution_budget,
         );
+        core.set_head_positions(publisher.head_positions());
         Ok(LoonFs {
             core,
             mode: Writable { bits, publisher },

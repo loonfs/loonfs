@@ -3234,6 +3234,7 @@ fn segment_write_watch(root: &Path) -> NamespaceOverlapStore<LocalFsStore> {
 }
 
 mod fenced_session;
+mod head_positions;
 mod inline_writer;
 mod pin_folds;
 mod session_compaction;

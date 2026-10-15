@@ -18,6 +18,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::Instrument;
 
+mod read_position;
+
+pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
+
 impl RuntimeCore {
     pub(crate) fn cached_read_context(
         &self,

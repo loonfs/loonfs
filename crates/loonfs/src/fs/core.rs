@@ -1,6 +1,7 @@
 //! The runtime core that read-only and writable runtimes share, and the extra
 //! state a writer holds.
 
+use crate::cache::HeadPositions;
 use crate::config::ReadConfig;
 use crate::metadata_cache::MetadataCacheBinding;
 use crate::metrics::RuntimeInstruments;
@@ -24,7 +25,7 @@ use loonfs_types::{
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 /// The object-store client, configuration, caches, and metrics that
 /// read-only and writable runtimes share.
@@ -51,6 +52,10 @@ pub(crate) struct RuntimeCoreInner {
     pub(crate) object_cache: Arc<ObjectCache>,
     /// Publication, collection, completed-compaction, and view-read metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
+    /// The writer sessions whose positions reads start from. A writable
+    /// runtime sets it once, after it builds its publisher registry. Weak,
+    /// because the registry keeps this core.
+    pub(crate) head_positions: OnceLock<Weak<dyn HeadPositions>>,
 }
 
 /// Actor identity used by a writer.
@@ -103,8 +108,37 @@ impl RuntimeCore {
                 completed_upload_sessions: metadata_cache.completed_upload_sessions,
                 object_cache: Arc::new(metadata_cache.objects),
                 instruments,
+                head_positions: OnceLock::new(),
             }),
         }
+    }
+
+    /// Lets reads start from the positions of `head_positions`'s writer
+    /// sessions.
+    pub(crate) fn set_head_positions(&self, head_positions: Weak<dyn HeadPositions>) {
+        assert!(
+            self.inner.head_positions.set(head_positions).is_ok(),
+            "a runtime core should get its writer sessions once"
+        );
+    }
+
+    /// Returns the position of the namespace's writer session in this
+    /// runtime, or `None` when the runtime has no session for the namespace
+    /// or the session has no position.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "reads start from the position in the next change")
+    )]
+    pub(crate) fn writer_position(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<Arc<loonfs_core::publish::ReadPosition>> {
+        self.inner
+            .head_positions
+            .get()?
+            .upgrade()?
+            .read_position_slot(namespace_id)?
+            .current()
     }
 
     /// Reads the handle's wall clock as unix milliseconds.
