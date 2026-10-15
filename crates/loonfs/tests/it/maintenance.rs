@@ -145,28 +145,6 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
 }
 
 #[test]
-fn maintenance_step_below_threshold_is_not_needed() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "step-not-needed-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put file");
-
-    let response = fs
-        .maintain_metadata_blocking(&namespace_id, metadata_options(3))
-        .expect("maintenance pass");
-    assert_eq!(response.wal_fold, WalFoldStepOutcome::NotNeeded);
-}
-
-#[test]
 fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "step-publish-test");

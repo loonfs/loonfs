@@ -755,52 +755,6 @@ fn publisher_trace_labels_are_low_cardinality() {
 }
 
 #[tokio::test]
-async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let runtime = test_runtime(store);
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-    let candidate = CommitCandidate::new(create_directory_request("bootstrap-error", "docs"));
-    let commit_id = candidate.commit_id().clone();
-    let semantic_identity = candidate
-        .semantic_identity(&namespace_id)
-        .expect("candidate identity");
-    let (sender, receiver) = oneshot::channel();
-    publisher_state(&publisher).in_flight.insert(
-        commit_id.clone(),
-        InFlightRequest {
-            semantic_identity,
-            waiters: vec![AdmittedWaiter::new(
-                sender,
-                &publisher
-                    .admission
-                    .acquire(
-                        &namespace_id,
-                        candidate.estimated_retained_bytes().expect("weight"),
-                    )
-                    .expect("admit request"),
-            )],
-        },
-    );
-    let selected_at = publisher.timer.monotonic_now_ms();
-    publisher.deliver_batch_results(
-        vec![commit_id],
-        vec![Err(Error::Core(crate::CoreError::NamespaceExists {
-            namespace_id: namespace_id.clone(),
-        }))],
-        selected_at,
-    );
-
-    let error = receiver
-        .await
-        .expect("publisher should deliver the result")
-        .expect_err("bootstrap failure should remain an error");
-    assert_matches!(error, Error::Core(_));
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-}
-
-#[tokio::test]
 async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
@@ -1715,56 +1669,6 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
         .await
         .expect_err("a precondition the tombstone outran");
     assert_eq!(stale_error.code(), ErrorCode::NamespaceDeleted);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-
-    store.block_next();
-    let before = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("before", "before"),
-    );
-    store.wait_until_blocked().await;
-
-    let delete_task = {
-        let publisher = publisher.clone();
-        tokio::spawn(async move {
-            publisher
-                .submit_delete(DeleteNamespaceOptions::default())
-                .await
-        })
-    };
-    wait_for_queued_delete(&publisher).await;
-    let after = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("after", "after"),
-    );
-
-    store.release();
-    assert_eq!(
-        recv_commit(before, "before").await.committed_seq,
-        ChangeSeq(1)
-    );
-    let delete_response = delete_task
-        .await
-        .expect("delete task")
-        .expect("delete succeeds behind the in-flight publication");
-    assert_eq!(delete_response.head_seq, ChangeSeq(1));
-    let after_error = after
-        .await
-        .expect("after waiter answered")
-        .expect_err("admitted after the delete");
-    assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

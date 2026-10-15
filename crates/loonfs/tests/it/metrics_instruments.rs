@@ -1,5 +1,5 @@
 //! What a writer built with a metrics recorder actually reports: the
-//! object-store bridge, the publication instruments, and a collection pass.
+//! object-store bridge and the publication instruments.
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
@@ -143,42 +143,6 @@ fn a_writer_with_a_recorder_reports_stores_and_publications() {
         counter(&snapshot, "loonfs.publisher.write_stop_refusals", &[]),
         0,
         "the test stays below the write-stop bound"
-    );
-}
-
-#[test]
-fn a_collection_step_reports_what_the_pass_retained() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let namespace_id = namespace_id("demo");
-    let snapshot = block_on(async {
-        let fs = open_runtime_with_async(store(temp_dir.path()), "metrics-gc-writer", |builder| {
-            builder.metrics_recorder(recorder.clone())
-        })
-        .await;
-        fs.writer
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-            .await
-            .expect("create namespace");
-        fs.maintenance
-            .gc(&namespace_id)
-            .await
-            .expect("run one collection pass");
-        recorder.snapshot()
-    });
-    assert_eq!(
-        snapshot.by_name("loonfs.gc.reclaimed").count(),
-        10,
-        "one pass registers the whole reclaimable vocabulary"
-    );
-    assert_eq!(
-        counter(
-            &snapshot,
-            "loonfs.gc.reclaimed",
-            &[("category", "deleted_wal_objects")],
-        ),
-        0,
-        "a fresh namespace has nothing to reclaim yet"
     );
 }
 

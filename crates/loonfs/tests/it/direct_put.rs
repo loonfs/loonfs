@@ -333,6 +333,7 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
     // validation issues no probe for content the put itself is writing.
     assert_eq!(raw_store.count(OperationSelector::Put), 1);
     assert_eq!(raw_store.count(OperationSelector::Read), 0);
+    assert_eq!(raw_store.count(OperationSelector::Head), 0);
 
     // A replace put rides the same overlapped path: new blob, no probe.
     raw_store.reset();
