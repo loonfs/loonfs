@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use loonfs_types::options::Freshness;
 use loonfs_types::PageRequest;
 
 /// Options for a read of a file's content by path or by inode.
@@ -10,6 +11,9 @@ pub struct ReadFileOptions {
     /// Read the file revision captured by this snapshot instead of the
     /// current one.
     pub snapshot_id: Option<PinId>,
+    /// How recently the server confirms the live head before the read. A
+    /// snapshot read takes only [`Freshness::Latest`].
+    pub freshness: Freshness,
 }
 
 /// Options for creating a namespace.
@@ -38,6 +42,20 @@ impl Default for CreateNamespaceOptions {
 pub struct ListChangesOptions {
     /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<PinId>,
+    /// How recently the server confirms the live head before each page. A
+    /// snapshot's feed takes only [`Freshness::Latest`].
+    pub freshness: Freshness,
+}
+
+/// Adds the freshness query parameters of a live read. A `latest` read sends
+/// neither, so the client also works with a server that doesn't accept them.
+fn push_freshness(query: &mut QueryBuilder, freshness: Freshness) {
+    if let Freshness::Bounded { interval } = freshness {
+        query.push("freshness", "bounded");
+        if let Some(interval) = interval {
+            query.push("freshness_interval_ms", interval.as_millis());
+        }
+    }
 }
 
 /// A pager over directory entries.
@@ -299,6 +317,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -325,6 +344,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -357,6 +377,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -410,6 +431,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -555,6 +577,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         let url = query.build();
         self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -573,7 +596,7 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.file_content_url(spec, None, options.snapshot_id.as_ref()))
+        self.request_bytes(&self.file_content_url(spec, None, options))
             .await
     }
 
@@ -583,8 +606,12 @@ impl Client {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.file_content_url(spec, Some(revision_no), None))
-            .await
+        self.request_bytes(&self.file_content_url(
+            spec,
+            Some(revision_no),
+            &ReadFileOptions::default(),
+        ))
+        .await
     }
 
     /// Streams a file's current content through the server.
@@ -605,12 +632,8 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.file_content_url(
-            spec,
-            None,
-            options.snapshot_id.as_ref(),
-        )))
-        .await
+        self.call_for_response_stream(&self.get(&self.file_content_url(spec, None, options)))
+            .await
     }
 
     /// Streams one retained revision of a file through the server.
@@ -625,7 +648,7 @@ impl Client {
         self.call_for_response_stream(&self.get(&self.file_content_url(
             spec,
             Some(revision_no),
-            None,
+            &ReadFileOptions::default(),
         )))
         .await
     }
@@ -634,7 +657,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
-        snapshot_id: Option<&PinId>,
+        options: &ReadFileOptions,
     ) -> String {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/content",
@@ -645,9 +668,10 @@ impl Client {
         if let Some(revision_no) = revision_no {
             query.push("revision_no", revision_no.0);
         }
-        if let Some(snapshot_id) = snapshot_id {
+        if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         query.build()
     }
 
@@ -670,12 +694,8 @@ impl Client {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.inode_content_url(
-            namespace_id,
-            inode_id,
-            options.snapshot_id.as_ref(),
-        ))
-        .await
+        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, options))
+            .await
     }
 
     /// Streams the current content of a visible file inode through the server,
@@ -711,7 +731,7 @@ impl Client {
         self.call_for_response_stream(&self.get(&self.inode_content_url(
             namespace_id,
             inode_id,
-            options.snapshot_id.as_ref(),
+            options,
         )))
         .await
     }
@@ -749,16 +769,17 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        snapshot_id: Option<&PinId>,
+        options: &ReadFileOptions,
     ) -> String {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
             self.base_url
         ));
-        if let Some(snapshot_id) = snapshot_id {
+        if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
+        push_freshness(&mut query, options.freshness);
         query.build()
     }
 
@@ -895,6 +916,51 @@ mod tests {
             .expect("one page")
             .expect("decoded trash");
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
+    }
+
+    /// Checks that a `latest` read sends neither freshness parameter, and
+    /// that a bounded read sends `freshness=bounded`, plus
+    /// `freshness_interval_ms` when it sets an interval.
+    #[tokio::test]
+    async fn bounded_reads_send_the_freshness_parameters_and_latest_reads_send_none() {
+        let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
+        let read = |freshness| ReadFileOptions {
+            freshness,
+            ..ReadFileOptions::default()
+        };
+        let transport = scripted_transport::script([
+            Outcome::Success(b"file".to_vec()),
+            Outcome::Success(b"file".to_vec()),
+            Outcome::Success(b"file".to_vec()),
+        ]);
+        let client = client_for(&transport);
+        for freshness in [
+            Freshness::Latest,
+            Freshness::Bounded { interval: None },
+            Freshness::Bounded {
+                interval: Some(std::time::Duration::from_millis(2_500)),
+            },
+        ] {
+            client
+                .read_file_with_options(&spec, &read(freshness))
+                .await
+                .expect("read file");
+        }
+        let urls: Vec<_> = transport
+            .sent()
+            .into_iter()
+            .map(|request| request.url)
+            .collect();
+        let content =
+            "http://example.invalid/v0/namespaces/demo/filesystem/content?path=%2Ffile.txt";
+        assert_eq!(
+            urls,
+            [
+                content.to_owned(),
+                format!("{content}&freshness=bounded"),
+                format!("{content}&freshness=bounded&freshness_interval_ms=2500"),
+            ]
+        );
     }
 
     #[tokio::test]

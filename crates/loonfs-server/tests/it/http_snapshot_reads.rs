@@ -402,6 +402,7 @@ async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
 
     let pinned = ReadFileOptions {
         snapshot_id: Some(snapshot.snapshot_id.clone()),
+        ..Default::default()
     };
     assert_eq!(
         harness
@@ -627,6 +628,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 inode_id,
                 &ReadFileOptions {
                     snapshot_id: Some(deleted.snapshot_id.clone()),
+                    ..Default::default()
                 },
             )
             .await

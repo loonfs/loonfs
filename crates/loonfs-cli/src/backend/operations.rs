@@ -146,6 +146,7 @@ impl ResolvedTarget {
                         spec,
                         &ReadFileOptions {
                             snapshot_id: snapshot_id.cloned(),
+                            ..Default::default()
                         },
                     )
                     .await?
@@ -188,6 +189,7 @@ impl ResolvedTarget {
             after_seq,
             &ListChangesOptions {
                 snapshot_id: snapshot_id.cloned(),
+                ..Default::default()
             },
         )
     }
