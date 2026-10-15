@@ -147,7 +147,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
 }
 
 pub(crate) use crate::test_support::mutation_context;

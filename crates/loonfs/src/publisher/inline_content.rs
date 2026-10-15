@@ -56,7 +56,7 @@ impl NamespacePublisher {
             return Ok(plan.candidate);
         }
         let kept = {
-            let slot = self.engine.lock().await;
+            let slot = self.lock_engine().await;
             // Until a publish observes the tail, admit at most one WAL object budget.
             let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
                 self.inline_content
@@ -89,7 +89,7 @@ impl NamespacePublisher {
         }
         let namespace_id = &self.namespace_id;
         {
-            let slot = self.engine.lock().await;
+            let slot = self.lock_engine().await;
             if slot
                 .engine
                 .as_ref()

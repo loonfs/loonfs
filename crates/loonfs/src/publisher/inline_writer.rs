@@ -1051,7 +1051,10 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
     let folds = hold_every_fold_permit(&writer).await;
     let registry = writer.mode.publisher.clone();
     for index in 0..4 {
-        writer.invalidate_namespace(&namespace);
+        writer
+            .mode
+            .publisher
+            .invalidate_namespace(&namespace, NamespaceChange::Unknown);
         namespace_writer
             .put_file_with_options(
                 &format!("/file-{index}"),
@@ -1407,7 +1410,10 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
             .await
             .expect("observe the completed fold");
         assert_eq!(usage.wal_tail_inline_bytes, 0);
-        writer.invalidate_namespace(&namespace);
+        writer
+            .mode
+            .publisher
+            .invalidate_namespace(&namespace, NamespaceChange::Unknown);
         namespace_writer
             .put_file_with_options(
                 "/during",

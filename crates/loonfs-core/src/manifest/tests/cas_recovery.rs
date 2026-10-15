@@ -456,7 +456,8 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         crate::test_support::std_timer(),
     )
     .await
-    .expect("advance");
+    .expect("advance")
+    .response;
     assert_eq!(store.counts().create_if_absent_puts, 1);
     assert_eq!(store.counts().overwrite_puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 1);
@@ -872,7 +873,8 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         crate::test_support::std_timer(),
     )
     .await
-    .expect("claim");
+    .expect("claim")
+    .response;
     assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
     let current = load_current_manifest(&store, &namespace_id)
         .await

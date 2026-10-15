@@ -356,8 +356,8 @@ impl RuntimeCore {
     }
 
     /// Drops the namespace's head anchor, so its next read revalidates from
-    /// the store. A caller that owns a publication service also drops its
-    /// publisher's position; see `LoonFs::invalidate_namespace`.
+    /// the store. A writer runtime calls `PublisherRegistry::invalidate_namespace`
+    /// instead, which also tells the namespace's publisher what changed.
     ///
     /// Cached WAL-tail projections stay, the tails writers publish from
     /// included. A tail is keyed by namespace, manifest number, and head

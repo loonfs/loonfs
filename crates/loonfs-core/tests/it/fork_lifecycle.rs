@@ -93,7 +93,8 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let snapshot = engine
         .create_snapshot("basis".to_owned(), u64::MAX / 2)
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
     let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
     write_file_bytes(
         &store,
@@ -109,7 +110,8 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let floor = engine
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
-        .expect("advance floor");
+        .expect("advance floor")
+        .response;
     assert!(floor.retention_floor_seq > snapshot.captured_seq);
     let mut compacted = false;
     for _ in 0..16 {
@@ -207,15 +209,18 @@ async fn invalid_snapshot_forks_write_nothing() {
     let expired = engine
         .create_snapshot("expired".to_owned(), 1)
         .await
-        .expect("expired snapshot");
+        .expect("expired snapshot")
+        .response;
     let foreign = namespace_engine(&store, &other, &context)
         .create_snapshot("foreign".to_owned(), u64::MAX / 2)
         .await
-        .expect("foreign snapshot");
+        .expect("foreign snapshot")
+        .response;
     let checkpoint = engine
         .create_checkpoint("user".to_owned(), None)
         .await
-        .expect("user checkpoint");
+        .expect("user checkpoint")
+        .response;
     for (snapshot_id, expected_code) in [
         (expired.snapshot_id, ErrorCode::SnapshotGone),
         (foreign.snapshot_id, ErrorCode::SnapshotNotFound),
@@ -249,7 +254,8 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let snapshot = engine
         .create_snapshot("basis".to_owned(), u64::MAX / 2)
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
     let store = BlockingStore::new(
         BlockingStore::new(
             store,
@@ -1048,7 +1054,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
         .create_checkpoint("test-pin".to_owned(), None)
         .await
-        .expect("create source checkpoint");
+        .expect("create source checkpoint")
+        .response;
 
     let source_record = load_pin(&store, &source_namespace_id, &checkpoint.checkpoint_id).await;
     let manifest_key =

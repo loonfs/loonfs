@@ -6,7 +6,7 @@ use crate::cache::{HeadStateCache, MetadataSegmentCache, ObjectCache};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::manifest::FoldWalResponse;
+use crate::manifest::{FoldWalResponse, PublicationReport};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -1325,8 +1325,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// method first folds them into a new manifest without compacting
     /// metadata. `ttl_ms` sets `expires_at_ms`; an expired checkpoint stays
     /// listed and readable, and keeps its manifest retained, until collection
-    /// deletes it. `None` keeps the checkpoint until it is deleted.
-    pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
+    /// deletes it. `None` keeps the checkpoint until it is deleted. The report
+    /// includes the manifest the fold published.
+    pub async fn create_checkpoint(
+        &self,
+        name: String,
+        ttl_ms: Option<u64>,
+    ) -> Result<PublicationReport<Checkpoint>> {
         let context = self.mutation_context();
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::pin::create_pin(
@@ -1343,11 +1348,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Arc::clone(&self.timer),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(|report| report.map(crate::pin::checkpoint_summary))
     }
 
-    /// Creates a snapshot of the current namespace state.
-    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Snapshot> {
+    /// Creates a snapshot of the current namespace state. The report includes
+    /// the manifest that folding the WAL tail first published.
+    pub async fn create_snapshot(
+        &self,
+        name: String,
+        expires_at_ms: u64,
+    ) -> Result<PublicationReport<Snapshot>> {
         let context = self.mutation_context();
         crate::pin::create_pin(
             &self.store,
@@ -1363,7 +1373,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Arc::clone(&self.timer),
         )
         .await
-        .map(crate::pin::snapshot_summary)
+        .map(|report| report.map(crate::pin::snapshot_summary))
     }
 }
 
@@ -1434,8 +1444,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
     /// pin. Superseded manifests become garbage-collection
-    /// candidates once nothing pins them.
-    pub async fn fold_wal(&self) -> Result<FoldWalResponse> {
+    /// candidates once nothing pins them. The report includes the manifest
+    /// this call published.
+    pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         crate::manifest::fold_wal_with_deadline(
             &self.store,
             &self.namespace_id,
@@ -1447,8 +1458,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Claims the namespace compactor epoch for a maintenance runtime.
-    pub async fn claim_compactor(&self) -> Result<CompactorEpoch> {
+    /// Claims the namespace compactor epoch for a maintenance runtime. The
+    /// report includes the manifest that records the claim.
+    pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
         crate::manifest::claim_compactor(&self.store, &self.namespace_id, Arc::clone(&self.timer))
             .await
     }
@@ -1492,11 +1504,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Advances the retention floor toward `target` when a verified checkpoint
-    /// makes it safe.
+    /// makes it safe. The report includes the manifest that records the new
+    /// floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
-    ) -> Result<AdvanceRetentionResponse> {
+    ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
         crate::manifest::advance_retention_floor(
             &self.store,
             self.segment_cache.as_deref(),

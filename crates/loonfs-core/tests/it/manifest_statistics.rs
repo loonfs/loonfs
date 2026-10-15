@@ -220,7 +220,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let snapshot = engine
         .create_snapshot("baseline".to_owned(), u64::MAX / 2)
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
     let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
         .await
         .expect("pin activity");
@@ -244,7 +245,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let layout_snapshot = engine
         .create_snapshot("layout".to_owned(), u64::MAX / 2)
         .await
-        .expect("layout snapshot");
+        .expect("layout snapshot")
+        .response;
     let current = load_namespace_current_manifest(&store, &parent)
         .await
         .expect("manifest");

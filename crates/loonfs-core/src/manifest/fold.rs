@@ -4,6 +4,7 @@ use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
 use super::load::load_basis_metadata_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use super::published::{PublicationReport, PublishedManifest};
 use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit_engine::WalFoldInput;
@@ -28,7 +29,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -65,6 +66,8 @@ pub struct FoldWalResponse {
 pub(crate) struct FoldedBasis {
     /// Reference to the manifest that covers the head.
     pub(crate) manifest: ManifestRef,
+    /// The WAL number that manifest folds through.
+    folded_wal_no: WalNo,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
     /// Current manifest after the attempt.
@@ -72,6 +75,16 @@ pub(crate) struct FoldedBasis {
     /// Sequence covered by `current_manifest_no`.
     pub(super) current_manifest_head_seq: ChangeSeq,
     pub(super) outcome: FoldWalOutcome,
+}
+
+impl FoldedBasis {
+    /// The manifest this attempt published, or `None` when it published none.
+    pub(crate) fn published(&self) -> Option<PublishedManifest> {
+        (self.outcome == FoldWalOutcome::Published).then(|| PublishedManifest::Fold {
+            manifest: self.manifest.clone(),
+            folded_wal_no: self.folded_wal_no,
+        })
+    }
 }
 
 pub(crate) enum TryFoldWalOutcome {
@@ -99,6 +112,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         &tokio::sync::Semaphore::new(32),
     )
     .await
+    .map(|report| report.response)
 }
 
 pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
@@ -108,7 +122,7 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
-) -> Result<FoldWalResponse> {
+) -> Result<PublicationReport<FoldWalResponse>> {
     let basis = fold_wal_basis_with_deadline(
         store,
         namespace_id,
@@ -118,7 +132,10 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
         content_writes,
     )
     .await?;
-    Ok(fold_wal_response(namespace_id, basis))
+    Ok(PublicationReport {
+        published: basis.published(),
+        response: fold_wal_response(namespace_id, basis),
+    })
 }
 
 async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
@@ -296,6 +313,7 @@ fn already_current<S: ObjectStore + ?Sized>(
     let basis_manifest = projection.basis.manifest();
     Some(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
         manifest: basis_manifest.clone(),
+        folded_wal_no: projection.head.wal_no,
         target_head_seq: head_seq,
         current_manifest_no: basis_manifest.manifest_no,
         current_manifest_head_seq: head_seq,
@@ -341,6 +359,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
         manifest: current.manifest(),
+        folded_wal_no: current.folded_wal_no(),
         target_head_seq: projection.head.seq,
         outcome,
     })))

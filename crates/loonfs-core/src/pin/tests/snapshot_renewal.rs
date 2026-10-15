@@ -30,7 +30,8 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             crate::test_support::std_timer(),
         )
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
         let key = keys::pin(&namespace_id, &pin.pin_id);
         let failing = FailStore::new(
             inner.clone(),
@@ -105,7 +106,8 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             crate::test_support::std_timer(),
         )
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .response;
         let store = BlockingStore::new(
             inner.clone(),
             KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
@@ -172,7 +174,8 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         crate::test_support::std_timer(),
     )
     .await
-    .expect("snapshot");
+    .expect("snapshot")
+    .response;
     let store = BlockingStore::new(
         inner.clone(),
         KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),

@@ -56,7 +56,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
     .expect("create checkpoint")
     .checkpoint_id
 }
@@ -497,7 +497,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
     .expect("create snapshot");
 
     let listed = list_all_checkpoints(&store, &namespace_id)
@@ -550,7 +550,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
             crate::test_support::std_timer(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(|report| crate::pin::checkpoint_summary(report.response))
         .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
@@ -586,7 +586,8 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_snapshot_read_checks_live
         crate::test_support::std_timer(),
     )
     .await
-    .expect("create snapshot");
+    .expect("create snapshot")
+    .response;
 
     let listed = list_all_checkpoints(&store, &namespace_id)
         .await

@@ -6,7 +6,7 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::{try_fold_wal, MetadataRunPolicy, TryFoldWalOutcome};
+use crate::manifest::{try_fold_wal, MetadataRunPolicy, PublicationReport, TryFoldWalOutcome};
 use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::WalPublishError;
 use loonfs_objectstore::ObjectStore;
@@ -31,11 +31,15 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<PinPayload> {
+) -> Result<PublicationReport<PinPayload>> {
     validate_pin_owner(&owner)?;
     let deadline = Deadline::start(timer);
     let deadline = &deadline;
     let owner = &owner;
+    // An attempt can publish its fold and then fail to write the pin, so the
+    // report keeps the newest fold any attempt published.
+    let published_slot = std::sync::Mutex::new(None);
+    let published = &published_slot;
     let created = retry_while_contended(|| async move {
         let basis = match try_fold_wal(
             store,
@@ -54,6 +58,11 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
                 )))
             }
         };
+        if let Some(manifest) = basis.published() {
+            *published
+                .lock()
+                .expect("the published-fold slot should not be poisoned") = Some(manifest);
+        }
 
         match create_pin_at_basis(
             store,
@@ -70,7 +79,12 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
         }
     })
     .await?;
-    created
+    Ok(PublicationReport {
+        response: created?,
+        published: published_slot
+            .into_inner()
+            .expect("the published-fold slot should not be poisoned"),
+    })
 }
 
 pub(crate) async fn create_pin_at_basis<S: ObjectStore + ?Sized>(

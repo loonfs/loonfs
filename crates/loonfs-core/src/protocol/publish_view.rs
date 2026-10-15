@@ -2,10 +2,9 @@
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
-use crate::manifest::VerifiedMetadataSegments;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
-    MetadataSegmentCache, WalTailProjectionCacheKey,
+    MetadataSegmentCache, PublishedManifest, VerifiedMetadataSegments, WalTailProjectionCacheKey,
 };
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
@@ -130,37 +129,92 @@ impl PublishTailPosition {
         Some(Arc::new(fold.since))
     }
 
-    /// Moves the position to a manifest that a compaction published, and
-    /// returns whether the position moved.
-    ///
-    /// The position moves only when the compaction's manifest is the
-    /// successor of the position's manifest, has the same `head_seq`, and no
-    /// fold is in progress. (During a fold, `record_wal_fold` moves or drops
-    /// the position when the fold finishes.) The cached WAL tail is still
-    /// correct after the move, for two reasons:
-    ///
-    /// - A compaction copies every field that `NamespaceReadState::from`
-    ///   reads (such as `head_seq`, `folded_wal_no`, `next_inode_id`, and
-    ///   `writer_epoch`) into its manifest, so replay starts from the same
-    ///   head on either manifest.
-    /// - Both manifests list runs, so replay starts from empty base rows on
-    ///   either manifest. A compaction needs runs to merge, and it keeps every
-    ///   live row, including the root directory's.
-    pub(crate) fn reanchor_after_compaction(&mut self, basis: MetadataBasis) -> bool {
-        let succeeds = self
-            .basis
-            .manifest_no()
-            .successor()
-            .is_ok_and(|next| next == basis.manifest_no());
-        if self.fold.is_some() || !succeeds || basis.0.head_seq != self.basis.0.head_seq {
-            return false;
-        }
-        self.basis = basis;
-        true
+    /// Whether a fold of this position's tail is in progress.
+    pub(crate) fn is_folding(&self) -> bool {
+        self.fold.is_some()
     }
 }
 
+/// How a position changed for a manifest that this runtime published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReanchorOutcome {
+    /// The position already uses this manifest or a newer one.
+    Kept,
+    /// The position moved to the manifest, with the tail above it.
+    Moved,
+    /// The position can't move to the manifest, so the engine drops it.
+    Superseded,
+}
+
 impl PublishTailProjection {
+    /// Moves the position to a manifest that this runtime published.
+    ///
+    /// The position moves only to the successor of its manifest. A later
+    /// manifest supersedes the position, because a manifest between the two
+    /// (for example, another writer's claim) could have changed the head
+    /// that the tail starts from. The tail above the new manifest depends on
+    /// the kind of manifest:
+    ///
+    /// - A manifest at its predecessor's head (a compaction, a compactor
+    ///   claim, or a retention advance) has the same tail. It copies every
+    ///   field that `NamespaceReadState::from` reads (such as `head_seq`,
+    ///   `folded_wal_no`, `next_inode_id`, and `writer_epoch`), so replay
+    ///   starts from the same head on either manifest. Both manifests list
+    ///   runs, so replay starts from empty base rows on either manifest. (A
+    ///   compaction needs runs to merge, and it keeps every live row,
+    ///   including the root directory's.)
+    /// - A fold's manifest has the commits after the fold as its tail. A
+    ///   fold folds whole WAL objects, oldest first, so those commits are
+    ///   the chunks after the manifest's `head_seq`. For example, if a fold
+    ///   read the WAL through the commit at sequence 10, and this runtime
+    ///   then wrote the commits at 11 and 12, the tail above the fold's
+    ///   manifest is those two commits. The fold's manifest lists runs,
+    ///   because the fold folded at least one commit.
+    pub(crate) fn reanchor_after_publish(
+        &mut self,
+        published: &PublishedManifest,
+    ) -> ReanchorOutcome {
+        let position = &mut self.position;
+        let manifest = published.manifest();
+        let basis_no = position.basis.manifest_no();
+        if manifest.manifest_no <= basis_no {
+            return ReanchorOutcome::Kept;
+        }
+        assert!(
+            position.fold.is_none(),
+            "the engine should keep a manifest published during a fold until the fold finishes"
+        );
+        let succeeds = basis_no
+            .successor()
+            .is_ok_and(|next| next == manifest.manifest_no);
+        if !succeeds {
+            return ReanchorOutcome::Superseded;
+        }
+        let basis_head_seq = position.basis.0.head_seq;
+        match published {
+            PublishedManifest::SameHead(_) if manifest.head_seq == basis_head_seq => {}
+            PublishedManifest::Fold { folded_wal_no, .. }
+                if position.head.folded_wal_no < *folded_wal_no
+                    && *folded_wal_no <= position.head.wal_no
+                    && basis_head_seq < manifest.head_seq =>
+            {
+                let Some(after) = self
+                    .tail_state
+                    .after_seq(manifest.head_seq, position.head.seq)
+                else {
+                    return ReanchorOutcome::Superseded;
+                };
+                position.head.folded_wal_no = *folded_wal_no;
+                position.wal_tail_objects = position.head.wal_no.0 - folded_wal_no.0;
+                position.wal_tail_inline_bytes = after.inline_bytes();
+                self.tail_state = Arc::new(after);
+            }
+            _ => return ReanchorOutcome::Superseded,
+        }
+        position.basis = MetadataBasis(manifest.clone());
+        ReanchorOutcome::Moved
+    }
+
     pub(crate) fn apply_fold_object(
         &mut self,
         chunk: Option<Arc<TailChunk>>,

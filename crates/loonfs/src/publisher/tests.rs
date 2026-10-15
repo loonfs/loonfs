@@ -2871,7 +2871,9 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     let replays = counter(&recorder, "loonfs.publisher.tail_replays");
 
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance.invalidate_namespace(&namespace_id);
+    maintenance
+        .publisher
+        .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged);
     namespaces[0]
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after", "after",
@@ -2883,6 +2885,47 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
         counter(&recorder, "loonfs.publisher.tail_replays"),
         replays,
         "maintenance drops the read anchor, not the tail the writer publishes from"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a drop of the writer's position that arrives during a publish
+/// waits for the publish to release the engine, instead of being skipped, so
+/// the next publish reads its tail from the store.
+#[tokio::test]
+async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        recorder.clone(),
+    )
+    .await;
+    let namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
+    let replays = counter(&recorder, "loonfs.publisher.tail_replays");
+    let commit = |name| {
+        namespaces[0].commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
+    };
+
+    store.block_next();
+    let (during, ()) = futures::join!(commit("during"), async {
+        store.wait_until_blocked().await;
+        writer
+            .mode
+            .publisher
+            .invalidate_namespace(&namespace_id, NamespaceChange::Unknown);
+        store.release();
+    });
+    during.expect("the publish succeeds");
+    commit("after").await.expect("publish after the drop");
+
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.tail_replays"),
+        replays + 1,
+        "the drop was applied once the publish released the engine"
     );
     writer.shutdown().await.expect("shutdown");
 }

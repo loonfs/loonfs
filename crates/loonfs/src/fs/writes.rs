@@ -39,24 +39,6 @@ impl LoonFs<Writable> {
         self.core
             .writer_engine(&self.mode.bits.identity, namespace_id)
     }
-
-    /// Drops everything this runtime caches for a namespace: the read
-    /// caches, and the rebuildable half of its publisher's publish state.
-    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
-        self.core.invalidate_namespace_read_cache(namespace_id);
-        self.mode.publisher.invalidate_projection(namespace_id);
-    }
-
-    pub(crate) fn finish_namespace_mutation<T>(
-        &self,
-        namespace_id: &NamespaceId,
-        result: Result<T>,
-    ) -> Result<T> {
-        if super::should_invalidate_after_result(&result) {
-            self.invalidate_namespace(namespace_id);
-        }
-        result
-    }
 }
 
 impl Namespace<Writable> {
@@ -64,23 +46,6 @@ impl Namespace<Writable> {
     pub(crate) fn engine(&self) -> NamespaceWriterEngine<crate::SharedObjectStore> {
         self.core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id)
-    }
-
-    /// Drops everything this runtime caches for the namespace: the read
-    /// caches, and the rebuildable half of its publisher's publish state.
-    pub(crate) fn invalidate_namespace(&self) {
-        self.core
-            .invalidate_namespace_read_cache(&self.namespace_id);
-        self.mode
-            .publisher
-            .invalidate_projection(&self.namespace_id);
-    }
-
-    pub(crate) fn finish_namespace_mutation<T>(&self, result: Result<T>) -> Result<T> {
-        if super::should_invalidate_after_result(&result) {
-            self.invalidate_namespace();
-        }
-        result
     }
 
     /// Writes file bytes to a path, refusing to replace an existing file.
@@ -1093,6 +1058,10 @@ impl Namespace<Writable> {
 /// Only the publication service calls this: it owns the engine, and
 /// borrowing it here keeps engine construction and locking in that one
 /// place. Results match candidates in order.
+///
+/// `before_seed` runs after the put and before the seed. A maintenance call
+/// can publish a manifest while the put runs, and moving the engine to that
+/// manifest first keeps the replaced manifest out of the read cache.
 pub(crate) async fn publish_batch_with_engine(
     core: &RuntimeCore,
     namespace_id: &NamespaceId,
@@ -1100,6 +1069,7 @@ pub(crate) async fn publish_batch_with_engine(
     candidates: &[CommitCandidate],
     context: &loonfs_core::MutationContext,
     batch: &loonfs_core::time::Deadline,
+    before_seed: impl FnOnce(&mut loonfs_core::publish::NamespaceCommitEngine),
 ) -> loonfs_core::publish::NamespaceCommitEnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
@@ -1107,9 +1077,14 @@ pub(crate) async fn publish_batch_with_engine(
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
     let mut publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
+    before_seed(engine);
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
-        if let Some(state) = publish.resulting_read_state.take() {
+        if let Some(state) = publish
+            .resulting_read_state
+            .take()
+            .and_then(|written| engine.reanchored_read_state(written))
+        {
             core.seed_namespace_read_cache(namespace_id, state);
         }
     }

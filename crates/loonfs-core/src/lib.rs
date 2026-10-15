@@ -202,8 +202,8 @@ pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataCompactionSpec, MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget,
-    SegmentBlockLoader, SegmentRowIterator,
+    MetadataCompactionSpec, MetadataFamilyGroup, MetadataRunPolicy, PublicationReport,
+    PublishedManifest, RetentionTarget, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{

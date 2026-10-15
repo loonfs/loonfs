@@ -5,6 +5,7 @@
 //! builds and collects its own state through this handle's public
 //! checkpoint calls, and its hosts drive it.
 
+use crate::publisher::NamespaceChange;
 use crate::trace::phase_span;
 use crate::Maintenance;
 use crate::NamespaceDiagnostics;
@@ -18,8 +19,7 @@ use crate::{
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
 use loonfs_core::control::NamespaceReadAnchor;
-use loonfs_core::CheckpointPageCursor;
-use loonfs_types::format::control::ManifestRef;
+use loonfs_core::{CheckpointPageCursor, PublishedManifest};
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
 use std::sync::Arc;
@@ -118,31 +118,6 @@ impl Maintenance {
             None => engine,
         };
         engine
-    }
-
-    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
-        self.core.invalidate_namespace_read_cache(namespace_id);
-    }
-
-    /// Moves this runtime's publisher to a manifest that a compaction
-    /// published, and invalidates the namespace's read cache, which still
-    /// refers to the old manifest.
-    async fn record_metadata_compaction(&self, namespace_id: &NamespaceId, published: ManifestRef) {
-        self.publisher
-            .record_metadata_compaction(namespace_id, published)
-            .await;
-        self.invalidate_namespace(namespace_id);
-    }
-
-    fn finish_namespace_mutation<T>(
-        &self,
-        namespace_id: &NamespaceId,
-        result: Result<T>,
-    ) -> Result<T> {
-        if crate::fs::should_invalidate_after_result(&result) {
-            self.invalidate_namespace(namespace_id);
-        }
-        result
     }
 
     /// Returns namespace state and storage details used by maintenance.
@@ -498,13 +473,17 @@ impl Maintenance {
         if let Some(epoch) = epochs.get(namespace_id) {
             return Ok(*epoch);
         }
-        let epoch = self
+        let claimed = self
             .engine(namespace_id)
             .claim_compactor()
             .await
             .map_err(Error::Core)?;
-        epochs.insert(namespace_id.clone(), epoch);
-        Ok(epoch)
+        if let Some(published) = claimed.published {
+            self.publisher
+                .record_manifest_published(namespace_id, published);
+        }
+        epochs.insert(namespace_id.clone(), claimed.response);
+        Ok(claimed.response)
     }
 
     async fn forget_fenced_compactor_epoch(
@@ -573,8 +552,10 @@ impl Maintenance {
                 manifest,
                 bottom_anchored_merge_blocked,
             } => {
-                self.record_metadata_compaction(namespace_id, manifest)
-                    .await;
+                self.publisher.invalidate_namespace(
+                    namespace_id,
+                    NamespaceChange::Published(PublishedManifest::SameHead(manifest)),
+                );
                 tracing::info!(
                     families = ?group.families(),
                     merged_delta_rows,
@@ -723,8 +704,10 @@ impl Maintenance {
             .compaction_finished(&outcome, elapsed_ms);
         match &outcome {
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published { manifest, .. }) => {
-                self.record_metadata_compaction(namespace_id, manifest.clone())
-                    .await;
+                self.publisher.invalidate_namespace(
+                    namespace_id,
+                    NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
+                );
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(
@@ -783,8 +766,10 @@ impl Maintenance {
         // this shared pass records them here.
         self.core.instruments().gc_pass(&report);
         // Sweeping can remove objects cached views still reference; drop the
-        // namespace caches rather than trusting them across a collection.
-        self.invalidate_namespace(namespace_id);
+        // namespace caches rather than trusting them across a collection. A
+        // pass publishes no manifest, so the publisher keeps its position.
+        self.publisher
+            .invalidate_namespace(namespace_id, NamespaceChange::Unchanged);
         Ok(report)
     }
 
@@ -837,7 +822,9 @@ impl Maintenance {
                 .await
         }
         .map_err(Error::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publisher
+            .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+            .map(|report| report.response)
     }
 
     /// Lists existing checkpoints in ascending id order, including expired
@@ -940,7 +927,8 @@ impl Maintenance {
             .delete_checkpoint(checkpoint_id)
             .await
             .map_err(Error::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publisher
+            .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
     }
 
     /// Folds the visible WAL tail into a new manifest.
@@ -1011,7 +999,9 @@ impl Maintenance {
             .advance_retention_floor(options.target)
             .await
             .map_err(Error::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publisher
+            .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+            .map(|report| report.response)
     }
 
     /// Shared implementation for metadata maintenance and [`Self::fold_wal`].
@@ -1023,10 +1013,9 @@ impl Maintenance {
                 .fold_wal()
                 .await
                 .map_err(Error::from);
-            if result.is_ok() {
-                self.publisher.record_fold_outcome(namespace_id).await;
-            }
-            self.finish_namespace_mutation(namespace_id, result)
+            self.publisher
+                .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+                .map(|report| report.response)
                 .inspect_err(|error| tracing::debug!(%error))
         }
         .instrument(phase_span!(self.core, "wal_fold", namespace_id))

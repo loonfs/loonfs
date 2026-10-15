@@ -4,6 +4,7 @@ use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
+use super::published::{PublicationReport, PublishedManifest};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::manifest_index::commits_after_page;
@@ -75,7 +76,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     target: RetentionTarget,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<AdvanceRetentionResponse> {
+) -> Result<PublicationReport<AdvanceRetentionResponse>> {
     let target_seq = match target {
         RetentionTarget::Head => None,
         RetentionTarget::Seq(seq) => Some(seq),
@@ -84,20 +85,27 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         }
     };
     let deadline = Deadline::start(timer);
-    let (floor, _, _) = update_manifest(store, namespace_id, &deadline, |mut payload| async move {
-        ensure_namespace_live(&NamespaceReadState::from(&payload))?;
-        let target = target_seq.map_or(payload.head_seq, |seq| seq.min(payload.head_seq));
-        if payload.retention_floor_seq >= target {
-            return Ok(ManifestChange::Finished(payload.retention_floor_seq));
-        }
-        verify_manifest_segments_exist(store, &payload).await?;
-        payload.retention_floor_seq = target;
-        Ok(ManifestChange::Next(Box::new(payload), target))
-    })
-    .await?;
-    Ok(AdvanceRetentionResponse {
-        namespace_id: namespace_id.clone(),
-        retention_floor_seq: floor,
+    let ((floor, advanced), current, _) =
+        update_manifest(store, namespace_id, &deadline, |mut payload| async move {
+            ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+            let target = target_seq.map_or(payload.head_seq, |seq| seq.min(payload.head_seq));
+            if payload.retention_floor_seq >= target {
+                return Ok(ManifestChange::Finished((
+                    payload.retention_floor_seq,
+                    false,
+                )));
+            }
+            verify_manifest_segments_exist(store, &payload).await?;
+            payload.retention_floor_seq = target;
+            Ok(ManifestChange::Next(Box::new(payload), (target, true)))
+        })
+        .await?;
+    Ok(PublicationReport {
+        response: AdvanceRetentionResponse {
+            namespace_id: namespace_id.clone(),
+            retention_floor_seq: floor,
+        },
+        published: advanced.then(|| PublishedManifest::SameHead(current.state.manifest())),
     })
 }
 

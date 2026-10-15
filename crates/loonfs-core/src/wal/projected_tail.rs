@@ -131,6 +131,27 @@ impl ProjectedWalTail {
         Ok(())
     }
 
+    /// Returns the chunks of the commits after `seq`, which are the tail above
+    /// a manifest that folded this tail's WAL through the commit at `seq`.
+    /// `head_seq` is the newest commit in this tail. Returns `None` when `seq`
+    /// isn't the last commit of a chunk.
+    ///
+    /// A fold folds whole WAL objects and commit sequences have no gaps, so
+    /// the first chunk after the fold starts at the sequence after `seq`.
+    pub(crate) fn after_seq(&self, seq: ChangeSeq, head_seq: ChangeSeq) -> Option<Self> {
+        let mut after = Self::default();
+        for chunk in self.chunks.iter().filter(|chunk| chunk.first_seq > seq) {
+            after
+                .push_chunk(Arc::clone(chunk))
+                .expect("part of a tail's activity should fit, because the whole tail's does");
+        }
+        let ends_a_chunk = match after.chunks.first() {
+            Some(first) => seq.successor().ok() == Some(first.first_seq),
+            None => seq == head_seq,
+        };
+        ends_a_chunk.then_some(after)
+    }
+
     #[cfg(test)]
     pub(crate) fn chunks(&self) -> &[Arc<TailChunk>] {
         &self.chunks

@@ -199,7 +199,8 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         crate::test_support::std_timer(),
     )
     .await
-    .expect("initial manifest already covers floor zero");
+    .expect("initial manifest already covers floor zero")
+    .response;
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         store.count(OperationSelector::Read),
@@ -249,7 +250,8 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         crate::test_support::std_timer(),
     )
     .await
-    .expect("advance retention");
+    .expect("advance retention")
+    .response;
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store.count(OperationSelector::Read),
@@ -341,6 +343,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         )
         .await
         .expect("advance the floor")
+        .response
         .retention_floor_seq;
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, expected_floor);
@@ -404,6 +407,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     )
     .await
     .expect("advance to the newest commit")
+    .response
     .retention_floor_seq;
     assert_eq!(floor, ChangeSeq(2));
     assert!(
@@ -697,7 +701,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
     .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
@@ -716,7 +720,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             crate::test_support::std_timer(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(|report| crate::pin::checkpoint_summary(report.response))
         .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
@@ -780,7 +784,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
         crate::test_support::std_timer(),
     )
     .await
-    .map(crate::pin::checkpoint_summary)
+    .map(|report| crate::pin::checkpoint_summary(report.response))
     .expect("create checkpoint whose expiry has already passed");
     assert!(
         load_pin(&store, &namespace_id, &already_expired.checkpoint_id)
@@ -2679,7 +2683,8 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         crate::test_support::std_timer(),
     )
     .await
-    .expect("advance floor");
+    .expect("advance floor")
+    .response;
     assert!(floor.retention_floor_seq > pin.captured_seq);
     let aged = mutation_context("gc", u64::MAX / 2);
     crate::gc::gc_namespace(
