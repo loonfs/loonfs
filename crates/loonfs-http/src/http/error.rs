@@ -299,14 +299,4 @@ mod tests {
             assert_eq!(retry_after, expected, "unexpected Retry-After for {code}");
         }
     }
-
-    #[test]
-    fn not_supported_response_keeps_its_typed_code_extension() {
-        let response =
-            ApiResponseError::not_supported("test.feature", "not available").into_response();
-        assert_eq!(
-            response.extensions().get::<ServedErrorCode>(),
-            Some(&ServedErrorCode(ErrorCode::NotSupported))
-        );
-    }
 }

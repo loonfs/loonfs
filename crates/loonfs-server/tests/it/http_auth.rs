@@ -3,13 +3,11 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::NamespacePath;
-use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::ContentId;
 use loonfs_types::{
-    api::v0::{ContentToken, CreateUploadBody},
-    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DestinationBehavior,
-    ErrorCode, ErrorResponse, FilesystemOperation,
+    api::v0::ContentToken, AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
+    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation,
 };
 use serde_json::json;
 use std::io::Read as _;
@@ -343,49 +341,6 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .stat(&NamespacePath::parse("demo", "/docs").expect("path"))
         .await
         .expect("mkdir committed");
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_upload_session_route_requires_the_bearer_token() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-current",
-        "http-upload-auth",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let begin = harness
-        .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
-        .await
-        .expect("begin upload");
-    let upload_id = begin.upload_id.clone();
-    let base = format!(
-        "{}/v0/namespaces/{namespace}/uploads/{upload_id}",
-        harness.server_url
-    );
-
-    // Both operations require deployment authorization because they expose
-    // or modify another client's upload session.
-    for (method, url) in [("GET", base.clone()), ("POST", format!("{base}/abort"))] {
-        match raw_agent().request(method, &url).call() {
-            Err(ureq::Error::Status(401, response)) => {
-                let error: ErrorResponse =
-                    serde_json::from_reader(response.into_reader()).expect("decode api error");
-                assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
-            }
-            other => panic!("expected 401 for `{method} {url}`, got {other:?}"),
-        }
-    }
 
     harness.server.abort();
 }

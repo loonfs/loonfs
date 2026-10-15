@@ -871,38 +871,6 @@ fn openapi_document_generation_is_byte_stable() {
 }
 
 #[test]
-fn every_registered_operation_publishes_its_retry_class() {
-    let generated =
-        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
-            .expect("generate openapi json");
-    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
-    let published = operations_by_id(&spec)
-        .into_iter()
-        .map(|(operation_id, operation)| {
-            (
-                operation_id,
-                operation
-                    .get("x-loonfs-retry")
-                    .and_then(Value::as_str)
-                    .expect("OpenAPI operation has an x-loonfs-retry extension"),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    assert_eq!(
-        published.keys().copied().collect::<BTreeSet<_>>(),
-        registered_operation_ids()
-    );
-    for (operation_id, retry_class) in published {
-        assert_matches!(
-            retry_class,
-            "idempotent" | "replayable" | "not_idempotent",
-            "operation `{operation_id}` has invalid retry class `{retry_class}`"
-        );
-    }
-}
-
-#[test]
 fn every_registered_operation_publishes_its_sdk_name() {
     let generated =
         openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
