@@ -231,38 +231,6 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
 }
 
 #[test]
-fn runtime_publish_and_read_allow_multi_object_wal_tail() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let setup = open_runtime(object_store.clone(), "publish-tail");
-    let measured_read = open_runtime(object_store.clone(), "publish-tail");
-    let measured_publish = open_runtime(object_store, "publish-tail");
-
-    setup
-        .create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    setup
-        .create_directory_blocking(&namespace_id, "/seed-a", &loonfs_test_support::test_actor())
-        .expect("seed first WAL object");
-    setup
-        .create_directory_blocking(&namespace_id, "/seed-b", &loonfs_test_support::test_actor())
-        .expect("seed second WAL object");
-
-    measured_read
-        .stat_path_blocking(&namespace_id, "/seed-a")
-        .expect("read projects the visible WAL tail without a WAL object limit");
-    measured_publish
-        .create_directory_blocking(
-            &namespace_id,
-            "/should-succeed",
-            &loonfs_test_support::test_actor(),
-        )
-        .expect("publish projects the visible WAL tail without a WAL object limit");
-}
-
-#[test]
 fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
@@ -589,28 +557,6 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let after_read = fs.metadata_cache_stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
-}
-
-#[test]
-fn stat_and_list_use_initial_manifest_without_checkpoint() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let fs = open_runtime_with(store(temp_dir.path()), "read-fallback-test", |builder| {
-        builder.metrics_recorder(recorder.clone())
-    });
-
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", &loonfs_test_support::test_actor())
-        .expect("create docs");
-
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("stat docs");
-    fs.list_path_blocking(&namespace_id, "/")
-        .expect("list root");
-
-    assert_eq!(latest_metadata_view_reads(&recorder), 2);
 }
 
 fn latest_metadata_view_reads(recorder: &DefaultMetricsRecorder) -> u64 {

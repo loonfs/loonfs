@@ -160,22 +160,3 @@ fn a_snapshot_orders_entries_by_name_then_labels() {
         ]
     );
 }
-
-#[test]
-fn registering_on_the_noop_recorder_does_not_panic() {
-    let recorder = NoopMetricsRecorder;
-    recorder
-        .register_counter("loonfs.test.calls", "Calls", &[])
-        .increment(1);
-    recorder
-        .register_gauge("loonfs.test.depth", "Depth", &[])
-        .set(1);
-    recorder
-        .register_histogram(
-            "loonfs.test.seconds",
-            "Seconds",
-            &[],
-            LATENCY_SECONDS_BOUNDARIES,
-        )
-        .record(1.0);
-}

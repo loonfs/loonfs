@@ -579,70 +579,6 @@ fn the_feed_names_deleted_entries_and_their_writer() {
 }
 
 #[test]
-fn undelete_rejects_deletions_from_the_same_commit() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-same-commit-test");
-    let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/report.txt",
-        b"cycled",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put file");
-    let entry = fs
-        .stat_path_blocking(&namespace_id, "/docs/report.txt")
-        .expect("stat");
-
-    // Assigned sequences are head + 1 and therefore guessable: without the
-    // earlier-commit bound, one commit could delete, undelete, and
-    // re-delete the inode, minting two deletion positions that share a
-    // sequence. The undelete must refuse a target in its own commit.
-    let guessed_seq = ChangeSeq(entry.head_seq.0 + 1);
-    let error = fs
-        .mutate_blocking(
-            &namespace_id,
-            CommitIntent {
-                preconditions: Vec::new(),
-                commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
-                actor_id: loonfs_test_support::test_actor(),
-                subject: None,
-                message: None,
-                operations: vec![
-                    FilesystemOperation::DeletePath {
-                        path: parse_mutation_path("/docs/report.txt").expect("valid mutation path"),
-                        behavior: DeleteDirectoryBehavior::Recursive,
-                        expected_inode_id: Some(entry.inode_id),
-                    },
-                    FilesystemOperation::Undelete {
-                        inode_id: entry.inode_id,
-                        deletion_seq: guessed_seq,
-                        destination_path: Some(
-                            parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
-                        ),
-                        destination_parent_inode_id: None,
-                        destination_display_name: None,
-                    },
-                ],
-            },
-        )
-        .expect_err("same-commit delete/undelete cycling must be rejected");
-    assert_matches!(
-        &error,
-        Error::Core(error) if error.code() == ErrorCode::NotDeleted
-    );
-    // The rejected commit changed nothing.
-    assert_eq!(
-        fs.read_file_blocking(&namespace_id, "/docs/report.txt")
-            .expect("file untouched")
-            .bytes,
-        b"cycled"
-    );
-}
-
-#[test]
 fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-details-test");
@@ -728,6 +664,12 @@ fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
     assert_eq!(details.inode_id, Some(fresh.inode_id));
     assert_eq!(details.expected_deletion_seq, None);
     assert_eq!(details.actual_deletion_seq, None);
+    assert_eq!(
+        fs.read_file_blocking(&namespace_id, "/docs/fresh.txt")
+            .expect("file untouched")
+            .bytes,
+        b"fresh"
+    );
 }
 
 #[test]

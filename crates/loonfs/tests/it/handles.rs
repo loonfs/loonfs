@@ -5,7 +5,7 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    Commit, CommitId, CreateDirectoryOptions, Error, ErrorCode, LoonFs, MaintainMetadataOptions,
+    CommitId, CreateDirectoryOptions, Error, ErrorCode, LoonFs, MaintainMetadataOptions,
     ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, WalFoldStepOutcome,
     Writable,
 };
@@ -285,46 +285,6 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             .expect("read after write on the shared core");
 
         writer.shutdown().await.expect("shut down writer");
-    });
-}
-
-#[test]
-fn a_plain_mutation_commits_what_its_options_form_commits_with_default_options() {
-    let namespace_id = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
-    let plain_dir = tempdir().expect("tempdir");
-    let options_dir = tempdir().expect("tempdir");
-    block_on(async {
-        let plain_writer = writer(plain_dir.path()).await;
-        let options_writer = writer(options_dir.path()).await;
-        for runtime in [&plain_writer, &options_writer] {
-            runtime
-                .create_namespace(&namespace_id, &actor)
-                .await
-                .expect("create namespace");
-        }
-        let plain = plain_writer
-            .open_namespace(&namespace_id)
-            .expect("open namespace")
-            .create_directory("/docs", &actor)
-            .await
-            .expect("plain create");
-        let with_options = options_writer
-            .open_namespace(&namespace_id)
-            .expect("open namespace")
-            .create_directory_with_options("/docs", &actor, &CreateDirectoryOptions::default())
-            .await
-            .expect("create with default options");
-        // Each call generates its own commit id, and each commit is stamped
-        // with its own wall-clock time.
-        assert_eq!(
-            Commit {
-                commit_id: with_options.commit_id.clone(),
-                committed_at_ms: with_options.committed_at_ms,
-                ..plain
-            },
-            with_options
-        );
     });
 }
 

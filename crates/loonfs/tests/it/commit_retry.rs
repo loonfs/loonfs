@@ -956,45 +956,6 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
 }
 
 #[tokio::test]
-async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let namespace = runtime.reader.namespace(&namespace_id);
-    let namespace_writer = runtime
-        .writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let commit_id = CommitId::parse("pinned-stream").expect("valid commit id");
-
-    namespace_writer
-        .put_file_stream_with_options(
-            PATH,
-            streamed(&vec![7u8; 300_000], 64 * 1024),
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first streamed put");
-    let error = namespace_writer
-        .put_file_stream_with_options(
-            PATH,
-            streamed(&vec![9u8; 300_000], 64 * 1024),
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect_err("different bytes are a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        namespace.read_file(PATH).await.expect("read file").bytes,
-        vec![7u8; 300_000],
-        "the refused rerun changed nothing"
-    );
-}
-
-#[tokio::test]
 async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;

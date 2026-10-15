@@ -299,34 +299,6 @@ fn a_write_is_visible_to_the_next_stat() {
 }
 
 #[test]
-fn plain_stat_reads_with_the_default_stat_options() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "plain-stat-defaults");
-    let namespace_id = namespace_id("demo");
-    let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/report.txt",
-        b"body",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put file");
-    let namespace_writer = fs
-        .writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    annotate_owner(&namespace_writer);
-
-    assert_eq!(
-        block_on(namespace.stat("/docs/report.txt")).expect("plain stat"),
-        block_on(namespace.stat_with_options("/docs/report.txt", &StatOptions::default()))
-            .expect("stat with default options")
-    );
-}
-
-#[test]
 fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-projection");

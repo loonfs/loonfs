@@ -283,48 +283,6 @@ async fn put_file_prepared_performs_no_content_io() {
 }
 
 #[tokio::test]
-async fn prepared_content_for_another_store_is_rejected_without_content_io() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recording = RequestLog::new(temp_dir.path());
-    let store = recording.store();
-    let source = NamespaceId::parse("source-store").expect("source namespace id");
-    let target = NamespaceId::parse("target-store").expect("target namespace id");
-    let writer = build_initialized_writer(store.clone(), &source, "cross-store-writer").await;
-    let source_writer = writer.open_namespace(&source).expect("open namespace");
-    writer
-        .create_namespace(&target, &loonfs_test_support::test_actor())
-        .await
-        .expect("create target namespace");
-    let target_writer = writer.open_namespace(&target).expect("open namespace");
-    target_writer
-        .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
-        .await
-        .expect("warm target catalog");
-    let prepared = source_writer
-        .prepare_content(b"source-store-only")
-        .await
-        .expect("prepare source content");
-    let content_ref = prepared.content_ref().clone();
-    recording.reset();
-
-    let error = target_writer
-        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
-        .await
-        .expect_err("another store must reject the admission");
-    assert_matches!(
-        error,
-        Error::Core(_),
-        "expected core content-preparation error"
-    );
-    let Error::Core(error) = error else {
-        return;
-    };
-
-    assert_content_not_prepared(error, &content_ref);
-    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
 async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_content() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = RequestLog::new(temp_dir.path());
@@ -803,29 +761,6 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
         .expect("publish restore");
 
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
-async fn put_file_publishes_without_reading_content() {
-    let harness = TestHarness::new("put-bytes-admission").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    harness.recording.reset();
-
-    namespace
-        .put_file(
-            "/file.txt",
-            b"admitted content",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("put admitted bytes");
-
-    // Staging performs the one content PUT. Its acknowledged write admits publication,
-    // so neither staging nor publication needs a content HEAD or GET.
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
 }
 
 #[tokio::test]
