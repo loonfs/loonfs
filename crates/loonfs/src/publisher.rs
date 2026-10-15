@@ -19,6 +19,7 @@
 mod admission;
 mod inline_content;
 
+use crate::cache::{HeadPositions, ReadPositionSlot};
 use crate::fs::{RuntimeCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
@@ -90,8 +91,9 @@ pub enum NamespaceSessionStatus {
 pub(crate) struct PublisherRegistry {
     shared: Arc<RegistryShared>,
     /// Strong: the runtime core owns neither this registry nor the writer, so
-    /// holding it here cannot cycle. Publications read through its caches
-    /// and seed them with what they produce.
+    /// holding it here cannot cycle. Publications read through its caches,
+    /// and the core keeps only a weak reference back (see
+    /// [`Self::head_positions`]).
     runtime_core: RuntimeCore,
     /// Weak: the writer owns its bits, and a publication is the writer's
     /// work. Publish work upgrades per unit and reports `shutting_down`
@@ -241,6 +243,36 @@ impl RegistryShared {
     }
 }
 
+impl HeadPositions for RegistryShared {
+    fn read_position_slot(&self, namespace_id: &NamespaceId) -> Option<Arc<ReadPositionSlot>> {
+        self.lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| Arc::clone(&live.publisher.read_position))
+    }
+
+    fn drop_position(&self, namespace_id: &NamespaceId) {
+        let publisher = self
+            .lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone());
+        if let Some(publisher) = publisher {
+            publisher.read_position.clear();
+            publisher.change_position(PositionChange::Drop);
+        }
+    }
+
+    fn apply_pending_position(&self, namespace_id: &NamespaceId) -> bool {
+        let publisher = self
+            .lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone());
+        publisher.is_some_and(|publisher| publisher.release_engine_if_free())
+    }
+}
+
 /// Locks registry and publisher state, recovering a lock that a contained
 /// panic poisoned.
 ///
@@ -345,9 +377,6 @@ impl PublisherRegistry {
 
     /// Drops the namespace's read anchor, and tells the namespace's publisher
     /// how a mutation outside the publisher changed the namespace.
-    ///
-    /// The anchor is dropped first, so a publish that is in flight seeds the
-    /// read cache after the publisher's position has moved.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId, change: NamespaceChange) {
         self.runtime_core
             .invalidate_namespace_read_cache(namespace_id);
@@ -383,8 +412,8 @@ impl PublisherRegistry {
 
     /// Moves the namespace's publisher to a manifest that this runtime
     /// published, or drops the publisher's position when it can't move
-    /// there, so that later commits seed the read cache with the newest
-    /// manifest.
+    /// there, so that later commits and reads in this runtime start from the
+    /// newest manifest.
     pub(crate) fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
@@ -401,6 +430,11 @@ impl PublisherRegistry {
             .sessions
             .get(namespace_id)
             .map(|live| live.publisher.clone())
+    }
+
+    /// Returns the writer sessions that this runtime's reads start from.
+    pub(crate) fn head_positions(&self) -> Weak<dyn HeadPositions> {
+        Arc::downgrade(&self.shared) as Weak<dyn HeadPositions>
     }
 
     pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
@@ -555,10 +589,13 @@ struct NamespacePublisher {
     /// Lock it through [`Self::lock_engine`].
     engine: Arc<AsyncMutex<EngineSlot>>,
     /// A change to the engine's position that arrived while a publish, a
-    /// delete, or a fold had the engine locked. The next task that locks the
-    /// engine applies it, and a publish also applies it after its put,
-    /// before it seeds the read cache.
+    /// delete, or a fold had the engine locked. The task that has the engine
+    /// locked applies it when it releases the engine, or the next task to
+    /// lock the engine does.
     pending_position: Arc<Mutex<Option<PositionChange>>>,
+    /// The engine's position as of the last release of the engine, which
+    /// reads in this runtime start from.
+    read_position: Arc<ReadPositionSlot>,
     session: SharedWriterSessionStatus,
     /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
@@ -598,9 +635,48 @@ impl EngineSlot {
             .or(self.last_known_wal_tail_inline_bytes)
     }
 
-    fn record_fold_outcome(&mut self, folded: Option<&loonfs_core::FoldedWalTail>) {
+    fn record_fold_outcome(
+        &mut self,
+        folded: std::result::Result<&loonfs_core::FoldedWalTail, &CoreError>,
+    ) {
         if let Some(engine) = self.engine.as_mut() {
             engine.record_wal_fold(folded);
+        }
+    }
+}
+
+/// The engine of one publisher, locked through
+/// [`NamespacePublisher::lock_engine`].
+///
+/// Releasing it applies a position change that waited for the engine, and
+/// stores the engine's position where reads start from it (see
+/// [`NamespacePublisher::release_engine`]). Every task that locks the engine
+/// goes through this guard, so the stored position matches the engine as of
+/// its last release, or is empty while a drop waits for the engine.
+struct LockedEngine<'a> {
+    publisher: &'a NamespacePublisher,
+    /// `None` only while `drop` runs.
+    slot: Option<tokio::sync::MutexGuard<'a, EngineSlot>>,
+}
+
+impl std::ops::Deref for LockedEngine<'_> {
+    type Target = EngineSlot;
+
+    fn deref(&self) -> &EngineSlot {
+        self.slot.as_ref().expect("a locked engine keeps its guard")
+    }
+}
+
+impl std::ops::DerefMut for LockedEngine<'_> {
+    fn deref_mut(&mut self) -> &mut EngineSlot {
+        self.slot.as_mut().expect("a locked engine keeps its guard")
+    }
+}
+
+impl Drop for LockedEngine<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            self.publisher.release_engine(slot);
         }
     }
 }
@@ -813,6 +889,7 @@ impl NamespacePublisher {
                 last_known_wal_tail_inline_bytes: None,
             })),
             pending_position: Arc::new(Mutex::new(None)),
+            read_position: Arc::default(),
             session,
             shared: Arc::downgrade(&registry.shared),
             runtime: registry.runtime.clone(),
@@ -940,21 +1017,46 @@ impl NamespacePublisher {
     /// task that has the engine locked.
     ///
     /// The change waits in `pending_position` first, so the task that has
-    /// the engine locked applies it before it releases the engine, or the
-    /// next task to lock the engine applies it. Nothing is skipped.
+    /// the engine locked applies it when it releases the engine, or the next
+    /// task to lock the engine applies it. Nothing is skipped.
+    ///
+    /// Until then, reads keep the position they have, except that a drop
+    /// clears it at once. A position on a manifest that this runtime has
+    /// replaced still reads correctly, because garbage collection keeps that
+    /// manifest's objects for at least one grace.
     fn change_position(&self, change: PositionChange) {
-        {
+        if let PositionChange::Reanchor(published) = &change {
+            self.read_position
+                .record_published(published.manifest().manifest_no);
+        }
+        let drops = {
             let mut pending = lock_state(&self.pending_position);
             let change = match pending.take() {
                 Some(earlier) => earlier.then(change),
                 None => change,
             };
+            let drops = matches!(change, PositionChange::Drop);
             *pending = Some(change);
+            drops
+        };
+        if !self.release_engine_if_free() && drops {
+            self.read_position.clear();
         }
-        if let Ok(mut slot) = self.engine.try_lock() {
-            if let Some(engine) = slot.engine.as_mut() {
-                self.apply_pending_position(engine);
+    }
+
+    /// Locks the engine if no task has it locked and releases it at once,
+    /// which applies a position change that waited for it. Returns whether
+    /// the engine was free.
+    fn release_engine_if_free(&self) -> bool {
+        match self.engine.try_lock() {
+            Ok(slot) => {
+                drop(LockedEngine {
+                    publisher: self,
+                    slot: Some(slot),
+                });
+                true
             }
+            Err(_) => false,
         }
     }
 
@@ -967,14 +1069,58 @@ impl NamespacePublisher {
     }
 
     /// Locks the engine and applies the position change that waited for it.
-    async fn lock_engine(&self) -> tokio::sync::MutexGuard<'_, EngineSlot> {
+    async fn lock_engine(&self) -> LockedEngine<'_> {
         let mut slot = self.engine.lock().await;
         match slot.engine.as_mut() {
             Some(engine) => self.apply_pending_position(engine),
             // An engine built later starts without a position to change.
             None => drop(lock_state(&self.pending_position).take()),
         }
-        slot
+        LockedEngine {
+            publisher: self,
+            slot: Some(slot),
+        }
+    }
+
+    /// Applies the position change that waited for the engine, stores the
+    /// engine's position for reads, and releases the engine.
+    ///
+    /// The position is stored while `pending_position` is locked. A drop
+    /// that [`Self::change_position`] queues after the take below then either
+    /// finds the slot cleared here, or clears the slot itself after this
+    /// release, so reads never start from a position that a queued drop is
+    /// about to remove.
+    fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
+        if std::thread::panicking() {
+            // The engine may be partway through a unit of work. Reads start
+            // from the read cache until the next release, and the change
+            // waits for the next task that locks the engine.
+            self.read_position.clear();
+            return;
+        }
+        let position = match slot.engine.as_mut() {
+            Some(engine) => {
+                self.apply_pending_position(engine);
+                engine.read_position()
+            }
+            None => {
+                drop(lock_state(&self.pending_position).take());
+                None
+            }
+        };
+        let position = self.read_position.prepare(position);
+        let started = {
+            let pending = lock_state(&self.pending_position);
+            let drops = matches!(*pending, Some(PositionChange::Drop));
+            self.read_position.store(position.filter(|_| !drops))
+        };
+        drop(slot);
+        if started {
+            // Reads start from the position from now on, so the anchor that
+            // reads used before it would only be a second copy of the head.
+            self.runtime_core
+                .invalidate_namespace_read_cache(&self.namespace_id);
+        }
     }
 
     /// Places the candidate's inline content, then admits it before awaiting
@@ -1388,16 +1534,11 @@ impl NamespacePublisher {
     ) -> Vec<Result<Commit, CoreError>> {
         let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
-        let publish = crate::fs::publish_batch_with_engine(
-            &self.runtime_core,
-            &self.namespace_id,
-            engine,
-            candidates,
-            context,
-            batch,
-            |engine| self.apply_pending_position(engine),
-        )
-        .await;
+        let store = self.runtime_core.store();
+        // Boxing erases the engine's deeply nested publish future. Without
+        // it, callers awaiting a put or commit (CLI, server, embedding
+        // crates) exceed rustc's type-recursion depth.
+        let publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
         if publish
             .wal_tail
             .is_some_and(|tail| tail.source == TailSource::Store)
@@ -1682,9 +1823,17 @@ impl NamespacePublisher {
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
+        if let Ok(folded) = &result {
+            if folded.response.outcome == FoldWalOutcome::Published {
+                // Reads that find this manifest before the engine moves the
+                // position to it keep the position.
+                self.read_position
+                    .record_published(folded.response.manifest_no);
+            }
+        }
         self.lock_engine()
             .await
-            .record_fold_outcome(result.as_ref().ok());
+            .record_fold_outcome(result.as_ref());
         let published = match result {
             Ok(folded) => {
                 self.runtime_core.instruments().publisher_wal_fold();

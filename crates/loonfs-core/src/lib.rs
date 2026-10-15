@@ -175,8 +175,8 @@ pub mod publish {
     pub use crate::commit::CommitFingerprint;
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
-        TailSource, WalFoldInput, WalTailReport, WriterSessionStatus,
+        NamespaceCommitEnginePublishResult, ReadPosition, SharedWriterSessionStatus, TailSource,
+        WalFoldInput, WalTailReport, WriterSessionStatus,
     };
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};

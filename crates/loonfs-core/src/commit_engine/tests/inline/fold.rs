@@ -71,7 +71,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     )
     .await
     .expect("fold");
-    engine.record_wal_fold(Some(&folded));
+    engine.record_wal_fold(Ok(&folded));
     assert!(engine.publish_tail.is_none());
     store.reset();
     publish(&mut engine, &store, &context, during)
@@ -156,7 +156,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         .await
         .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        engine.record_wal_fold(Some(&folded));
+        engine.record_wal_fold(Ok(&folded));
         timer.advance_ms(100);
         store.reset();
 
@@ -256,7 +256,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_wal_fold(Some(&folded));
+    engine.record_wal_fold(Ok(&folded));
     NamespaceCommitEngine::new(
         engine.namespace_id.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -421,6 +421,10 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     assert_eq!(retry_keys, keys);
 }
 
+/// Checks that two sessions' folds of the same tail write identical content
+/// objects and publish one manifest, and that the fold of the older session,
+/// which the second session's epoch claim fenced, fails with
+/// `writer_fenced`.
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
     let content_writes = tokio::sync::Semaphore::new(32);
@@ -469,17 +473,12 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         result
     };
     let (first_result, second_result) = tokio::join!(first_fold, second_fold);
-    let first_result = first_result.expect("first fold");
     let second_result = second_result.expect("second fold");
-    assert_eq!(
-        first_result.response.outcome,
-        FoldWalOutcome::AlreadyCurrent
+    assert_matches!(
+        first_result.err(),
+        Some(CoreError::WriterFenced(fence)) if fence.active_epoch > fence.fenced_epoch
     );
     assert_eq!(second_result.response.outcome, FoldWalOutcome::Published);
-    assert_eq!(
-        first_result.response.manifest_no,
-        second_result.response.manifest_no
-    );
     let keys = content_assemblies(&store);
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
@@ -652,7 +651,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
-    engine.record_wal_fold(Some(&folded));
+    engine.record_wal_fold(Ok(&folded));
     let position = engine.publish_tail.as_ref().expect("retained position");
     assert_eq!(position.basis(), &folded.basis);
     assert_eq!(position.wal_tail_objects, 2);

@@ -534,12 +534,8 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
         .monotonic_timer(timer.clone());
-    let first = publish_one(&mut engine, &store, &writer, "alpha").await;
-    let basis = first
-        .resulting_read_state
-        .expect("landed")
-        .basis
-        .manifest_no();
+    publish_one(&mut engine, &store, &writer, "alpha").await;
+    let basis = engine.read_position().expect("landed").basis.manifest_no();
 
     // Another process folds the tail into the next manifest.
     fold_wal_tail(
@@ -556,13 +552,9 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     // A budget after the load the basis and the tip are still trusted.
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
     store.reset();
-    let second = publish_one(&mut engine, &store, &writer, "beta").await;
+    publish_one(&mut engine, &store, &writer, "beta").await;
     assert_eq!(
-        second
-            .resulting_read_state
-            .expect("landed")
-            .basis
-            .manifest_no(),
+        engine.read_position().expect("landed").basis.manifest_no(),
         basis
     );
     assert_eq!(store.count(OperationSelector::Head), 0);
@@ -571,14 +563,10 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     // view is reloaded from the hint before the put.
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
     store.reset();
-    let third = publish_one(&mut engine, &store, &writer, "gamma").await;
+    publish_one(&mut engine, &store, &writer, "gamma").await;
     let operations = store.take();
     assert_eq!(
-        third
-            .resulting_read_state
-            .expect("landed")
-            .basis
-            .manifest_no(),
+        engine.read_position().expect("landed").basis.manifest_no(),
         basis.successor().expect("next manifest number")
     );
     let head = operations
@@ -805,13 +793,9 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
 
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     store.reset();
-    let published = publish_one(&mut engine, &store, &writer, "beta").await;
+    publish_one(&mut engine, &store, &writer, "beta").await;
     assert_eq!(
-        published
-            .resulting_read_state
-            .expect("landed")
-            .basis
-            .manifest_no(),
+        engine.read_position().expect("landed").basis.manifest_no(),
         basis.successor().expect("next manifest number")
     );
     let operations = store.take();
@@ -859,7 +843,7 @@ async fn writer_after_own_compaction(
         )
         .await
         .expect("own fold");
-        engine.record_wal_fold(Some(&folded));
+        engine.record_wal_fold(Ok(&folded));
     }
     let before = engine.wal_fold_input().expect("re-anchored tail");
     let current = crate::namespace::control::load_current_manifest(store, namespace_id)
@@ -912,11 +896,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         Some(TailSource::Store)
     );
     assert_eq!(
-        published
-            .resulting_read_state
-            .expect("landed")
-            .basis
-            .manifest_no(),
+        engine.read_position().expect("landed").basis.manifest_no(),
         manifest.manifest_no
     );
     let operations = store.take();
@@ -979,7 +959,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_cached_tail() {
         Some(TailSource::Cached)
     );
     assert_eq!(
-        published.resulting_read_state.expect("put succeeded").basis,
+        engine.read_position().expect("put succeeded").basis,
         MetadataBasis(manifest)
     );
     let operations = store.take();
@@ -1032,7 +1012,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         delta.wal_tail.map(|tail| tail.source),
         Some(TailSource::Cached)
     );
-    let written = delta.resulting_read_state.expect("put succeeded");
+    let written = engine.read_position().expect("put succeeded");
     assert_eq!(written.basis.manifest(), published.manifest());
     let operations = store.take();
     assert!(
@@ -1069,7 +1049,7 @@ async fn a_confirmed_batch_without_a_put_keeps_the_attempt_observation() {
             timer.advance_ms(1_000);
             store.inner().release();
         });
-    assert!(replayed.resulting_read_state.is_none());
+    drop(replayed);
     assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
         engine.projection_observed.as_ref().expect("tip").age_ms(),
@@ -1126,13 +1106,12 @@ async fn a_probe_answered_at_the_bound_after_the_last_confirmation_is_not_truste
     timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1_000);
     store.reset();
     store.inner().block_next();
-    let (published, ()) =
-        futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
-            store.inner().wait_until_blocked().await;
-            timer.advance_ms(1_000);
-            store.inner().release();
-        });
-    assert!(published.resulting_read_state.is_some());
+    let (_, ()) = futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
+        store.inner().wait_until_blocked().await;
+        timer.advance_ms(1_000);
+        store.inner().release();
+    });
+    assert!(engine.read_position().is_some());
     let operations = store.take();
     let successor = operations
         .iter()
@@ -1169,28 +1148,23 @@ async fn the_manifest_head_is_sent_after_the_wal_probe_answers() {
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     store.reset();
     store.inner().block_next();
-    let (published, ()) =
-        futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
-            store.inner().wait_until_blocked().await;
-            assert!(store.snapshot().is_empty(), "{:?}", store.snapshot());
-            fold_wal_tail(
-                store.inner().inner(),
-                None,
-                &namespace_id,
-                None,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                &tokio::sync::Semaphore::new(32),
-            )
-            .await
-            .expect("another process folds");
-            store.inner().release();
-        });
+    let (_, ()) = futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
+        store.inner().wait_until_blocked().await;
+        assert!(store.snapshot().is_empty(), "{:?}", store.snapshot());
+        fold_wal_tail(
+            store.inner().inner(),
+            None,
+            &namespace_id,
+            None,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32),
+        )
+        .await
+        .expect("another process folds");
+        store.inner().release();
+    });
     assert_eq!(
-        published
-            .resulting_read_state
-            .expect("landed")
-            .basis
-            .manifest_no(),
+        engine.read_position().expect("landed").basis.manifest_no(),
         basis.successor().expect("next manifest number")
     );
     let operations = store.take();

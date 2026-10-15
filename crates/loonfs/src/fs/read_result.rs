@@ -77,6 +77,7 @@ impl RuntimeCore {
             return result;
         }
         self.invalidate_namespace_read_cache(namespace_id);
+        self.drop_writer_position(namespace_id);
         let (engine, context) = self
             .pinned_metadata_read(namespace_id)
             .instrument(

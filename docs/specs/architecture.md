@@ -91,7 +91,7 @@ LoonFS resolves a path by following [directory bindings](glossary.md#directory-b
 
 Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
 
-A reader with a cached view checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default. Because WAL objects and content objects are immutable, a reader also keeps recently read WAL objects and small content objects in memory and doesn't need to invalidate them. Local caches affect only read cost and freshness. They aren't needed for recovery.
+In a process without the namespace's writer session, a reader with a cached view checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default. In the writer's process, reads take the head from the writer session's [position](glossary.md#writer-position), which includes every commit that the session made, so a read sends no request to confirm the head apart from the same check for a newer manifest. Because WAL objects and content objects are immutable, a reader also keeps recently read WAL objects and small content objects in memory and doesn't need to invalidate them. Local caches affect only read cost and freshness. They aren't needed for recovery.
 
 Why fail instead of reading an older version of the files? A fallback would return files from an earlier point in history, and the caller would have no way to tell.
 

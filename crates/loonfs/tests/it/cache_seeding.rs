@@ -1,4 +1,4 @@
-//! Runtime cache seeding, reuse, eviction, and cross-handle sharing.
+//! Runtime cache reuse, eviction, and cross-handle sharing.
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
@@ -18,6 +18,8 @@ use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Checks that reads in the writer's runtime reuse the WAL-tail projection
+/// that each put cached, and send no request to confirm the head.
 #[test]
 fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
@@ -44,8 +46,8 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("first read is served from the projection the put seeded");
-    assert_wal_probe(recording.take(), &namespace_id, loonfs_types::WalNo(3));
+        .expect("first read is served from the projection the put cached");
+    assert_eq!(recording.take(), []);
     let after_first = fs.metadata_cache_stats();
     assert_eq!(after_first.wal_tail_misses, 0);
     assert!(after_first.wal_tail_inserts >= 1);
@@ -55,7 +57,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
-    assert_wal_probe(recording.take(), &namespace_id, loonfs_types::WalNo(3));
+    assert_eq!(recording.take(), []);
     let after_second = fs.metadata_cache_stats();
     assert!(after_second.wal_tail_hits > after_first.wal_tail_hits);
 
@@ -69,8 +71,8 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("read after local mutation reuses the newly seeded projection");
-    assert_wal_probe(recording.take(), &namespace_id, loonfs_types::WalNo(4));
+        .expect("read after local mutation reuses the projection the mutation cached");
+    assert_eq!(recording.take(), []);
     let after_mutation = fs.metadata_cache_stats();
     assert_eq!(after_mutation.wal_tail_misses, 0);
     assert!(after_mutation.wal_tail_hits > after_second.wal_tail_hits);
@@ -267,6 +269,8 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     assert!(raw_store.wal_get_count() > 0);
 }
 
+/// Checks that a cache with zero limits keeps no WAL tail, so every read
+/// in the writer's runtime replays the tail from the store.
 #[test]
 fn a_cache_with_zero_limits_keeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -299,7 +303,9 @@ fn a_cache_with_zero_limits_keeps_nothing() {
         .expect("first read should project WAL tail");
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
-    assert_eq!(raw_store.wal_get_count(), 10);
+    // Each read starts from the writer's position and replays the two WAL
+    // objects above its manifest, because no tail is kept.
+    assert_eq!(raw_store.wal_get_count(), 4);
     let stats = fs.metadata_cache_stats();
     assert_eq!(stats.wal_tail_hits, 0);
     assert_eq!(stats.wal_tail_misses, 0);
@@ -439,10 +445,13 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     assert_eq!(reader.metadata_cache().stats().head_state_evictions, 0);
 }
 
+/// Checks that a WAL tail heavier than the head-state budget isn't kept, so
+/// each read in the writer's runtime replays it from the store, and that the
+/// read sends nothing else.
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
-    // Half of a namespace's anchor and tail together holds the anchor but not
-    // the tail, which outweighs it.
+    // Half of a namespace's anchor and tail together has no room for the
+    // tail, which outweighs the anchor.
     let budget = one_namespace_head_state_bytes() / 2;
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("first");
@@ -475,20 +484,15 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    let _view = block_on(namespace.read_view()).expect("view the seeded namespace");
-    assert_wal_probe(recording.take(), &namespace_id, loonfs_types::WalNo(3));
+    let _view = block_on(namespace.read_view()).expect("view the namespace");
+    assert_eq!(recording.take(), []);
     for _ in 0..2 {
         fs.read_file_blocking(&namespace_id, "/file.txt")
             .expect("read replays the uncached tail");
         let operations = recording.take();
-        assert_eq!(operations.len(), 3);
-        assert_wal_probe(
-            operations[2..].to_vec(),
-            &namespace_id,
-            loonfs_types::WalNo(3),
-        );
+        assert_eq!(operations.len(), 2);
         // The bounded replay overlaps its reads, so they finish in either order.
-        let mut replayed = operations[..2]
+        let mut replayed = operations
             .iter()
             .map(|operation| match operation {
                 loonfs_test_support::stores::RecordedOperation::Get {
@@ -517,8 +521,11 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     assert!(stats.head_state_bytes <= budget);
 }
 
+/// Checks that after a WAL publication conflict, the next write reloads
+/// the namespace, and that a read after it starts from the writer's new
+/// position and sends no request.
 #[test]
-fn wal_publication_conflict_recovers_and_reseeds_caches() {
+fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -553,7 +560,7 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let before_read = fs.metadata_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
         .expect("read after the recovered write");
-    assert_wal_probe(recording.take(), &namespace_id, loonfs_types::WalNo(4));
+    assert_eq!(recording.take(), []);
     let after_read = fs.metadata_cache_stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
@@ -830,8 +837,9 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     )
     .expect("put second file");
 
-    // The writer's own reads are served from the state its batches seeded,
-    // so a runtime that reads cold is what fills the stored cache.
+    // The writer's own reads start from its position and the tails its
+    // batches cached, so a runtime that reads cold is what fills the stored
+    // cache.
     let filler = open_runtime_with(shared_store.clone(), "stored-block-filler", |builder| {
         builder.stored_metadata_block_cache(stored_blocks.clone())
     });

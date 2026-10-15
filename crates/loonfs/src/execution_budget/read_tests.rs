@@ -85,6 +85,17 @@ struct Fixture {
 
 impl Fixture {
     async fn new(keys: KeyPredicate) -> Self {
+        Self::with_cache(keys, crate::MetadataCache::default()).await
+    }
+
+    /// Creates a writer runtime over `metadata_cache` with a namespace of
+    /// three files, whose reads the store parks when `keys` selects them.
+    ///
+    /// A cache that keeps no head state makes every read in the writer's
+    /// runtime replay the WAL tail from the store, so a test can park a read
+    /// there. Otherwise the writer's position and its cached tail serve the
+    /// metadata, and only content reads reach the store.
+    async fn with_cache(keys: KeyPredicate, metadata_cache: crate::MetadataCache) -> Self {
         let root = tempdir().expect("tempdir");
         let store = Arc::new(BlockingStore::new(
             RecordingStore::new(
@@ -101,6 +112,7 @@ impl Fixture {
             .build();
         let runtime = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("read-budget"))
+            .metadata_cache(metadata_cache)
             .execution_budget(budget)
             .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: None,
@@ -177,9 +189,19 @@ fn page<C>(cursor: Option<C>) -> PageRequest<C> {
     }
 }
 
+fn no_head_state() -> crate::MetadataCache {
+    crate::MetadataCache::builder()
+        .max_head_state_bytes(0)
+        .build()
+}
+
+/// Checks that a list in the writable runtime and a list in a read-only
+/// runtime with the same execution budget share its one read slot. The
+/// writer's cache keeps no head state, so its list waits in the store with
+/// the slot taken.
 #[tokio::test]
 async fn lists_share_one_slot_across_writable_and_read_only_runtimes() {
-    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let fixture = Fixture::with_cache(KeyPredicate::any(), no_head_state()).await;
     let reader = LoonFs::builder_with_store(fixture.store.clone())
         .read_only()
         .execution_budget(fixture.runtime.execution_budget().clone())
@@ -332,9 +354,12 @@ async fn streams_release_the_slot_before_reading_body_bytes() {
     fixture.runtime.shutdown().await.expect("shutdown");
 }
 
+/// Checks that dropping a read that waits for the slot, and cancelling the
+/// read that has it, both clear the read counts. The writer's cache keeps no
+/// head state, so the running read waits in the store with the slot taken.
 #[tokio::test]
 async fn dropping_waiting_and_running_reads_clears_the_counts() {
-    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let fixture = Fixture::with_cache(KeyPredicate::any(), no_head_state()).await;
     fixture.store.block_next();
     let held = tokio::spawn({
         let namespace = fixture.namespace.clone();

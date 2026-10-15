@@ -716,8 +716,13 @@ fn object_gets(operations: &[RecordedOperation], family: DurableObjectFamily) ->
         .count()
 }
 
-/// Checks that the first read after a compaction reloads the namespace's
-/// anchor without reading the unfolded WAL objects from the store again.
+/// Checks that the first read after a compaction, in a runtime without the
+/// namespace's writer session, reloads the namespace's anchor without
+/// reading the unfolded WAL objects from the store again.
+///
+/// The reads run on a read-only runtime that shares the writer's cache,
+/// because reads in the writer's runtime start from the writer's position
+/// and keep no anchor.
 #[tokio::test]
 async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
     for max_object_bytes in [crate::DEFAULT_MAX_OBJECT_BYTES, 0] {
@@ -725,6 +730,14 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
             .max_object_bytes(max_object_bytes)
             .build();
         let (writer, store, _root) = recorded_writer(cache.clone()).await;
+        let reader = LoonFs::builder_with_store(store.clone())
+            .read_only()
+            .metadata_cache(cache.clone())
+            .manifest_revalidation_interval_ms(0)
+            .build()
+            .await
+            .expect("build reader");
+        let reader_namespace = reader.namespace(&demo());
         let namespace = writer.open_namespace(&demo()).expect("open namespace");
         let maintenance = writer.maintenance(writer_id("object-cache-maintenance"));
         for index in 0..3 {
@@ -740,11 +753,14 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
                 .await
                 .expect("put a file whose bytes stay in the WAL");
         }
-        // The publish seeded the anchor, so this read loads the unfolded WAL
-        // objects from the store only after the anchor is dropped.
-        writer.core.invalidate_namespace_read_cache(&demo());
+        // The reader's first read loads the unfolded WAL objects from the
+        // store.
         assert_eq!(
-            namespace.read_file("/tail-0").await.expect("read").bytes,
+            reader_namespace
+                .read_file("/tail-0")
+                .await
+                .expect("read")
+                .bytes,
             b"tail"
         );
         let compaction = maintenance
@@ -758,7 +774,11 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
 
         store.reset();
         assert_eq!(
-            namespace.read_file("/tail-2").await.expect("read").bytes,
+            reader_namespace
+                .read_file("/tail-2")
+                .await
+                .expect("read")
+                .bytes,
             b"tail"
         );
         let operations = store.snapshot();
