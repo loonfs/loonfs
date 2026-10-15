@@ -55,10 +55,21 @@ impl RuntimeCore {
         head
     }
 
+    /// Returns the namespace's anchor, revalidated or loaded for this read.
+    ///
+    /// The read takes the slot's ticket before it sends any request, and it
+    /// installs its result only if the slot hasn't changed since (see
+    /// [`HeadStateCache::replace_anchor`](loonfs_core::cache::HeadStateCache::replace_anchor)).
+    /// Loads of one namespace can run at once, for example when the slot is
+    /// empty, and the ticket keeps the order they finish in from mattering.
+    /// A refused install doesn't fail the read. The read starts from the
+    /// slot's anchor, which is at least as new as its own result, or from
+    /// its own result when the slot is empty.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedReadAnchor>, CoreError> {
+        let ticket = self.inner.head_state.anchor_ticket(namespace_id);
         let validation = self
             .inner
             .head_state
@@ -112,8 +123,14 @@ impl RuntimeCore {
                 head.validation = Arc::clone(&validation);
                 head.completed_validation_no = validation_no;
                 let head = Arc::new(head);
-                self.inner.head_state.insert_anchor(Arc::clone(&head));
-                Ok(head)
+                match self
+                    .inner
+                    .head_state
+                    .replace_anchor(ticket, Arc::clone(&head))
+                {
+                    Ok(head) => Ok(head),
+                    Err(fenced) => Ok(fenced.current.unwrap_or(head)),
+                }
             }
             Err(error) => {
                 self.inner.head_state.invalidate_anchor(namespace_id);

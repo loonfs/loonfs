@@ -120,11 +120,11 @@ impl ReadPositionSlot {
     ///
     /// When the slot has a position, the read cache's anchor for the
     /// namespace is dropped first, so the first read after the position
-    /// loads or confirms the head. A read that was already confirming an
-    /// anchor when the position started can store that anchor after the
-    /// position started, while reads take the position. Without the drop, a
-    /// bounded read after the position ends could read at that anchor's
-    /// head, which is older than the reads from the position returned.
+    /// loads or confirms the head. The drop also fences every refresh that
+    /// started before it (see
+    /// [`HeadStateCache::invalidate_anchor`](loonfs_core::cache::HeadStateCache::invalidate_anchor)),
+    /// so a refresh from before the position can't put back a head older
+    /// than the reads from the position returned.
     pub(crate) fn clear(&self) {
         if self.current().is_some() {
             self.head_state.invalidate_anchor(&self.namespace_id);

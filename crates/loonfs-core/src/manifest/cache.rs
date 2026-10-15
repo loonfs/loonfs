@@ -28,6 +28,7 @@ use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -309,6 +310,25 @@ pub struct CachedReadAnchor {
     pub completed_validation_no: u64,
 }
 
+/// What a namespace's anchor slot had when a refresh took this ticket (see
+/// [`HeadStateCache::anchor_ticket`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorTicket {
+    /// The slot had the anchor that the cache installed with this version.
+    Version(u64),
+    /// The slot was empty, and its absence generation had this value.
+    Absent { generation: u64 },
+}
+
+/// An install that [`HeadStateCache::replace_anchor`] refused, because the
+/// namespace's anchor slot changed after the refresh took its ticket.
+#[derive(Debug)]
+pub struct AnchorFenced {
+    /// The slot's anchor when the install was refused, or `None` when the
+    /// slot is empty.
+    pub current: Option<Arc<CachedReadAnchor>>,
+}
+
 /// Lets concurrent reads of one namespace share one revalidation.
 #[derive(Debug, Default)]
 pub struct NamespaceValidation {
@@ -335,14 +355,26 @@ impl DecodedBlockKey for HeadStateKey {
 
 #[derive(Debug, Clone)]
 enum HeadStateEntry {
-    Anchor(Arc<CachedReadAnchor>),
+    /// An anchor, with the version that the cache gave it when it was
+    /// installed.
+    Anchor {
+        version: u64,
+        anchor: Arc<CachedReadAnchor>,
+    },
     Tail(Arc<ProjectedWalTail>),
 }
 
 impl HeadStateEntry {
     fn into_anchor(self) -> Option<Arc<CachedReadAnchor>> {
         match self {
-            Self::Anchor(anchor) => Some(anchor),
+            Self::Anchor { anchor, .. } => Some(anchor),
+            Self::Tail(_) => None,
+        }
+    }
+
+    fn versioned_anchor(&self) -> Option<(u64, &Arc<CachedReadAnchor>)> {
+        match self {
+            Self::Anchor { version, anchor } => Some((*version, anchor)),
             Self::Tail(_) => None,
         }
     }
@@ -350,7 +382,7 @@ impl HeadStateEntry {
     fn into_tail(self) -> Option<Arc<ProjectedWalTail>> {
         match self {
             Self::Tail(tail) => Some(tail),
-            Self::Anchor(_) => None,
+            Self::Anchor { .. } => None,
         }
     }
 }
@@ -358,7 +390,7 @@ impl HeadStateEntry {
 impl DecodedBlock for HeadStateEntry {
     fn weight(&self) -> usize {
         match self {
-            Self::Anchor(anchor) => {
+            Self::Anchor { anchor, .. } => {
                 arc_bytes::<CachedReadAnchor>()
                     + arc_bytes::<NamespaceValidation>()
                     + anchor.head.heap_bytes()
@@ -369,6 +401,9 @@ impl DecodedBlock for HeadStateEntry {
     }
 }
 
+/// The number of absence generations in a [`SharedHeadState`].
+const ABSENCE_GENERATIONS: usize = 1024;
+
 /// Namespace head anchors and WAL-tail projections for every scope, under one
 /// byte budget and one recency order.
 pub struct SharedHeadState {
@@ -376,6 +411,22 @@ pub struct SharedHeadState {
     max_decoded_bytes: usize,
     tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     counters: HeadStateCounters,
+    /// The version that the last installed anchor got. Versions are unique
+    /// across the shared cache, so an anchor that was dropped and loaded
+    /// again never has the version of a ticket taken before the drop.
+    last_anchor_version: AtomicU64,
+    /// Counters that version an empty anchor slot. Each anchor slot (a scope
+    /// and a namespace) maps to one counter by hash, and dropping or
+    /// installing an anchor in the slot advances its counter.
+    ///
+    /// An empty slot has no entry to remove, so without the counters a drop
+    /// of an empty slot couldn't fence a load that started before the drop,
+    /// and that load could install a head older than the reads that the
+    /// writer's position returned in between. Eviction can remove an entry,
+    /// but it can't erase a counter. Two slots that share a counter can fence
+    /// each other's loads by mistake, which only means that one load's
+    /// result isn't cached and the next read loads again.
+    absence_generations: Box<[AtomicU64]>,
 }
 
 impl std::fmt::Debug for SharedHeadState {
@@ -411,6 +462,10 @@ impl SharedHeadState {
             max_decoded_bytes,
             tail_observer,
             counters: HeadStateCounters::default(),
+            last_anchor_version: AtomicU64::new(0),
+            absence_generations: (0..ABSENCE_GENERATIONS)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
         }
     }
 
@@ -460,6 +515,16 @@ impl HeadStateCache {
         (self.scope, HeadStateKey::Anchor(namespace_id.clone()))
     }
 
+    /// Returns the absence generation of the namespace's anchor slot.
+    fn absence_generation(&self, namespace_id: &NamespaceId) -> &AtomicU64 {
+        let generations = &self.shared.absence_generations;
+        let mut hasher = DefaultHasher::new();
+        (self.scope, namespace_id).hash(&mut hasher);
+        let index = hasher.finish() % generations.len() as u64;
+        &generations
+            [usize::try_from(index).expect("an index below the table's length fits in usize")]
+    }
+
     /// Returns the namespace's anchor and marks it recently used.
     pub fn get_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
         self.shared
@@ -476,29 +541,97 @@ impl HeadStateCache {
             .and_then(HeadStateEntry::into_anchor)
     }
 
-    /// Stores the namespace's anchor, unless the cached anchor is at a
-    /// higher head sequence. A refresh that started before another one can
-    /// finish after it, and keeping the higher head means the head that reads
-    /// start from never moves backwards on a runtime.
-    pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
-        let key = self.anchor_key(&anchor.head.namespace_id);
-        let newer = self
-            .shared
-            .entries
-            .peek(&key)
-            .and_then(HeadStateEntry::into_anchor)
-            .is_some_and(|cached| cached.head.seq > anchor.head.seq);
-        if !newer {
-            self.shared
-                .entries
-                .insert(key, HeadStateEntry::Anchor(anchor));
+    /// Returns what the namespace's anchor slot has now, for a refresh to
+    /// take before it sends any request and to pass to
+    /// [`Self::replace_anchor`].
+    pub fn anchor_ticket(&self, namespace_id: &NamespaceId) -> AnchorTicket {
+        // Read the generation before the slot, so a drop between the two reads
+        // fences the ticket instead of being missed.
+        let generation = self.absence_generation(namespace_id).load(Ordering::SeqCst);
+        match self.shared.entries.peek(&self.anchor_key(namespace_id)) {
+            Some(HeadStateEntry::Anchor { version, .. }) => AnchorTicket::Version(version),
+            _ => AnchorTicket::Absent { generation },
         }
     }
 
+    /// Installs `anchor` as the namespace's anchor, if the slot hasn't
+    /// changed since the refresh that produced `anchor` took `ticket`, and
+    /// returns `anchor`.
+    ///
+    /// The install succeeds when the slot still has the ticket's anchor and
+    /// `anchor` isn't at a lower head sequence, or when the slot is still
+    /// empty and its absence generation hasn't moved. An anchor at a higher
+    /// head sequence than the cached one also replaces it, whatever the
+    /// ticket. A cached anchor was loaded after the slot's last drop, so its
+    /// head is at least as new as every head that reads returned before that
+    /// drop, and an anchor at a higher head can replace it without moving the
+    /// cached head backwards. A successful install assigns `anchor` the next
+    /// version and advances the slot's absence generation.
+    ///
+    /// Otherwise nothing changes, and [`AnchorFenced`] includes the slot's
+    /// anchor, which is at a head sequence at least as high as `anchor`'s. A
+    /// drop of the slot (see [`Self::invalidate_anchor`]) fences every
+    /// ticket taken before it, so a refresh that started before the drop
+    /// can't put its result back into the emptied slot. A cache with no room
+    /// for anchors keeps nothing and returns `anchor`.
+    pub fn replace_anchor(
+        &self,
+        ticket: AnchorTicket,
+        anchor: Arc<CachedReadAnchor>,
+    ) -> Result<Arc<CachedReadAnchor>, AnchorFenced> {
+        let namespace_id = &anchor.head.namespace_id;
+        let key = self.anchor_key(namespace_id);
+        let generation = self.absence_generation(namespace_id);
+        let version = self
+            .shared
+            .last_anchor_version
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let entry = HeadStateEntry::Anchor {
+            version,
+            anchor: Arc::clone(&anchor),
+        };
+        let mut fenced = None;
+        self.shared.entries.insert_if(key, entry, |current| {
+            let current = current.and_then(HeadStateEntry::versioned_anchor);
+            let admitted = match current {
+                Some((current_version, cached)) => {
+                    anchor.head.seq > cached.head.seq
+                        || (ticket == AnchorTicket::Version(current_version)
+                            && anchor.head.seq >= cached.head.seq)
+                }
+                None => {
+                    ticket
+                        == AnchorTicket::Absent {
+                            generation: generation.load(Ordering::SeqCst),
+                        }
+                }
+            };
+            if admitted {
+                generation.fetch_add(1, Ordering::SeqCst);
+            } else {
+                fenced = Some(AnchorFenced {
+                    current: current.map(|(_, cached)| Arc::clone(cached)),
+                });
+            }
+            admitted
+        });
+        match fenced {
+            Some(fenced) => Err(fenced),
+            None => Ok(anchor),
+        }
+    }
+
+    /// Drops the namespace's anchor and advances the slot's absence
+    /// generation, also when the slot is empty, so every ticket taken before
+    /// the drop is fenced.
     pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
+        let generation = self.absence_generation(namespace_id);
         self.shared
             .entries
-            .invalidate(&self.anchor_key(namespace_id));
+            .invalidate_with(&self.anchor_key(namespace_id), || {
+                generation.fetch_add(1, Ordering::SeqCst);
+            });
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
@@ -560,7 +693,7 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedReadAnchor, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
+        AnchorTicket, CachedReadAnchor, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
         MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState, ObjectStoreScope,
         SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
@@ -780,24 +913,107 @@ mod tests {
         })
     }
 
-    /// Checks that an anchor at a lower head sequence doesn't replace the
-    /// cached anchor, and that an anchor at the same or a higher sequence
-    /// does.
+    fn demo() -> NamespaceId {
+        NamespaceId::parse("demo").expect("namespace id")
+    }
+
+    /// Installs `anchor` and asserts that the install succeeded.
+    fn install(cache: &HeadStateCache, ticket: AnchorTicket, anchor: &Arc<CachedReadAnchor>) {
+        let installed = cache
+            .replace_anchor(ticket, Arc::clone(anchor))
+            .expect("the install succeeds");
+        assert!(Arc::ptr_eq(&installed, anchor));
+    }
+
+    /// Returns the anchor that a refused install reports as the slot's.
+    fn fenced(
+        cache: &HeadStateCache,
+        ticket: AnchorTicket,
+        anchor: Arc<CachedReadAnchor>,
+    ) -> Option<Arc<CachedReadAnchor>> {
+        cache
+            .replace_anchor(ticket, anchor)
+            .expect_err("the install is fenced")
+            .current
+    }
+
+    /// Checks that of two cold loads that both found the slot empty, the
+    /// first to finish installs its anchor and the second is fenced when its
+    /// head is older, so the newer head stays cached whatever order the
+    /// loads finish in.
+    #[test]
+    fn an_older_cold_load_finishing_last_leaves_the_newer_anchor() {
+        let cache = HeadStateCache::unshared(1 << 20);
+        let older = cache.anchor_ticket(&demo());
+        let newer = cache.anchor_ticket(&demo());
+        let newer_anchor = anchor_at(6);
+        install(&cache, newer, &newer_anchor);
+        let current = fenced(&cache, older, anchor_at(5)).expect("the slot's anchor");
+        assert!(Arc::ptr_eq(&current, &newer_anchor));
+        let cached = cache.get_anchor(&demo()).expect("an anchor");
+        assert!(Arc::ptr_eq(&cached, &newer_anchor));
+    }
+
+    /// Checks that when the older of two cold loads finishes first, the
+    /// newer load's anchor replaces it, because a higher head replaces any
+    /// cached anchor.
+    #[test]
+    fn a_newer_cold_load_finishing_last_replaces_the_older_anchor() {
+        let cache = HeadStateCache::unshared(1 << 20);
+        let older = cache.anchor_ticket(&demo());
+        let newer = cache.anchor_ticket(&demo());
+        install(&cache, older, &anchor_at(5));
+        let newer_anchor = anchor_at(6);
+        install(&cache, newer, &newer_anchor);
+        let cached = cache.get_anchor(&demo()).expect("an anchor");
+        assert!(Arc::ptr_eq(&cached, &newer_anchor));
+    }
+
+    /// Checks that dropping the anchor fences a ticket taken before the drop,
+    /// whether the ticket refers to the dropped anchor's version or to an
+    /// empty slot.
+    #[test]
+    fn an_invalidation_fences_every_ticket_taken_before_it() {
+        let cache = HeadStateCache::unshared(1 << 20);
+        let absent = cache.anchor_ticket(&demo());
+        cache.invalidate_anchor(&demo());
+        assert!(fenced(&cache, absent, anchor_at(5)).is_none());
+        install(&cache, cache.anchor_ticket(&demo()), &anchor_at(5));
+        let version = cache.anchor_ticket(&demo());
+        assert!(matches!(version, AnchorTicket::Version(_)));
+        cache.invalidate_anchor(&demo());
+        assert!(fenced(&cache, version, anchor_at(5)).is_none());
+        assert!(cache.get_anchor(&demo()).is_none());
+    }
+
+    /// Checks that an install at the ticket's version but at a lower head
+    /// sequence is fenced, and that the cached anchor stays.
     #[test]
     fn an_anchor_at_a_lower_head_does_not_replace_the_cached_anchor() {
         let cache = HeadStateCache::unshared(1 << 20);
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let cached = |cache: &HeadStateCache| cache.get_anchor(&namespace_id).expect("an anchor");
-        let newer = anchor_at(5);
-        cache.insert_anchor(Arc::clone(&newer));
-        cache.insert_anchor(anchor_at(4));
-        assert!(Arc::ptr_eq(&cached(&cache), &newer));
-        let same = anchor_at(5);
-        cache.insert_anchor(Arc::clone(&same));
-        assert!(Arc::ptr_eq(&cached(&cache), &same));
+        let cached = anchor_at(5);
+        install(&cache, cache.anchor_ticket(&demo()), &cached);
+        let ticket = cache.anchor_ticket(&demo());
+        let current = fenced(&cache, ticket, anchor_at(4)).expect("the slot's anchor");
+        assert!(Arc::ptr_eq(&current, &cached));
+        assert_eq!(cache.anchor_ticket(&demo()), ticket);
+    }
+
+    /// Checks that an install at the ticket's version and at the same or a
+    /// higher head sequence succeeds and assigns the slot a new version.
+    #[test]
+    fn an_install_at_the_tickets_version_advances_the_version() {
+        let cache = HeadStateCache::unshared(1 << 20);
+        install(&cache, cache.anchor_ticket(&demo()), &anchor_at(5));
+        let first = cache.anchor_ticket(&demo());
+        install(&cache, first, &anchor_at(5));
+        let second = cache.anchor_ticket(&demo());
+        assert_ne!(second, first);
         let higher = anchor_at(6);
-        cache.insert_anchor(Arc::clone(&higher));
-        assert!(Arc::ptr_eq(&cached(&cache), &higher));
+        install(&cache, second, &higher);
+        assert_ne!(cache.anchor_ticket(&demo()), second);
+        let cached = cache.get_anchor(&demo()).expect("an anchor");
+        assert!(Arc::ptr_eq(&cached, &higher));
     }
 
     #[tokio::test]

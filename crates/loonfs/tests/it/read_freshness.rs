@@ -13,7 +13,9 @@ use loonfs::{
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordedOperation, RecordingStore};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
+};
 use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
@@ -23,8 +25,9 @@ use std::time::Duration;
 const INTERVAL_MS: u64 = 1_000;
 
 struct Fixture {
-    /// Records every request that either runtime sends.
-    recording: Arc<RecordingStore<MemoryStore>>,
+    /// Records every request that either runtime sends, and can park the
+    /// namespace's manifest checks.
+    recording: Arc<RecordingStore<BlockingStore<MemoryStore>>>,
     /// The reader runtime's monotonic clock.
     clock: Arc<ManualClock>,
     /// The reader runtime's metrics.
@@ -40,14 +43,19 @@ struct Fixture {
 
 /// Creates a writer runtime with a namespace that has one file, and a
 /// separate read-only runtime over the same store with a manual clock and a
-/// one-second manifest check interval.
+/// one-second manifest check interval. The store parks the namespace's
+/// manifest checks (HEAD requests) once a test calls `block_next`.
 async fn fixture(name: &str) -> Fixture {
+    let namespace_id = namespace_id(name);
     let recording = Arc::new(RecordingStore::new(
-        MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
+        BlockingStore::new(
+            MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
+            KeyPredicate::manifest(&namespace_id),
+            OperationSelector::Head,
+        ),
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let namespace_id = namespace_id(name);
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
@@ -387,11 +395,11 @@ async fn a_bounded_read_after_a_latest_read_never_reads_an_older_head() {
 /// the position.
 ///
 /// A read that loads the namespace while the writer has no position can
-/// store its anchor after the writer's next commit starts a new position.
-/// The test parks that load's manifest check until the commit returns, so
-/// the anchor's head is older than the reads from the new position. When
-/// the takeover drops the position, the anchor goes with it, so a bounded
-/// read with a long interval loads the namespace again.
+/// finish after the writer's next commit starts a new position, with a head
+/// older than the reads from that position. The test parks that load's
+/// manifest check until the commit returns. The position's start fences the
+/// load's install, and the takeover's drop of the position leaves no anchor
+/// either, so a bounded read with a long interval loads the namespace again.
 #[tokio::test]
 async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
@@ -443,4 +451,116 @@ async fn a_bounded_read_after_a_dropped_position_reads_the_current_head() {
         .await
         .expect("a bounded read after the takeover");
     assert_eq!(entry.head_seq, peer_commit.committed_seq);
+}
+
+/// Checks that a load that started before the writer's session took a
+/// position, and finished after the session closed, doesn't put its older
+/// head back into the read cache.
+///
+/// The steps follow the race. The load reads the WAL at the first commit's
+/// head and waits on its manifest check. The writer commits again, a read
+/// from the writer's position returns that newer head, the session closes,
+/// and then the load finishes. The position's start and the session's close
+/// each drop the namespace's anchor while the slot is empty, and each drop
+/// advances the slot's absence generation, which fences the load's install.
+/// Without that advance, the load would install its older anchor, and the
+/// bounded read at the end would return the first commit's head.
+#[tokio::test]
+async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
+    let fixture = writer_position_reads::fixture("spanning-load", Parked::ManifestChecks).await;
+    let gate = fixture.recording.inner();
+    // Past the revalidation bound, the next read drops the position and
+    // loads the namespace from the store.
+    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    gate.block_next();
+    let (loaded, positioned) = futures::join!(fixture.reader.stat("/small.txt"), async {
+        gate.wait_until_blocked().await;
+        let commit = fixture
+            .put("/during.txt")
+            .await
+            .expect("a commit while the load waits");
+        let positioned = fixture
+            .reader
+            .stat("/during.txt")
+            .await
+            .expect("a read from the writer's position");
+        assert_eq!(positioned.head_seq, commit.committed_seq);
+        fixture
+            .writer
+            .open_namespace(&fixture.namespace_id)
+            .expect("a handle on the session")
+            .close()
+            .await
+            .expect("close the session");
+        gate.release();
+        positioned
+    });
+    let loaded = loaded.expect("the load");
+    assert!(
+        loaded.head_seq < positioned.head_seq,
+        "the load's head {} is older than the position's {}",
+        loaded.head_seq,
+        positioned.head_seq
+    );
+    let entry = fixture
+        .reader
+        .stat_with_options(
+            "/small.txt",
+            &StatOptions {
+                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("a bounded read after the close");
+    assert_eq!(entry.head_seq, positioned.head_seq);
+}
+
+/// Checks that of two cold loads of one namespace in a reader runtime, the
+/// older one finishing last doesn't replace the newer head in the read
+/// cache.
+///
+/// The first load reads the WAL and waits on its manifest check. The writer
+/// commits, and a second load reads the newer head and installs it. Both
+/// loads found the slot empty, so the first load's install is fenced when it
+/// finishes, and that read starts from the newer anchor instead.
+#[tokio::test]
+async fn an_older_cold_load_finishing_last_leaves_the_newer_head_cached() {
+    let fixture = fixture("concurrent-cold-loads").await;
+    let gate = fixture.recording.inner();
+    gate.block_next();
+    let (older, newer) = futures::join!(fixture.reader.stat("/file.txt"), async {
+        gate.wait_until_blocked().await;
+        let commit = fixture
+            .namespace
+            .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
+            .await
+            .expect("a commit while the first load waits");
+        let newer = fixture
+            .reader
+            .stat("/next.txt")
+            .await
+            .expect("a second cold load");
+        assert_eq!(newer.head_seq, commit.committed_seq);
+        gate.release();
+        newer
+    });
+    let older = older.expect("the first cold load");
+    assert_eq!(
+        older.head_seq, newer.head_seq,
+        "the fenced load starts from the newer anchor"
+    );
+    let entry = fixture
+        .reader
+        .stat_with_options(
+            "/next.txt",
+            &StatOptions {
+                freshness: bounded(READ_REVALIDATION_BOUND_MS),
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("a bounded read after both loads");
+    assert_eq!(entry.head_seq, newer.head_seq);
+    fixture.shutdown().await;
 }

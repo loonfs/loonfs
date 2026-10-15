@@ -307,6 +307,19 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// entry first and then the entry itself. When the cache doesn't keep
     /// the entry, the entry that the key already had stays.
     pub fn insert(&self, key: K, block: V) -> bool {
+        self.insert_if(key, block, |_| true)
+    }
+
+    /// Inserts `block` under `key` as [`Self::insert`] does, but only if
+    /// `admit` accepts the entry that the key has now.
+    ///
+    /// `admit` runs in the same critical section as the insert, so no other
+    /// insert or invalidation can change the key's entry between the check
+    /// and the insert. When `admit` refuses, nothing changes. A disabled
+    /// cache, or an entry whose charge is more than the whole budget,
+    /// returns `false` without calling `admit`. Returns whether the cache
+    /// kept the entry.
+    pub fn insert_if(&self, key: K, block: V, admit: impl FnOnce(Option<&V>) -> bool) -> bool {
         if self.disabled() {
             return false;
         }
@@ -321,6 +334,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
+        if !admit(inner.entries.get(&key).map(|slot| &slot.block)) {
+            return false;
+        }
         if let Some(previous) = inner.entries.remove(&key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
         }
@@ -346,10 +362,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
 
     /// Drops one entry without counting an eviction.
     pub fn invalidate(&self, key: &K) {
+        self.invalidate_with(key, || {});
+    }
+
+    /// Drops one entry as [`Self::invalidate`] does, after running `before`
+    /// in the same critical section, also when the key has no entry.
+    pub fn invalidate_with(&self, key: &K, before: impl FnOnce()) {
         let mut inner = self
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
+        before();
         if let Some(slot) = inner.entries.remove(key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
             inner.shrink_if_sparse();
@@ -632,6 +655,29 @@ mod tests {
                 .expect("observer lock")
                 .push(decoded_bytes);
         }
+    }
+
+    /// Checks that `insert_if` passes the key's entry to the admission check,
+    /// and that a refused insert changes neither the entry nor the counters.
+    #[test]
+    fn a_refused_conditional_insert_changes_nothing() {
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(1 << 20));
+        let key = MetadataSegmentId::parse(format!("seg_{:032x}", 1)).expect("segment id");
+        assert!(cache.insert_if(key.clone(), Block(3), |current| current.is_none()));
+        let stats = cache.stats();
+        assert!(!cache.insert_if(key.clone(), Block(5), |current| {
+            current.is_some_and(|block| block.0 == 5)
+        }));
+        assert_eq!(cache.peek(&key).map(|block| block.0), Some(3));
+        assert_eq!(cache.stats().inserts, stats.inserts);
+        assert_eq!(
+            cache.stats().cached_decoded_bytes,
+            stats.cached_decoded_bytes
+        );
+        assert!(cache.insert_if(key.clone(), Block(5), |current| {
+            current.is_some_and(|block| block.0 == 3)
+        }));
+        assert_eq!(cache.peek(&key).map(|block| block.0), Some(5));
     }
 
     #[tokio::test]

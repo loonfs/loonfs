@@ -32,7 +32,7 @@ pub(crate) struct Fixture {
     pub(crate) namespace_id: NamespaceId,
     namespace: Namespace<Writable>,
     pub(crate) reader: Namespace<ReadOnly>,
-    writer: LoonFs<Writable>,
+    pub(crate) writer: LoonFs<Writable>,
 }
 
 /// The requests that a fixture's store parks once a test calls
