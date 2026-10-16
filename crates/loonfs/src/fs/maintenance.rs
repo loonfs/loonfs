@@ -765,9 +765,11 @@ impl Maintenance {
         // A caller may drop the response, so its counts survive only when
         // this shared pass records them here.
         self.core.instruments().gc_pass(&report);
-        // Sweeping can remove objects cached views still reference; drop the
-        // namespace caches rather than trusting them across a collection. A
-        // pass publishes no manifest, so the publisher keeps its position.
+        // A pass publishes no manifest, so the head didn't move. The
+        // publisher keeps its position, and the cached head stays confirmed.
+        // The collection grace covers the revalidation bound, so a head
+        // inside its bound never lists a segment that a pass deleted
+        // (format.md sections 11.2 and 11.4).
         self.publisher
             .invalidate_namespace(namespace_id, NamespaceChange::Unchanged);
         Ok(report)
