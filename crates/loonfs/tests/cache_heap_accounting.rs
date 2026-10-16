@@ -443,6 +443,62 @@ fn small_entries_charge_cache_bookkeeping() {
     assert_eq!(cache.stats().cached_decoded_bytes, 0);
 }
 
+/// Checks that a namespace head heavier than the whole head-state budget
+/// isn't kept by the cache once the read that loaded it is done, and that
+/// the next read of the namespace loads it again. The head of a namespace
+/// with access control includes its root grants, so a namespace whose root
+/// grants are at the entry limit has a head of tens of KiB.
+async fn a_head_larger_than_the_budget_is_not_kept() {
+    const BUDGET: usize = 4096;
+    let shape = Shape {
+        label: "oversized",
+        namespaces: 1,
+        folded_entries: 16,
+        tail_commits: 0,
+        tail_entries_per_commit: 0,
+        rows: Rows::Dense,
+    };
+    let root = tempfile::tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(root.path()).expect("local store"));
+    seed(&store, &shape).await;
+    drop(store);
+    let head_state = |max_head_state_bytes| {
+        MetadataCache::builder()
+            .max_segment_bytes(0)
+            .max_head_state_bytes(max_head_state_bytes)
+            .max_object_bytes(0)
+            .build()
+    };
+
+    let (with_budget, reader) = retained_heap(root.path(), head_state(BUDGET), |reader| {
+        stat_one_path_per_namespace(&shape, reader)
+    })
+    .await;
+    let first = reader.metadata_cache().stats();
+    let (without_budget, unbudgeted) = retained_heap(root.path(), head_state(0), |reader| {
+        stat_one_path_per_namespace(&shape, reader)
+    })
+    .await;
+    drop(unbudgeted);
+    let retained = with_budget.saturating_sub(without_budget);
+    println!(
+        "oversized head | {BUDGET} | {} accounted | {retained} retained",
+        first.head_state_bytes
+    );
+    assert!(first.head_state_rejections >= 1, "{first:?}");
+    assert!(first.head_state_bytes <= BUDGET, "{first:?}");
+    assert!(
+        retained <= BUDGET,
+        "the head-state cache retains {retained} bytes under a {BUDGET} byte budget"
+    );
+
+    stat_one_path_per_namespace(&shape, reader.clone()).await;
+    let second = reader.metadata_cache().stats();
+    assert_eq!(second.head_anchor_misses, first.head_anchor_misses + 1);
+    assert_eq!(second.head_anchor_hits, first.head_anchor_hits);
+    assert!(second.head_state_rejections > first.head_state_rejections);
+}
+
 #[tokio::test]
 async fn cache_budgets_charge_the_heap_their_contents_hold() {
     small_entries_charge_cache_bookkeeping();
@@ -539,4 +595,5 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    a_head_larger_than_the_budget_is_not_kept().await;
 }

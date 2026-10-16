@@ -3,7 +3,7 @@
 
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
-use loonfs_core::cache::{CachedHead, HeadStateCache};
+use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
 use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -41,11 +41,14 @@ pub(crate) trait HeadPositions: Send + Sync {
 /// commit.
 #[derive(Debug)]
 pub(crate) struct ReadPositionSlot {
-    /// The namespace of the writer session.
-    namespace_id: NamespaceId,
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head.
     head_state: Arc<HeadStateCache>,
+    /// The namespace's head record, which the slot keeps while the session
+    /// lasts. A change that the runtime learns of while the session has a
+    /// position stays on the record, so the position's install when it ends
+    /// doesn't keep a confirmation from before the change.
+    record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
@@ -65,9 +68,9 @@ const MAX_PUBLISHED_AHEAD: usize = 16;
 impl ReadPositionSlot {
     /// Returns an empty slot for the writer session of `namespace_id`, in the
     /// runtime whose read cache is `head_state`.
-    pub(crate) fn new(namespace_id: NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
+    pub(crate) fn new(namespace_id: &NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
         Self {
-            namespace_id,
+            record: head_state.record(namespace_id),
             head_state,
             position: Mutex::default(),
             checking: AtomicBool::default(),
@@ -119,7 +122,7 @@ impl ReadPositionSlot {
     /// slot had a position.
     ///
     /// The position becomes the namespace's cached head first, through
-    /// [`NamespaceHead::replace`](loonfs_core::cache::NamespaceHead::replace),
+    /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
     /// with both checks at the position's last successor check, because
     /// that check confirmed a head that this runtime wrote itself. So the
     /// first read after the position starts from a head at least as new as
@@ -129,14 +132,15 @@ impl ReadPositionSlot {
         let Some(position) = self.current() else {
             return false;
         };
-        let head = self.head_state.namespace_head(&self.namespace_id);
-        head.replace(CachedHead {
-            head: position.head.clone(),
-            basis: position.basis.clone(),
-            basis_checked: Some(position.basis_checked.clone()),
-            head_confirmed: Some(position.basis_checked.clone()),
-        });
-        self.head_state.recharge_head(&self.namespace_id, &head);
+        self.head_state.replace_head(
+            &self.record,
+            CachedHead {
+                head: position.head.clone(),
+                basis: position.basis.clone(),
+                basis_checked: Some(position.basis_checked.clone()),
+                head_confirmed: Some(position.basis_checked.clone()),
+            },
+        );
         *self.lock() = None;
         true
     }

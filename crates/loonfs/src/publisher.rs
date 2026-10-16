@@ -870,7 +870,7 @@ impl NamespacePublisher {
     fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
         let session = SharedWriterSessionStatus::default();
         let read_position = Arc::new(ReadPositionSlot::new(
-            namespace_id.clone(),
+            &namespace_id,
             registry.runtime_core.head_state(),
         ));
         Self {

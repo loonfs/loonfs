@@ -130,8 +130,8 @@ pub mod cache {
 
     pub use crate::manifest::metadata_compaction_due;
     pub use crate::manifest::{
-        CacheScope, CachedHead, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
-        MetadataSegmentCacheStats, NamespaceHead, ObjectStoreScope, SharedHeadState,
+        CacheScope, CachedHead, HeadRecord, HeadStateCache, HeadStateCacheStats,
+        MetadataSegmentCache, MetadataSegmentCacheStats, ObjectStoreScope, SharedHeadState,
         SharedSegmentBlocks, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError,
         StoredMetadataBlockKey, StoredMetadataBlockKind, WalTailProjectionCacheKey,
     };
