@@ -29,7 +29,7 @@ use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 /// The scope under which a shared cache keeps one runtime's head state.
@@ -323,25 +323,17 @@ impl CachedHead {
     }
 }
 
-/// The coordination of one namespace's head in one runtime: the lock that
-/// refreshes take, and what the runtime has learned about the head while a
-/// read, a refresh, or a writer session uses the record.
+/// What one runtime has learned about one namespace's head while a read or
+/// a writer session uses the record.
 ///
 /// The head itself is an immutable [`CachedHead`] snapshot in the head-state
 /// cache, weighed when it's inserted and evicted like any other entry. The
 /// record is a few words kept outside the cache's budget. It lives while a
-/// read, a refresh, or a writer session references it and goes away when
-/// the namespace is idle, which is when no read or position that predates
-/// a change can still install a head.
+/// read or a writer session references it and goes away when the namespace
+/// is idle, which is when no read or position that predates a change can
+/// still install a head.
 #[derive(Debug, Default)]
 pub struct HeadRecord {
-    /// The lock that refreshes of the head take, so they run one at a time.
-    pub refresh: tokio::sync::Mutex<()>,
-    /// The number of the last refresh that started.
-    pub started: AtomicU64,
-    /// The number of the last refresh that completed, which a read that
-    /// waited for it compares with the number it observed when it arrived.
-    pub completed_validation_no: AtomicU64,
     state: std::sync::Mutex<RecordState>,
 }
 

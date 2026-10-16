@@ -1,8 +1,9 @@
 //! The heads that runtime reads start from: the position of the namespace's
-//! writer session in this runtime, or else the namespace's cached head. A
-//! cached head's WAL probe finds new commits, and the interval check of
-//! either head finds a newer manifest. An eventual read skips both while the
-//! cached head was confirmed less than its maximum staleness ago.
+//! writer session in this runtime, or else the namespace's cached head. Each
+//! strong read of a cached head sends its own WAL probe to find new commits,
+//! and the interval check of either head finds a newer manifest. An eventual
+//! read skips both while the cached head was confirmed less than its maximum
+//! staleness ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -18,7 +19,6 @@ use loonfs_core::control::{
 };
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -56,63 +56,28 @@ impl RuntimeCore {
 
     /// Returns the namespace's head, confirmed or loaded for this read.
     ///
-    /// Refreshes of one namespace take the refresh lock of its head record,
-    /// so they run one at a time, and a read that waited for a refresh that
-    /// started after the read arrived starts from that refresh's result. A
-    /// refresh installs its result through
+    /// The read sends its own requests to confirm the head, even while
+    /// another read of the namespace is confirming it. The read installs its
+    /// result through
     /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
-    /// which keeps the newer of the result and the current head, and the
-    /// read starts from whichever head that returns.
+    /// which keeps the newer of the result and the current head, so the
+    /// cached head doesn't move backwards whatever order concurrent reads
+    /// finish in. The read starts from whichever head that returns.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
+        // Take the record before the refresh reads the timer, so the record
+        // keeps any change marked while the refresh runs, and the refresh's
+        // confirmation, which predates that change, doesn't confirm the head.
         let record = self.inner.head_state.record(namespace_id);
-        let observed_validation_no = record.started.load(Ordering::SeqCst);
-        let _refresh = record
-            .refresh
-            .lock()
-            .instrument(tracing::debug_span!(
-                target: "loonfs::page",
-                "loonfs.phase",
-                phase = "validation_wait",
-                namespace_id = %namespace_id,
-            ))
-            .await;
         let cached = self.inner.head_state.get_head(namespace_id);
-        let reusable = cached.clone().filter(|cached| {
-            cached.head_confirmed.is_some()
-                && record.completed_validation_no.load(Ordering::SeqCst) > observed_validation_no
-        });
-        if let Some(head) = reusable {
-            // A successful refresh started after this read arrived, so its
-            // observation is inside our read interval, and no change marked
-            // the head unconfirmed since. A probe already in flight when we
-            // arrived can't authorize this shortcut, because it may have
-            // observed the store before an intervening write completed.
-            let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
-            self.record_head_lookup(true);
-            return Ok(head);
-        }
-        // Saturate instead of wrapping: at exhaustion reads simply stop
-        // sharing, since no later validation number can exceed the observed one.
-        let validation_no = record
-            .started
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
-            .map(|previous| previous + 1)
-            .unwrap_or(u64::MAX);
         let result = self
             .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
             .await;
         match result {
-            Ok(candidate) => {
-                let current = self.inner.head_state.replace_head(&record, candidate);
-                record
-                    .completed_validation_no
-                    .store(validation_no, Ordering::SeqCst);
-                Ok(current)
-            }
+            Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
             Err(error) => {
                 self.inner.head_state.unconfirm_head(
                     namespace_id,
@@ -135,7 +100,6 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         let record = self.inner.head_state.record(namespace_id);
-        let _refresh = record.refresh.lock().await;
         let loaded = self.refresh_namespace_head(namespace_id, None).await?;
         Ok(self.inner.head_state.replace_head(&record, loaded))
     }
