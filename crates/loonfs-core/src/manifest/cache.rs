@@ -6,7 +6,7 @@
 //! object store to every key, so runtimes over the same object store share
 //! decoded blocks and manifests, and runtimes over different object stores
 //! never read each other's blocks. The head-state view adds the runtime's
-//! [`CacheScope`] to every key, so no runtime reads the head anchors or
+//! [`CacheScope`] to every key, so no runtime reads the namespace heads or
 //! WAL-tail projections of another runtime. Eviction runs across every scope.
 //!
 //! The segment view also carries the handle to the optional node-local
@@ -28,9 +28,9 @@ use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// The scope under which a shared cache keeps one runtime's head state.
 ///
@@ -289,63 +289,116 @@ pub struct WalTailProjectionCacheKey {
     pub head_seq: ChangeSeq,
 }
 
-/// A namespace head and the metadata basis it was read against.
+/// A namespace head and the metadata basis it was read against, with the
+/// checks that confirmed them.
 ///
 /// Keeping them together ensures reads use a consistent pair. If compaction
 /// advances the current manifest, reads may replay additional WAL entries until
-/// the anchor refreshes.
+/// the head refreshes.
 #[derive(Debug, Clone)]
-pub struct CachedReadAnchor {
+pub struct CachedHead {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
-    /// The successor check that last confirmed `basis`.
+    /// The successor check that last confirmed `basis`. A read trusts the
+    /// basis only while this check is younger than the revalidation bound,
+    /// so the check is kept when the head is marked unconfirmed.
     pub basis_checked: Option<Observation>,
-    /// When the WAL probe last confirmed `head`, or when the anchor was
-    /// loaded. The observation is taken before the probe or the load is
-    /// sent, so `head` includes every commit acknowledged before it. A
-    /// eventual read within its maximum staleness reads at `head` without a request.
-    pub head_confirmed: Observation,
-    pub validation: Arc<NamespaceValidation>,
-    /// The number of the validation that produced this anchor.
-    pub completed_validation_no: u64,
+    /// When the WAL probe last confirmed `head`, or when the head was loaded,
+    /// or `None` when the head is unconfirmed. The observation is taken
+    /// before the probe or the load is sent, so `head` includes every commit
+    /// acknowledged before it. An eventual read within its maximum staleness
+    /// reads at `head` without a request, and a strong read of an unconfirmed
+    /// head checks for a successor manifest whatever the interval.
+    pub head_confirmed: Option<Observation>,
 }
 
-/// What a namespace's anchor slot had when a refresh took this ticket (see
-/// [`HeadStateCache::anchor_ticket`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnchorTicket {
-    /// The slot had the anchor that the cache installed with this version.
-    Version(u64),
-    /// The slot was empty, and its absence generation had this value.
-    Absent { generation: u64 },
+impl CachedHead {
+    /// The order that [`HeadStateCache::replace_head`] compares heads in.
+    fn order(&self) -> (ChangeSeq, ManifestNo) {
+        (self.head.seq, self.basis.manifest_no())
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.head.heap_bytes() + self.basis.0.heap_bytes()
+    }
 }
 
-/// An install that [`HeadStateCache::replace_anchor`] refused, because the
-/// namespace's anchor slot changed after the refresh took its ticket.
-#[derive(Debug)]
-pub struct AnchorFenced {
-    /// The slot's anchor when the install was refused, or `None` when the
-    /// slot is empty.
-    pub current: Option<Arc<CachedReadAnchor>>,
-}
-
-/// Lets concurrent reads of one namespace share one revalidation.
+/// The coordination of one namespace's head in one runtime: the lock that
+/// refreshes take, and what the runtime has learned about the head while a
+/// read, a refresh, or a writer session uses the record.
+///
+/// The head itself is an immutable [`CachedHead`] snapshot in the head-state
+/// cache, weighed when it's inserted and evicted like any other entry. The
+/// record is a few words kept outside the cache's budget. It lives while a
+/// read, a refresh, or a writer session references it and goes away when
+/// the namespace is idle, which is when no read or position that predates
+/// a change can still install a head.
 #[derive(Debug, Default)]
-pub struct NamespaceValidation {
-    pub lock: tokio::sync::Mutex<()>,
+pub struct HeadRecord {
+    /// The lock that refreshes of the head take, so they run one at a time.
+    pub refresh: tokio::sync::Mutex<()>,
+    /// The number of the last refresh that started.
     pub started: AtomicU64,
+    /// The number of the last refresh that completed, which a read that
+    /// waited for it compares with the number it observed when it arrived.
+    pub completed_validation_no: AtomicU64,
+    state: std::sync::Mutex<RecordState>,
+}
+
+/// The state behind a [`HeadRecord`]'s lock.
+#[derive(Debug, Default)]
+struct RecordState {
+    /// The order of the newest head that the record installed or saw. It
+    /// stays after the cache evicts that head.
+    floor: Option<(ChangeSeq, ManifestNo)>,
+    /// When the head was last marked unconfirmed. A confirmation taken before
+    /// this observation predates the change, so it doesn't confirm the head.
+    unconfirmed_at: Option<Observation>,
+}
+
+impl HeadRecord {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecordState> {
+        // A critical section under this lock compares heads and calls the
+        // head-state cache, which doesn't call back into the record, so the
+        // lock isn't poisoned by anything that the record's own code doesn't
+        // control.
+        self.state
+            .lock()
+            .expect("the head record lock should not be poisoned")
+    }
+}
+
+/// The number of head records the map keeps before its first scan for
+/// records that nothing references.
+const MIN_RECORDS_BEFORE_COMPACTING: usize = 64;
+
+/// Returns whether two optional observations are the same reading.
+fn same_observation(first: &Option<Observation>, second: &Option<Observation>) -> bool {
+    match (first, second) {
+        (Some(first), Some(second)) => !first.is_after(second) && !second.is_after(first),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Returns the newer of two observations of one timer.
+fn newer(first: Option<Observation>, second: Option<Observation>) -> Option<Observation> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.newer(second)),
+        (first, second) => first.or(second),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum HeadStateKey {
-    Anchor(NamespaceId),
+    Head(NamespaceId),
     Tail(WalTailProjectionCacheKey),
 }
 
 impl DecodedBlockKey for HeadStateKey {
     fn heap_bytes(&self) -> usize {
         match self {
-            Self::Anchor(namespace_id)
+            Self::Head(namespace_id)
             | Self::Tail(WalTailProjectionCacheKey { namespace_id, .. }) => {
                 HeapBytes::heap_bytes(namespace_id)
             }
@@ -355,26 +408,14 @@ impl DecodedBlockKey for HeadStateKey {
 
 #[derive(Debug, Clone)]
 enum HeadStateEntry {
-    /// An anchor, with the version that the cache gave it when it was
-    /// installed.
-    Anchor {
-        version: u64,
-        anchor: Arc<CachedReadAnchor>,
-    },
+    Head(Arc<CachedHead>),
     Tail(Arc<ProjectedWalTail>),
 }
 
 impl HeadStateEntry {
-    fn into_anchor(self) -> Option<Arc<CachedReadAnchor>> {
+    fn into_head(self) -> Option<Arc<CachedHead>> {
         match self {
-            Self::Anchor { anchor, .. } => Some(anchor),
-            Self::Tail(_) => None,
-        }
-    }
-
-    fn versioned_anchor(&self) -> Option<(u64, &Arc<CachedReadAnchor>)> {
-        match self {
-            Self::Anchor { version, anchor } => Some((*version, anchor)),
+            Self::Head(head) => Some(head),
             Self::Tail(_) => None,
         }
     }
@@ -382,7 +423,7 @@ impl HeadStateEntry {
     fn into_tail(self) -> Option<Arc<ProjectedWalTail>> {
         match self {
             Self::Tail(tail) => Some(tail),
-            Self::Anchor { .. } => None,
+            Self::Head(_) => None,
         }
     }
 }
@@ -390,43 +431,30 @@ impl HeadStateEntry {
 impl DecodedBlock for HeadStateEntry {
     fn weight(&self) -> usize {
         match self {
-            Self::Anchor { anchor, .. } => {
-                arc_bytes::<CachedReadAnchor>()
-                    + arc_bytes::<NamespaceValidation>()
-                    + anchor.head.heap_bytes()
-                    + anchor.basis.0.heap_bytes()
-            }
+            Self::Head(head) => arc_bytes::<CachedHead>() + head.heap_bytes(),
             Self::Tail(tail) => tail.decoded_bytes(),
         }
     }
 }
 
-/// The number of absence generations in a [`SharedHeadState`].
-const ABSENCE_GENERATIONS: usize = 1024;
-
-/// Namespace head anchors and WAL-tail projections for every scope, under one
+/// Namespace heads and WAL-tail projections for every scope, under one
 /// byte budget and one recency order.
 pub struct SharedHeadState {
     entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
     max_decoded_bytes: usize,
     tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     counters: HeadStateCounters,
-    /// The version that the last installed anchor got. Versions are unique
-    /// across the shared cache, so an anchor that was dropped and loaded
-    /// again never has the version of a ticket taken before the drop.
-    last_anchor_version: AtomicU64,
-    /// Counters that version an empty anchor slot. Each anchor slot (a scope
-    /// and a namespace) maps to one counter by hash, and dropping or
-    /// installing an anchor in the slot advances its counter.
-    ///
-    /// An empty slot has no entry to remove, so without the counters a drop
-    /// of an empty slot couldn't fence a load that started before the drop,
-    /// and that load could install a head older than the reads that the
-    /// writer's position returned in between. Eviction can remove an entry,
-    /// but it can't erase a counter. Two slots that share a counter can fence
-    /// each other's loads by mistake, which only means that one load's
-    /// result isn't cached and the next read loads again.
-    absence_generations: Box<[AtomicU64]>,
+    records: std::sync::Mutex<HeadRecords>,
+}
+
+/// The live [`HeadRecord`]s of every scope.
+#[derive(Debug, Default)]
+struct HeadRecords {
+    records: HashMap<(CacheScope, NamespaceId), Weak<HeadRecord>>,
+    /// The map's length at which the next lookup drops the records that
+    /// nothing references. It doubles with the live records, so the scan
+    /// costs a constant amount per lookup on average.
+    compact_at: usize,
 }
 
 impl std::fmt::Debug for SharedHeadState {
@@ -462,10 +490,7 @@ impl SharedHeadState {
             max_decoded_bytes,
             tail_observer,
             counters: HeadStateCounters::default(),
-            last_anchor_version: AtomicU64::new(0),
-            absence_generations: (0..ABSENCE_GENERATIONS)
-                .map(|_| AtomicU64::new(0))
-                .collect(),
+            records: std::sync::Mutex::default(),
         }
     }
 
@@ -511,127 +536,183 @@ impl HeadStateCache {
         self.shared.stats()
     }
 
-    fn anchor_key(&self, namespace_id: &NamespaceId) -> (CacheScope, HeadStateKey) {
-        (self.scope, HeadStateKey::Anchor(namespace_id.clone()))
+    fn head_key(&self, namespace_id: &NamespaceId) -> (CacheScope, HeadStateKey) {
+        (self.scope, HeadStateKey::Head(namespace_id.clone()))
     }
 
-    /// Returns the absence generation of the namespace's anchor slot.
-    fn absence_generation(&self, namespace_id: &NamespaceId) -> &AtomicU64 {
-        let generations = &self.shared.absence_generations;
-        let mut hasher = DefaultHasher::new();
-        (self.scope, namespace_id).hash(&mut hasher);
-        let index = hasher.finish() % generations.len() as u64;
-        &generations
-            [usize::try_from(index).expect("an index below the table's length fits in usize")]
-    }
-
-    /// Returns the namespace's anchor and marks it recently used.
-    pub fn get_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
-        self.shared
-            .entries
-            .get(&self.anchor_key(namespace_id))
-            .and_then(HeadStateEntry::into_anchor)
-    }
-
-    /// Returns the namespace's anchor without marking it used.
-    pub fn peek_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
-        self.shared
-            .entries
-            .peek(&self.anchor_key(namespace_id))
-            .and_then(HeadStateEntry::into_anchor)
-    }
-
-    /// Returns what the namespace's anchor slot has now, for a refresh to
-    /// take before it sends any request and to pass to
-    /// [`Self::replace_anchor`].
-    pub fn anchor_ticket(&self, namespace_id: &NamespaceId) -> AnchorTicket {
-        // Read the generation before the slot, so a drop between the two reads
-        // fences the ticket instead of being missed.
-        let generation = self.absence_generation(namespace_id).load(Ordering::SeqCst);
-        match self.shared.entries.peek(&self.anchor_key(namespace_id)) {
-            Some(HeadStateEntry::Anchor { version, .. }) => AnchorTicket::Version(version),
-            _ => AnchorTicket::Absent { generation },
-        }
-    }
-
-    /// Installs `anchor` as the namespace's anchor, if the slot hasn't
-    /// changed since the refresh that produced `anchor` took `ticket`, and
-    /// returns `anchor`.
-    ///
-    /// The install succeeds when the slot still has the ticket's anchor and
-    /// `anchor` isn't at a lower head sequence, or when the slot is still
-    /// empty and its absence generation hasn't moved. An anchor at a higher
-    /// head sequence than the cached one also replaces it, whatever the
-    /// ticket. A cached anchor was loaded after the slot's last drop, so its
-    /// head is at least as new as every head that reads returned before that
-    /// drop, and an anchor at a higher head can replace it without moving the
-    /// cached head backwards. A successful install assigns `anchor` the next
-    /// version and advances the slot's absence generation.
-    ///
-    /// Otherwise nothing changes, and [`AnchorFenced`] includes the slot's
-    /// anchor, which is at a head sequence at least as high as `anchor`'s. A
-    /// drop of the slot (see [`Self::invalidate_anchor`]) fences every
-    /// ticket taken before it, so a refresh that started before the drop
-    /// can't put its result back into the emptied slot. A cache with no room
-    /// for anchors keeps nothing and returns `anchor`.
-    pub fn replace_anchor(
-        &self,
-        ticket: AnchorTicket,
-        anchor: Arc<CachedReadAnchor>,
-    ) -> Result<Arc<CachedReadAnchor>, AnchorFenced> {
-        let namespace_id = &anchor.head.namespace_id;
-        let key = self.anchor_key(namespace_id);
-        let generation = self.absence_generation(namespace_id);
-        let version = self
+    /// Returns the namespace's head record, creating it when nothing
+    /// references one.
+    pub fn record(&self, namespace_id: &NamespaceId) -> Arc<HeadRecord> {
+        // A critical section under this lock only edits a map, so it can't
+        // panic and poison the lock.
+        let mut records = self
             .shared
-            .last_anchor_version
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        let entry = HeadStateEntry::Anchor {
-            version,
-            anchor: Arc::clone(&anchor),
-        };
-        let mut fenced = None;
-        self.shared.entries.insert_if(key, entry, |current| {
-            let current = current.and_then(HeadStateEntry::versioned_anchor);
-            let admitted = match current {
-                Some((current_version, cached)) => {
-                    anchor.head.seq > cached.head.seq
-                        || (ticket == AnchorTicket::Version(current_version)
-                            && anchor.head.seq >= cached.head.seq)
-                }
-                None => {
-                    ticket
-                        == AnchorTicket::Absent {
-                            generation: generation.load(Ordering::SeqCst),
-                        }
-                }
-            };
-            if admitted {
-                generation.fetch_add(1, Ordering::SeqCst);
-            } else {
-                fenced = Some(AnchorFenced {
-                    current: current.map(|(_, cached)| Arc::clone(cached)),
-                });
-            }
-            admitted
-        });
-        match fenced {
-            Some(fenced) => Err(fenced),
-            None => Ok(anchor),
+            .records
+            .lock()
+            .expect("the head record map lock should not be poisoned");
+        let key = (self.scope, namespace_id.clone());
+        if let Some(record) = records.records.get(&key).and_then(Weak::upgrade) {
+            return record;
         }
+        if records.records.len() >= records.compact_at {
+            records
+                .records
+                .retain(|_, record| record.strong_count() > 0);
+            records.compact_at = (2 * records.records.len()).max(MIN_RECORDS_BEFORE_COMPACTING);
+        }
+        let record = Arc::new(HeadRecord::default());
+        records.records.insert(key, Arc::downgrade(&record));
+        record
     }
 
-    /// Drops the namespace's anchor and advances the slot's absence
-    /// generation, also when the slot is empty, so every ticket taken before
-    /// the drop is fenced.
-    pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
-        let generation = self.absence_generation(namespace_id);
+    /// Returns the namespace's cached head and marks it recently used.
+    pub fn get_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedHead>> {
         self.shared
             .entries
-            .invalidate_with(&self.anchor_key(namespace_id), || {
-                generation.fetch_add(1, Ordering::SeqCst);
-            });
+            .get(&self.head_key(namespace_id))
+            .and_then(HeadStateEntry::into_head)
+    }
+
+    /// Returns the namespace's cached head without marking it used.
+    pub fn peek_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedHead>> {
+        self.shared
+            .entries
+            .peek(&self.head_key(namespace_id))
+            .and_then(HeadStateEntry::into_head)
+    }
+
+    /// Installs `candidate` as the namespace's cached head if it's newer than
+    /// the current head, and returns the head that the read starts from.
+    ///
+    /// The current head is the higher of the cached head and the floor of
+    /// `record`, the newest head that the record installed or saw, which
+    /// stays after the cache evicts that head. A head is newer when
+    /// its sequence is higher, or when its sequence is the same and its basis
+    /// is a later manifest.
+    ///
+    /// - A candidate below the current head changes nothing. The read starts
+    ///   from the cached head, or from the candidate when the cache evicted
+    ///   the head the floor came from.
+    /// - A candidate equal to the cached head takes the newer of each
+    ///   confirmation, because confirmations only move forward. A new
+    ///   snapshot is cached only when a confirmation moved.
+    /// - A newer candidate becomes the cached head.
+    ///
+    /// A candidate's head confirmation is kept only if it's newer than the
+    /// last time the head was marked unconfirmed, so a read that started
+    /// before a change can't confirm the head again after it. A snapshot too
+    /// large for the cache isn't cached, and the smaller head it replaces is
+    /// dropped with it, so an eventual read misses and confirms through the
+    /// record. The read starts from the candidate, and the floor still
+    /// moves, so the head that reads start from never moves backwards while
+    /// the record lives.
+    pub fn replace_head(&self, record: &HeadRecord, mut candidate: CachedHead) -> Arc<CachedHead> {
+        let key = self.head_key(&candidate.head.namespace_id);
+        let mut state = record.lock();
+        if let Some(unconfirmed_at) = &state.unconfirmed_at {
+            candidate.head_confirmed = candidate
+                .head_confirmed
+                .filter(|confirmed| confirmed.is_after(unconfirmed_at));
+        }
+        let cached = self
+            .shared
+            .entries
+            .peek(&key)
+            .and_then(HeadStateEntry::into_head);
+        let current = state
+            .floor
+            .max(cached.as_ref().map(|cached| cached.order()));
+        state.floor = current;
+        let next = match current.map(|current| candidate.order().cmp(&current)) {
+            Some(std::cmp::Ordering::Less) => {
+                return match cached {
+                    Some(cached) if cached.order() == current.expect("a current head") => cached,
+                    _ => Arc::new(candidate),
+                };
+            }
+            Some(std::cmp::Ordering::Equal) => match &cached {
+                Some(cached) if cached.order() == candidate.order() => {
+                    let merged = CachedHead {
+                        basis_checked: newer(cached.basis_checked.clone(), candidate.basis_checked),
+                        head_confirmed: newer(
+                            cached.head_confirmed.clone(),
+                            candidate.head_confirmed,
+                        ),
+                        ..CachedHead::clone(cached)
+                    };
+                    if same_observation(&merged.basis_checked, &cached.basis_checked)
+                        && same_observation(&merged.head_confirmed, &cached.head_confirmed)
+                    {
+                        return Arc::clone(cached);
+                    }
+                    merged
+                }
+                _ => candidate,
+            },
+            Some(std::cmp::Ordering::Greater) | None => candidate,
+        };
+        state.floor = Some(next.order());
+        let next = Arc::new(next);
+        let installed = self.shared.entries.insert_if(
+            key.clone(),
+            HeadStateEntry::Head(Arc::clone(&next)),
+            |entry| match (entry, &cached) {
+                (Some(HeadStateEntry::Head(entry)), Some(cached)) => Arc::ptr_eq(entry, cached),
+                (None, _) => true,
+                _ => false,
+            },
+        );
+        if !installed {
+            // Every install for the namespace runs under the record's lock,
+            // so the cache refused the snapshot because it's too large or the
+            // cache is disabled. The head it replaces is older, and an
+            // eventual read doesn't consult the record, so that head mustn't
+            // stay.
+            self.shared.entries.invalidate(&key);
+        }
+        next
+    }
+
+    /// Marks the namespace's head unconfirmed at `now`, after the runtime
+    /// learns of a change to the namespace, such as a manifest that it
+    /// published itself or found.
+    ///
+    /// The cached head is replaced with a copy that has no head confirmation,
+    /// so the next strong read confirms it from the known tip with a WAL
+    /// probe and a successor check, and an eventual read doesn't read at it
+    /// until then. The record keeps the time of the change while something
+    /// references it, so a refresh or a position that confirmed the head
+    /// before the change can't confirm it again.
+    pub fn unconfirm_head(&self, namespace_id: &NamespaceId, now: Observation) {
+        let record = self.record(namespace_id);
+        let mut state = record.lock();
+        state.unconfirmed_at = Some(match state.unconfirmed_at.take() {
+            Some(previous) => previous.newer(now),
+            None => now,
+        });
+        let key = self.head_key(namespace_id);
+        let Some(cached) = self
+            .shared
+            .entries
+            .peek(&key)
+            .and_then(HeadStateEntry::into_head)
+        else {
+            return;
+        };
+        if cached.head_confirmed.is_none() {
+            return;
+        }
+        let unconfirmed = HeadStateEntry::Head(Arc::new(CachedHead {
+            head_confirmed: None,
+            ..CachedHead::clone(&cached)
+        }));
+        let replaced = self.shared.entries.insert_if(key.clone(), unconfirmed, |entry| {
+            matches!(entry, Some(HeadStateEntry::Head(entry)) if Arc::ptr_eq(entry, &cached))
+        });
+        if !replaced {
+            // The copy wasn't cached, so the confirmed head mustn't stay.
+            self.shared.entries.invalidate(&key);
+        }
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
@@ -693,9 +774,9 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorTicket, CachedReadAnchor, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
+        CachedHead, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
         MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState, ObjectStoreScope,
-        SharedSegmentBlocks, WalTailProjectionCacheKey,
+        Observation, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
@@ -881,10 +962,15 @@ mod tests {
         );
     }
 
-    /// Creates an anchor for namespace `demo` at head sequence `seq`.
-    fn anchor_at(seq: u64) -> Arc<CachedReadAnchor> {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        Arc::new(CachedReadAnchor {
+    fn namespace(name: &str) -> NamespaceId {
+        NamespaceId::parse(name).expect("namespace id")
+    }
+
+    /// Creates a head for namespace `demo` at head sequence `seq` against
+    /// manifest `manifest_no`, with both checks at `checked`.
+    fn head_at(seq: u64, manifest_no: u64, checked: &Observation) -> CachedHead {
+        let namespace_id = namespace("demo");
+        CachedHead {
             head: NamespaceReadState {
                 namespace_id: namespace_id.clone(),
                 created_at_ms: 1_000,
@@ -902,118 +988,276 @@ mod tests {
             },
             basis: MetadataBasis(ManifestRef {
                 owner_namespace_id: namespace_id,
-                manifest_no: ManifestNo(1),
+                manifest_no: ManifestNo(manifest_no),
                 head_seq: ChangeSeq(0),
                 payload_checksum: "checksum".to_owned(),
             }),
-            basis_checked: Some(crate::test_support::observed_now()),
-            head_confirmed: crate::test_support::observed_now(),
-            validation: Arc::default(),
-            completed_validation_no: 0,
-        })
+            basis_checked: Some(checked.clone()),
+            head_confirmed: Some(checked.clone()),
+        }
     }
 
-    fn demo() -> NamespaceId {
-        NamespaceId::parse("demo").expect("namespace id")
+    fn order(head: &CachedHead) -> (u64, u64) {
+        (head.head.seq.0, head.basis.manifest_no().0)
     }
 
-    /// Installs `anchor` and asserts that the install succeeded.
-    fn install(cache: &HeadStateCache, ticket: AnchorTicket, anchor: &Arc<CachedReadAnchor>) {
-        let installed = cache
-            .replace_anchor(ticket, Arc::clone(anchor))
-            .expect("the install succeeds");
-        assert!(Arc::ptr_eq(&installed, anchor));
+    /// Creates a head like [`head_at`] whose namespace grants access to
+    /// `principals` principals, each with a 60-byte ID.
+    fn head_with_grants(seq: u64, principals: usize, checked: &Observation) -> CachedHead {
+        let grants = (0..principals)
+            .map(|index| {
+                (
+                    loonfs_types::PrincipalId::parse(format!("prn_{index:056}"))
+                        .expect("principal"),
+                    loonfs_types::AccessRights::from_iter([loonfs_types::AccessRight::Read]),
+                )
+            })
+            .collect();
+        let mut head = head_at(seq, 1, checked);
+        head.head.access = loonfs_types::NamespaceAccess::Acl {
+            principal_scope: loonfs_types::PrincipalScope::parse("org").expect("scope"),
+            root_grants: loonfs_types::AccessGrants::new(grants).expect("grants"),
+        };
+        head
     }
 
-    /// Returns the anchor that a refused install reports as the slot's.
-    fn fenced(
-        cache: &HeadStateCache,
-        ticket: AnchorTicket,
-        anchor: Arc<CachedReadAnchor>,
-    ) -> Option<Arc<CachedReadAnchor>> {
+    /// Removes the namespace's cached head, as eviction would.
+    fn evict_head(cache: &HeadStateCache) {
         cache
-            .replace_anchor(ticket, anchor)
-            .expect_err("the install is fenced")
-            .current
+            .shared
+            .entries
+            .invalidate(&cache.head_key(&namespace("demo")));
     }
 
-    /// Checks that of two cold loads that both found the slot empty, the
-    /// first to finish installs its anchor and the second is fenced when its
-    /// head is older, so the newer head stays cached whatever order the
-    /// loads finish in.
+    /// Checks that a candidate at a lower head sequence, or at the same
+    /// sequence against an earlier manifest, doesn't replace the cached
+    /// head, and that the read starts from the cached head.
     #[test]
-    fn an_older_cold_load_finishing_last_leaves_the_newer_anchor() {
+    fn a_lower_head_does_not_replace_the_cached_head() {
+        let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let older = cache.anchor_ticket(&demo());
-        let newer = cache.anchor_ticket(&demo());
-        let newer_anchor = anchor_at(6);
-        install(&cache, newer, &newer_anchor);
-        let current = fenced(&cache, older, anchor_at(5)).expect("the slot's anchor");
-        assert!(Arc::ptr_eq(&current, &newer_anchor));
-        let cached = cache.get_anchor(&demo()).expect("an anchor");
-        assert!(Arc::ptr_eq(&cached, &newer_anchor));
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, head_at(5, 2, &now));
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            (5, 2)
+        );
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            (5, 2)
+        );
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert_eq!(order(&cached), (5, 2));
     }
 
-    /// Checks that when the older of two cold loads finishes first, the
-    /// newer load's anchor replaces it, because a higher head replaces any
-    /// cached anchor.
+    /// Checks that a candidate at a higher head sequence, or at the same
+    /// sequence against a later manifest, becomes the cached head.
     #[test]
-    fn a_newer_cold_load_finishing_last_replaces_the_older_anchor() {
+    fn a_higher_head_or_a_later_manifest_replaces_the_cached_head() {
+        let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let older = cache.anchor_ticket(&demo());
-        let newer = cache.anchor_ticket(&demo());
-        install(&cache, older, &anchor_at(5));
-        let newer_anchor = anchor_at(6);
-        install(&cache, newer, &newer_anchor);
-        let cached = cache.get_anchor(&demo()).expect("an anchor");
-        assert!(Arc::ptr_eq(&cached, &newer_anchor));
+        let record = cache.record(&namespace("demo"));
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            (5, 1)
+        );
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            (5, 2)
+        );
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            (6, 1)
+        );
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert_eq!(order(&cached), (6, 1));
     }
 
-    /// Checks that dropping the anchor fences a ticket taken before the drop,
-    /// whether the ticket refers to the dropped anchor's version or to an
-    /// empty slot.
+    /// Checks that a candidate equal to the cached head takes the newer of
+    /// each confirmation into a new snapshot, and that a candidate with no
+    /// newer confirmation leaves the cached snapshot in place.
     #[test]
-    fn an_invalidation_fences_every_ticket_taken_before_it() {
+    fn an_equal_head_keeps_the_newer_confirmations() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+        let early = Observation::now(clock.clone());
+        clock.advance_ms(10);
+        let late = Observation::now(clock.clone());
         let cache = HeadStateCache::unshared(1 << 20);
-        let absent = cache.anchor_ticket(&demo());
-        cache.invalidate_anchor(&demo());
-        assert!(fenced(&cache, absent, anchor_at(5)).is_none());
-        install(&cache, cache.anchor_ticket(&demo()), &anchor_at(5));
-        let version = cache.anchor_ticket(&demo());
-        assert!(matches!(version, AnchorTicket::Version(_)));
-        cache.invalidate_anchor(&demo());
-        assert!(fenced(&cache, version, anchor_at(5)).is_none());
-        assert!(cache.get_anchor(&demo()).is_none());
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(
+            &record,
+            CachedHead {
+                head_confirmed: Some(late.clone()),
+                ..head_at(5, 1, &early)
+            },
+        );
+        let merged = cache.replace_head(
+            &record,
+            CachedHead {
+                basis_checked: Some(late.clone()),
+                ..head_at(5, 1, &early)
+            },
+        );
+        let age = |check: &Option<Observation>| check.as_ref().map(Observation::age_ms);
+        assert_eq!(age(&merged.basis_checked), Some(0));
+        assert_eq!(age(&merged.head_confirmed), Some(0));
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert!(Arc::ptr_eq(&cached, &merged));
+        let unchanged = cache.replace_head(&record, head_at(5, 1, &early));
+        assert!(Arc::ptr_eq(&unchanged, &merged));
     }
 
-    /// Checks that an install at the ticket's version but at a lower head
-    /// sequence is fenced, and that the cached anchor stays.
+    /// Checks the record's floor while the cache has evicted the head it
+    /// came from: a candidate below the floor isn't cached and the read
+    /// starts from the candidate, an equal candidate is cached, and a higher
+    /// one is cached and moves the floor.
     #[test]
-    fn an_anchor_at_a_lower_head_does_not_replace_the_cached_anchor() {
+    fn the_record_keeps_out_a_head_below_an_evicted_head() {
+        let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let cached = anchor_at(5);
-        install(&cache, cache.anchor_ticket(&demo()), &cached);
-        let ticket = cache.anchor_ticket(&demo());
-        let current = fenced(&cache, ticket, anchor_at(4)).expect("the slot's anchor");
-        assert!(Arc::ptr_eq(&current, &cached));
-        assert_eq!(cache.anchor_ticket(&demo()), ticket);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, head_at(5, 2, &now));
+        evict_head(&cache);
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            (4, 3)
+        );
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            (5, 2)
+        );
+        assert_eq!(
+            cache
+                .get_head(&namespace("demo"))
+                .map(|cached| order(&cached)),
+            Some((5, 2))
+        );
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            (6, 1)
+        );
+        evict_head(&cache);
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(5, 9, &now))),
+            (5, 9)
+        );
+        assert!(cache.get_head(&namespace("demo")).is_none());
     }
 
-    /// Checks that an install at the ticket's version and at the same or a
-    /// higher head sequence succeeds and assigns the slot a new version.
+    /// Checks that marking the head unconfirmed replaces the cached head
+    /// with a copy that has no head confirmation and keeps its head, basis,
+    /// and successor check, and that a refresh that confirmed the head
+    /// before the change installs its head without a confirmation, whether
+    /// its head is equal or newer, while a later confirmation confirms it.
     #[test]
-    fn an_install_at_the_tickets_version_advances_the_version() {
+    fn marking_the_head_unconfirmed_clears_its_confirmation() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
         let cache = HeadStateCache::unshared(1 << 20);
-        install(&cache, cache.anchor_ticket(&demo()), &anchor_at(5));
-        let first = cache.anchor_ticket(&demo());
-        install(&cache, first, &anchor_at(5));
-        let second = cache.anchor_ticket(&demo());
-        assert_ne!(second, first);
-        let higher = anchor_at(6);
-        install(&cache, second, &higher);
-        assert_ne!(cache.anchor_ticket(&demo()), second);
-        let cached = cache.get_anchor(&demo()).expect("an anchor");
-        assert!(Arc::ptr_eq(&cached, &higher));
+        let record = cache.record(&namespace("demo"));
+        let before = Observation::now(clock.clone());
+        cache.replace_head(&record, head_at(5, 2, &before));
+        cache.unconfirm_head(&namespace("demo"), Observation::now(clock.clone()));
+        let cached = cache.get_head(&namespace("demo")).expect("the head stays");
+        assert_eq!(order(&cached), (5, 2));
+        assert!(cached.basis_checked.is_some());
+        assert!(cached.head_confirmed.is_none());
+
+        let equal = cache.replace_head(&record, head_at(5, 2, &before));
+        assert!(equal.head_confirmed.is_none());
+        let newer = cache.replace_head(&record, head_at(6, 2, &before));
+        assert_eq!(order(&newer), (6, 2));
+        assert!(newer.head_confirmed.is_none());
+        let after = Observation::now(clock.clone());
+        let confirmed = cache.replace_head(&record, head_at(6, 2, &after));
+        assert!(confirmed.head_confirmed.is_some());
+    }
+
+    /// Checks that a namespace head larger than the whole head-state budget
+    /// isn't cached, that the cache keeps only the bytes it weighed, and
+    /// that nothing keeps the head once the read that loaded it is done.
+    #[test]
+    fn a_head_larger_than_the_budget_is_not_cached() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(4096);
+        let record = cache.record(&namespace("demo"));
+        let large = head_with_grants(5, 1_000, &now);
+        assert!(large.heap_bytes() > 16 * 4096);
+        let head = cache.replace_head(&record, large);
+        assert_eq!(order(&head), (5, 1));
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.rejections, 1);
+        assert!(stats.cached_decoded_bytes <= 4096, "{stats:?}");
+        let weak = Arc::downgrade(&head);
+        drop(head);
+        assert!(weak.upgrade().is_none(), "nothing keeps the head");
+    }
+
+    /// Checks that a newer head too large for the cache drops the smaller
+    /// head it replaces: the read starts from the newer head, the cache has
+    /// no head for the namespace afterwards, the cache records the refusal
+    /// as a rejection, and the record's floor is at the newer head.
+    #[test]
+    fn a_newer_head_too_large_to_cache_drops_the_older_head() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(4096);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, head_at(0, 1, &now));
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert!(cached.head_confirmed.is_some());
+        let rejections = cache.stats().rejections;
+        let large = head_with_grants(1, 1_000, &now);
+        assert!(large.heap_bytes() > 4096);
+        let head = cache.replace_head(&record, large);
+        assert_eq!(order(&head), (1, 1));
+        assert!(head.head_confirmed.is_some());
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        assert_eq!(cache.stats().rejections, rejections + 1);
+        assert_eq!(record.lock().floor, Some((ChangeSeq(1), ManifestNo(1))));
+    }
+
+    /// Checks that a head that grows within the budget is charged its new
+    /// weight when the larger snapshot replaces the smaller one.
+    #[test]
+    fn a_larger_head_is_charged_its_weight() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(1 << 20);
+        let record = cache.record(&namespace("demo"));
+        let small = cache.replace_head(&record, head_at(5, 1, &now));
+        let before = cache.stats().cached_decoded_bytes;
+        let large = cache.replace_head(&record, head_with_grants(6, 100, &now));
+        let after = cache.stats().cached_decoded_bytes;
+        assert!(
+            after >= before + large.heap_bytes() - small.heap_bytes(),
+            "{before} bytes before, {after} after"
+        );
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert!(Arc::ptr_eq(&cached, &large));
+    }
+
+    /// Checks that the record map drops a record that nothing references, and
+    /// that the next record of an idle namespace starts with no floor.
+    #[test]
+    fn an_idle_namespace_gets_a_fresh_record() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(1 << 20);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, head_at(5, 1, &now));
+        evict_head(&cache);
+        drop(record);
+        let record = cache.record(&namespace("demo"));
+        assert_eq!(
+            order(&cache.replace_head(&record, head_at(4, 1, &now))),
+            (4, 1)
+        );
+        assert!(cache.get_head(&namespace("demo")).is_some());
+        drop(record);
+        for index in 0..200 {
+            drop(cache.record(&namespace(&format!("idle-{index}"))));
+        }
+        let records = cache.shared.records.lock().expect("records").records.len();
+        assert!(records <= 2 * 64, "{records} records");
     }
 
     #[tokio::test]

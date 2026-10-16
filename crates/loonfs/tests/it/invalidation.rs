@@ -288,11 +288,15 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
 
     // Publishing to the other namespace pushes the first namespace's tail
     // out of the cache. Its publisher, engine position, and writer session
-    // stay behind.
-    other_writer_a
-        .put_file("/spill.txt", b"s", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer a publishes to the other namespace");
+    // stay behind. The cache also keeps each namespace's head, which is used
+    // less recently than the tail, so it takes a second publish to evict the
+    // tail.
+    for path in ["/spill.txt", "/spill-more.txt"] {
+        other_writer_a
+            .put_file(path, b"s", &loonfs_test_support::test_actor())
+            .await
+            .expect("writer a publishes to the other namespace");
+    }
     assert!(writer_a.metadata_cache().stats().head_state_evictions > 0);
     let misses_before_fencing = writer_a.metadata_cache().stats().wal_tail_misses;
 

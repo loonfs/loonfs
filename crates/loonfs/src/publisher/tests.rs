@@ -2889,7 +2889,7 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         replays,
-        "maintenance drops the read anchor, not the tail the writer publishes from"
+        "maintenance marks the cached head unconfirmed, and keeps the tail the writer publishes from"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -2936,8 +2936,8 @@ async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() 
 }
 
 /// Checks that the writer and the reads in its runtime share one WAL tail
-/// under the key that the writer's position points to, that the runtime
-/// keeps no anchor for the namespace, and that the cache counts the tail once.
+/// under the key that the writer's position points to, and that the cache
+/// charges the tail once.
 #[tokio::test]
 async fn a_writer_and_its_reader_share_one_counted_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2964,10 +2964,6 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
     );
     assert_eq!(stats.wal_tail_misses, 0, "the read starts from that tail");
     let head_state = &writer.core.inner.head_state;
-    assert!(
-        head_state.peek_anchor(&namespace_id).is_none(),
-        "reads in the writer's runtime keep no anchor"
-    );
     let position = writer
         .core
         .writer_position(&namespace_id)
@@ -3094,8 +3090,8 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
 }
 
 /// What one namespace's WAL tail weighs after a single publish, so a budget
-/// can be stated in whole namespaces instead of a guessed constant. The
-/// writer's runtime keeps no anchor for a namespace with a writer session.
+/// can be stated in whole namespaces instead of a guessed constant, with the
+/// namespace's cached head included.
 async fn one_namespace_head_state_bytes() -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;

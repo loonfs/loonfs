@@ -719,12 +719,11 @@ fn object_gets(operations: &[RecordedOperation], family: DurableObjectFamily) ->
 }
 
 /// Checks that the first read after a compaction, in a runtime without the
-/// namespace's writer session, reloads the namespace's anchor without
+/// namespace's writer session, reloads the namespace's head without
 /// reading the unfolded WAL objects from the store again.
 ///
 /// The reads run on a read-only runtime that shares the writer's cache,
-/// because reads in the writer's runtime start from the writer's position
-/// and keep no anchor.
+/// because reads in the writer's runtime start from the writer's position.
 #[tokio::test]
 async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
     for max_object_bytes in [crate::DEFAULT_MAX_OBJECT_BYTES, 0] {

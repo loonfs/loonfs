@@ -3,7 +3,7 @@
 
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
-use loonfs_core::cache::HeadStateCache;
+use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
 use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -41,11 +41,14 @@ pub(crate) trait HeadPositions: Send + Sync {
 /// commit.
 #[derive(Debug)]
 pub(crate) struct ReadPositionSlot {
-    /// The namespace of the writer session.
-    namespace_id: NamespaceId,
-    /// The runtime's read cache, whose anchor for the namespace
-    /// [`Self::clear`] drops.
+    /// The runtime's read cache, where [`Self::clear`] installs the position
+    /// as the namespace's cached head.
     head_state: Arc<HeadStateCache>,
+    /// The namespace's head record, which the slot keeps while the session
+    /// lasts. A change that the runtime learns of while the session has a
+    /// position stays on the record, so the position's install when it ends
+    /// doesn't keep a confirmation from before the change.
+    record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
@@ -65,9 +68,9 @@ const MAX_PUBLISHED_AHEAD: usize = 16;
 impl ReadPositionSlot {
     /// Returns an empty slot for the writer session of `namespace_id`, in the
     /// runtime whose read cache is `head_state`.
-    pub(crate) fn new(namespace_id: NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
+    pub(crate) fn new(namespace_id: &NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
         Self {
-            namespace_id,
+            record: head_state.record(namespace_id),
             head_state,
             position: Mutex::default(),
             checking: AtomicBool::default(),
@@ -105,31 +108,41 @@ impl ReadPositionSlot {
         Some(Arc::new(position))
     }
 
-    /// Stores a position that [`Self::prepare`] returned, and returns whether
-    /// the slot had no position before. Only [`Self::clear`] removes a
-    /// position.
-    pub(crate) fn store(&self, position: Arc<ReadPosition>) -> bool {
+    /// Stores a position that [`Self::prepare`] returned. Only
+    /// [`Self::clear`] removes a position.
+    pub(crate) fn store(&self, position: Arc<ReadPosition>) {
         let basis_no = position.basis.manifest_no();
         self.lock_published()
             .retain(|manifest_no| *manifest_no > basis_no);
-        self.lock().replace(position).is_none()
+        *self.lock() = Some(position);
     }
 
-    /// Removes the position, so reads take the read cache until the engine's
-    /// next release stores one again.
+    /// Removes the position, so reads take the namespace's cached head until
+    /// the engine's next release stores one again, and returns whether the
+    /// slot had a position.
     ///
-    /// When the slot has a position, the read cache's anchor for the
-    /// namespace is dropped first, so the first read after the position
-    /// loads or confirms the head. The drop also fences every refresh that
-    /// started before it (see
-    /// [`HeadStateCache::invalidate_anchor`](loonfs_core::cache::HeadStateCache::invalidate_anchor)),
-    /// so a refresh from before the position can't put back a head older
-    /// than the reads from the position returned.
-    pub(crate) fn clear(&self) {
-        if self.current().is_some() {
-            self.head_state.invalidate_anchor(&self.namespace_id);
-        }
+    /// The position becomes the namespace's cached head first, through
+    /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
+    /// with both checks at the position's last successor check, because
+    /// that check confirmed a head that this runtime wrote itself. So the
+    /// first read after the position starts from a head at least as new as
+    /// the reads from the position returned, whatever older load finishes
+    /// after it.
+    pub(crate) fn clear(&self) -> bool {
+        let Some(position) = self.current() else {
+            return false;
+        };
+        self.head_state.replace_head(
+            &self.record,
+            CachedHead {
+                head: position.head.clone(),
+                basis: position.basis.clone(),
+                basis_checked: Some(position.basis_checked.clone()),
+                head_confirmed: Some(position.basis_checked.clone()),
+            },
+        );
         *self.lock() = None;
+        true
     }
 
     /// Records that a HEAD sent at `checked` found no successor of the
@@ -312,7 +325,10 @@ impl RuntimeCore {
                 None => None,
             };
             if kept.is_none() {
+                // The position becomes the cached head, which a successor
+                // makes out of date, so the head is marked unconfirmed after.
                 positions.drop_position(namespace_id);
+                self.invalidate_namespace_read_cache(namespace_id);
             }
             return Ok(kept);
         }

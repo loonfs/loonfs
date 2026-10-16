@@ -362,17 +362,10 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
 
     /// Drops one entry without counting an eviction.
     pub fn invalidate(&self, key: &K) {
-        self.invalidate_with(key, || {});
-    }
-
-    /// Drops one entry as [`Self::invalidate`] does, after running `before`
-    /// in the same critical section, also when the key has no entry.
-    pub fn invalidate_with(&self, key: &K, before: impl FnOnce()) {
         let mut inner = self
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        before();
         if let Some(slot) = inner.entries.remove(key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
             inner.shrink_if_sparse();

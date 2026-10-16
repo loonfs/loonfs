@@ -125,10 +125,10 @@ impl MetricLabel for PublishOutcome {
 pub(crate) enum ReadHeadSource {
     /// The position of the namespace's writer session in this runtime.
     Position,
-    /// The read cache's anchor, revalidated or loaded for the read.
+    /// The namespace's cached head, confirmed or loaded for the read.
     Anchor,
-    /// The read cache's anchor as it was, for an eventual read within its
-    /// maximum staleness, with no request to confirm the head.
+    /// The namespace's cached head as it was, for an eventual read within
+    /// its maximum staleness, with no request to confirm the head.
     Eventual,
 }
 
