@@ -445,8 +445,10 @@ async fn read_policy_stays_with_each_binding() {
 
     let (every_read, every_read_store) =
         binding(|builder| builder.manifest_revalidation_interval_ms(0)).await;
-    let (never, never_store) =
-        binding(|builder| builder.manifest_revalidation_interval_ms(u64::MAX)).await;
+    let (never, never_store) = binding(|builder| {
+        builder.manifest_revalidation_interval_ms(crate::engine::READ_REVALIDATION_BOUND_MS)
+    })
+    .await;
     for (runtime, store) in [(&every_read, &every_read_store), (&never, &never_store)] {
         assert_reads(runtime, b"first").await;
         store.reset();

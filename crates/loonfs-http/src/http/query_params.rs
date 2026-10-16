@@ -1,12 +1,14 @@
 //! Shared query-parameter and path-id parsing for HTTP handlers.
 
 use super::error::ApiResponseError;
-use loonfs::ErrorCode;
+use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::{Consistency, ErrorCode};
 use loonfs_types::{
     decode_cursor, GeneratedIdValidationError, LimitError, OpaqueTokenError, PaginationPolicy,
     PublicOrdinalRangeError, RevisionNo,
 };
 use std::str::FromStr;
+use std::time::Duration;
 
 pub(super) fn required_query_param(
     value: Option<String>,
@@ -40,6 +42,58 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
         )
         .with_param(name)),
     }
+}
+
+/// Parses the `consistency` and `max_staleness_ms` parameters of a live
+/// read. A read with a `snapshot_id` has no consistency setting, so
+/// `has_snapshot` rejects `consistency` on one.
+pub(super) fn parse_consistency(
+    consistency: Option<&str>,
+    max_staleness_ms: Option<&str>,
+    has_snapshot: bool,
+) -> Result<Consistency, ApiResponseError> {
+    if has_snapshot && consistency.is_some() {
+        return Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            "consistency cannot be combined with snapshot_id, because a snapshot read has no \
+             consistency setting",
+        )
+        .with_param("consistency"));
+    }
+    let max_staleness = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
+    match consistency {
+        Some("eventual") => Ok(Consistency::Eventual { max_staleness }),
+        None | Some("strong") if max_staleness.is_some() => Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            "max_staleness_ms requires consistency=eventual",
+        )
+        .with_param("max_staleness_ms")),
+        None | Some("strong") => Ok(Consistency::Strong),
+        Some(other) => Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            &format!("invalid consistency `{other}`: expected `strong` or `eventual`"),
+        )
+        .with_param("consistency")),
+    }
+}
+
+fn parse_max_staleness_ms(value: &str) -> Result<Duration, ApiResponseError> {
+    let invalid = |reason: &str| {
+        ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            &format!("invalid max_staleness_ms `{value}`: {reason}"),
+        )
+        .with_param("max_staleness_ms")
+    };
+    let max_staleness_ms = value
+        .parse::<u64>()
+        .map_err(|_| invalid("expected an integer number of milliseconds"))?;
+    if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
+        return Err(invalid(&format!(
+            "must not exceed {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
+        )));
+    }
+    Ok(Duration::from_millis(max_staleness_ms))
 }
 
 pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
@@ -150,6 +204,46 @@ impl utoipa::PartialSchema for OpenApiPageLimit {
 
 #[cfg(feature = "openapi")]
 impl utoipa::ToSchema for OpenApiPageLimit {}
+
+/// Schema-only override for the `consistency` query parameter.
+#[cfg(feature = "openapi")]
+pub(super) struct OpenApiConsistency;
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for OpenApiConsistency {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .enum_values(Some(["strong", "eventual"]))
+            .default(Some(serde_json::json!("strong")))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for OpenApiConsistency {}
+
+/// Schema-only override for the `max_staleness_ms` query parameter,
+/// which can't exceed the revalidation bound.
+#[cfg(feature = "openapi")]
+pub(super) struct OpenApiMaxStalenessMs;
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for OpenApiMaxStalenessMs {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::Integer)
+            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                utoipa::openapi::KnownFormat::Int64,
+            )))
+            .minimum(Some(0u64))
+            .maximum(Some(READ_REVALIDATION_BOUND_MS))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for OpenApiMaxStalenessMs {}
 
 /// Schema-only override for an optional boolean that defaults to true.
 #[cfg(feature = "openapi")]

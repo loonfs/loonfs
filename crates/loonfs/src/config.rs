@@ -6,6 +6,10 @@ use loonfs_objectstore::ConfiguredObjectStoreKind;
 /// Default minimum interval, in milliseconds, between checks for a successor
 /// to a cached manifest.
 pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
+/// Default maximum staleness, in milliseconds, of an eventual read: how old the
+/// reader's last confirmation of the head can be for the read to start from
+/// that head without a request to confirm it.
+pub(crate) const DEFAULT_MAX_STALENESS_MS: u64 = 1000;
 /// Default largest file content that one buffered read materializes.
 ///
 /// With the default of
@@ -133,6 +137,10 @@ pub(crate) struct ReadConfig {
     /// Minimum monotonic interval between checks for a successor to a cached
     /// manifest. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
+    /// The maximum staleness of an eventual read that doesn't set its own: how
+    /// old the confirmation of the cached head may be before the read
+    /// confirms it again. Zero confirms on every read.
+    pub max_staleness_ms: u64,
     /// Layout and input limits for metadata compactions.
     pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.

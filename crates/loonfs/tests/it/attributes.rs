@@ -331,7 +331,7 @@ fn read_options_project_grouped_attributes_or_none() {
         "/docs/report.txt",
         &StatOptions {
             include_attributes: loonfs_types::AttributeInclusion::Omit,
-            snapshot_id: None,
+            ..Default::default()
         },
     ))
     .expect("stat without attributes");
@@ -350,7 +350,7 @@ fn read_options_project_grouped_attributes_or_none() {
                 "/docs",
                 &ListOptions {
                     include_attributes: loonfs_types::AttributeInclusion::Include,
-                    snapshot_id: None,
+                    ..Default::default()
                 },
             )
             .page(PageRequest {

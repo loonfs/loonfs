@@ -6362,6 +6362,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6383,7 +6409,7 @@
                 }
               }
             },
-            "description": "Invalid change cursor, limit, snapshot ID, non-snapshot checkpoint, or after_seq above the snapshot sequence"
+            "description": "Invalid change cursor, limit, snapshot ID, consistency, non-snapshot checkpoint, or after_seq above the head that the request reads"
           },
           "401": {
             "content": {
@@ -6603,6 +6629,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6629,7 +6681,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, non-snapshot checkpoint, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot ID, consistency, non-snapshot checkpoint, or revision_no combined with snapshot_id"
           },
           "401": {
             "content": {
@@ -6861,6 +6913,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6882,7 +6960,7 @@
                 }
               }
             },
-            "description": "Invalid path, limit, cursor, include_attributes, snapshot ID, or non-snapshot checkpoint"
+            "description": "Invalid path, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -6976,6 +7054,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6997,7 +7101,7 @@
                 }
               }
             },
-            "description": "Invalid path, include_attributes, snapshot ID, or non-snapshot checkpoint"
+            "description": "Invalid path, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7618,6 +7722,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -7639,7 +7769,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, include_attributes, snapshot ID, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7752,6 +7882,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -7773,7 +7929,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7869,6 +8025,32 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -7895,7 +8077,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -8258,6 +8440,32 @@
             "schema": {
               "$ref": "#/components/schemas/RevisionNo"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "strong",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -8284,7 +8492,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID or revision number, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, or consistency, or a snapshot_id, which can't be combined with a revision"
           },
           "401": {
             "content": {

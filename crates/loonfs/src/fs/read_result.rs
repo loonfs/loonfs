@@ -2,7 +2,7 @@
 
 use super::reads::ReadSource;
 use super::RuntimeCore;
-use crate::{CoreError, Error, NamespaceId, Result, SharedObjectStore};
+use crate::{Consistency, CoreError, Error, NamespaceId, Result, SharedObjectStore};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_current_manifest, load_snapshot_read_basis,
 };
@@ -55,13 +55,18 @@ pub(super) async fn classify_read_result<T>(
 }
 
 impl RuntimeCore {
-    pub(crate) async fn read<T, F, Fut>(&self, namespace_id: &NamespaceId, read: F) -> Result<T>
+    pub(crate) async fn read<T, F, Fut>(
+        &self,
+        namespace_id: &NamespaceId,
+        consistency: Consistency,
+        read: F,
+    ) -> Result<T>
     where
         F: Fn(NamespaceReaderEngine<SharedObjectStore>, RuntimeReadContext) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let (engine, context) = self
-            .pinned_metadata_read(namespace_id)
+            .pinned_metadata_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
@@ -79,7 +84,7 @@ impl RuntimeCore {
         self.invalidate_namespace_read_cache(namespace_id);
         self.drop_writer_position(namespace_id);
         let (engine, context) = self
-            .pinned_metadata_read(namespace_id)
+            .pinned_metadata_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )

@@ -6,14 +6,17 @@
 //! Results are the `loonfs-types` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{Error, MetadataCompactionPolicy, Result, RetentionTarget};
-use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
+use crate::{Error, MetadataCompactionPolicy, PinId, Result, RetentionTarget};
+use loonfs_core::limits::{
+    FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS, READ_REVALIDATION_BOUND_MS,
+};
 use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::time::Duration;
 
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
-    CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
+    Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
     DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
     StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
@@ -166,6 +169,8 @@ pub struct ReadFileStreamOptions {
     /// before driving the stream. Zero reads from the first byte and asks
     /// nothing of the caller.
     pub start_offset: u64,
+    /// How recently the read confirms the live head.
+    pub consistency: Consistency,
 }
 
 impl Default for ReadFileStreamOptions {
@@ -173,8 +178,72 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
+            consistency: Consistency::Strong,
         }
     }
+}
+
+/// Rejects a live read's consistency before the read sends a request, when
+/// its maximum staleness is longer than the revalidation bound.
+pub(crate) fn check_consistency(consistency: Consistency) -> Result<()> {
+    if let Consistency::Eventual {
+        max_staleness: Some(max_staleness),
+    } = consistency
+    {
+        if max_staleness > Duration::from_millis(READ_REVALIDATION_BOUND_MS) {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "an eventual read's maximum staleness may not exceed the revalidation bound \
+                     ({READ_REVALIDATION_BOUND_MS} ms)"
+                ),
+                param: "max_staleness_ms",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects an eventual read of a pinned view (a snapshot, a checkpoint, or a
+/// [`ReadView`](crate::ReadView)). The pin selects the state such a read
+/// sees, so the read has no consistency setting and takes only
+/// [`Consistency::Strong`].
+pub(crate) fn check_pinned_consistency(consistency: Consistency) -> Result<()> {
+    if consistency != Consistency::Strong {
+        return Err(Error::InvalidRequest {
+            message: "a read of a snapshot or a read view has no consistency setting, so it \
+                      takes only `strong`"
+                .to_owned(),
+            param: "consistency",
+        });
+    }
+    Ok(())
+}
+
+/// Checks the consistency of a read that reads a snapshot when it has a
+/// `snapshot_id`, and the live head otherwise, before the read sends a
+/// request.
+pub(crate) fn check_snapshot_consistency(
+    snapshot_id: Option<&PinId>,
+    consistency: Consistency,
+) -> Result<()> {
+    match snapshot_id {
+        Some(_) => check_pinned_consistency(consistency),
+        None => check_consistency(consistency),
+    }
+}
+
+/// Options for a buffered read of a file's current content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadFileOptions {
+    /// How recently the read confirms the live head.
+    pub consistency: Consistency,
+}
+
+/// Options for reading the change feed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListChangesOptions {
+    /// How recently each page confirms the live head.
+    pub consistency: Consistency,
 }
 
 #[cfg(test)]

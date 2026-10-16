@@ -226,6 +226,14 @@ A new namespace that starts as a copy of another namespace at one point in its h
 
 The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no request to confirm the head. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, a `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. A manifest check once per revalidation interval finds a manifest that another process published, such as a new writer's claim. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
+### Consistency
+
+A setting on a live read that controls how recently LoonFS confirms the namespace [head](#head) before the read. `strong` (the default) confirms the head before every read, so the read sees every commit that was acknowledged before it started. `eventual` confirms the head only when the last confirmation is older than the read's maximum staleness, so a read before then reads at the head that was confirmed last, and it may miss commits acknowledged since. A pinned read, such as a snapshot read, has no consistency setting. See [Read consistency](api.md#read-consistency).
+
+### Eventual read
+
+A live read with the `eventual` [consistency](#consistency). In a process without the namespace's writer session, an eventual read sends no request to confirm the head while the head was confirmed less than the read's maximum staleness ago (one second by default). For example, a dashboard that lists a directory every 100 milliseconds with a maximum staleness of five seconds confirms the head once every five seconds instead of on every listing. An eventual read sees every commit that was acknowledged before the last confirmation, and it never reads an older head than a read that completed earlier in the same process. In the writer's process, an eventual read starts from the [writer position](#writer-position), like any other read. See [Read consistency](api.md#read-consistency).
+
 ### Revalidation bound
 
 The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view and to a [writer position](#writer-position). After that, the reader loads the current manifest again before it serves a read. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).

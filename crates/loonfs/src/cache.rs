@@ -1,13 +1,14 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the read cache's anchor. An
 //! anchor's WAL probe finds new commits, and the interval check of either
-//! head finds a newer manifest.
+//! head finds a newer manifest. An eventual read skips both while the anchor's
+//! head was confirmed less than its maximum staleness ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
 use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
-use crate::{CoreError, NamespaceId, PinId};
+use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
@@ -54,10 +55,21 @@ impl RuntimeCore {
         head
     }
 
+    /// Returns the namespace's anchor, revalidated or loaded for this read.
+    ///
+    /// The read takes the slot's ticket before it sends any request, and it
+    /// installs its result only if the slot hasn't changed since (see
+    /// [`HeadStateCache::replace_anchor`](loonfs_core::cache::HeadStateCache::replace_anchor)).
+    /// Loads of one namespace can run at once, for example when the slot is
+    /// empty, and the ticket keeps the order they finish in from mattering.
+    /// A refused install doesn't fail the read. The read starts from the
+    /// slot's anchor, which is at least as new as its own result, or from
+    /// its own result when the slot is empty.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedReadAnchor>, CoreError> {
+        let ticket = self.inner.head_state.anchor_ticket(namespace_id);
         let validation = self
             .inner
             .head_state
@@ -111,8 +123,14 @@ impl RuntimeCore {
                 head.validation = Arc::clone(&validation);
                 head.completed_validation_no = validation_no;
                 let head = Arc::new(head);
-                self.inner.head_state.insert_anchor(Arc::clone(&head));
-                Ok(head)
+                match self
+                    .inner
+                    .head_state
+                    .replace_anchor(ticket, Arc::clone(&head))
+                {
+                    Ok(head) => Ok(head),
+                    Err(fenced) => Ok(fenced.current.unwrap_or(head)),
+                }
             }
             Err(error) => {
                 self.inner.head_state.invalidate_anchor(namespace_id);
@@ -156,6 +174,7 @@ impl RuntimeCore {
                     if checked.is_within_revalidation_bound()
                         && probed.map_err(MetadataProjectionLoadError::LoadHead)?
                     {
+                        head.head_confirmed = observed.clone();
                         if check_due {
                             head.basis_checked = Some(observed);
                         }
@@ -191,17 +210,21 @@ impl RuntimeCore {
                 tail,
             );
         }
-        Ok(cached_anchor(loaded, Some(observed)))
+        Ok(cached_anchor(loaded, observed))
     }
 
     /// Returns the read context of the namespace's current head.
     ///
     /// In a runtime with the namespace's writer session, the head is the
-    /// session's position (see [`Self::checked_writer_position`]). Otherwise
-    /// it's the read cache's anchor, which the read revalidates or loads.
+    /// session's position (see [`Self::checked_writer_position`]), whatever
+    /// the consistency. Otherwise it's the read cache's anchor. An eventual read
+    /// takes the anchor as it is while its head was confirmed less than the
+    /// read's maximum staleness ago (see [`Self::eventual_anchor`]), and every other
+    /// read revalidates or loads the anchor.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
+        consistency: Consistency,
     ) -> Result<RuntimeReadContext> {
         let (context, source) = match self.checked_writer_position(namespace_id).await? {
             Some(position) => (
@@ -209,15 +232,58 @@ impl RuntimeCore {
                 ReadHeadSource::Position,
             ),
             None => {
-                let anchor = self.load_namespace_head_cached(namespace_id).await?;
+                let (anchor, source) = match self.eventual_anchor(namespace_id, consistency) {
+                    Some(anchor) => (anchor, ReadHeadSource::Eventual),
+                    None => (
+                        self.load_namespace_head_cached(namespace_id).await?,
+                        ReadHeadSource::Anchor,
+                    ),
+                };
                 (
                     self.read_context(anchor.head.clone(), anchor.basis.clone()),
-                    ReadHeadSource::Anchor,
+                    source,
                 )
             }
         };
         self.inner.instruments.read_head(source);
         Ok(context)
+    }
+
+    /// Returns the read cache's anchor for an eventual read that can take it
+    /// without a request, or `None` when the read confirms the head the way a
+    /// `strong` read does.
+    ///
+    /// An eventual read takes the anchor while the anchor's head was confirmed
+    /// less than the read's maximum staleness ago, so the read sees every
+    /// commit acknowledged before that confirmation. The anchor's manifest check
+    /// must also be younger than the revalidation bound, because garbage
+    /// collection may delete the segments of a superseded manifest once the
+    /// bound passes (format section 4.2).
+    fn eventual_anchor(
+        &self,
+        namespace_id: &NamespaceId,
+        consistency: Consistency,
+    ) -> Option<Arc<CachedReadAnchor>> {
+        let Consistency::Eventual { max_staleness } = consistency else {
+            return None;
+        };
+        let max_staleness_ms = max_staleness
+            .map_or(self.inner.config.max_staleness_ms, |max_staleness| {
+                u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
+            });
+        let anchor = self.inner.head_state.get_anchor(namespace_id)?;
+        let confirmed = anchor.head_confirmed.age_ms() < max_staleness_ms
+            && anchor
+                .basis_checked
+                .as_ref()
+                .is_some_and(Observation::is_within_revalidation_bound);
+        if !confirmed {
+            return None;
+        }
+        self.inner
+            .metadata_cache
+            .record_head_anchor_lookup(CacheLookup::Hit);
+        Some(anchor)
     }
 
     pub(crate) fn read_context(
@@ -241,11 +307,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
+        consistency: Consistency,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let read_context = self.current_read_context(namespace_id).await?;
+        let read_context = self.current_read_context(namespace_id, consistency).await?;
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
@@ -258,7 +325,9 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.current_read_context(namespace_id).await?;
+        let live = self
+            .current_read_context(namespace_id, Consistency::Strong)
+            .await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -279,7 +348,9 @@ impl RuntimeCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.current_read_context(namespace_id).await?;
+        let live = self
+            .current_read_context(namespace_id, Consistency::Strong)
+            .await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -313,11 +384,12 @@ impl RuntimeCore {
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
+        consistency: Consistency,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let pinned = self.pinned_read(namespace_id).await?;
+        let pinned = self.pinned_read(namespace_id, consistency).await?;
         self.inner.instruments.latest_metadata_view_read();
         Ok(pinned)
     }
@@ -328,7 +400,9 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let context = self.current_read_context(namespace_id).await?;
+        let context = self
+            .current_read_context(namespace_id, Consistency::Strong)
+            .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
@@ -350,14 +424,14 @@ impl RuntimeCore {
     }
 }
 
-fn cached_anchor(
-    anchor: NamespaceReadAnchor,
-    basis_checked: Option<Observation>,
-) -> CachedReadAnchor {
+/// Returns the anchor that a load observed at `observed` read, with both its
+/// manifest check and its head confirmed at that observation.
+fn cached_anchor(anchor: NamespaceReadAnchor, observed: Observation) -> CachedReadAnchor {
     CachedReadAnchor {
         basis: anchor.basis(),
         head: anchor.read_state,
-        basis_checked,
+        basis_checked: Some(observed.clone()),
+        head_confirmed: observed,
         validation: Arc::default(),
         completed_validation_no: 0,
     }

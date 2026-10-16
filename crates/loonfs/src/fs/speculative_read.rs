@@ -1,6 +1,6 @@
 //! Small buffered reads that overlap content I/O with current-path validation.
 
-use crate::{FileBytes, Namespace, Result};
+use crate::{Consistency, FileBytes, Namespace, Result};
 use loonfs_core::{ResolvedFileContent, RuntimeReadContext};
 
 /// A path resolved in the cached view, before that view is validated.
@@ -31,39 +31,52 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         absolute_path: &str,
         cached: &CachedFileTarget,
+        consistency: Consistency,
     ) -> Result<ResolvedFileContent> {
         self.core
-            .read(&self.namespace_id, |engine, context| async move {
-                let target =
-                    if context.head == cached.view.head && context.basis == cached.view.basis {
-                        cached.target.clone()
-                    } else {
-                        engine
-                            .resolve_file_content(
-                                absolute_path,
-                                &context,
-                                Some(self.core.inner.config.max_read_content_bytes),
-                            )
-                            .await?
-                    };
-                Ok(target)
-            })
+            .read(
+                &self.namespace_id,
+                consistency,
+                |engine, context| async move {
+                    let target =
+                        if context.head == cached.view.head && context.basis == cached.view.basis {
+                            cached.target.clone()
+                        } else {
+                            engine
+                                .resolve_file_content(
+                                    absolute_path,
+                                    &context,
+                                    Some(self.core.inner.config.max_read_content_bytes),
+                                )
+                                .await?
+                        };
+                    Ok(target)
+                },
+            )
             .await
     }
 
-    pub(super) async fn get_current_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
+    pub(super) async fn get_current_file_bytes(
+        &self,
+        absolute_path: &str,
+        consistency: Consistency,
+    ) -> Result<FileBytes> {
         let max_bytes = Some(self.core.inner.config.max_read_content_bytes);
         let Some(cached) = self.cached_file_target(absolute_path).await else {
             return self
                 .core
-                .read(&self.namespace_id, |engine, context| async move {
-                    Ok(engine.read_file(absolute_path, &context, max_bytes).await?)
-                })
+                .read(
+                    &self.namespace_id,
+                    consistency,
+                    |engine, context| async move {
+                        Ok(engine.read_file(absolute_path, &context, max_bytes).await?)
+                    },
+                )
                 .await;
         };
 
         let engine = self.core.reader_engine(&self.namespace_id);
-        let current = self.current_file_target(absolute_path, &cached);
+        let current = self.current_file_target(absolute_path, &cached, consistency);
         let target = if cached.target.supports_speculative_read() {
             let content =
                 engine.read_speculative_file_content(&cached.target, &cached.view.object_cache);

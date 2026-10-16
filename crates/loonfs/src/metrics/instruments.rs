@@ -125,17 +125,21 @@ impl MetricLabel for PublishOutcome {
 pub(crate) enum ReadHeadSource {
     /// The position of the namespace's writer session in this runtime.
     Position,
-    /// The read cache's anchor.
+    /// The read cache's anchor, revalidated or loaded for the read.
     Anchor,
+    /// The read cache's anchor as it was, for an eventual read within its
+    /// maximum staleness, with no request to confirm the head.
+    Eventual,
 }
 
 impl MetricLabel for ReadHeadSource {
-    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor];
+    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor, Self::Eventual];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Position => "position",
             Self::Anchor => "anchor",
+            Self::Eventual => "eventual",
         }
     }
 }

@@ -819,6 +819,77 @@ fn builders_require_identity_and_a_runtime() {
     }
 }
 
+/// Checks that a manifest check interval or a maximum staleness above the
+/// revalidation bound fails both builds with a config error that
+/// identifies the setting, and that both builds accept the bound itself.
+#[test]
+fn builders_reject_a_read_interval_above_the_revalidation_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let bound = loonfs::engine::READ_REVALIDATION_BOUND_MS;
+    let builder = || {
+        LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id(loonfs_test_support::ids::writer_id("interval-test"))
+    };
+    let assert_rejected = |result: loonfs::Result<()>, setting: &str| match result {
+        Err(Error::Config(message)) => assert!(
+            message.contains(setting),
+            "the error should identify `{setting}`: {message}"
+        ),
+        Err(other) => panic!("expected a config error for `{setting}`, got {other:?}"),
+        Ok(()) => panic!("`{setting}` above the revalidation bound must fail the build"),
+    };
+    block_on(async {
+        assert_rejected(
+            builder()
+                .manifest_revalidation_interval_ms(bound + 1)
+                .build()
+                .await
+                .map(drop),
+            "manifest_revalidation_interval_ms",
+        );
+        assert_rejected(
+            builder()
+                .max_staleness_ms(bound + 1)
+                .build()
+                .await
+                .map(drop),
+            "max_staleness_ms",
+        );
+        assert_rejected(
+            builder()
+                .read_only()
+                .manifest_revalidation_interval_ms(bound + 1)
+                .build()
+                .await
+                .map(drop),
+            "manifest_revalidation_interval_ms",
+        );
+        assert_rejected(
+            builder()
+                .read_only()
+                .max_staleness_ms(bound + 1)
+                .build()
+                .await
+                .map(drop),
+            "max_staleness_ms",
+        );
+        let writer = builder()
+            .manifest_revalidation_interval_ms(bound)
+            .max_staleness_ms(bound)
+            .build()
+            .await
+            .expect("the bound itself is accepted");
+        writer.shutdown().await.expect("shutdown");
+        builder()
+            .read_only()
+            .manifest_revalidation_interval_ms(bound)
+            .max_staleness_ms(bound)
+            .build()
+            .await
+            .expect("the bound itself is accepted");
+    });
+}
+
 #[test]
 fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
@@ -880,7 +951,7 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
         );
         let writer = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("delete-lost-answer"))
-            .manifest_revalidation_interval_ms(u64::MAX)
+            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
             .build()
             .await
             .expect("writer");

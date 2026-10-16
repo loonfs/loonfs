@@ -9,12 +9,13 @@ use super::handlers_uploads::{
     content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
-    checked_cursor, effective_page_limit, parse_include_attributes, parse_public_ordinal,
-    parse_revision_no, required_query_param,
+    checked_cursor, effective_page_limit, parse_consistency, parse_include_attributes,
+    parse_public_ordinal, parse_revision_no, required_query_param,
 };
 #[cfg(feature = "openapi")]
 use super::query_params::{
-    OpenApiDefaultFalseBoolean, OpenApiDefaultTrueBoolean, OpenApiPageLimit,
+    OpenApiConsistency, OpenApiDefaultFalseBoolean, OpenApiDefaultTrueBoolean,
+    OpenApiMaxStalenessMs, OpenApiPageLimit,
 };
 use super::{acquire_download_permit, AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -22,8 +23,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId, ReadOnly,
-    ReadView, StatOptions,
+    ChangeSeq, Consistency, DownloadOptions, ErrorCode, InodeId, ListChangesOptions, ListOptions,
+    Namespace, PinId, ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -42,6 +43,8 @@ pub(super) struct PathQuery {
     path: Option<String>,
     include_attributes: Option<String>,
     snapshot_id: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -63,6 +66,8 @@ pub(super) struct ListPathPageQuery {
     cursor: Option<String>,
     include_attributes: Option<String>,
     snapshot_id: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -78,6 +83,8 @@ pub(super) struct ContentQuery {
     path: Option<String>,
     revision_no: Option<String>,
     snapshot_id: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -86,6 +93,8 @@ pub(super) struct ChangesQuery {
     after_seq: Option<String>,
     limit: Option<String>,
     snapshot_id: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 pub(super) enum ReadTarget {
@@ -146,12 +155,25 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
+        consistency: Consistency,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
+        let options = ReadFileStreamOptions {
+            consistency,
+            ..ReadFileStreamOptions::default()
+        };
         match self {
-            Self::Snapshot(view) => view.read_file_stream(path).await,
+            Self::Snapshot(view) => view.read_file_stream_with_options(path, &options).await,
             Self::Live(namespace) => match revision_no {
-                Some(revision_no) => namespace.read_file_revision_stream(path, revision_no).await,
-                None => namespace.read_file_stream(path).await,
+                Some(revision_no) => {
+                    namespace
+                        .read_file_revision_stream_with_options(path, revision_no, &options)
+                        .await
+                }
+                None => {
+                    namespace
+                        .read_file_stream_with_options(path, &options)
+                        .await
+                }
             },
         }
     }
@@ -159,10 +181,22 @@ impl ReadTarget {
     pub(super) async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
+        consistency: Consistency,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
+        let options = ReadFileStreamOptions {
+            consistency,
+            ..ReadFileStreamOptions::default()
+        };
         match self {
-            Self::Snapshot(view) => view.read_file_stream_by_inode(inode_id).await,
-            Self::Live(namespace) => namespace.read_file_stream_by_inode(inode_id).await,
+            Self::Snapshot(view) => {
+                view.read_file_stream_by_inode_with_options(inode_id, &options)
+                    .await
+            }
+            Self::Live(namespace) => {
+                namespace
+                    .read_file_stream_by_inode_with_options(inode_id, &options)
+                    .await
+            }
         }
     }
 
@@ -203,10 +237,14 @@ impl ReadTarget {
         }
     }
 
-    fn list_changes(&self, after_seq: ChangeSeq) -> loonfs::ChangesPager {
+    /// A snapshot's feed has no consistency setting, and the handler rejects
+    /// `consistency` with a `snapshot_id` before it reads.
+    fn list_changes(&self, after_seq: ChangeSeq, consistency: Consistency) -> loonfs::ChangesPager {
         match self {
             Self::Snapshot(view) => view.list_changes(after_seq),
-            Self::Live(namespace) => namespace.list_changes(after_seq),
+            Self::Live(namespace) => {
+                namespace.list_changes_with_options(after_seq, &ListChangesOptions { consistency })
+            }
         }
     }
 }
@@ -234,11 +272,13 @@ impl ReadTarget {
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read.")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -266,6 +306,11 @@ pub(super) async fn list_path_entries(
         cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    options.consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
+        snapshot_id.is_some(),
+    )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let listing = target
         .list_with_options(&path, &options)
@@ -292,11 +337,13 @@ pub(super) async fn list_path_entries(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path to read."),
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read.")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Path entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid path, include_attributes, snapshot ID, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -318,6 +365,11 @@ pub(super) async fn get_path_entry(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    options.consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
+        snapshot_id.is_some(),
+    )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let entry = target
         .stat_with_options(&path, &options)
@@ -343,11 +395,13 @@ pub(super) async fn get_path_entry(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path of the file to read."),
             ("revision_no" = Option<RevisionNo>, Query, description = "An earlier revision to read. It can't be combined with `snapshot_id`."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read.")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path, revision, snapshot ID, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
+            (status = 400, description = "Invalid path, revision, snapshot ID, consistency, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -372,10 +426,15 @@ pub(super) async fn get_file_content(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no, "revision_no")?;
+    let consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
+        snapshot_id.is_some(),
+    )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream(&path, revision_no)
+        .read_file_stream(&path, revision_no, consistency)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -625,11 +684,13 @@ pub(super) async fn create_commit(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("after_seq" = loonfs_types::ChangeSeq, Query, description = "The sequence after which to return committed changes."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
-            (status = 400, description = "Invalid change cursor, limit, snapshot ID, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ErrorResponse),
+            (status = 400, description = "Invalid change cursor, limit, snapshot ID, consistency, non-snapshot checkpoint, or after_seq above the head that the request reads", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
             (status = 409, description = "The cursor is older than the retained change history. Restart from a fresh listing or checkpoint.", body = ErrorResponse),
@@ -649,9 +710,14 @@ pub(super) async fn list_changes(
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = effective_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let consistency = parse_consistency(
+        query.consistency.as_deref(),
+        query.max_staleness_ms.as_deref(),
+        snapshot_id.is_some(),
+    )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let response = target
-        .list_changes(after_seq)
+        .list_changes(after_seq, consistency)
         .page(PageRequest {
             limit,
             cursor: None,

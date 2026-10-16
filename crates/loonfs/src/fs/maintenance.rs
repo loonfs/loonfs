@@ -1047,7 +1047,10 @@ impl crate::Namespace<crate::Writable> {
         use loonfs_types::{AccessGrants, AccessRight, AccessRights};
 
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
+        let (engine, context) = self
+            .core
+            .pinned_metadata_read(&self.namespace_id, crate::Consistency::Strong)
+            .await?;
         let root = engine.root_access(&context).await?;
         let grants = root.access.grants;
         let mut entries: std::collections::BTreeMap<_, _> = grants

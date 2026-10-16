@@ -16,7 +16,10 @@ impl LoonFs<Writable> {
         if self.core.subject.is_none() {
             return Ok(());
         }
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, context) = self
+            .core
+            .pinned_metadata_read(namespace_id, crate::Consistency::Strong)
+            .await?;
         Ok(engine.ensure_administrator(&context).await?)
     }
 
@@ -143,7 +146,10 @@ impl Namespace<Writable> {
         if self.core.subject.is_none() {
             return Ok(());
         }
-        let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
+        let (engine, context) = self
+            .core
+            .pinned_metadata_read(&self.namespace_id, crate::Consistency::Strong)
+            .await?;
         Ok(engine.ensure_administrator(&context).await?)
     }
 

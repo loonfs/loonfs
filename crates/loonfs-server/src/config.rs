@@ -2,6 +2,7 @@
 //! store, metadata cache limits, and runtime overrides.
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
+use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{ExecutionBudget, MetadataCache};
 use loonfs_grep::GrepWorkerConfig;
@@ -276,8 +277,13 @@ pub struct ServerConfig {
     pub max_merge_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
-    /// default of 1000.
+    /// default of 1000. At most 1155000, the revalidation bound.
     pub manifest_revalidation_interval_ms: Option<u64>,
+    /// The maximum staleness, in milliseconds, of an eventual read that doesn't
+    /// set its own `max_staleness_ms`. Zero confirms the namespace head on
+    /// every read. Unset keeps the runtime default of 1000. At most 1155000,
+    /// the revalidation bound.
+    pub max_staleness_ms: Option<u64>,
     /// Bytes retained by all read, publication, and fold memos. Zero keeps
     /// none. Derived when sized; otherwise defaults to 256 MiB.
     pub max_read_working_bytes: Option<usize>,
@@ -647,6 +653,22 @@ impl ServerConfig {
                 return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                     field,
                     reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
+                }));
+            }
+        }
+        for (field, interval_ms) in [
+            (
+                "manifest_revalidation_interval_ms",
+                self.manifest_revalidation_interval_ms,
+            ),
+            ("max_staleness_ms", self.max_staleness_ms),
+        ] {
+            if interval_ms.is_some_and(|interval_ms| interval_ms > READ_REVALIDATION_BOUND_MS) {
+                return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
+                    field,
+                    reason: format!(
+                        "must not exceed {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
+                    ),
                 }));
             }
         }
@@ -1057,7 +1079,7 @@ mod tests {
     use super::{
         load_server_config, ConfigFieldError, InlineContentConfig, PublicationLimitsConfig,
         ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES,
-        MIN_DISK_BYTES,
+        MIN_DISK_BYTES, READ_REVALIDATION_BOUND_MS,
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
@@ -2220,6 +2242,61 @@ root = "/tmp/loonfs-server"
         assert_missing_field(error, "content_token_secret");
     }
 
+    /// Checks that a manifest check interval or a maximum staleness above the
+    /// revalidation bound fails to load and fails `validate`, and that the
+    /// bound itself loads.
+    #[test]
+    fn read_intervals_above_the_revalidation_bound_are_rejected() {
+        let bound = READ_REVALIDATION_BOUND_MS;
+        for field in ["manifest_revalidation_interval_ms", "max_staleness_ms"] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+{field} = {}
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+                bound + 1
+            ));
+            let error = load_server_config(&path).expect_err("a setting above the bound");
+            assert_invalid_field(error, field);
+        }
+
+        let path = write_config(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+manifest_revalidation_interval_ms = {bound}
+max_staleness_ms = {bound}
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+        ));
+        let config = load_server_config(&path).expect("the bound itself loads");
+        assert_eq!(config.manifest_revalidation_interval_ms, Some(bound));
+        assert_eq!(config.max_staleness_ms, Some(bound));
+        for field in ["manifest_revalidation_interval_ms", "max_staleness_ms"] {
+            let mut oversized = config.clone();
+            match field {
+                "manifest_revalidation_interval_ms" => {
+                    oversized.manifest_revalidation_interval_ms = Some(bound + 1)
+                }
+                _ => oversized.max_staleness_ms = Some(bound + 1),
+            }
+            assert_invalid_field(
+                oversized.validate().expect_err("a setting above the bound"),
+                field,
+            );
+        }
+    }
+
     #[test]
     fn load_uses_default_metadata_cache_when_omitted() {
         let path = write_config(
@@ -2237,6 +2314,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.metadata_cache, super::MetadataCacheConfig::default());
         assert_eq!(config.manifest_revalidation_interval_ms, None);
+        assert_eq!(config.max_staleness_ms, None);
         assert_eq!(config.max_read_working_bytes, None);
     }
 
@@ -2248,6 +2326,7 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 manifest_revalidation_interval_ms = 250
+max_staleness_ms = 5000
 max_read_working_bytes = 8192
 
 [metadata_cache]
@@ -2263,6 +2342,7 @@ root = "/tmp/loonfs-server"
 
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
+        assert_eq!(config.max_staleness_ms, Some(5000));
         assert_eq!(config.max_read_working_bytes, Some(8192));
         assert_eq!(
             config.metadata_cache,

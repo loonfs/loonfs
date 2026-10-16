@@ -1272,11 +1272,11 @@ The `NamespaceMetadata` object has exactly these fields:
 
 The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes.
 
-LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read starts at the hint, and if the hint lags, the read probes forward. If the hint is missing, the read treats the namespace as absent. In a runtime without the namespace's writer session, a read from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next read even when the hint hasn't been raised.
+LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read starts at the hint, and if the hint lags, the read probes forward. If the hint is missing, the read treats the namespace as absent. In a runtime without the namespace's writer session, a `strong` read (the default, see [Read consistency](#read-consistency)) from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next `strong` read even when the hint hasn't been raised.
 
 In a runtime with the namespace's open writer session, a read starts from the session's [writer position](glossary.md#writer-position) instead. The runtime moves the position to each commit before it acknowledges the commit, so a read sees every commit that the runtime acknowledged, and it sends no request to confirm the head. Another writer can't commit until it publishes a claim manifest, which the manifest check below finds. So after another writer takes over the namespace, reads in the old writer's runtime see the new writer's commits, including access changes, within one manifest check interval, or on every read with an interval of `0`. The old session's next commit fails with `writer_fenced`.
 
-`LoonFsBuilder::manifest_revalidation_interval_ms` sets the minimum monotonic interval between checks for a successor to the manifest that a read starts from. It defaults to 1000 milliseconds, and a value of `0` checks on every read. A read after the interval sends a HEAD for the successor manifest. In a runtime without the writer session, the read also probes the next WAL number, so a warm read of an unchanged head costs two requests, and one within the interval. In the writer's runtime, the read costs one request after the interval and none within it, and reads that arrive while another read's check runs don't wait for it. If a successor exists, the reader reloads the namespace. Readers observe deletions, retention floor advances, and new manifests on this interval. Handle builders accept an injected monotonic timer for deterministic runtime timing.
+`LoonFsBuilder::manifest_revalidation_interval_ms` sets the minimum monotonic interval between checks for a successor to the manifest that a read starts from. It defaults to 1000 milliseconds, and a value of `0` checks on every read. A read after the interval sends a HEAD for the successor manifest. In a runtime without the writer session, a `strong` read also probes the next WAL number, so a warm read of an unchanged head costs two requests, and one within the interval. In the writer's runtime, the read costs one request after the interval and none within it, and reads that arrive while another read's check runs don't wait for it. If a successor exists, the reader reloads the namespace. Readers observe deletions, retention floor advances, and new manifests on this interval. Handle builders accept an injected monotonic timer for deterministic runtime timing.
 
 The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` returns the namespace state plus the storage details that maintenance uses:
 
@@ -1306,6 +1306,31 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
   "live_checkpoints": 4
 }
 ```
+
+#### Read consistency
+
+This section describes how recent the state that a live read sees is, and how a caller chooses.
+
+In a runtime without the namespace's writer session, confirming the cached head costs a WAL probe on every read, as described above. A caller that can accept state up to a known age, such as a dashboard that lists a directory every few seconds, doesn't need that probe on every read. So each live read takes a consistency setting (`consistency`):
+
+- `strong` (the default): the reader confirms the head before the read, so the read sees every commit that was acknowledged before it started.
+- `eventual`: the read has a maximum staleness, which is how old the reader's last confirmation of the head can be. While that confirmation is younger than the maximum staleness, the read reads at the head that the reader confirmed last, and it sends no request to confirm the head. After that, the read confirms the head the way a `strong` read does.
+
+An `eventual` read sees every commit that was acknowledged before the last confirmation, and it may miss commits acknowledged since. It never returns state older than a read that completed earlier on the same runtime, because the confirmed head only moves forward. For example, with a maximum staleness of 1000 milliseconds, a reader that confirmed the head at sequence 40 serves `eventual` reads at sequence 40 for up to one second, even if the writer commits sequence 41 in that second. A `strong` read in that second reads at sequence 41, and every `eventual` read after it reads at sequence 41 or later.
+
+`LoonFsBuilder::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness }` in the Rust runtime, or with `max_staleness_ms` on the HTTP binding, which is accepted only together with `consistency=eventual`.
+
+Neither the maximum staleness nor the manifest check interval can exceed `READ_REVALIDATION_BOUND_MS` (1,155,000 milliseconds). A runtime build with a larger `max_staleness_ms` or `manifest_revalidation_interval_ms` fails with a config error, a server whose config sets one fails at startup, and a read that sets a larger maximum staleness returns `invalid_request` with `param` set to `max_staleness_ms`. A cached head whose last manifest check is older than the bound is confirmed before a read with either setting.
+
+In a runtime with the namespace's writer session, a read with either setting starts from the [writer position](glossary.md#writer-position), so an `eventual` read is the same as a `strong` read there, and neither sends a request to confirm the head.
+
+A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the pin selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`.
+
+An `eventual` read can read an older head than one that a caller learned from a fresher read, such as a `strong` read or a response from another server. An `after_seq` above the head that a change feed request reads returns `invalid_request` (see [`GET /changes`](#611-get-changes)), and so does a directory cursor issued at a newer head. So a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
+
+Why is `strong` the default? Applications often read a change back at once, such as a permission change followed by a read, or a fork read by a new process. A caller that can accept lag opts into `eventual` for the reads where the lag doesn't matter.
+
+Why can't the maximum staleness exceed the revalidation bound? Garbage collection can delete the segments of a superseded manifest once its grace window passes, and the bound is what keeps a read off them (see [Replaying the visible WAL](format.md#42-replaying-the-visible-wal)). A reader confirms a head that's older than the bound whatever the setting, so LoonFS rejects a longer maximum staleness instead of accepting a setting that it can't honor.
 
 #### Namespace statistics
 
@@ -1380,13 +1405,15 @@ A newer server might report an `inode_kind` that this document doesn't define. A
 
 The `include_attributes` parameter selects whether the response includes the inode's attributes. It accepts `true` or `false`, and any other value returns `invalid_request`. The entry route defaults to `true`, because it returns one attribute map, which is limited to 64 KiB.
 
+The `consistency` parameter selects how recently the read confirms the namespace head (see [Read consistency](#read-consistency)). It accepts `strong` (the default) or `eventual`, and any other value returns `invalid_request`. With `consistency=eventual`, `max_staleness_ms` sets the read's own maximum staleness in milliseconds, from 0 to 1,155,000. Neither parameter can be combined with `snapshot_id`.
+
 The attributes projection is serialized as prefixed sibling fields of the entry. `attributes_revision_no` and the complete `attributes` map are either both present or both absent. `attributes_updated_by` and `attributes_updated_at_ms` are also present when a stored attributes revision exists.
 
 An empty map is a real projected value at its current revision. An inode whose attributes have never been written reads as `{}` at revision 0, with no updater or update time. A read that didn't include attributes leaves out all four fields, so an absent projection never means "no attributes".
 
 The namespace root has no name, so its entry omits `parent_inode_id`, `display_name`, and `binding_version`. Every other entry includes a validated `display_name`, and a `binding_version` for its current parent and name binding (see [Commit identity and preconditions](#51-commit-identity-and-preconditions)). The empty string isn't a valid name for the root or for any path component that has a name.
 
-The inode route accepts `snapshot_id` and returns the same entry shape, including the `path` at the selected sequence. The path limits in [Names and paths](format.md#14-names-and-paths) apply to request paths. A derived `path` can exceed them, and inode-addressed reads still return it. Renaming an entry changes its path and name, but not its inode ID or metadata. An unknown or hidden inode returns `inode_not_found`, and for the root inode, the route returns the path `/`. `include_attributes` behaves the same way as it does on the path entry route.
+The inode route accepts `snapshot_id` and returns the same entry shape, including the `path` at the selected sequence. The path limits in [Names and paths](format.md#14-names-and-paths) apply to request paths. A derived `path` can exceed them, and inode-addressed reads still return it. Renaming an entry changes its path and name, but not its inode ID or metadata. An unknown or hidden inode returns `inode_not_found`, and for the root inode, the route returns the path `/`. `include_attributes`, `consistency`, and `max_staleness_ms` behave the same way as they do on the path entry route.
 
 Why are the attribute fields siblings of the entry's other fields, instead of one nested object? Clients read the revision number on its own, and pass it as `expected_attributes_revision_no` on their next write, without reading the values.
 
@@ -1400,11 +1427,13 @@ The inode route accepts `snapshot_id`, and it addresses the directory by its sta
 
 `include_attributes` works exactly as it does on the entry route, and it follows the same rule about which attribute fields are present together, but on this route it defaults to `false`. That keeps the default response bounded, because a page can contain up to `pagination.max_limit` entries, and each attribute map can be up to 64 KiB. Clients that request attributes should choose a suitable page size.
 
+Both routes accept `consistency` and `max_staleness_ms`, which work as they do on the entry route. Each page applies them to the head that the page reads.
+
 A cursor is normally an opaque resume position in the listing order, not a snapshot pin. Directory listing, trash listing, revision listing, grep, and change-feed cursors tolerate forward head drift. A commit made while a client is paging doesn't invalidate these cursors, and the resumed page is evaluated at the head that's current when it's read, continuing strictly after the last returned position.
 
 Each page is internally consistent at its own head, but a multi-page listing spans whatever heads its pages were read at. So an entry created behind the resume position is missed, an entry deleted behind it was already returned, and a rename can appear as a duplicate or be missed. A client that needs one consistent cut re-issues the listing when `head_seq` changes between pages.
 
-A cursor tolerates a head that moved forward, but not one that moved backward. Every read confirms its head when it starts, so a cursor issued ahead of the serving head wasn't issued for this view, and it returns `invalid_request`. A malformed cursor, or one replayed against a different target, also returns `invalid_request`.
+A cursor tolerates a head that moved forward, but not one that moved backward. A `strong` read confirms its head when it starts, and an `eventual` read never reads an older head than an earlier read on the same runtime, so a cursor issued ahead of the serving head wasn't issued for this view, and it returns `invalid_request`. (An `eventual` page can read an older head than a cursor that another server issued. A client that gets this error from an `eventual` page reads the page again as `strong`.) A malformed cursor, or one replayed against a different target, also returns `invalid_request`.
 
 A directory cursor issued with `snapshot_id` is the exception. It's bound to that snapshot's immutable view, and the client MUST repeat the same `snapshot_id` on every page. If a page request omits it or supplies another snapshot, the server returns `invalid_request` instead of combining rows from different views. An unrecognized cursor version is also rejected with `invalid_request`.
 
@@ -1525,6 +1554,8 @@ For example, a revision listing returns:
 The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path. Deleted files stay readable while their revision rows are kept. A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`.
 
 `GET /inodes/{inode_id}/content` reads the current revision of a visible file inode, wherever the inode is bound, and streams and verifies it like the path route. Like the path route without `revision_no`, it requires only the `read` right. A deleted or unknown inode returns `inode_not_found`, and a directory returns `path_conflict`. With `snapshot_id`, the route reads the revision that the snapshot captured, and like every snapshot read, it also requires `history`.
+
+Both content routes and the inode revision route accept `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). A revision read finds the revision at the live head, so on a revision read the parameters select how recently the server confirms that head. Neither parameter can be combined with `snapshot_id`.
 
 Embedded by-reference reads require administrator access to the reading namespace. The namespace's read view MUST contain a publication for the content, including publications inherited through a fork. A reference that's absent from that view returns `path_not_found` without reading any content bytes, even when the reading namespace owns the content. Content published after a snapshot isn't readable through that snapshot.
 
@@ -2205,6 +2236,8 @@ Why does every deployment with a direct write offer direct reads? `direct_put` a
 Returns a page of the namespace's change feed, which lists the commits after `after_seq`.
 
 In an ACL namespace, the change feed requires an administrator when the request includes subject headers. Without subject headers, the request reads as the token holder.
+
+The feed accepts `consistency` and `max_staleness_ms`, which work as they do on the read routes (see [Read consistency](#read-consistency)), and neither can be combined with `snapshot_id`. An `eventual` poll within its maximum staleness reads at the head that the server confirmed last, so it can miss commits from that time, and a later poll returns them. An `after_seq` above the head that an `eventual` poll reads returns `invalid_request`, so a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
 
 Each change is one commit, represented as a `Commit` (the same object `POST /commits` returns). A change includes the commit's identity (`committed_seq`, `commit_id`, `committed_by`, the observational `committed_at_ms`, and the optional `message`) and its `events`, which are the semantic filesystem operations the commit applied, in the order it applied them.
 

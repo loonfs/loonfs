@@ -81,6 +81,7 @@ impl ResolvedTarget {
             &StatOptions {
                 include_attributes: loonfs_types::AttributeInclusion::Omit,
                 snapshot_id: snapshot_id.cloned(),
+                ..StatOptions::default()
             },
         )
         .await
@@ -145,6 +146,7 @@ impl ResolvedTarget {
                         spec,
                         &ReadFileOptions {
                             snapshot_id: snapshot_id.cloned(),
+                            ..Default::default()
                         },
                     )
                     .await?
@@ -187,6 +189,7 @@ impl ResolvedTarget {
             after_seq,
             &ListChangesOptions {
                 snapshot_id: snapshot_id.cloned(),
+                ..Default::default()
             },
         )
     }

@@ -12,6 +12,7 @@ use crate::{
     SharedObjectStore, StoreConfig, TraceMode,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
+use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -47,6 +48,7 @@ struct CoreConfig {
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
     manifest_revalidation_interval_ms: u64,
+    max_staleness_ms: u64,
     execution_budget: Option<ExecutionBudget>,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
@@ -82,6 +84,7 @@ impl<M> LoonFsBuilder<M> {
                 metadata_cache: None,
                 manifest_revalidation_interval_ms:
                     crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
+                max_staleness_ms: crate::config::DEFAULT_MAX_STALENESS_MS,
                 execution_budget: None,
                 timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
@@ -134,12 +137,29 @@ impl<M> LoonFsBuilder<M> {
     /// Sets the minimum interval, in milliseconds, between checks for a
     /// successor to a cached manifest.
     ///
-    /// Defaults to 1000; zero checks on every read.
+    /// Defaults to 1000, and zero checks on every read. A value above
+    /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
+    /// fails the build with [`Error::Config`].
     pub fn manifest_revalidation_interval_ms(
         mut self,
         manifest_revalidation_interval_ms: u64,
     ) -> Self {
         self.core.manifest_revalidation_interval_ms = manifest_revalidation_interval_ms;
+        self
+    }
+
+    /// Sets the maximum staleness, in milliseconds, of an eventual read that
+    /// doesn't set its own (see
+    /// [`Consistency::Eventual`](crate::Consistency::Eventual)).
+    ///
+    /// In a runtime without the namespace's writer session, an eventual read
+    /// reads at the head that the runtime confirmed last, without a request,
+    /// while that confirmation is younger than the maximum staleness. Defaults to
+    /// 1000, and zero confirms the head on every read. A value above
+    /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
+    /// fails the build with [`Error::Config`].
+    pub fn max_staleness_ms(mut self, max_staleness_ms: u64) -> Self {
+        self.core.max_staleness_ms = max_staleness_ms;
         self
     }
 
@@ -356,6 +376,24 @@ impl CoreConfig {
                     .to_owned(),
             ));
         }
+        // A reader reloads a view whose manifest check is as old as the
+        // revalidation bound, whatever the setting, so a longer interval or
+        // maximum staleness would promise something that the runtime doesn't
+        // do.
+        for (setting, interval_ms) in [
+            (
+                "manifest_revalidation_interval_ms",
+                self.manifest_revalidation_interval_ms,
+            ),
+            ("max_staleness_ms", self.max_staleness_ms),
+        ] {
+            if interval_ms > READ_REVALIDATION_BOUND_MS {
+                return Err(Error::Config(format!(
+                    "`{setting}` is {interval_ms} ms, which exceeds the revalidation bound of \
+                     {READ_REVALIDATION_BOUND_MS} ms"
+                )));
+            }
+        }
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = config.kind();
@@ -412,6 +450,7 @@ impl CoreConfig {
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
+                max_staleness_ms: self.max_staleness_ms,
                 metadata_run_policy,
                 execution_budget,
                 trace_mode: self.trace_mode,

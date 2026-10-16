@@ -310,6 +310,7 @@ async fn a_resumed_inode_stream_reads_only_the_rest_in_the_asked_chunks() {
             &ReadFileStreamOptions {
                 chunk_bytes: NonZeroU64::new(1024).expect("non-zero chunk size"),
                 start_offset: held as u64,
+                ..ReadFileStreamOptions::default()
             },
         )
         .await
