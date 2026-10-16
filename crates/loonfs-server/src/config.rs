@@ -829,12 +829,11 @@ impl MemorySizing {
         ]
     }
 
-    pub(crate) fn metadata_cache(&self, recorder: Arc<dyn MetricsRecorder>) -> MetadataCache {
+    pub(crate) fn metadata_cache(&self) -> MetadataCache {
         MetadataCache::builder()
             .max_segment_bytes(self.segment.bytes)
             .max_head_state_bytes(self.head_state.bytes)
             .max_object_bytes(self.object.bytes)
-            .metrics_recorder(recorder)
             .build()
     }
 

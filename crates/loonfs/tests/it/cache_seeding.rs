@@ -566,16 +566,17 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }
 
-fn latest_metadata_view_reads(recorder: &DefaultMetricsRecorder) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.runtime_cache.latest_metadata_view_reads")
-        .next()
-        .expect("the runtime registers its view-read counter");
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+/// Returns how many reads took the head they started from, summed over
+/// every source of the head. Each read takes one head.
+fn read_heads(recorder: &DefaultMetricsRecorder) -> u64 {
+    recorder
+        .snapshot()
+        .by_name("loonfs.read_head.source")
+        .map(|entry| match entry.value {
+            MetricValue::Counter(value) => value,
+            ref other => panic!("expected a counter, found {other:?}"),
+        })
+        .sum()
 }
 
 #[test]
@@ -605,12 +606,13 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
         .expect("checkpoint");
 
     raw_store.reset();
+    let heads = read_heads(&recorder);
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("stat materialized file");
     fs.list_path_blocking(&namespace_id, "/docs")
         .expect("list materialized docs");
 
-    assert_eq!(latest_metadata_view_reads(&recorder), 2);
+    assert_eq!(read_heads(&recorder), heads + 2);
     assert_eq!(raw_store.count(OperationSelector::Read), 0);
 }
 
@@ -641,6 +643,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
         .await
         .expect("checkpoint");
 
+    let heads = read_heads(&recorder);
     let (stat, list) = tokio::join!(
         fs.stat(&namespace_id, "/docs/file.txt"),
         fs.list_path(&namespace_id, "/docs"),
@@ -653,7 +656,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].path, "/docs/file.txt");
 
-    assert_eq!(latest_metadata_view_reads(&recorder), 2);
+    assert_eq!(read_heads(&recorder), heads + 2);
 }
 
 #[test]
@@ -678,6 +681,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     let fs = open_runtime_with(store(temp_dir.path()), "materialized-reader", |builder| {
         builder.metrics_recorder(recorder.clone())
     });
+    let heads = read_heads(&recorder);
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
     let after_first = fs.metadata_cache_stats();
@@ -687,7 +691,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
 
     assert!(after_first.segment_inserts > 0);
     assert!(after_second.segment_hits > after_first.segment_hits);
-    assert_eq!(latest_metadata_view_reads(&recorder), 2);
+    assert_eq!(read_heads(&recorder), heads + 2);
 }
 
 #[test]

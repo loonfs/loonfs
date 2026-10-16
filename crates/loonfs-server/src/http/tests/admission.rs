@@ -58,8 +58,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(limit.in_flight(), 1);
     }
-    let rendered =
-        super::super::metrics::render(&state.binding.metrics, None, None, 8, 16, limit.in_flight());
+    let rendered = super::super::metrics::render(&state);
     assert!(rendered.contains("loonfs_server_in_flight_requests 1\n"));
     assert!(rendered.contains("loonfs_server_busy_rejections_total{kind=\"request\"} 1\n"));
     assert!(rendered.contains("method=\"POST\",route=\"/v0/namespaces\",status_class=\"5xx\"} 1\n"));

@@ -57,21 +57,6 @@ async fn get_readiness(State(state): State<AppState>) -> Response {
 }
 
 async fn get_metrics(State(state): State<AppState>) -> Response {
-    let rendered = metrics::render(
-        &state.binding.metrics,
-        state.local_cache.as_ref().map(|cache| cache.foyer_stats()),
-        state
-            .binding
-            .grep
-            .worker()
-            .map(|worker| worker.step_budget().stats()),
-        state.binding.upload_permits.available_permits(),
-        state.binding.download_permits.available_permits(),
-        state
-            .binding
-            .request_limit
-            .as_ref()
-            .map_or(0, loonfs_http::RequestLimit::in_flight),
-    );
+    let rendered = metrics::render(&state);
     ([(CONTENT_TYPE, "text/plain; version=0.0.4")], rendered).into_response()
 }

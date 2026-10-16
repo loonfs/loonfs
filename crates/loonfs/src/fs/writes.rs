@@ -428,7 +428,7 @@ impl Namespace<Writable> {
         let engine = self.engine();
         let (owner, context) = self
             .core
-            .pinned_metadata_read(&content_ref.owner_namespace_id, crate::Consistency::Strong)
+            .pinned_read(&content_ref.owner_namespace_id, crate::Consistency::Strong)
             .await?;
         owner.ensure_administrator(&context).await?;
         let owner_location = Some(

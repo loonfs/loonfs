@@ -173,3 +173,96 @@ fn a_scrape_reports_positive_process_resident_bytes() {
         .expect("a Linux scrape should render process RSS");
     assert!(resident_bytes > 0);
 }
+
+/// Checks that each field of the cache stats renders into its own series,
+/// under the exported name and labels that operators scrape.
+#[test]
+fn each_cache_stats_field_renders_into_its_own_series() {
+    let mut rendered = String::new();
+    render_metadata_cache(
+        &mut rendered,
+        &MetadataCacheStats {
+            segment_hits: 1,
+            segment_misses: 2,
+            segment_inserts: 3,
+            segment_evictions: 4,
+            segment_filter_skips: 5,
+            segment_filter_false_positives: 6,
+            segment_bytes: 7,
+            head_anchor_hits: 8,
+            head_anchor_misses: 9,
+            wal_tail_hits: 10,
+            wal_tail_misses: 11,
+            wal_tail_inserts: 12,
+            head_state_evictions: 13,
+            head_state_evicted_bytes: 14,
+            head_state_rejections: 15,
+            head_state_rejected_bytes: 16,
+            head_state_bytes: 17,
+            wal_object_hits: 18,
+            wal_object_misses: 19,
+            wal_object_inserts: 20,
+            content_object_hits: 21,
+            content_object_misses: 22,
+            content_object_inserts: 23,
+            object_evictions: 24,
+            object_bytes: 25,
+        },
+    );
+    render_grep_block_cache(
+        &mut rendered,
+        &DecodedBlockCacheStats {
+            hits: 26,
+            misses: 27,
+            inserts: 28,
+            evictions: 29,
+            ..DecodedBlockCacheStats::default()
+        },
+    );
+
+    let expected = [
+        "loonfs_metadata_segment_cache_gets_total{result=\"hit\"} 1",
+        "loonfs_metadata_segment_cache_gets_total{result=\"miss\"} 2",
+        "loonfs_metadata_segment_cache_inserts_total 3",
+        "loonfs_metadata_segment_cache_evictions_total 4",
+        "loonfs_metadata_segment_cache_filter_skips_total 5",
+        "loonfs_metadata_segment_cache_filter_false_positives_total 6",
+        "loonfs_metadata_segment_cache_retained_decoded_bytes 7",
+        "loonfs_namespace_head_cache_gets_total{result=\"hit\"} 8",
+        "loonfs_namespace_head_cache_gets_total{result=\"miss\"} 9",
+        "loonfs_wal_tail_projection_cache_gets_total{result=\"hit\"} 10",
+        "loonfs_wal_tail_projection_cache_gets_total{result=\"miss\"} 11",
+        "loonfs_wal_tail_projection_cache_inserts_total 12",
+        "loonfs_head_state_cache_evictions_total 13",
+        "loonfs_head_state_cache_evicted_decoded_bytes_total 14",
+        "loonfs_head_state_cache_rejections_total 15",
+        "loonfs_head_state_cache_rejected_decoded_bytes_total 16",
+        "loonfs_head_state_cache_retained_decoded_bytes 17",
+        "loonfs_object_cache_gets_total{key_class=\"wal_object\",result=\"hit\"} 18",
+        "loonfs_object_cache_gets_total{key_class=\"wal_object\",result=\"miss\"} 19",
+        "loonfs_object_cache_inserts_total{key_class=\"wal_object\"} 20",
+        "loonfs_object_cache_gets_total{key_class=\"content\",result=\"hit\"} 21",
+        "loonfs_object_cache_gets_total{key_class=\"content\",result=\"miss\"} 22",
+        "loonfs_object_cache_inserts_total{key_class=\"content\"} 23",
+        "loonfs_object_cache_evictions_total 24",
+        "loonfs_object_cache_retained_decoded_bytes 25",
+        "loonfs_grep_block_cache_gets_total{result=\"hit\"} 26",
+        "loonfs_grep_block_cache_gets_total{result=\"miss\"} 27",
+        "loonfs_grep_block_cache_inserts_total 28",
+        "loonfs_grep_block_cache_evictions_total 29",
+    ];
+    for series in expected {
+        assert!(
+            rendered.lines().any(|line| line == series),
+            "missing `{series}` in:\n{rendered}"
+        );
+    }
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count(),
+        expected.len(),
+        "one series for each exported field"
+    );
+}

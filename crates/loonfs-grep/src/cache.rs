@@ -3,10 +3,8 @@
 use crate::codec::IndexRow;
 use crate::manifest::GrepManifestState;
 use loonfs::engine::{
-    DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedSegmentBlock,
-    SegmentCacheKey,
+    DecodedBlockCache, DecodedBlockCacheConfig, DecodedSegmentBlock, SegmentCacheKey,
 };
-use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
@@ -20,74 +18,16 @@ pub type GrepBlockCache = DecodedBlockCache<SegmentCacheKey, DecodedGrepBlock>;
 pub type DecodedGrepBlock = DecodedSegmentBlock<IndexRow, Arc<GrepManifestState>>;
 pub type GrepBlockCacheKey = SegmentCacheKey;
 
-struct GrepBlockCacheMetrics {
-    hits: Arc<dyn CounterHandle>,
-    misses: Arc<dyn CounterHandle>,
-    inserts: Arc<dyn CounterHandle>,
-    evictions: Arc<dyn CounterHandle>,
-}
-
-impl GrepBlockCacheMetrics {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let get = |result| {
-            recorder.register_counter(
-                "loonfs.grep_block_cache.gets",
-                "Decoded grep block cache lookups, by outcome",
-                &[("result", result)],
-            )
-        };
-        Self {
-            hits: get(RESULT_HIT),
-            misses: get(RESULT_MISS),
-            inserts: recorder.register_counter(
-                "loonfs.grep_block_cache.inserts",
-                "Blocks inserted into the decoded grep block cache",
-                &[],
-            ),
-            evictions: recorder.register_counter(
-                "loonfs.grep_block_cache.evictions",
-                "Blocks evicted from the decoded grep block cache",
-                &[],
-            ),
-        }
-    }
-}
-
-/// Creates a grep block cache that reports metrics to `recorder`.
-pub fn new_grep_block_cache(
-    max_decoded_bytes: usize,
-    recorder: &dyn MetricsRecorder,
-) -> GrepBlockCache {
-    GrepBlockCache::new(DecodedBlockCacheConfig {
-        observer: Some(Arc::new(GrepBlockCacheMetrics::register(recorder))),
-        ..DecodedBlockCacheConfig::new(max_decoded_bytes)
-    })
-}
-
-impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
-    fn hit(&self) {
-        self.hits.increment(1);
-    }
-
-    fn miss(&self) {
-        self.misses.increment(1);
-    }
-
-    fn insert(&self) {
-        self.inserts.increment(1);
-    }
-
-    fn evict(&self, _decoded_bytes: usize) {
-        self.evictions.increment(1);
-    }
+/// Creates a grep block cache with a budget of `max_decoded_bytes`.
+pub fn new_grep_block_cache(max_decoded_bytes: usize) -> GrepBlockCache {
+    GrepBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes))
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics};
+    use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
     use loonfs::engine::SegmentBlockKind;
-    use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
     use loonfs_types::format::segment_blocks::DecodedDataBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -108,56 +48,6 @@ mod tests {
             block_kind: SegmentBlockKind::Data,
             block_offset: 0,
         }
-    }
-
-    fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
-        let entry = snapshot
-            .by_name(name)
-            .find(|entry| entry.labels == labels)
-            .expect("grep cache counter should be registered");
-        match entry.value {
-            MetricValue::Counter(value) => value,
-            ref other => panic!("expected a counter, found {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cache_activity_reaches_the_metrics_recorder() {
-        let recorder = DefaultMetricsRecorder::new();
-        let cache = GrepBlockCache::new(loonfs::engine::DecodedBlockCacheConfig {
-            observer: Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
-            ..loonfs::engine::DecodedBlockCacheConfig::new(1_600)
-        });
-        cache.insert(key("a"), block(600));
-        cache.insert(key("b"), block(600));
-        assert!(cache.get(&key("a")).is_none());
-        assert!(cache.get(&key("b")).is_some());
-
-        let snapshot = recorder.snapshot();
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.grep_block_cache.gets",
-                &[("result", "hit")]
-            ),
-            1
-        );
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.grep_block_cache.gets",
-                &[("result", "miss")]
-            ),
-            1
-        );
-        assert_eq!(
-            counter(&snapshot, "loonfs.grep_block_cache.inserts", &[]),
-            2
-        );
-        assert_eq!(
-            counter(&snapshot, "loonfs.grep_block_cache.evictions", &[]),
-            1
-        );
     }
 
     #[tokio::test]

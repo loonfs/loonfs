@@ -15,8 +15,7 @@
 //! same check.
 
 use crate::block_cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockKey,
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::ObjectStoreScope;
@@ -82,37 +81,20 @@ struct KindCounters {
     hits: AtomicUsize,
     misses: AtomicUsize,
     inserts: AtomicUsize,
-    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
 }
 
 impl KindCounters {
-    fn new(observer: Option<Arc<dyn DecodedBlockCacheObserver>>) -> Self {
-        Self {
-            observer,
-            ..Self::default()
-        }
-    }
-
     fn record_lookup<T>(&self, found: Option<T>) -> Option<T> {
         let counter = match found {
             Some(_) => &self.hits,
             None => &self.misses,
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.observer {
-            match found {
-                Some(_) => observer.hit(),
-                None => observer.miss(),
-            }
-        }
         found
     }
 
     fn record_insert(&self) {
         self.inserts.fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.observer {
-            observer.insert();
-        }
     }
 }
 
@@ -139,25 +121,14 @@ impl std::fmt::Debug for SharedObjects {
 
 impl SharedObjects {
     /// `max_cached_object_bytes` is the largest content object the cache
-    /// keeps. `observer` sees evictions and retained bytes across both kinds
-    /// of entry, and `wal_observer` and `content_observer` see the lookups
-    /// and inserts of one kind each.
-    pub fn new(
-        max_decoded_bytes: usize,
-        max_cached_object_bytes: u64,
-        observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-        wal_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-        content_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    ) -> Self {
+    /// keeps.
+    pub fn new(max_decoded_bytes: usize, max_cached_object_bytes: u64) -> Self {
         Self {
-            entries: DecodedBlockCache::new(DecodedBlockCacheConfig {
-                max_decoded_bytes,
-                observer,
-            }),
+            entries: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
             max_decoded_bytes,
             max_cached_object_bytes,
-            wal: KindCounters::new(wal_observer),
-            content: KindCounters::new(content_observer),
+            wal: KindCounters::default(),
+            content: KindCounters::default(),
         }
     }
 
@@ -202,9 +173,6 @@ impl ObjectCache {
             Arc::new(SharedObjects::new(
                 max_decoded_bytes,
                 max_cached_object_bytes,
-                None,
-                None,
-                None,
             )),
             ObjectStoreScope::new(0),
         )
@@ -379,7 +347,7 @@ mod tests {
     /// object store read the same entry.
     #[test]
     fn views_read_only_the_objects_of_their_own_object_store() {
-        let shared = Arc::new(SharedObjects::new(1_000, 1_000, None, None, None));
+        let shared = Arc::new(SharedObjects::new(1_000, 1_000));
         let view = |scope| ObjectCache::new(Arc::clone(&shared), ObjectStoreScope::new(scope));
         let (first, second, first_again) = (view(1), view(2), view(1));
         first.insert_content("key", b"first");

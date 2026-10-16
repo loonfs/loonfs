@@ -77,7 +77,8 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         ) >= 1.0
     );
 
-    // The recorder includes both object-store and cache activity.
+    // The scrape includes object-store activity from the recorder and cache
+    // activity from the caches' stats.
     assert!(
         series(
             &first,
@@ -92,8 +93,6 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         ) > 0.0
     );
     assert!(first.contains_key("loonfs_metadata_segment_cache_gets_total{result=\"hit\"}"));
-    assert!(first.contains_key("loonfs_runtime_cache_latest_metadata_view_reads_total"));
-    assert!(first.contains_key("loonfs_runtime_cache_snapshot_view_reads_total"));
     assert!(first.contains_key("loonfs_grep_block_cache_gets_total{result=\"hit\"}"));
     assert!(first.contains_key("loonfs_head_state_cache_retained_decoded_bytes"));
     assert_eq!(
