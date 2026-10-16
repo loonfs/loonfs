@@ -224,7 +224,7 @@ A new namespace that starts as a copy of another namespace at one point in its h
 
 ### Writer position
 
-The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no request to confirm the head. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, a `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. A manifest check once per revalidation interval finds a manifest that another process published, such as a new writer's claim. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no request to confirm the head. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, a `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. A manifest check once per revalidation interval finds a manifest published above the position's: the position moves onto one with the session's writer epoch, and a new writer's claim drops it. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Consistency
 
