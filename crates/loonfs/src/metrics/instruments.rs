@@ -300,7 +300,8 @@ impl RuntimeInstruments {
         installed.publisher.batch_size.record(batch_size as f64);
     }
 
-    /// Reports one WAL-tail fold on the publication path.
+    /// Reports one WAL-tail fold on the publication path that published a
+    /// manifest.
     pub(crate) fn publisher_wal_fold(&self) {
         let Some(installed) = &self.installed else {
             return;

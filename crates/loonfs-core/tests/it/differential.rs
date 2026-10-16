@@ -1358,6 +1358,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             &namespace_id,
             None,
             &deadline(),
+            loonfs_core::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await

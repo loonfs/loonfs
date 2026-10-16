@@ -3,21 +3,20 @@
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
 use super::load::load_basis_metadata_segments;
-use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
-use super::published::{PublicationReport, PublishedManifest};
+use super::publish::{
+    encode_manifest, manifest_ref_for, publish_manifest, ManifestPublicationOutcome,
+};
+use super::published::PublishedManifest;
 use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit_engine::WalFoldInput;
-use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::error::WriterFence;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::CurrentManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
@@ -27,23 +26,23 @@ use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ManifestRef, WriterBlock};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
+use loonfs_types::format::manifest::{
+    MetadataRunRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
+};
 use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo, WriterEpoch};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
 
-/// How one WAL fold satisfied its goal.
+/// How one WAL fold ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldWalOutcome {
-    /// The current manifest already covered the WAL tail; nothing was published.
+    /// A current manifest already folded the WAL tail, so nothing was
+    /// published.
     AlreadyCurrent,
     /// This call published the next current manifest.
     Published,
-    /// Another publisher changed the current manifest before this call could publish.
-    ManifestAdvanced,
 }
 
 /// The current manifest state after one WAL fold.
@@ -61,45 +60,6 @@ pub struct FoldWalResponse {
     pub outcome: FoldWalOutcome,
 }
 
-/// Manifest that covers the head after a fold attempt.
-///
-/// This may be a newly published manifest or one that was already current.
-pub(crate) struct FoldedBasis {
-    /// Reference to the manifest that covers the head.
-    pub(crate) manifest: ManifestRef,
-    /// The WAL number that manifest folds through.
-    folded_wal_no: WalNo,
-    /// Head sequence the attempt targeted.
-    pub(super) target_head_seq: ChangeSeq,
-    /// Current manifest after the attempt.
-    pub(super) current_manifest_no: ManifestNo,
-    /// Sequence covered by `current_manifest_no`.
-    pub(super) current_manifest_head_seq: ChangeSeq,
-    pub(super) outcome: FoldWalOutcome,
-    /// The writer epoch of `manifest`, and the writer block that claimed it.
-    writer_epoch: WriterEpoch,
-    writer: Option<WriterBlock>,
-}
-
-impl FoldedBasis {
-    /// The manifest this attempt published, or `None` when it published none.
-    pub(crate) fn published(&self) -> Option<PublishedManifest> {
-        (self.outcome == FoldWalOutcome::Published).then(|| PublishedManifest::Fold {
-            manifest: self.manifest.clone(),
-            folded_wal_no: self.folded_wal_no,
-        })
-    }
-}
-
-pub(crate) enum TryFoldWalOutcome {
-    /// The attempt finished with a valid basis, whether or not it published
-    /// that basis itself.
-    Settled(Box<FoldedBasis>),
-    /// A concurrent manifest publication does not cover this attempt's
-    /// target. It carries the current manifest the attempt lost to.
-    RaceLost(CurrentManifest),
-}
-
 /// Folds the visible WAL tail into segments and publishes the next manifest.
 #[cfg(test)]
 pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
@@ -107,110 +67,17 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<FoldWalResponse> {
     let deadline = Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default()));
-    fold_wal_with_deadline(
+    fold_wal_tail(
         store,
+        None,
         namespace_id,
+        None,
         &deadline,
         MetadataRunPolicy::default(),
-        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
-    .map(|report| report.response)
-}
-
-pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-    segment_cache: Option<&MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
-) -> Result<PublicationReport<FoldWalResponse>> {
-    let basis = fold_wal_basis_with_deadline(
-        store,
-        namespace_id,
-        deadline,
-        policy,
-        segment_cache,
-        content_writes,
-        None,
-    )
-    .await?;
-    Ok(PublicationReport {
-        published: basis.published(),
-        response: fold_wal_response(namespace_id, basis),
-    })
-}
-
-/// Folds the current tail from a fresh load, again after each lost race.
-///
-/// `session_epoch` is the writer epoch of the session whose fold this is, or
-/// `None` for a fold that any process may run. A session's fold fails with
-/// `writer_fenced` when a load finds a newer writer's manifest, so it never
-/// folds over that writer's claim.
-async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-    segment_cache: Option<&MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
-    session_epoch: Option<WriterEpoch>,
-) -> Result<FoldedBasis> {
-    retry_while_contended(|| async move {
-        // The fallback reloads after every lost race, so it never relies on
-        // the rule that keeps a held tail.
-        let projection =
-            load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?;
-        ensure_session_epoch(
-            session_epoch,
-            projection.head.writer_epoch,
-            projection.head.writer.as_ref(),
-        )?;
-        Result::Ok(
-            match try_fold_wal_projection(
-                store,
-                namespace_id,
-                &projection,
-                deadline,
-                policy,
-                content_writes,
-            )
-            .await?
-            {
-                TryFoldWalOutcome::Settled(basis) => CasOutcome::Settled(*basis),
-                TryFoldWalOutcome::RaceLost(_) => {
-                    CasOutcome::Contended(CoreError::WalPublish(WalPublishError::NumberTaken))
-                }
-            },
-        )
-    })
-    .await?
-}
-
-/// Loads the namespace and folds its tail, keeping that tail across
-/// manifests that fold no WAL (see `fold_held_projection`).
-pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-    segment_cache: Option<&MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWalOutcome> {
-    let projection =
-        load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?;
-    fold_held_projection(
-        store,
-        segment_cache,
-        namespace_id,
-        projection,
-        deadline,
-        policy,
-        content_writes,
-    )
-    .await
+    .map(|folded| folded.response)
 }
 
 async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
@@ -225,46 +92,6 @@ async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
             phase = "scan_namespace_state"
         ))
         .await
-}
-
-/// Folds a projection the caller already holds. When a manifest that folded
-/// no WAL past the projection's basis takes the fold's number, the fold
-/// takes that manifest as its basis and publishes again from the same tail,
-/// up to the contention limit. Any other lost race is returned.
-async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
-    mut projection: ManifestProjection<'a, S>,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-    content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWalOutcome> {
-    if let Some(current) = already_current(&projection) {
-        return Ok(current);
-    }
-    let layouts = materialize_tail_content(store, &projection, content_writes).await?;
-    let mut attempt =
-        publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
-    for _retry in 0..MAX_CONTENTION_ATTEMPTS {
-        let TryFoldWalOutcome::RaceLost(winner) = &attempt else {
-            break;
-        };
-        if !keeps_held_tail(
-            projection.manifest_segments.manifest().payload(),
-            winner.envelope.payload(),
-        ) {
-            break;
-        }
-        projection.basis = MetadataBasis(winner.manifest());
-        projection.manifest_segments =
-            load_basis_metadata_segments(store, segment_cache, &projection.basis)
-                .await?
-                .segments;
-        attempt =
-            publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
-    }
-    Ok(attempt)
 }
 
 /// Whether a tail replayed above `basis` is also the tail above `winner`, a
@@ -297,49 +124,6 @@ fn keeps_held_tail(basis: &NamespaceManifestPayload, winner: &NamespaceManifestP
             }
 }
 
-async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    projection: &ManifestProjection<'_, S>,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-    content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWalOutcome> {
-    if let Some(current) = already_current(projection) {
-        return Ok(current);
-    }
-    let layouts = materialize_tail_content(store, projection, content_writes).await?;
-    publish_fold(store, namespace_id, projection, &layouts, deadline, policy).await
-}
-
-/// The settled attempt for a projection whose basis already folded its
-/// tail.
-fn already_current<S: ObjectStore + ?Sized>(
-    projection: &ManifestProjection<'_, S>,
-) -> Option<TryFoldWalOutcome> {
-    if projection
-        .manifest_segments
-        .manifest()
-        .payload()
-        .folded_wal_no
-        != projection.head.wal_no
-    {
-        return None;
-    }
-    let head_seq = projection.head.seq;
-    let basis_manifest = projection.basis.manifest();
-    Some(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
-        manifest: basis_manifest.clone(),
-        folded_wal_no: projection.head.wal_no,
-        target_head_seq: head_seq,
-        current_manifest_no: basis_manifest.manifest_no,
-        current_manifest_head_seq: head_seq,
-        outcome: FoldWalOutcome::AlreadyCurrent,
-        writer_epoch: projection.head.writer_epoch,
-        writer: projection.head.writer.clone(),
-    })))
-}
-
 async fn publish_fold<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -347,7 +131,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
     deadline: &Deadline,
     policy: MetadataRunPolicy,
-) -> Result<TryFoldWalOutcome> {
+) -> Result<ManifestPublicationOutcome> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
     let manifest = build_namespace_manifest_for_projection(
@@ -359,32 +143,9 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         policy,
     )
     .await?;
-    let manifest = encode_manifest(manifest);
     // Written segments may outlive the GC grace if publication exceeds its budget.
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let (outcome, current) = match publish_manifest(store, manifest, deadline).await? {
-        ManifestPublicationOutcome::Published(current) => (FoldWalOutcome::Published, current),
-        ManifestPublicationOutcome::CoveredByCurrent(current) => {
-            (FoldWalOutcome::ManifestAdvanced, current)
-        }
-        // A same-sequence compaction can replace the predecessor without
-        // covering the newer WAL head. That manifest wins, but it has not
-        // satisfied the fold.
-        ManifestPublicationOutcome::PredecessorChanged(current) => {
-            return Ok(TryFoldWalOutcome::RaceLost(current));
-        }
-    };
-    let payload = current.envelope.payload();
-    Ok(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
-        current_manifest_no: current.manifest().manifest_no,
-        current_manifest_head_seq: current.manifest().head_seq,
-        manifest: current.manifest(),
-        folded_wal_no: current.folded_wal_no(),
-        target_head_seq: projection.head.seq,
-        outcome,
-        writer_epoch: payload.writer_epoch,
-        writer: payload.writer.clone(),
-    })))
+    publish_manifest(store, encode_manifest(manifest), deadline).await
 }
 
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
@@ -436,107 +197,131 @@ pub struct FoldedWalTail {
     pub folded_wal_no: WalNo,
 }
 
+impl FoldedWalTail {
+    fn new(
+        namespace_id: &NamespaceId,
+        target_head_seq: ChangeSeq,
+        manifest: &NamespaceManifestEnvelope,
+        outcome: FoldWalOutcome,
+    ) -> Self {
+        let basis = manifest_ref_for(namespace_id, manifest);
+        Self {
+            response: FoldWalResponse {
+                namespace_id: namespace_id.clone(),
+                target_head_seq,
+                manifest_no: basis.manifest_no,
+                manifest_head_seq: basis.head_seq,
+                outcome,
+            },
+            basis: MetadataBasis(basis),
+            writer_epoch: manifest.payload().writer_epoch,
+            folded_wal_no: manifest.payload().folded_wal_no,
+        }
+    }
+
+    /// The manifest this fold published, or `None` when it published none.
+    pub(crate) fn published(&self) -> Option<PublishedManifest> {
+        (self.response.outcome == FoldWalOutcome::Published).then(|| PublishedManifest::Fold {
+            manifest: self.basis.0.clone(),
+            folded_wal_no: self.folded_wal_no,
+        })
+    }
+}
+
+/// Folds the WAL tail and publishes the next manifest as the maintainer.
+///
+/// The manifest copies both epochs from its predecessor (format spec,
+/// "Publishing a materialized file set"). A writer session passes the tail
+/// it holds as `held`, and every other caller passes `None`, which loads the
+/// tail from the store. A fold whose manifest put loses to a manifest that
+/// doesn't cover its tail rebuilds against that manifest. It keeps the tail
+/// it read when the manifest is at the same head (see `keeps_held_tail`),
+/// and loads the tail again otherwise, which folds a new writer's log after
+/// the writer's claim. A namespace tombstone stops the fold.
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    input: Option<WalFoldInput>,
+    held: Option<WalFoldInput>,
     deadline: &Deadline,
+    policy: MetadataRunPolicy,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
-    let policy = MetadataRunPolicy::default();
-    let session_epoch = input.as_ref().map(|input| input.head.writer_epoch);
-    let folded = if let Some(input) = input {
-        let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
-        let manifest_projection = ManifestProjection {
-            head: input.head,
-            basis: input.basis,
-            manifest_segments: loaded_basis.segments,
-            tail_state: input.tail_state,
+    let mut projection = match held {
+        Some(held) => ManifestProjection {
+            manifest_segments: load_basis_metadata_segments(store, segment_cache, &held.basis)
+                .await?
+                .segments,
+            head: held.head,
+            basis: held.basis,
+            tail_state: held.tail_state,
+        },
+        None => {
+            load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?
+        }
+    };
+    let mut layouts = None;
+    for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
+        let basis = projection.manifest_segments.manifest();
+        if basis.payload().folded_wal_no == projection.head.wal_no {
+            return Ok(FoldedWalTail::new(
+                namespace_id,
+                projection.head.seq,
+                basis,
+                FoldWalOutcome::AlreadyCurrent,
+            ));
+        }
+        let tail_layouts = match layouts.take() {
+            Some(layouts) => layouts,
+            None => materialize_tail_content(store, &projection, content_writes).await?,
         };
-        // A fold publishes metadata without updating the namespace head.
-        match fold_held_projection(
+        let (current, outcome) = match publish_fold(
             store,
-            segment_cache,
             namespace_id,
-            manifest_projection,
+            &projection,
+            &tail_layouts,
             deadline,
             policy,
-            content_writes,
         )
         .await?
         {
-            TryFoldWalOutcome::Settled(basis) => *basis,
-            TryFoldWalOutcome::RaceLost(winner) => {
-                let payload = winner.envelope.payload();
-                ensure_session_epoch(session_epoch, payload.writer_epoch, payload.writer.as_ref())?;
-                fold_wal_basis_with_deadline(
-                    store,
-                    namespace_id,
-                    deadline,
-                    policy,
-                    segment_cache,
-                    content_writes,
-                    session_epoch,
-                )
-                .await?
+            ManifestPublicationOutcome::Published(current) => (current, FoldWalOutcome::Published),
+            ManifestPublicationOutcome::CoveredByCurrent(current) => {
+                (current, FoldWalOutcome::AlreadyCurrent)
             }
-        }
-    } else {
-        fold_wal_basis_with_deadline(
-            store,
+            // Another manifest took the fold's number without folding its
+            // tail, such as a compaction or a new writer's claim.
+            ManifestPublicationOutcome::PredecessorChanged(winner) => {
+                if keeps_held_tail(
+                    projection.manifest_segments.manifest().payload(),
+                    winner.envelope.payload(),
+                ) {
+                    projection.basis = MetadataBasis(winner.manifest());
+                    projection.manifest_segments =
+                        load_basis_metadata_segments(store, segment_cache, &projection.basis)
+                            .await?
+                            .segments;
+                    layouts = Some(tail_layouts);
+                } else {
+                    projection = load_fold_projection(
+                        store,
+                        namespace_id,
+                        segment_cache,
+                        deadline.observe(),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+        };
+        return Ok(FoldedWalTail::new(
             namespace_id,
-            deadline,
-            policy,
-            segment_cache,
-            content_writes,
-            None,
-        )
-        .await?
-    };
-    ensure_session_epoch(session_epoch, folded.writer_epoch, folded.writer.as_ref())?;
-    Ok(FoldedWalTail {
-        basis: MetadataBasis(folded.manifest.clone()),
-        writer_epoch: folded.writer_epoch,
-        folded_wal_no: folded.folded_wal_no,
-        response: fold_wal_response(namespace_id, folded),
-    })
-}
-
-/// Returns `writer_fenced` when a session folds its own tail and a manifest
-/// it loaded belongs to a newer writer session.
-///
-/// A session's fold keeps its writer epoch the way its publishes do, so it
-/// learns of a takeover from the manifest it loads, and it never folds over
-/// the new writer's claim. `session_epoch` is `None` for a fold that any
-/// process may run, which folds whatever the current manifest's writer
-/// committed.
-fn ensure_session_epoch(
-    session_epoch: Option<WriterEpoch>,
-    writer_epoch: WriterEpoch,
-    writer: Option<&WriterBlock>,
-) -> Result<()> {
-    match session_epoch {
-        Some(fenced_epoch) if writer_epoch > fenced_epoch => {
-            Err(CoreError::WriterFenced(WriterFence {
-                fenced_epoch,
-                active_epoch: writer_epoch,
-                active_writer_id: writer.map(|writer| writer.writer_id.clone()),
-                active_acquired_at_ms: writer.map(|writer| writer.acquired_at_ms),
-            }))
-        }
-        _ => Ok(()),
+            projection.head.seq,
+            &current.envelope,
+            outcome,
+        ));
     }
-}
-
-fn fold_wal_response(namespace_id: &NamespaceId, basis: FoldedBasis) -> FoldWalResponse {
-    FoldWalResponse {
-        namespace_id: namespace_id.clone(),
-        target_head_seq: basis.target_head_seq,
-        manifest_no: basis.current_manifest_no,
-        manifest_head_seq: basis.current_manifest_head_seq,
-        outcome: basis.outcome,
-    }
+    Err(CoreError::WalPublish(WalPublishError::NumberTaken))
 }
 
 pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {

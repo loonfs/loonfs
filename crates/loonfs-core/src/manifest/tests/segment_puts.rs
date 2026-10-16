@@ -170,10 +170,11 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         store.block_next();
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let (result, verified_manifest) = tokio::try_join!(
-            try_fold_wal_projection(
+            fold_wal_tail(
                 &store,
+                None,
                 &namespace_id,
-                &projection,
+                None,
                 &deadline,
                 MetadataRunPolicy {
                     max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
@@ -205,9 +206,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             }
         )
         .expect("fold");
-        assert!(
-            matches!(result, TryFoldWalOutcome::Settled(basis) if basis.outcome == FoldWalOutcome::Published)
-        );
+        assert_eq!(result.response.outcome, FoldWalOutcome::Published);
         let published = load_current_manifest(&store, &namespace_id)
             .await
             .expect("published manifest");
@@ -253,19 +252,11 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         ConcurrencyWatchStore::new(failing, KeyPredicate::metadata_segment()),
         KeyPredicate::any(),
     );
-    let projection = load_manifest_projection(
+    let result = fold_wal_tail(
         &store,
+        None,
         &namespace_id,
         None,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("projection");
-    store.reset();
-    let result = try_fold_wal_projection(
-        &store,
-        &namespace_id,
-        &projection,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(2).expect("row limit"),

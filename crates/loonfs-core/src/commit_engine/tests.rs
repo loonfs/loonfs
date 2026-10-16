@@ -544,6 +544,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         &namespace_id,
         None,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -786,6 +787,7 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
         &namespace_id,
         None,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -810,6 +812,40 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
                 .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
         "{operations:?}"
     );
+}
+
+/// Checks that a session's fold of a tail that the head-state cache no
+/// longer holds loads the tail from the store and still moves the position
+/// to the fold's manifest.
+#[tokio::test]
+async fn a_fold_of_an_evicted_tail_moves_the_position_to_its_manifest() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, _writer) = writer_after_one_publish(&store, &namespace_id).await;
+    let before = engine.read_position().expect("a position after a publish");
+    engine
+        .head_state
+        .as_ref()
+        .expect("head-state cache")
+        .invalidate_tail(&before.tail_key);
+    assert!(engine.begin_wal_fold().is_none(), "the tail was evicted");
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &namespace_id,
+        None,
+        &Deadline::start(timer),
+        crate::manifest::MetadataRunPolicy::default(),
+        &tokio::sync::Semaphore::new(32),
+    )
+    .await
+    .expect("fold");
+    assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
+    engine.record_wal_fold(Ok(&folded));
+    let after = engine.read_position().expect("the position moved");
+    assert_eq!(after.basis, folded.basis);
+    assert_eq!(after.head.seq, before.head.seq);
 }
 
 /// Creates a writer that folds three times and moves its position after
@@ -839,6 +875,7 @@ async fn writer_after_own_compaction(
             namespace_id,
             Some(input),
             &Deadline::start(timer.clone()),
+            crate::manifest::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await
@@ -985,17 +1022,18 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     publish_one(&mut engine, &store, &writer, "beta").await;
     // A maintenance call folds the tail through beta. The writer then
     // commits gamma on the manifest that the fold replaced.
-    let folded = crate::manifest::fold_wal_with_deadline(
+    let folded = fold_wal_tail(
         &store,
+        None,
         &namespace_id,
+        None,
         &Deadline::start(timer.clone()),
         crate::manifest::MetadataRunPolicy::default(),
-        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fold");
-    let published = folded.published.expect("the fold publishes a manifest");
+    let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &store, &writer, "gamma").await;
 
     engine.record_manifest_published(published.clone());
@@ -1157,6 +1195,7 @@ async fn the_manifest_head_is_sent_after_the_wal_probe_answers() {
             &namespace_id,
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await

@@ -111,6 +111,11 @@ impl PublishTailPosition {
         });
     }
 
+    /// Ends the fold in progress without moving the position.
+    pub(crate) fn end_fold(&mut self) {
+        self.fold = None;
+    }
+
     /// Moves the position onto the manifest a fold published, and returns
     /// the commits published since the fold began, which are the tail above
     /// the moved position, or `None` when the manifest isn't the fold of
@@ -119,11 +124,10 @@ impl PublishTailPosition {
     /// The manifest has to fold exactly the head the fold started from: the
     /// same sequence and the same WAL number, under the position's writer
     /// epoch. A new writer's claim changes the epoch, and its fence moves
-    /// the WAL number without moving the sequence, so a fold that another
-    /// process ran over a claim never moves the position. A manifest that
-    /// the fold skipped while it retried (a compaction, a compactor claim,
-    /// or a retention advance) keeps the epoch and the head, so the position
-    /// still moves past it.
+    /// the WAL number without moving the sequence, so a fold over a claim
+    /// never moves the position. A manifest that the fold skipped while it
+    /// retried (a compaction, a compactor claim, or a retention advance)
+    /// keeps the epoch and the head, so the position still moves past it.
     pub(crate) fn reanchor_after_fold(
         &mut self,
         folded: &FoldedWalTail,

@@ -171,16 +171,16 @@ fn fold_every_inline_commit() -> InlineContentPolicy {
 }
 
 /// Checks that when A's own fold loses its manifest number to B's claim,
-/// the fold ends fenced instead of folding over the claim, and that a read
-/// in A's runtime then sees B's commit.
+/// the fold folds B's log over the claim, that A's session finds that it's
+/// fenced at its next commit and not from the fold, and that a read in A's
+/// runtime sees B's commit.
 ///
 /// A's fold waits at its manifest put while B claims the namespace, and B's
 /// commit waits at its WAL put until A's fold has ended, so the claim and
-/// B's fence are all that the fold could load. A fold that folded over
-/// them would leave A's position on a manifest after the claim at A's old
-/// head, where reads wouldn't see B's commit until B folded.
+/// B's fence are all that the fold could load. The fold's manifest has B's
+/// writer epoch, so A's position doesn't move onto it.
 #[tokio::test]
-async fn a_session_fold_that_loses_to_a_claim_fences_the_session() {
+async fn a_session_fold_that_loses_to_a_claim_folds_the_new_writers_log() {
     let fixture = takeover("fold-over-claim", parked_folds, fold_every_inline_commit()).await;
     let peer_gate: Gate = Arc::new(BlockingStore::matching(
         fixture.store.clone(),
@@ -219,13 +219,16 @@ async fn a_session_fold_that_loses_to_a_claim_fences_the_session() {
         .expect("drain");
     assert_eq!(
         fixture.namespace.session_status(),
-        NamespaceSessionStatus::Fenced,
-        "the fold found B's claim and fenced A's session"
+        NamespaceSessionStatus::Open,
+        "A's fold doesn't fence A's session"
     );
     assert_eq!(
         fixture.current_manifest_no().await,
-        claimed.successor().expect("B's claim number"),
-        "A's fold published nothing over B's claim"
+        claimed
+            .successor()
+            .and_then(|claim| claim.successor())
+            .expect("the number after B's claim"),
+        "A's fold folded B's log over B's claim"
     );
 
     peer_gate.release();
@@ -237,9 +240,9 @@ async fn a_session_fold_that_loses_to_a_claim_fences_the_session() {
     fixture.assert_sees_the_takeover().await;
 }
 
-/// Checks that when a fold through A's maintenance folds over B's claim,
-/// which a fold that any process runs may do, a read in A's runtime still
-/// sees B's commit, because A's position can't move past B's claim.
+/// Checks that when a fold through A's maintenance folds over B's claim, a
+/// read in A's runtime still sees B's commit, because A's position doesn't
+/// move past B's claim.
 #[tokio::test]
 async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_claim() {
     let fixture = takeover(
@@ -296,8 +299,8 @@ impl Takeover {
         );
     }
 
-    /// Runs a fold through A's maintenance, which any process may run, and
-    /// returns the manifest it published.
+    /// Runs a fold through A's maintenance and returns the manifest it
+    /// published.
     async fn maintenance_fold(&self) -> ManifestNo {
         let folded = self
             .writer

@@ -135,6 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input.clone(),
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
+            loonfs_core::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await
@@ -157,6 +158,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input,
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
+            loonfs_core::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await

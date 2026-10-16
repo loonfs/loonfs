@@ -43,12 +43,13 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             if payload.folded_wal_no < head.wal_no {
                 deadline.ensure_metadata_publication_budget(namespace_id)?;
-                crate::manifest::fold_wal_with_deadline(
+                crate::manifest::fold_wal_tail(
                     store,
+                    segment_cache,
                     namespace_id,
+                    None,
                     deadline,
                     crate::manifest::MetadataRunPolicy::default(),
-                    segment_cache,
                     content_writes,
                 )
                 .await?;
