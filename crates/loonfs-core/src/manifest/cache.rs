@@ -590,6 +590,10 @@ impl HeadStateCache {
     /// record. The read starts from the candidate, and the floor still
     /// moves, so the head that reads start from never moves backwards while
     /// the record lives.
+    ///
+    /// Every install and invalidation of a namespace's head runs under its
+    /// record's state lock, so the head's entry in the cache can't change
+    /// between this function's peek and its insert, except by an eviction.
     pub fn replace_head(&self, record: &HeadRecord, mut candidate: CachedHead) -> Arc<CachedHead> {
         let key = self.head_key(&candidate.head.namespace_id);
         let mut state = record.lock();
@@ -637,21 +641,15 @@ impl HeadStateCache {
         };
         state.floor = Some(next.order());
         let next = Arc::new(next);
-        let installed = self.shared.entries.insert_if(
-            key.clone(),
-            HeadStateEntry::Head(Arc::clone(&next)),
-            |entry| match (entry, &cached) {
-                (Some(HeadStateEntry::Head(entry)), Some(cached)) => Arc::ptr_eq(entry, cached),
-                (None, _) => true,
-                _ => false,
-            },
-        );
+        let installed = self
+            .shared
+            .entries
+            .insert(key.clone(), HeadStateEntry::Head(Arc::clone(&next)));
         if !installed {
-            // Every install for the namespace runs under the record's lock,
-            // so the cache refused the snapshot because it's too large or the
-            // cache is disabled. The head it replaces is older, and an
-            // eventual read doesn't consult the record, so that head mustn't
-            // stay.
+            // The cache didn't keep the new head, because its snapshot is too
+            // large for the budget or the cache is disabled. The cached head
+            // is older, and an eventual read doesn't consult the record, so
+            // the older head mustn't stay.
             self.shared.entries.invalidate(&key);
         }
         next
@@ -690,9 +688,7 @@ impl HeadStateCache {
             head_confirmed: None,
             ..CachedHead::clone(&cached)
         }));
-        let replaced = self.shared.entries.insert_if(key.clone(), unconfirmed, |entry| {
-            matches!(entry, Some(HeadStateEntry::Head(entry)) if Arc::ptr_eq(entry, &cached))
-        });
+        let replaced = self.shared.entries.insert(key.clone(), unconfirmed);
         if !replaced {
             // The copy wasn't cached, so the confirmed head mustn't stay.
             self.shared.entries.invalidate(&key);
