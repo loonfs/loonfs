@@ -359,14 +359,14 @@ async fn reads_past_the_revalidation_interval_reload_nothing_after_a_compaction(
 }
 
 /// Checks that after another runtime's compaction, the writer's runtime
-/// moves its position onto the compaction's manifests without a reload, and
-/// that later commits and the reads after them reload nothing.
+/// reloads once, and that later commits and the reads after them reload
+/// nothing.
 ///
-/// The first read's manifest check finds the compaction's manifests, loads
-/// them, and moves the writer's position onto them, so no commit loads the
-/// namespace from the store.
+/// The first read's manifest check finds the compaction's manifest, drops
+/// the writer's position, and reloads. The next commit loads the namespace,
+/// so the position moves to the compaction's manifest.
 #[tokio::test]
-async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
+async fn reads_reload_once_after_another_runtimes_compaction() {
     let fixture = fixture("other-compaction", 0, false).await;
     let other_store: SharedObjectStore = fixture.recording.clone();
     let other = LoonFs::builder_with_store(other_store)
@@ -384,15 +384,7 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
         outcome.compaction,
         MetadataCompactionOutcome::BoundedMergePublished
     );
-    fixture.recording.reset();
-    fixture.user.stat("/m/doc").await.expect("first read");
-    let operations = fixture.recording.take();
-    assert!(
-        operations
-            .iter()
-            .all(|operation| operation.key() != hint(&fixture.namespace_id)),
-        "the first read loads the compaction's manifests, not the hint: {operations:?}"
-    );
+    fixture.user.stat("/m/doc").await.expect("reload");
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round).await;
         fixture.recording.reset();

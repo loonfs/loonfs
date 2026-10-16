@@ -4,11 +4,11 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
-use loonfs_core::control::{manifest_has_successor, manifests_above};
+use loonfs_core::control::manifest_has_successor;
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
-use loonfs_core::PublishedManifest;
 use loonfs_core::{CoreError, MetadataProjectionLoadError};
+use loonfs_types::ManifestNo;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
@@ -27,12 +27,10 @@ pub(crate) trait HeadPositions: Send + Sync {
     /// publish loads the namespace from the store.
     fn drop_position(&self, namespace_id: &NamespaceId);
 
-    /// Moves the position of the namespace's writer session onto
-    /// `published`, a manifest above the position's, the way the session's
-    /// own publications move it: at once when no task has the engine
-    /// locked, otherwise when the task that has it releases it. It never
-    /// waits for the engine.
-    fn move_position(&self, namespace_id: &NamespaceId, published: PublishedManifest);
+    /// Applies a position change that waits for the namespace's commit
+    /// engine, if no task has the engine locked, and returns whether the
+    /// engine was free. It never waits for the engine.
+    fn apply_pending_position(&self, namespace_id: &NamespaceId) -> bool;
 }
 
 /// The position of one writer session's commit engine, kept where reads can
@@ -55,7 +53,17 @@ pub(crate) struct ReadPositionSlot {
     /// Set while one read checks the position's manifest for a successor,
     /// so concurrent reads send one HEAD.
     checking: AtomicBool,
+    /// The numbers of the manifests above the position's manifest that this
+    /// runtime published for the namespace, in order, recorded before the
+    /// engine's position moves to them. At most [`MAX_PUBLISHED_AHEAD`].
+    published: Mutex<Vec<ManifestNo>>,
 }
+
+/// The most manifests above the position's that a slot remembers as this
+/// runtime's own. A runtime publishes a few manifests between two releases
+/// of the engine at most, and a check that finds a manifest the slot forgot
+/// drops the position, which costs one reload.
+const MAX_PUBLISHED_AHEAD: usize = 16;
 
 impl ReadPositionSlot {
     /// Returns an empty slot for the writer session of `namespace_id`, in the
@@ -66,6 +74,7 @@ impl ReadPositionSlot {
             head_state,
             position: Mutex::default(),
             checking: AtomicBool::default(),
+            published: Mutex::default(),
         }
     }
 
@@ -102,6 +111,9 @@ impl ReadPositionSlot {
     /// Stores a position that [`Self::prepare`] returned. Only
     /// [`Self::clear`] removes a position.
     pub(crate) fn store(&self, position: Arc<ReadPosition>) {
+        let basis_no = position.basis.manifest_no();
+        self.lock_published()
+            .retain(|manifest_no| *manifest_no > basis_no);
         *self.lock() = Some(position);
     }
 
@@ -159,6 +171,46 @@ impl ReadPositionSlot {
         }
     }
 
+    fn lock_published(&self) -> MutexGuard<'_, Vec<ManifestNo>> {
+        // A critical section under this lock only edits a short vector, so it
+        // can't panic and poison the lock.
+        self.published
+            .lock()
+            .expect("the published manifest lock should not be poisoned")
+    }
+
+    /// Records that this runtime published manifest `manifest_no` for the
+    /// namespace, before anything waits for the engine to move the position
+    /// there.
+    pub(crate) fn record_published(&self, manifest_no: ManifestNo) {
+        let mut published = self.lock_published();
+        if let Err(index) = published.binary_search(&manifest_no) {
+            published.insert(index, manifest_no);
+        }
+        if published.len() > MAX_PUBLISHED_AHEAD {
+            published.remove(0);
+        }
+    }
+
+    /// Whether this runtime published manifest `manifest_no` itself.
+    fn published_here(&self, manifest_no: ManifestNo) -> bool {
+        self.lock_published().binary_search(&manifest_no).is_ok()
+    }
+
+    /// Returns the newest manifest in the run of consecutive manifests that
+    /// this runtime published, starting at `first`.
+    fn published_run_end(&self, first: ManifestNo) -> ManifestNo {
+        let published = self.lock_published();
+        let mut end = first;
+        while let Ok(next) = end.successor() {
+            if published.binary_search(&next).is_err() {
+                break;
+            }
+            end = next;
+        }
+        end
+    }
+
     /// Starts a successor check of the position's manifest, or returns
     /// `None` while another read's check runs.
     fn start_check(&self) -> Option<PositionCheck<'_>> {
@@ -191,20 +243,22 @@ impl RuntimeCore {
     ///
     /// A read checks the position's manifest for a successor with one HEAD
     /// once the last check is a manifest revalidation interval old. A
-    /// successor of a later writer epoch is a new writer's claim, which
-    /// drops the position, and the read cache's reload finds the claim.
-    /// Concurrent reads share one check, and a read that finds another
-    /// read's check running starts from the position without waiting. With
-    /// an interval of zero, every read checks for itself, so each read sees
-    /// a claim published before the read started.
+    /// successor that another process published, such as a new writer's
+    /// claim or a compaction, drops the position, and the read cache's
+    /// reload finds the successor. Concurrent reads share one check, and a
+    /// read that finds another read's check running starts from the
+    /// position without waiting. With an interval of zero, every read checks
+    /// for itself, so each read sees a successor published before the read
+    /// started.
     ///
-    /// A successor that keeps the position's writer epoch (a fold, a
-    /// compaction, a checkpoint, a snapshot, or a retention advance, by this
-    /// runtime or by another process) describes the head this session
-    /// wrote, so the position moves onto it and the read starts from the
-    /// position (see `position_past_same_epoch_successors`). A claim above
-    /// such manifests still drops the position, so the takeover window is
-    /// one interval either way.
+    /// A successor can also be a manifest that this runtime published
+    /// itself (a fold, a compaction, a checkpoint, a snapshot, or a
+    /// retention advance) whose move of the position still waits for the
+    /// engine. The check then goes on past this runtime's own manifests (see
+    /// `position_past_own_manifests`), so a new writer's claim after them
+    /// still drops the position. The takeover window is one interval either
+    /// way, and with an interval of zero a read sees every manifest that
+    /// another process published before the read started.
     ///
     /// A check is trusted only while its answer arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
@@ -256,15 +310,20 @@ impl RuntimeCore {
             return Ok(None);
         }
         if successor {
-            let kept = self
-                .position_past_same_epoch_successors(
-                    namespace_id,
-                    positions.as_ref(),
-                    &slot,
-                    position,
-                    observed,
-                )
-                .await?;
+            let successor_no = position.basis.manifest_no().successor().ok();
+            let kept = match successor_no.filter(|no| slot.published_here(*no)) {
+                Some(successor_no) => {
+                    self.position_past_own_manifests(
+                        namespace_id,
+                        positions.as_ref(),
+                        &slot,
+                        position,
+                        successor_no,
+                    )
+                    .await?
+                }
+                None => None,
+            };
             if kept.is_none() {
                 // The position becomes the cached head, which a successor
                 // makes out of date, so the head is marked unconfirmed after.
@@ -277,28 +336,26 @@ impl RuntimeCore {
         Ok(Some(position))
     }
 
-    /// Returns the position for a read whose check found a successor of the
-    /// position's manifest, or `None` when the read drops the position.
+    /// Returns the position for a read whose check found `successor_no`, a
+    /// manifest that this runtime published itself, or `None` when the read
+    /// drops the position.
     ///
-    /// The read loads the manifests above the position's. While the newest
-    /// is an active manifest of the position's writer epoch, each describes
-    /// the head this session wrote, so the position moves onto them in
-    /// order, as it moves onto the manifests this runtime publishes (see
-    /// [`HeadPositions::move_position`]). A manifest of a later epoch is a
-    /// new writer's claim, and a tombstone ends the namespace, so the read
-    /// drops the position. The walk that ends on the newest manifest is
-    /// that manifest's successor check, so a position that moved onto it
-    /// records the check. A position that a locked engine keeps where it
-    /// was records none, because its manifest has a successor.
-    async fn position_past_same_epoch_successors(
+    /// The check goes on past this runtime's own manifests with one HEAD,
+    /// for the first manifest number that this runtime didn't publish. A
+    /// manifest there is another process's, such as a new writer's claim.
+    /// Otherwise the read starts from the position, moved to this runtime's
+    /// manifest if the engine is free to apply the move, and records no
+    /// check, because the position's manifest has a successor.
+    async fn position_past_own_manifests(
         &self,
         namespace_id: &NamespaceId,
         positions: &dyn HeadPositions,
         slot: &ReadPositionSlot,
         position: Arc<ReadPosition>,
-        observed: Observation,
+        successor_no: ManifestNo,
     ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
-        let above = manifests_above(self.store(), namespace_id, position.basis.manifest_no())
+        let newest_own = slot.published_run_end(successor_no);
+        let foreign = manifest_has_successor(self.store(), namespace_id, newest_own)
             .instrument(tracing::debug_span!(
                 target: "loonfs::page",
                 "loonfs.phase",
@@ -306,30 +363,17 @@ impl RuntimeCore {
             ))
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
-        let Some(newest) = above.last() else {
-            return Ok(None);
-        };
-        let payload = newest.envelope.payload();
-        if payload.writer_epoch != position.head.writer_epoch
-            || payload.status.is_deleted()
-            || !position.basis_checked.is_within_revalidation_bound()
-        {
+        if foreign || !position.basis_checked.is_within_revalidation_bound() {
             return Ok(None);
         }
-        let newest_no = newest.manifest().manifest_no;
-        let mut head_seq = position.basis.0.head_seq;
-        for manifest in &above {
-            positions.move_position(namespace_id, PublishedManifest::above(manifest, head_seq));
-            head_seq = manifest.manifest().head_seq;
+        if positions.apply_pending_position(namespace_id) {
+            let moved = slot
+                .current()
+                .filter(|moved| moved.basis.manifest_no() >= successor_no);
+            if moved.is_some() {
+                return Ok(moved);
+            }
         }
-        let current = slot.current();
-        if current
-            .as_ref()
-            .is_some_and(|moved| moved.basis.manifest_no() == newest_no)
-        {
-            slot.record_check(observed);
-            return Ok(slot.current());
-        }
-        Ok(current)
+        Ok(Some(position))
     }
 }
