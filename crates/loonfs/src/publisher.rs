@@ -263,15 +263,13 @@ impl HeadPositions for RegistryShared {
         }
     }
 
-    fn move_position(&self, namespace_id: &NamespaceId, published: PublishedManifest) {
+    fn apply_pending_position(&self, namespace_id: &NamespaceId) -> bool {
         let publisher = self
             .lock_state()
             .sessions
             .get(namespace_id)
             .map(|live| live.publisher.clone());
-        if let Some(publisher) = publisher {
-            publisher.change_position(PositionChange::Reanchor(published));
-        }
+        publisher.is_some_and(|publisher| publisher.release_engine_if_free())
     }
 }
 
@@ -547,8 +545,8 @@ impl NamespaceChange {
 /// asked for.
 #[derive(Debug)]
 enum PositionChange {
-    /// Moves the position onto a manifest above it under the session's
-    /// writer epoch, or drops the position when it can't move there.
+    /// Moves the position to a manifest this runtime published, or drops the
+    /// position when it can't move there.
     Reanchor(PublishedManifest),
     /// Drops the position.
     Drop,
@@ -1040,6 +1038,10 @@ impl NamespacePublisher {
     /// replaced still reads correctly, because garbage collection keeps that
     /// manifest's objects for at least one grace.
     fn change_position(&self, change: PositionChange) {
+        if let PositionChange::Reanchor(published) = &change {
+            self.read_position
+                .record_published(published.manifest().manifest_no);
+        }
         let drops = {
             let mut pending = lock_state(&self.pending_position);
             let change = match pending.take() {
@@ -1838,6 +1840,14 @@ impl NamespacePublisher {
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
+        if let Ok(folded) = &result {
+            if folded.response.outcome == FoldWalOutcome::Published {
+                // Reads that find this manifest before the engine moves the
+                // position to it keep the position.
+                self.read_position
+                    .record_published(folded.response.manifest_no);
+            }
+        }
         self.lock_engine()
             .await
             .record_fold_outcome(result.as_ref());

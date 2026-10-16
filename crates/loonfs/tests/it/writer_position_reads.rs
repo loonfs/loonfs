@@ -13,7 +13,7 @@ use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
+use loonfs_types::{ChecksumAlgorithm, NamespaceId};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,18 +22,6 @@ pub(crate) const INTERVAL_MS: u64 = 1_000;
 /// How long a read that must not wait for the store gets before the test
 /// fails.
 const NO_WAIT: Duration = Duration::from_secs(10);
-
-/// Whether `operation` is a GET of the namespace's manifest `manifest_no`.
-fn is_manifest_get(
-    operation: &RecordedOperation,
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-) -> bool {
-    matches!(
-        operation,
-        RecordedOperation::Get { key, .. } if *key == metadata_manifest_object(namespace_id, &manifest_no)
-    )
-}
 
 pub(crate) struct Fixture {
     /// Records every request, and can park the operations the fixture
@@ -300,11 +288,10 @@ async fn another_writers_takeover_is_seen_within_one_interval() {
 }
 
 /// Checks that a fold that another runtime publishes is found within one
-/// manifest check interval, that the position moves onto the fold's
-/// manifest, and that the session's next publish writes above it without
-/// loading the namespace from the store.
+/// manifest check interval, and that the session's next publish then loads
+/// the namespace from the store and keeps writing.
 #[tokio::test]
-async fn another_runtimes_fold_moves_the_position_within_one_interval() {
+async fn another_runtimes_fold_is_seen_within_one_interval() {
     let fixture = fixture("fold-interval", Parked::WalPuts).await;
     let peer = peer(&fixture, "fold-peer").await;
     let folded = peer
@@ -319,43 +306,19 @@ async fn another_runtimes_fold_moves_the_position_within_one_interval() {
     assert_eq!(fixture.recording.take(), [], "inside the interval");
 
     fixture.clock.advance_ms(INTERVAL_MS);
-    let (positions, anchors) = fixture.head_sources();
     fixture
         .reader
         .stat("/small.txt")
         .await
         .expect("the check finds the fold");
-    let operations = fixture.recording.take();
-    let after_fold = folded
-        .manifest_no
-        .successor()
-        .expect("next manifest number");
-    assert!(
-        operations.len() >= 3
-            && operations[0]
-                == RecordedOperation::Head {
-                    key: metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no),
-                }
-            && is_manifest_get(&operations[1], &fixture.namespace_id, folded.manifest_no)
-            && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold)
-            && operations
-                .iter()
-                .all(|operation| operation.key() != hint(&fixture.namespace_id)),
-        "the check finds the fold's manifest, loads it, finds nothing after it, and runs no \
-         discovery: {operations:?}"
-    );
-    assert_eq!(fixture.head_sources(), (positions + 1, anchors));
+    fixture.assert_check_found_a_successor();
 
     let replays = fixture.tail_replays();
     let commit = fixture
         .put("/after.txt")
         .await
         .expect("commit after the fold");
-    assert_eq!(
-        fixture.tail_replays(),
-        replays,
-        "the position moved onto the fold's manifest, so the publish replays nothing"
-    );
+    assert_eq!(fixture.tail_replays(), replays + 1);
     fixture.recording.reset();
     let entry = fixture.reader.stat("/after.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
@@ -364,8 +327,8 @@ async fn another_runtimes_fold_moves_the_position_within_one_interval() {
 
 /// Checks that a manifest check that finds a fold this runtime published,
 /// while a publish keeps the engine locked so the position can't move yet,
-/// loads the fold's manifest, finds nothing after it, and keeps the
-/// position without reloading, and that once the publish releases the
+/// goes on to the manifest after the fold's, finds nothing there, and keeps
+/// the position without reloading, and that once the publish releases the
 /// engine, reads start from the fold's manifest.
 ///
 /// The fold runs through maintenance while the publish waits for its WAL
@@ -398,14 +361,11 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
             .manifest_no
             .successor()
             .expect("next manifest number");
-        let operations = fixture.recording.take();
-        assert!(
-            operations.len() == 3
-                && operations[0] == manifest(folded.manifest_no)
-                && is_manifest_get(&operations[1], &fixture.namespace_id, folded.manifest_no)
-                && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold),
-            "one HEAD finds the fold's manifest, the read loads it, finds nothing after it, \
-             and reloads nothing: {operations:?}"
+        assert_eq!(
+            fixture.recording.take(),
+            [manifest(folded.manifest_no), manifest(after_fold)],
+            "one HEAD finds the fold's manifest, one more finds nothing after it, and the \
+             read reloads nothing"
         );
         assert_eq!(fixture.head_sources(), (positions + 1, anchors));
         gate.release();
