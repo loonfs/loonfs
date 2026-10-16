@@ -601,9 +601,11 @@ impl HeadStateCache {
     /// A candidate's head confirmation is kept only if it's newer than the
     /// last time the head was marked unconfirmed, so a read that started
     /// before a change can't confirm the head again after it. A snapshot too
-    /// large for the cache isn't cached, and the read starts from the
-    /// candidate, but the floor still moves, so the head that reads start
-    /// from never moves backwards while the record lives.
+    /// large for the cache isn't cached, and the smaller head it replaces is
+    /// dropped with it, so an eventual read misses and confirms through the
+    /// record. The read starts from the candidate, and the floor still
+    /// moves, so the head that reads start from never moves backwards while
+    /// the record lives.
     pub fn replace_head(&self, record: &HeadRecord, mut candidate: CachedHead) -> Arc<CachedHead> {
         let key = self.head_key(&candidate.head.namespace_id);
         let mut state = record.lock();
@@ -651,8 +653,8 @@ impl HeadStateCache {
         };
         state.floor = Some(next.order());
         let next = Arc::new(next);
-        self.shared.entries.insert_if(
-            key,
+        let installed = self.shared.entries.insert_if(
+            key.clone(),
             HeadStateEntry::Head(Arc::clone(&next)),
             |entry| match (entry, &cached) {
                 (Some(HeadStateEntry::Head(entry)), Some(cached)) => Arc::ptr_eq(entry, cached),
@@ -660,6 +662,14 @@ impl HeadStateCache {
                 _ => false,
             },
         );
+        if !installed {
+            // Every install for the namespace runs under the record's lock,
+            // so the cache refused the snapshot because it's too large or the
+            // cache is disabled. The head it replaces is older, and an
+            // eventual read doesn't consult the record, so that head mustn't
+            // stay.
+            self.shared.entries.invalidate(&key);
+        }
         next
     }
 
@@ -1182,6 +1192,29 @@ mod tests {
         let weak = Arc::downgrade(&head);
         drop(head);
         assert!(weak.upgrade().is_none(), "nothing keeps the head");
+    }
+
+    /// Checks that a newer head too large for the cache drops the smaller
+    /// head it replaces: the read starts from the newer head, the cache has
+    /// no head for the namespace afterwards, the cache records the refusal
+    /// as a rejection, and the record's floor is at the newer head.
+    #[test]
+    fn a_newer_head_too_large_to_cache_drops_the_older_head() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(4096);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, head_at(0, 1, &now));
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert!(cached.head_confirmed.is_some());
+        let rejections = cache.stats().rejections;
+        let large = head_with_grants(1, 1_000, &now);
+        assert!(large.heap_bytes() > 4096);
+        let head = cache.replace_head(&record, large);
+        assert_eq!(order(&head), (1, 1));
+        assert!(head.head_confirmed.is_some());
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        assert_eq!(cache.stats().rejections, rejections + 1);
+        assert_eq!(record.lock().floor, Some((ChangeSeq(1), ManifestNo(1))));
     }
 
     /// Checks that a head that grows within the budget is charged its new

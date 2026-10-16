@@ -6,9 +6,9 @@ use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, ManifestNo, Namespace,
-    NamespaceId, PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
-    StatOptions, Writable,
+    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, ManifestNo,
+    MetadataCache, Namespace, NamespaceId, PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -390,6 +390,145 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
         commit.committed_seq
     );
     fixture.shutdown().await;
+}
+
+/// Creates a read-only runtime over `store` whose head-state cache has
+/// `max_head_state_bytes`, with a manual clock and a one-second manifest
+/// check interval.
+async fn budgeted_reader(
+    store: &SharedObjectStore,
+    clock: Arc<ManualClock>,
+    max_head_state_bytes: usize,
+) -> LoonFs<ReadOnly> {
+    LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .monotonic_timer(clock)
+        .manifest_revalidation_interval_ms(INTERVAL_MS)
+        .metadata_cache(
+            MetadataCache::builder()
+                .max_head_state_bytes(max_head_state_bytes)
+                .build(),
+        )
+        .build()
+        .await
+        .expect("reader")
+}
+
+/// Returns whether a runtime whose head-state cache has
+/// `max_head_state_bytes` keeps the namespace's head after a strong read,
+/// so an eventual read takes it without loading the namespace.
+async fn keeps_the_head(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    max_head_state_bytes: usize,
+) -> bool {
+    let reader = budgeted_reader(
+        store,
+        Arc::new(ManualClock::new(1_000_000)),
+        max_head_state_bytes,
+    )
+    .await;
+    let namespace = reader.namespace(namespace_id);
+    namespace.stat("/file.txt").await.expect("strong read");
+    let misses = reader.metadata_cache().stats().head_anchor_misses;
+    namespace
+        .stat_with_options(
+            "/file.txt",
+            &StatOptions {
+                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("eventual read");
+    reader.metadata_cache().stats().head_anchor_misses == misses
+}
+
+/// Checks that an eventual read after a strong read never reads an older
+/// head when the newer head is too large for the head-state cache.
+///
+/// A commit can't change a namespace's root grants, so the head grows here
+/// the one way it can: a writer with a 128-byte writer ID takes the
+/// namespace over, and the head includes its writer's ID. The reader's
+/// head-state budget is the smallest that keeps the head from before the
+/// takeover, so the newer head is too large to cache. The takeover's commit
+/// has 8 KiB of inline content, so its WAL-tail projection is too large as
+/// well and doesn't evict the older head. A cache that kept the older head
+/// after refusing the newer one would return the sequence from before the
+/// takeover to the eventual read at the end.
+#[tokio::test]
+async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads_it() {
+    let namespace_id = namespace_id("eventual-oversized");
+    let store: SharedObjectStore = Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
+    let actor = loonfs_test_support::test_actor();
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id("a"))
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("namespace");
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file("/file.txt", b"file", &actor)
+        .await
+        .expect("commit file");
+    writer.shutdown().await.expect("writer shutdown");
+
+    let (mut lower, mut upper) = (0, 64 * 1024);
+    assert!(keeps_the_head(&store, &namespace_id, upper).await);
+    while upper - lower > 1 {
+        let middle = lower + (upper - lower) / 2;
+        if keeps_the_head(&store, &namespace_id, middle).await {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let reader = budgeted_reader(&store, clock.clone(), upper).await;
+    let namespace = reader.namespace(&namespace_id);
+    let before = namespace.stat("/file.txt").await.expect("strong read");
+
+    let peer = LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id(&format!("b{}", "x".repeat(127))))
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("peer");
+    let commit = peer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file("/peer.txt", &[b'p'; 8 * 1024], &actor)
+        .await
+        .expect("the peer takes over");
+    assert!(commit.committed_seq > before.head_seq);
+    clock.advance_ms(INTERVAL_MS);
+    let strong = namespace.stat("/peer.txt").await.expect("strong read");
+    assert_eq!(strong.head_seq, commit.committed_seq);
+
+    let misses = reader.metadata_cache().stats().head_anchor_misses;
+    let after = namespace
+        .stat_with_options(
+            "/file.txt",
+            &StatOptions {
+                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                ..StatOptions::default()
+            },
+        )
+        .await
+        .expect("eventual read");
+    assert_eq!(after.head_seq, commit.committed_seq);
+    assert_eq!(
+        reader.metadata_cache().stats().head_anchor_misses,
+        misses + 1,
+        "the eventual read loads the namespace"
+    );
+    peer.shutdown().await.expect("peer shutdown");
 }
 
 /// Checks that an eventual read after another writer's takeover drops the
