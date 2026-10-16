@@ -264,6 +264,10 @@ A WAL object with no commits. A new writer session publishes a fence as part of 
 
 A counter in the manifest, like the writer epoch, that stops a compaction from publishing its result if a newer compactor has claimed the namespace since the compaction started.
 
+### Maintainer
+
+The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or a retention advance publishes under the current compactor epoch without a claim. See [Publishing a materialized file set](format.md#72-publishing-a-materialized-file-set).
+
 ### Compare-and-swap (CAS)
 
 A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap for its control objects.
