@@ -125,10 +125,10 @@ impl<M> LoonFsBuilder<M> {
     /// decoded segment blocks and manifests in the cache, and runtimes over
     /// different object stores never read each other's blocks. This runtime
     /// keeps its own head anchors and WAL-tail projections in the cache, and
-    /// its clones, its read-only view, and its maintenance share them. The
-    /// cache reports its metrics to its own recorder. Without this setting,
-    /// the runtime creates a private cache with the default limits that
-    /// reports to [`Self::metrics_recorder`].
+    /// its clones, its read-only view, and its maintenance share them.
+    /// Without this setting, the runtime creates a private cache with the
+    /// default limits. Either cache keeps its counters in
+    /// [`MetadataCache::stats`], and no metrics recorder receives them.
     pub fn metadata_cache(mut self, metadata_cache: MetadataCache) -> Self {
         self.core.metadata_cache = Some(metadata_cache);
         self
@@ -243,14 +243,14 @@ impl<M> LoonFsBuilder<M> {
     /// (see [`crate::metrics`]).
     ///
     /// The runtime registers its instrument set once, here, and reports into
-    /// it from then on. Every mode reports object-store calls and metadata
-    /// view reads. A writable runtime and its maintenance also report
-    /// publications, compactions, and collection passes. A runtime built
-    /// without one registers nothing. The private metadata cache a runtime
-    /// creates without [`Self::metadata_cache`] reports here too; a cache
-    /// given to that setting reports only to its own recorder. The same holds
-    /// for the execution budget (see
-    /// [`LoonFsBuilder::execution_budget`]).
+    /// it from then on. Every mode reports object-store calls and where each
+    /// read took the head it started from. A writable runtime and its
+    /// maintenance also report publications, compactions, and collection
+    /// passes. A runtime built without one registers nothing. The metadata
+    /// cache doesn't report here, and its counters are read with
+    /// [`MetadataCache::stats`]. The private execution budget that a runtime
+    /// creates without [`Self::execution_budget`] also reports here, and a
+    /// budget given to that setting reports to its own recorder instead.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
@@ -405,14 +405,7 @@ impl CoreConfig {
             StoreSource::Shared(store) => (store, None),
         };
         let store_kind = self.store_kind.or(derived_kind);
-        let metadata_cache = self.metadata_cache.unwrap_or_else(|| {
-            let builder = MetadataCache::builder();
-            match &self.metrics_recorder {
-                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
-                None => builder,
-            }
-            .build()
-        });
+        let metadata_cache = self.metadata_cache.unwrap_or_default();
         let execution_budget = self.execution_budget.unwrap_or_else(|| {
             let builder = ExecutionBudget::builder();
             match &self.metrics_recorder {

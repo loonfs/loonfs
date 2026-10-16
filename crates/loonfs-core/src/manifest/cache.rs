@@ -16,8 +16,8 @@
 use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, DecodedSegmentBlock,
+    SegmentCacheKey,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
@@ -114,7 +114,6 @@ pub struct SharedSegmentBlocks {
     blocks:
         DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
     filter_stats: MetadataSegmentFilterStatsInner,
-    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
 }
 
 impl std::fmt::Debug for SharedSegmentBlocks {
@@ -133,17 +132,10 @@ struct MetadataSegmentFilterStatsInner {
 }
 
 impl SharedSegmentBlocks {
-    pub fn new(
-        max_decoded_bytes: usize,
-        observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    ) -> Self {
+    pub fn new(max_decoded_bytes: usize) -> Self {
         Self {
-            blocks: DecodedBlockCache::new(DecodedBlockCacheConfig {
-                max_decoded_bytes,
-                observer: observer.clone(),
-            }),
+            blocks: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
             filter_stats: MetadataSegmentFilterStatsInner::default(),
-            observer,
         }
     }
 
@@ -207,7 +199,7 @@ impl MetadataSegmentCache {
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedSegmentBlocks::new(max_decoded_bytes, None)),
+            Arc::new(SharedSegmentBlocks::new(max_decoded_bytes)),
             ObjectStoreScope::new(0),
             Arc::default(),
             None,
@@ -245,9 +237,6 @@ impl MetadataSegmentCache {
             .filter_stats
             .filter_skips
             .fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.blocks.observer {
-            observer.filter_skip();
-        }
     }
 
     pub(super) fn record_filter_false_positive(&self) {
@@ -255,9 +244,6 @@ impl MetadataSegmentCache {
             .filter_stats
             .filter_false_positives
             .fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.blocks.observer {
-            observer.filter_false_positive();
-        }
     }
 
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
@@ -434,7 +420,6 @@ impl DecodedBlock for HeadStateEntry {
 pub struct SharedHeadState {
     entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
     max_decoded_bytes: usize,
-    tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     counters: HeadStateCounters,
     records: std::sync::Mutex<HeadRecords>,
 }
@@ -467,20 +452,10 @@ struct HeadStateCounters {
 }
 
 impl SharedHeadState {
-    /// `observer` sees evictions, rejections, and retained bytes across both
-    /// kinds of entry; `tail_observer` sees WAL-tail lookups and inserts.
-    pub fn new(
-        max_decoded_bytes: usize,
-        observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-        tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    ) -> Self {
+    pub fn new(max_decoded_bytes: usize) -> Self {
         Self {
-            entries: DecodedBlockCache::new(DecodedBlockCacheConfig {
-                max_decoded_bytes,
-                observer,
-            }),
+            entries: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
             max_decoded_bytes,
-            tail_observer,
             counters: HeadStateCounters::default(),
             records: std::sync::Mutex::default(),
         }
@@ -518,7 +493,7 @@ impl HeadStateCache {
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedHeadState::new(max_decoded_bytes, None, None)),
+            Arc::new(SharedHeadState::new(max_decoded_bytes)),
             CacheScope::new(0),
         )
     }
@@ -709,12 +684,6 @@ impl HeadStateCache {
             None => &shared.counters.tail_misses,
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &shared.tail_observer {
-            match &tail {
-                Some(_) => observer.hit(),
-                None => observer.miss(),
-            }
-        }
         tail
     }
 
@@ -725,9 +694,6 @@ impl HeadStateCache {
             HeadStateEntry::Tail(tail),
         ) {
             shared.counters.tail_inserts.fetch_add(1, Ordering::Relaxed);
-            if let Some(observer) = &shared.tail_observer {
-                observer.insert();
-            }
         }
     }
 
@@ -838,7 +804,7 @@ mod tests {
     /// blocks.
     #[tokio::test]
     async fn views_read_only_the_blocks_of_their_own_object_store() {
-        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, None));
+        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX));
         let view = |scope| {
             MetadataSegmentCache::new(
                 Arc::clone(&shared),

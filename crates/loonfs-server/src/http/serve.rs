@@ -16,7 +16,7 @@ use loonfs::{
     LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, TraceMode, Writable, WriterId,
 };
-use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
+use loonfs_grep::{new_grep_block_cache, GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -128,6 +128,9 @@ pub struct AppState {
     /// start it.
     pub sweep: Option<Sweep>,
     pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
+    /// The grep block cache of a config that serves grep, whose stats a
+    /// scrape of `/metrics` reads.
+    pub grep_block_cache: Option<Arc<GrepBlockCache>>,
 }
 
 /// Optional inputs for building the HTTP application.
@@ -198,13 +201,17 @@ pub async fn app(
             ),
         )
     };
+    let grep_block_cache = config
+        .grep
+        .mode
+        .serves()
+        .then(|| Arc::new(new_grep_block_cache(memory.grep.bytes)));
     let grep_service = || {
-        let grep_block_cache = Arc::new(new_grep_block_cache(
-            memory.grep.bytes,
-            metrics.recorder().as_ref(),
-        ));
+        let block_cache = grep_block_cache
+            .as_ref()
+            .expect("a config that serves grep should build a grep block cache");
         Arc::new(GrepService::new(
-            grep_block_cache,
+            Arc::clone(block_cache),
             runtime.monotonic_timer(),
         ))
     };
@@ -278,6 +285,7 @@ pub async fn app(
         runtime,
         sweep,
         local_cache,
+        grep_block_cache,
     };
     Ok((router(state.clone()), state))
 }
@@ -300,8 +308,9 @@ async fn open_local_cache(
 /// The runtime reads through one metadata cache built from the
 /// `[metadata_cache]` table, and runs its publications, folds, and merges
 /// under one execution budget built from the fold, compaction, and merge
-/// input limits and the `[publication]` totals. Both report to the same
-/// recorder. An optional JSONL recorder receives the same object-store
+/// input limits and the `[publication]` totals. The execution budget reports
+/// to the recorder, and a scrape of `/metrics` reads the cache's counters
+/// from its stats. An optional JSONL recorder receives the same object-store
 /// samples. The local block cache is installed once on the runtime, so its
 /// reads and its maintenance use the same cache hierarchy.
 pub(super) async fn build_handles(
@@ -330,7 +339,7 @@ pub(super) async fn build_handles(
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
-        .metadata_cache(memory.metadata_cache(metrics.recorder()))
+        .metadata_cache(memory.metadata_cache())
         .trace_mode(TraceMode::Remote)
         .store_kind(store_kind)
         .metrics_recorder(metrics.recorder());

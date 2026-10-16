@@ -1,9 +1,10 @@
-//! What a writer built with a metrics recorder actually reports: the
-//! object-store bridge and the publication instruments.
+//! What a writer built with a metrics recorder actually reports (the
+//! object-store bridge and the publication instruments), and the head cache
+//! lookups that reads record in the metadata cache's stats.
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-use loonfs::{LoonFs, MaintainMetadataOptions, SnapshotPolicy};
+use loonfs::{LoonFs, MaintainMetadataOptions};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
@@ -146,65 +147,13 @@ fn a_writer_with_a_recorder_reports_stores_and_publications() {
     );
 }
 
+/// Checks that reads record their namespace head lookups, and the head
+/// state and manifests they cached, in the metadata cache's stats.
 #[test]
-fn snapshot_read_views_report_the_snapshot_view_counter() {
+fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let namespace_id = namespace_id("snapshot-metrics");
-    let snapshot = block_on(async {
-        let fs = open_runtime_with_async(store(temp_dir.path()), "snapshot-metrics", |builder| {
-            builder.metrics_recorder(recorder.clone())
-        })
-        .await;
-        let namespace = fs.reader.namespace(&namespace_id);
-        fs.writer
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-            .await
-            .expect("create namespace");
-        let namespace_writer = fs
-            .writer
-            .open_namespace(&namespace_id)
-            .expect("open namespace");
-        let checkpoint = fs
-            .maintenance
-            .create_checkpoint(&namespace_id, "operator")
-            .await
-            .expect("create checkpoint");
-        let _checkpoint_view = namespace
-            .read_view_at_checkpoint(&checkpoint.checkpoint_id)
-            .await
-            .expect("view checkpoint");
-        let reader_snapshot = namespace_writer
-            .create_snapshot("reader", u64::MAX, &SnapshotPolicy::default())
-            .await
-            .expect("create snapshot");
-        let _snapshot_view = namespace
-            .read_view_at_snapshot(&reader_snapshot.snapshot_id)
-            .await
-            .expect("view snapshot");
-        recorder.snapshot()
-    });
-
-    assert_eq!(
-        counter(
-            &snapshot,
-            "loonfs.runtime_cache.latest_metadata_view_reads",
-            &[]
-        ),
-        0
-    );
-    assert_eq!(
-        counter(&snapshot, "loonfs.runtime_cache.snapshot_view_reads", &[],),
-        1
-    );
-}
-
-#[test]
-fn reads_report_head_cache_lookups_and_retained_bytes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let (first, second) = (namespace_id("first"), namespace_id("second"));
-    let snapshot = block_on(async {
+    let stats = block_on(async {
         let setup = writer(store(temp_dir.path()), "head-cache-setup").await;
         for namespace_id in [&first, &second] {
             setup
@@ -214,7 +163,6 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
         }
         let reader = LoonFs::builder_with_store(store(temp_dir.path()))
             .read_only()
-            .metrics_recorder(recorder.clone())
             .build()
             .await
             .expect("build reader");
@@ -222,33 +170,16 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
             let namespace = reader.namespace(namespace_id);
             namespace.stat("/").await.expect("stat the root");
         }
-        recorder.snapshot()
+        reader.metadata_cache().stats()
     });
 
-    for (labels, count) in [
-        (&[("result", "miss")][..], 2),
-        (&[("result", "hit")][..], 1),
-    ] {
-        assert_eq!(
-            counter(&snapshot, "loonfs.namespace_head_cache.gets", labels),
-            count,
-            "{labels:?}"
-        );
-    }
+    assert_eq!((stats.head_anchor_misses, stats.head_anchor_hits), (2, 1));
     assert!(
-        gauge(
-            &snapshot,
-            "loonfs.head_state_cache.retained_decoded_bytes",
-            &[]
-        ) > 0,
+        stats.head_state_bytes > 0,
         "the head loads cached both namespaces' head state"
     );
     assert!(
-        gauge(
-            &snapshot,
-            "loonfs.metadata_segment_cache.retained_decoded_bytes",
-            &[]
-        ) > 0,
+        stats.segment_bytes > 0,
         "the head loads cached the manifests they decoded"
     );
 }

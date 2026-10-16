@@ -1,9 +1,7 @@
-//! Runtime, metadata cache, execution budget, and object-store metric
-//! reporting.
+//! Runtime, execution budget, and object-store metric reporting.
 //!
-//! Each runtime has one [`RuntimeInstruments`] instance, each metadata cache
-//! one [`MetadataCacheInstruments`], and each execution budget one
-//! [`ExecutionBudgetInstruments`]. Instruments with dynamic labels
+//! Each runtime has one [`RuntimeInstruments`] instance, and each execution
+//! budget one [`ExecutionBudgetInstruments`]. Instruments with dynamic labels
 //! are cached so each label set is registered once. Reporting returns
 //! immediately when no recorder is configured.
 
@@ -11,11 +9,8 @@ use super::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, ObjectStoreMetricSample,
     ObjectStoreMetricsRecorder, SMALL_COUNT_BOUNDARIES,
 };
-use crate::metrics::{
-    KeyClass, LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
-};
+use crate::metrics::{LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_OK};
 use crate::{GcResponse, MetadataCompactionJobOutcome};
-use loonfs_core::cache::DecodedBlockCacheObserver;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -184,7 +179,7 @@ struct Installed {
     compactions: CompactionInstruments,
     publisher: PublisherInstruments,
     gc: GcInstruments,
-    views: ViewReadInstruments,
+    read_head_sources: LabeledCounters<ReadHeadSource>,
 }
 
 impl RuntimeInstruments {
@@ -196,31 +191,23 @@ impl RuntimeInstruments {
                 compactions: CompactionInstruments::register(recorder.as_ref()),
                 publisher: PublisherInstruments::register(recorder.as_ref()),
                 gc: GcInstruments::register(recorder.as_ref()),
-                views: ViewReadInstruments::register(recorder.as_ref()),
+                read_head_sources: LabeledCounters::register(
+                    recorder.as_ref(),
+                    "loonfs.read_head.source",
+                    "Reads by where they took the head they started from",
+                    "source",
+                    &[],
+                ),
                 object_store: Mutex::new(HashMap::new()),
                 recorder,
             }),
         })
     }
 
-    /// Records one latest-view read.
-    pub(crate) fn latest_metadata_view_read(&self) {
-        if let Some(installed) = &self.installed {
-            installed.views.latest_metadata_view_reads.increment(1);
-        }
-    }
-
     /// Records where one read took the head it started from.
     pub(crate) fn read_head(&self, source: ReadHeadSource) {
         if let Some(installed) = &self.installed {
-            installed.views.read_head_sources.get(source).increment(1);
-        }
-    }
-
-    /// Records one snapshot-backed metadata view.
-    pub(crate) fn snapshot_view_read(&self) {
-        if let Some(installed) = &self.installed {
-            installed.views.snapshot_view_reads.increment(1);
+            installed.read_head_sources.get(source).increment(1);
         }
     }
 
@@ -567,112 +554,6 @@ impl ObjectStoreOperationInstruments {
     }
 }
 
-/// The metadata views one runtime reads through.
-struct ViewReadInstruments {
-    latest_metadata_view_reads: Arc<dyn CounterHandle>,
-    snapshot_view_reads: Arc<dyn CounterHandle>,
-    read_head_sources: LabeledCounters<ReadHeadSource>,
-}
-
-/// Every instrument one metadata cache reports, or nothing at all.
-pub(crate) struct MetadataCacheInstruments {
-    installed: Option<InstalledCache>,
-}
-
-struct InstalledCache {
-    namespace_head: NamespaceHeadCacheInstruments,
-    metadata_segment: Arc<MetadataSegmentCacheInstruments>,
-    wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
-    head_state: Arc<HeadStateCacheInstruments>,
-    object: Arc<ObjectCacheInstruments>,
-    wal_object: Arc<ObjectLookupInstruments>,
-    content_object: Arc<ObjectLookupInstruments>,
-}
-
-impl MetadataCacheInstruments {
-    /// Registers every cache instrument now, or nothing without a recorder.
-    pub(crate) fn new(recorder: Option<&dyn MetricsRecorder>) -> Self {
-        Self {
-            installed: recorder.map(|recorder| InstalledCache {
-                namespace_head: NamespaceHeadCacheInstruments::register(recorder),
-                metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
-                wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(
-                    recorder,
-                )),
-                head_state: Arc::new(HeadStateCacheInstruments::register(recorder)),
-                object: Arc::new(ObjectCacheInstruments::register(recorder)),
-                wal_object: Arc::new(ObjectLookupInstruments::register(
-                    recorder,
-                    KeyClass::WalObject,
-                )),
-                content_object: Arc::new(ObjectLookupInstruments::register(
-                    recorder,
-                    KeyClass::Content,
-                )),
-            }),
-        }
-    }
-
-    pub(crate) fn namespace_head_cache_hit(&self) {
-        if let Some(installed) = &self.installed {
-            installed.namespace_head.hits.increment(1);
-        }
-    }
-
-    pub(crate) fn namespace_head_cache_miss(&self) {
-        if let Some(installed) = &self.installed {
-            installed.namespace_head.misses.increment(1);
-        }
-    }
-
-    /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
-    pub(crate) fn metadata_segment_cache_observer(
-        &self,
-    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.metadata_segment);
-        Some(observer)
-    }
-
-    /// Returns the observer for WAL-tail lookups and inserts, if metrics are
-    /// enabled.
-    pub(crate) fn wal_tail_projection_cache_observer(
-        &self,
-    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.wal_tail_projection);
-        Some(observer)
-    }
-
-    /// Returns the observer for evictions, rejections, and retained bytes
-    /// across head anchors and WAL-tail projections, if metrics are enabled.
-    pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.head_state);
-        Some(observer)
-    }
-
-    /// Returns the observer for evictions and retained bytes across WAL
-    /// objects and content objects, if metrics are enabled.
-    pub(crate) fn object_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.object);
-        Some(observer)
-    }
-
-    /// Returns the observer for WAL object lookups and inserts, if metrics
-    /// are enabled.
-    pub(crate) fn wal_object_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.wal_object);
-        Some(observer)
-    }
-
-    /// Returns the observer for content object lookups and inserts, if
-    /// metrics are enabled.
-    pub(crate) fn content_object_cache_observer(
-        &self,
-    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.content_object);
-        Some(observer)
-    }
-}
-
 /// The instruments of one execution budget, registered when the budget is
 /// built.
 pub(crate) struct ExecutionBudgetInstruments {
@@ -823,316 +704,6 @@ impl PermitPoolGauges {
             .waiting
             .set(i64::try_from(waiting).unwrap_or(i64::MAX));
     }
-}
-
-struct NamespaceHeadCacheInstruments {
-    hits: Arc<dyn CounterHandle>,
-    misses: Arc<dyn CounterHandle>,
-}
-
-struct MetadataSegmentCacheInstruments {
-    hits: Arc<dyn CounterHandle>,
-    misses: Arc<dyn CounterHandle>,
-    inserts: Arc<dyn CounterHandle>,
-    evictions: Arc<dyn CounterHandle>,
-    filter_skips: Arc<dyn CounterHandle>,
-    filter_false_positives: Arc<dyn CounterHandle>,
-    retained_decoded_bytes: Arc<dyn GaugeHandle>,
-}
-
-struct WalTailProjectionCacheInstruments {
-    hits: Arc<dyn CounterHandle>,
-    misses: Arc<dyn CounterHandle>,
-    inserts: Arc<dyn CounterHandle>,
-}
-
-struct HeadStateCacheInstruments {
-    evictions: Arc<dyn CounterHandle>,
-    evicted_decoded_bytes: Arc<dyn CounterHandle>,
-    rejections: Arc<dyn CounterHandle>,
-    rejected_decoded_bytes: Arc<dyn CounterHandle>,
-    retained_decoded_bytes: Arc<dyn GaugeHandle>,
-}
-
-struct ObjectCacheInstruments {
-    evictions: Arc<dyn CounterHandle>,
-    retained_decoded_bytes: Arc<dyn GaugeHandle>,
-}
-
-/// Lookups and inserts of one kind of object in the object cache.
-struct ObjectLookupInstruments {
-    hits: Arc<dyn CounterHandle>,
-    misses: Arc<dyn CounterHandle>,
-    inserts: Arc<dyn CounterHandle>,
-}
-
-impl ViewReadInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        Self {
-            latest_metadata_view_reads: recorder.register_counter(
-                "loonfs.runtime_cache.latest_metadata_view_reads",
-                "Latest metadata reads served through the metadata-view path",
-                &[],
-            ),
-            snapshot_view_reads: recorder.register_counter(
-                "loonfs.runtime_cache.snapshot_view_reads",
-                "Snapshot-backed metadata views created by the runtime",
-                &[],
-            ),
-            read_head_sources: LabeledCounters::register(
-                recorder,
-                "loonfs.read_head.source",
-                "Reads by where they took the head they started from",
-                "source",
-                &[],
-            ),
-        }
-    }
-}
-
-impl NamespaceHeadCacheInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let get = |result| {
-            recorder.register_counter(
-                "loonfs.namespace_head_cache.gets",
-                "Namespace head cache lookups, by outcome",
-                &[("result", result)],
-            )
-        };
-        Self {
-            hits: get(RESULT_HIT),
-            misses: get(RESULT_MISS),
-        }
-    }
-}
-
-impl MetadataSegmentCacheInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let get = |result| {
-            recorder.register_counter(
-                "loonfs.metadata_segment_cache.gets",
-                "Decoded metadata-segment cache lookups, by outcome",
-                &[("result", result)],
-            )
-        };
-        Self {
-            hits: get(RESULT_HIT),
-            misses: get(RESULT_MISS),
-            inserts: recorder.register_counter(
-                "loonfs.metadata_segment_cache.inserts",
-                "Blocks inserted into the decoded metadata-segment cache",
-                &[],
-            ),
-            evictions: recorder.register_counter(
-                "loonfs.metadata_segment_cache.evictions",
-                "Blocks evicted from the decoded metadata-segment cache",
-                &[],
-            ),
-            filter_skips: recorder.register_counter(
-                "loonfs.metadata_segment_cache.filter_skips",
-                "Segments skipped after their filter ruled out a lookup",
-                &[],
-            ),
-            filter_false_positives: recorder.register_counter(
-                "loonfs.metadata_segment_cache.filter_false_positives",
-                "Filter admissions that matched no metadata rows",
-                &[],
-            ),
-            retained_decoded_bytes: recorder.register_gauge(
-                "loonfs.metadata_segment_cache.retained_decoded_bytes",
-                "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
-                &[],
-            ),
-        }
-    }
-}
-
-impl DecodedBlockCacheObserver for MetadataSegmentCacheInstruments {
-    fn hit(&self) {
-        self.hits.increment(1);
-    }
-
-    fn miss(&self) {
-        self.misses.increment(1);
-    }
-
-    fn insert(&self) {
-        self.inserts.increment(1);
-    }
-
-    fn evict(&self, _decoded_bytes: usize) {
-        self.evictions.increment(1);
-    }
-
-    fn filter_skip(&self) {
-        self.filter_skips.increment(1);
-    }
-
-    fn filter_false_positive(&self) {
-        self.filter_false_positives.increment(1);
-    }
-
-    fn retained(&self, decoded_bytes: usize) {
-        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
-    }
-}
-
-impl WalTailProjectionCacheInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let get = |result| {
-            recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.gets",
-                "WAL-tail projection cache lookups, by outcome",
-                &[("result", result)],
-            )
-        };
-        Self {
-            hits: get(RESULT_HIT),
-            misses: get(RESULT_MISS),
-            inserts: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.inserts",
-                "WAL-tail projections inserted into the cache",
-                &[],
-            ),
-        }
-    }
-}
-
-impl DecodedBlockCacheObserver for WalTailProjectionCacheInstruments {
-    fn hit(&self) {
-        self.hits.increment(1);
-    }
-
-    fn miss(&self) {
-        self.misses.increment(1);
-    }
-
-    fn insert(&self) {
-        self.inserts.increment(1);
-    }
-}
-
-impl HeadStateCacheInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        Self {
-            evictions: recorder.register_counter(
-                "loonfs.head_state_cache.evictions",
-                "Head anchors and WAL-tail projections evicted to stay within the head-state budget",
-                &[],
-            ),
-            evicted_decoded_bytes: recorder.register_counter(
-                "loonfs.head_state_cache.evicted_decoded_bytes",
-                "Bytes charged to evicted head state entries, including keys and per-entry bookkeeping",
-                &[],
-            ),
-            rejections: recorder.register_counter(
-                "loonfs.head_state_cache.rejections",
-                "Head anchors and WAL-tail projections heavier than the whole head-state budget",
-                &[],
-            ),
-            rejected_decoded_bytes: recorder.register_counter(
-                "loonfs.head_state_cache.rejected_decoded_bytes",
-                "Bytes charged to rejected head state entries, including keys and per-entry bookkeeping",
-                &[],
-            ),
-            retained_decoded_bytes: recorder.register_gauge(
-                "loonfs.head_state_cache.retained_decoded_bytes",
-                "Bytes currently charged to head anchors and WAL-tail projections, including keys and per-entry bookkeeping",
-                &[],
-            ),
-        }
-    }
-}
-
-impl DecodedBlockCacheObserver for HeadStateCacheInstruments {
-    fn evict(&self, decoded_bytes: usize) {
-        self.evictions.increment(1);
-        self.evicted_decoded_bytes
-            .increment(metric_count(decoded_bytes));
-    }
-
-    fn reject(&self, decoded_bytes: usize) {
-        self.rejections.increment(1);
-        self.rejected_decoded_bytes
-            .increment(metric_count(decoded_bytes));
-    }
-
-    fn retained(&self, decoded_bytes: usize) {
-        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
-    }
-}
-
-impl ObjectCacheInstruments {
-    fn register(recorder: &dyn MetricsRecorder) -> Self {
-        Self {
-            evictions: recorder.register_counter(
-                "loonfs.object_cache.evictions",
-                "WAL objects and content objects evicted to stay within the object budget",
-                &[],
-            ),
-            retained_decoded_bytes: recorder.register_gauge(
-                "loonfs.object_cache.retained_decoded_bytes",
-                "Bytes currently charged to WAL objects and content objects, including keys and per-entry bookkeeping",
-                &[],
-            ),
-        }
-    }
-}
-
-impl DecodedBlockCacheObserver for ObjectCacheInstruments {
-    fn evict(&self, _decoded_bytes: usize) {
-        self.evictions.increment(1);
-    }
-
-    fn retained(&self, decoded_bytes: usize) {
-        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
-    }
-}
-
-impl ObjectLookupInstruments {
-    /// Registers the instruments of one kind of object, labeled with the
-    /// key class the object-store metrics use for the same objects.
-    fn register(recorder: &dyn MetricsRecorder, key_class: KeyClass) -> Self {
-        let key_class = key_class.as_str();
-        let get = |result| {
-            recorder.register_counter(
-                "loonfs.object_cache.gets",
-                "Object cache lookups, by key class and outcome",
-                &[("key_class", key_class), ("result", result)],
-            )
-        };
-        Self {
-            hits: get(RESULT_HIT),
-            misses: get(RESULT_MISS),
-            inserts: recorder.register_counter(
-                "loonfs.object_cache.inserts",
-                "Objects inserted into the object cache, by key class",
-                &[("key_class", key_class)],
-            ),
-        }
-    }
-}
-
-impl DecodedBlockCacheObserver for ObjectLookupInstruments {
-    fn hit(&self) {
-        self.hits.increment(1);
-    }
-
-    fn miss(&self) {
-        self.misses.increment(1);
-    }
-
-    fn insert(&self) {
-        self.inserts.increment(1);
-    }
-}
-
-fn metric_count(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-fn metric_level(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// The gauges and durable totals for this process's streaming compactions.
@@ -1347,109 +918,24 @@ mod tests {
         }
     }
 
-    fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
-        let entry = snapshot
-            .by_name(name)
-            .next()
-            .unwrap_or_else(|| panic!("no `{name}` registered"));
-        match entry.value {
-            MetricValue::Gauge(value) => value,
-            ref other => panic!("expected a gauge, found {other:?}"),
-        }
-    }
-
+    /// Checks that each read-head source reaches its own labeled counter,
+    /// and that every source is registered before any read records one.
     #[test]
-    fn view_and_cache_events_reach_the_registered_instruments() {
+    fn read_head_sources_reach_the_registered_instruments() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
-        instruments.latest_metadata_view_read();
-        instruments.snapshot_view_read();
-        let cache = MetadataCacheInstruments::new(Some(recorder.as_ref()));
-
-        let metadata = cache
-            .metadata_segment_cache_observer()
-            .expect("metadata observer");
-        metadata.hit();
-        metadata.miss();
-        metadata.insert();
-        metadata.evict(0);
-        metadata.filter_skip();
-        metadata.filter_false_positive();
-        metadata.retained(170);
-
-        let wal = cache
-            .wal_tail_projection_cache_observer()
-            .expect("WAL-tail observer");
-        wal.hit();
-        wal.miss();
-        wal.insert();
-
-        let head_state = cache
-            .head_state_cache_observer()
-            .expect("head-state observer");
-        head_state.evict(70);
-        head_state.reject(110);
-        head_state.retained(130);
+        instruments.read_head(ReadHeadSource::Position);
+        instruments.read_head(ReadHeadSource::Eventual);
+        instruments.read_head(ReadHeadSource::Eventual);
 
         let snapshot = recorder.snapshot();
-        for (name, labels, value) in [
-            (
-                "loonfs.runtime_cache.latest_metadata_view_reads",
-                &[][..],
-                1,
-            ),
-            ("loonfs.runtime_cache.snapshot_view_reads", &[][..], 1),
-            (
-                "loonfs.metadata_segment_cache.gets",
-                &[("result", "hit")][..],
-                1,
-            ),
-            (
-                "loonfs.metadata_segment_cache.gets",
-                &[("result", "miss")][..],
-                1,
-            ),
-            ("loonfs.metadata_segment_cache.inserts", &[][..], 1),
-            ("loonfs.metadata_segment_cache.evictions", &[][..], 1),
-            ("loonfs.metadata_segment_cache.filter_skips", &[][..], 1),
-            (
-                "loonfs.metadata_segment_cache.filter_false_positives",
-                &[][..],
-                1,
-            ),
-            (
-                "loonfs.wal_tail_projection_cache.gets",
-                &[("result", "hit")][..],
-                1,
-            ),
-            (
-                "loonfs.wal_tail_projection_cache.gets",
-                &[("result", "miss")][..],
-                1,
-            ),
-            ("loonfs.wal_tail_projection_cache.inserts", &[][..], 1),
-            ("loonfs.head_state_cache.evictions", &[][..], 1),
-            ("loonfs.head_state_cache.evicted_decoded_bytes", &[][..], 70),
-            ("loonfs.head_state_cache.rejections", &[][..], 1),
-            (
-                "loonfs.head_state_cache.rejected_decoded_bytes",
-                &[][..],
-                110,
-            ),
-        ] {
-            assert_eq!(counter(&snapshot, name, labels), value, "counter `{name}`");
+        for (source, value) in [("position", 1), ("anchor", 0), ("eventual", 2)] {
+            assert_eq!(
+                counter(&snapshot, "loonfs.read_head.source", &[("source", source)]),
+                value,
+                "source `{source}`"
+            );
         }
-        assert_eq!(
-            gauge(
-                &snapshot,
-                "loonfs.metadata_segment_cache.retained_decoded_bytes"
-            ),
-            170
-        );
-        assert_eq!(
-            gauge(&snapshot, "loonfs.head_state_cache.retained_decoded_bytes"),
-            130
-        );
     }
 
     #[test]

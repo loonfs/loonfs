@@ -66,7 +66,7 @@ impl RuntimeCore {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let (engine, context) = self
-            .pinned_metadata_read(namespace_id, consistency)
+            .pinned_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
@@ -88,7 +88,7 @@ impl RuntimeCore {
         self.invalidate_namespace_read_cache(namespace_id);
         self.reload_namespace_head(namespace_id).await?;
         let (engine, context) = self
-            .pinned_metadata_read(namespace_id, consistency)
+            .pinned_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )

@@ -103,10 +103,7 @@ pub(super) async fn test_app(
         )
     };
     let grep_service = || {
-        let cache = Arc::new(new_grep_block_cache(
-            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-            metrics.recorder().as_ref(),
-        ));
+        let cache = Arc::new(new_grep_block_cache(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
         Arc::new(GrepService::new(cache, runtime.monotonic_timer()))
     };
     let grep = match config.grep {

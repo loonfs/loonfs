@@ -26,49 +26,15 @@ pub trait DecodedBlockKey: Clone + Eq + Hash {
     fn heap_bytes(&self) -> usize;
 }
 
-/// Receives decoded-block cache events for metrics.
-///
-/// Retained bytes include the values, keys, table, and recency queue.
-/// Evicted bytes count the key and value released with an entry; unused
-/// table and queue capacity remains charged until it is released.
-pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
-    fn hit(&self) {}
-    fn miss(&self) {}
-    fn insert(&self) {}
-    /// Reports an evicted entry and the bytes it was charged.
-    fn evict(&self, _decoded_bytes: usize) {}
-    /// Reports an entry the cache didn't keep because its charge was more
-    /// than the whole budget, and that charge.
-    fn reject(&self, _decoded_bytes: usize) {}
-    /// Reports total retained bytes after a cache allocation or removal.
-    fn retained(&self, _decoded_bytes: usize) {}
-    fn filter_skip(&self) {}
-    fn filter_false_positive(&self) {}
-}
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DecodedBlockCacheConfig {
     pub max_decoded_bytes: usize,
-    pub observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-}
-
-impl std::fmt::Debug for DecodedBlockCacheConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DecodedBlockCacheConfig")
-            .field("max_decoded_bytes", &self.max_decoded_bytes)
-            .field("observer", &self.observer.as_ref().map(|_| "configured"))
-            .finish()
-    }
 }
 
 impl DecodedBlockCacheConfig {
-    /// A byte-bounded cache with no observer.
+    /// Returns the config of a cache with a budget of `max_decoded_bytes`.
     pub fn new(max_decoded_bytes: usize) -> Self {
-        Self {
-            max_decoded_bytes,
-            observer: None,
-        }
+        Self { max_decoded_bytes }
     }
 }
 
@@ -272,18 +238,11 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             .expect("decoded block cache lock should not be poisoned");
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            if let Some(observer) = &self.config.observer {
-                observer.miss();
-            }
             return None;
         };
         inner.touch(key);
         self.evict_over_budget(&mut inner);
-        self.record_retained(inner.retained_bytes());
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.config.observer {
-            observer.hit();
-        }
         Some(block)
     }
 
@@ -336,11 +295,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
-        if let Some(observer) = &self.config.observer {
-            observer.insert();
-        }
         self.evict_over_budget(&mut inner);
-        self.record_retained(inner.retained_bytes());
         inner.entries.contains_key(&key)
     }
 
@@ -353,7 +308,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         if let Some(slot) = inner.entries.remove(key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
             inner.shrink_if_sparse();
-            self.record_retained(inner.retained_bytes());
         }
     }
 
@@ -381,9 +335,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.stats
             .rejected_decoded_bytes
             .fetch_add(charged_bytes, Ordering::Relaxed);
-        if let Some(observer) = &self.config.observer {
-            observer.reject(charged_bytes);
-        }
     }
 
     fn record_eviction(&self, decoded_bytes: usize) {
@@ -391,15 +342,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.stats
             .evicted_decoded_bytes
             .fetch_add(decoded_bytes, Ordering::Relaxed);
-        if let Some(observer) = &self.config.observer {
-            observer.evict(decoded_bytes);
-        }
-    }
-
-    fn record_retained(&self, decoded_bytes: usize) {
-        if let Some(observer) = &self.config.observer {
-            observer.retained(decoded_bytes);
-        }
     }
 }
 
@@ -590,8 +532,7 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 #[cfg(test)]
 mod tests {
     use super::{
-        charged_bytes, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig,
-        DecodedBlockCacheObserver, DecodedBlockKey,
+        charged_bytes, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey,
     };
     use crate::heap_bytes::HeapBytes;
     use bytes::Bytes;
@@ -603,7 +544,6 @@ mod tests {
     };
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
-    use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct Block(usize);
@@ -617,20 +557,6 @@ mod tests {
     impl DecodedBlockKey for MetadataSegmentId {
         fn heap_bytes(&self) -> usize {
             HeapBytes::heap_bytes(self)
-        }
-    }
-
-    #[derive(Default)]
-    struct RejectionObserver {
-        rejected_bytes: Mutex<Vec<usize>>,
-    }
-
-    impl DecodedBlockCacheObserver for RejectionObserver {
-        fn reject(&self, decoded_bytes: usize) {
-            self.rejected_bytes
-                .lock()
-                .expect("observer lock")
-                .push(decoded_bytes);
         }
     }
 
@@ -743,15 +669,11 @@ mod tests {
     }
 
     /// Checks that an entry whose charge is more than the whole budget isn't
-    /// kept, that the entries already in the cache stay, and that an
-    /// observer sees the entry rejected.
+    /// kept, that the entries already in the cache stay, and that the stats
+    /// record the rejection and its charge.
     #[test]
     fn an_entry_heavier_than_the_budget_is_rejected_without_evictions() {
-        let observer = Arc::new(RejectionObserver::default());
-        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig {
-            max_decoded_bytes: 1_000,
-            observer: Some(Arc::clone(&observer) as Arc<dyn DecodedBlockCacheObserver>),
-        });
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(1_000));
         let (kept, heavy) = ("kept".to_owned(), "heavy".to_owned());
         assert!(cache.insert(kept.clone(), Block(100)));
         // The value alone fits the budget, but its key and the cache's own
@@ -770,10 +692,6 @@ mod tests {
         assert_eq!(
             stats.cached_decoded_bytes,
             charged_bytes(&kept, &Block(100))
-        );
-        assert_eq!(
-            *observer.rejected_bytes.lock().expect("observer lock"),
-            [rejected_bytes]
         );
     }
 }
