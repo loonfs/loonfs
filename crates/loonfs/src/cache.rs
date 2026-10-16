@@ -27,23 +27,7 @@ mod read_position;
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
 
 impl RuntimeCore {
-    /// Returns the read context of the head that the namespace's next read
-    /// starts from, without checking that the head is current, or `None`
-    /// when this runtime has no head for the namespace yet.
-    pub(crate) fn cached_read_context(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<RuntimeReadContext> {
-        if let Some(position) = self.writer_position(namespace_id) {
-            return Some(self.read_context(position.head.clone(), position.basis.clone()));
-        }
-        let cached = self.inner.head_state.peek_head(namespace_id)?;
-        Some(self.read_context(cached.head.clone(), cached.basis.clone()))
-    }
-
     /// Records whether a load found the namespace's head in the read cache.
-    /// A speculative read peeks first and then loads, so only the load is
-    /// recorded.
     fn record_head_lookup(&self, found: bool) {
         self.inner
             .metadata_cache

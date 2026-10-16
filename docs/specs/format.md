@@ -586,23 +586,6 @@ Deleting a WAL object doesn't remove bytes that are already in a read view's pro
 
 For a streamed read, the full-file checksum can only be verified after the complete stream has been processed. The transport MUST report a verification failure, even if some bytes have already reached the client. A direct download grants one range per extent, and the client receives the bytes directly from object storage. The [API specification][api-spec] defines the client's verification responsibilities for direct downloads.
 
-### 4.6 Speculative reads
-
-The embedded runtime can reduce latency by reading a small file while it checks whether its cached view is still current. This optimization applies to nonempty files of at most 64 KiB, and it MUST respect any smaller configured limit on buffered reads.
-
-A speculative read works like this:
-
-1. Resolve the path in the cached view.
-2. Start the normal freshness check (see [Replaying the visible WAL](#42-replaying-the-visible-wal)) and the content read at the same time.
-3. If the namespace's read state and manifest haven't changed, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
-4. Use the speculative bytes only if the current path has the same complete content reference, and return the entry from the current view. If the reference changed, discard the earlier result (including any content error) and read the current content once. An error resolving the current path takes precedence over the speculative result.
-
-For example, if `/report.txt` now refers to different content, the reader discards the old bytes and reads the new ones. If the path was deleted, it returns the current metadata error, even if the old bytes were read successfully.
-
-A speculative read reads bytes the same way as any other read (see [Content verification](#45-content-verification)): a range of the object prefix, and then the tail's pieces, verified against the reference. If the projected tail contains the content from offset 0, no content request is needed.
-
-Reading speculative bytes doesn't by itself establish freshness or change retention, so the ordinary metadata checks are still required.
-
 ## 5. Uploading content
 
 This section describes upload sessions, the ways bytes can be transferred, and the proof a commit needs before it can reference uploaded content.

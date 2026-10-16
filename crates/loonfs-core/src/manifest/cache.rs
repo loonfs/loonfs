@@ -573,14 +573,6 @@ impl HeadStateCache {
             .and_then(HeadStateEntry::into_head)
     }
 
-    /// Returns the namespace's cached head without marking it used.
-    pub fn peek_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedHead>> {
-        self.shared
-            .entries
-            .peek(&self.head_key(namespace_id))
-            .and_then(HeadStateEntry::into_head)
-    }
-
     /// Installs `candidate` as the namespace's cached head if it's newer than
     /// the current head, and returns the head that the read starts from.
     ///

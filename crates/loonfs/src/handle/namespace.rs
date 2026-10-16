@@ -91,8 +91,7 @@ impl<M: Mode> Namespace<M> {
         Namespace::new(self.core.clone(), self.namespace_id.clone())
     }
 
-    // Reads live in `fs/reads.rs`, `fs/snapshots.rs`, and
-    // `fs/speculative_read.rs`.
+    // Reads live in `fs/reads.rs` and `fs/snapshots.rs`.
 }
 
 impl Namespace<ReadOnly> {
