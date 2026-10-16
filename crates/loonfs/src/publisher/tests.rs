@@ -2889,7 +2889,7 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         replays,
-        "maintenance marks the cached head unconfirmed, and keeps the tail the writer publishes from"
+        "maintenance that publishes no manifest keeps the tail the writer publishes from"
     );
     writer.shutdown().await.expect("shutdown");
 }

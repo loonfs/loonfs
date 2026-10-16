@@ -938,7 +938,7 @@ enum Grep {
 const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
     (Grep::NotMaintained, 6, 22, 10),
     (Grep::Maintained, 7, 32, 12),
-    (Grep::Enabled, 22, 50, 12),
+    (Grep::Enabled, 21, 50, 12),
 ];
 
 #[tokio::test]
