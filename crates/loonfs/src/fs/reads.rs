@@ -651,7 +651,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
-            .pinned_metadata_read(&self.namespace_id, Consistency::Strong)
+            .pinned_read(&self.namespace_id, Consistency::Strong)
             .await?;
         Ok(self.read_view_from(engine, context, ReadSource::Head))
     }
@@ -716,7 +716,6 @@ impl<M: crate::Mode> Namespace<M> {
             .core
             .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
             .await?;
-        self.core.inner.instruments.snapshot_view_read();
         Ok(self.read_view_from(engine, context, ReadSource::Snapshot(snapshot_id.clone())))
     }
 

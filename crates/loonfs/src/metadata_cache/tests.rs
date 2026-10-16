@@ -3,7 +3,7 @@
 //! metrics, and the object reads the cache saves.
 
 use super::MetadataCache;
-use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
+use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -511,77 +511,45 @@ fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
     }
 }
 
+/// Checks that a runtime registers no cache metric with its recorder,
+/// whether it reads through a shared cache or a private one, and that the
+/// cache's stats record the runtime's reads instead.
 #[tokio::test]
-async fn the_cache_reports_its_own_metrics_once() {
-    let (first_root, second_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
-    for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        same_shape_store(&local_store(root.path()), &MetadataCache::default(), bytes).await;
-    }
-    let cache_recorder = Arc::new(DefaultMetricsRecorder::new());
-    let cache = MetadataCache::builder()
-        .metrics_recorder(cache_recorder.clone() as Arc<dyn MetricsRecorder>)
-        .build();
-    let runtime_recorder = Arc::new(DefaultMetricsRecorder::new());
-    for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        let runtime = LoonFs::builder_with_store(local_store(root.path()))
+async fn runtimes_report_no_cache_metrics_to_their_recorder() {
+    let root = tempdir().expect("tempdir");
+    same_shape_store(
+        &local_store(root.path()),
+        &MetadataCache::default(),
+        b"first",
+    )
+    .await;
+    for shared in [Some(MetadataCache::default()), None] {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let builder = LoonFs::builder_with_store(local_store(root.path()))
             .read_only()
-            .metadata_cache(cache.clone())
-            .metrics_recorder(runtime_recorder.clone())
-            .build()
-            .await
-            .expect("build reader");
-        assert_reads(&runtime, bytes).await;
-    }
-
-    let runtime_snapshot = runtime_recorder.snapshot();
-    for name in CACHE_METRICS {
-        assert!(
-            !registered(&runtime_snapshot, name),
-            "a runtime given a cache does not report `{name}`"
-        );
-    }
-    assert!(registered(
-        &runtime_snapshot,
-        "loonfs.runtime_cache.latest_metadata_view_reads"
-    ));
-    let cache_snapshot = cache_recorder.snapshot();
-    for name in CACHE_METRICS {
-        assert!(
-            registered(&cache_snapshot, name),
-            "the cache reports `{name}`"
-        );
-    }
-    assert_eq!(
-        gauge(
-            &cache_snapshot,
-            "loonfs.head_state_cache.retained_decoded_bytes"
-        ),
-        i64::try_from(cache.stats().head_state_bytes).expect("small byte count"),
-        "one gauge reports both bindings' head state"
-    );
-
-    let private_recorder = Arc::new(DefaultMetricsRecorder::new());
-    let private = LoonFs::builder_with_store(local_store(first_root.path()))
-        .read_only()
-        .metrics_recorder(private_recorder.clone())
+            .metrics_recorder(recorder.clone());
+        let runtime = match shared {
+            Some(cache) => builder.metadata_cache(cache),
+            None => builder,
+        }
         .build()
         .await
         .expect("build reader");
-    assert_reads(&private, b"first").await;
-    let private_snapshot = private_recorder.snapshot();
-    for name in CACHE_METRICS {
+        assert_reads(&runtime, b"first").await;
+
+        let snapshot = recorder.snapshot();
+        for name in CACHE_METRICS {
+            assert!(
+                !registered(&snapshot, name),
+                "the runtime's recorder has no `{name}`"
+            );
+        }
+        let stats = runtime.metadata_cache().stats();
         assert!(
-            registered(&private_snapshot, name),
-            "a private cache reports `{name}` to the runtime's recorder"
+            stats.head_anchor_misses > 0 && stats.head_state_bytes > 0,
+            "{stats:?}"
         );
     }
-    assert_eq!(
-        gauge(
-            &private_snapshot,
-            "loonfs.head_state_cache.retained_decoded_bytes"
-        ),
-        i64::try_from(private.metadata_cache().stats().head_state_bytes).expect("small byte count"),
-    );
 }
 
 #[tokio::test]

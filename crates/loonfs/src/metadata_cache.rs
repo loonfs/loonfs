@@ -1,6 +1,5 @@
 //! The decoded metadata cache that one or more runtimes read through.
 
-use crate::metrics::{MetadataCacheInstruments, MetricsRecorder};
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
     CacheScope, CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache, ObjectCache,
@@ -69,7 +68,6 @@ struct MetadataCacheInner {
     object_store_scopes: Mutex<ObjectStoreScopes>,
     head_anchor_hits: AtomicUsize,
     head_anchor_misses: AtomicUsize,
-    instruments: MetadataCacheInstruments,
 }
 
 impl fmt::Debug for MetadataCache {
@@ -88,8 +86,7 @@ impl Default for MetadataCache {
 }
 
 impl MetadataCache {
-    /// Starts a cache builder with the default limits and no metrics
-    /// recorder.
+    /// Starts a cache builder with the default limits.
     pub fn builder() -> MetadataCacheBuilder {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
@@ -97,7 +94,6 @@ impl MetadataCache {
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
-            metrics_recorder: None,
         }
     }
 
@@ -121,7 +117,9 @@ impl MetadataCache {
             wal_tail_misses: head_state.tail_misses,
             wal_tail_inserts: head_state.tail_inserts,
             head_state_evictions: head_state.evictions,
+            head_state_evicted_bytes: head_state.evicted_decoded_bytes,
             head_state_rejections: head_state.rejections,
+            head_state_rejected_bytes: head_state.rejected_decoded_bytes,
             head_state_bytes: head_state.cached_decoded_bytes,
             wal_object_hits: objects.wal_hits,
             wal_object_misses: objects.wal_misses,
@@ -168,20 +166,14 @@ impl MetadataCache {
         }
     }
 
-    /// Counts one head anchor lookup that a read used to start from the
+    /// Records one head anchor lookup that a read used to start from the
     /// cache or that sent it to the store.
     pub(crate) fn record_head_anchor_lookup(&self, lookup: CacheLookup) {
-        let inner = &self.inner;
-        match lookup {
-            CacheLookup::Hit => {
-                inner.head_anchor_hits.fetch_add(1, Ordering::Relaxed);
-                inner.instruments.namespace_head_cache_hit();
-            }
-            CacheLookup::Miss => {
-                inner.head_anchor_misses.fetch_add(1, Ordering::Relaxed);
-                inner.instruments.namespace_head_cache_miss();
-            }
-        }
+        let counter = match lookup {
+            CacheLookup::Hit => &self.inner.head_anchor_hits,
+            CacheLookup::Miss => &self.inner.head_anchor_misses,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -237,7 +229,6 @@ pub struct MetadataCacheBuilder {
     max_completed_upload_session_bytes: usize,
     max_object_bytes: usize,
     max_cached_object_bytes: u64,
-    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 impl MetadataCacheBuilder {
@@ -293,44 +284,23 @@ impl MetadataCacheBuilder {
         self
     }
 
-    /// Installs the metrics recorder the cache reports its lookups,
-    /// evictions, and occupancy to (see [`crate::metrics`]). The cache
-    /// registers its instruments once, when it is built. A cache built
-    /// without one reports nothing.
-    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.metrics_recorder = Some(recorder);
-        self
-    }
-
     /// Builds the cache.
     pub fn build(self) -> MetadataCache {
-        let instruments = MetadataCacheInstruments::new(self.metrics_recorder.as_deref());
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
-                segment_blocks: Arc::new(SharedSegmentBlocks::new(
-                    self.max_segment_bytes,
-                    instruments.metadata_segment_cache_observer(),
-                )),
-                head_state: Arc::new(SharedHeadState::new(
-                    self.max_head_state_bytes,
-                    instruments.head_state_cache_observer(),
-                    instruments.wal_tail_projection_cache_observer(),
-                )),
+                segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
+                head_state: Arc::new(SharedHeadState::new(self.max_head_state_bytes)),
                 completed_upload_sessions: Arc::new(SharedCompletedUploadSessions::new(
                     self.max_completed_upload_session_bytes,
                 )),
                 objects: Arc::new(SharedObjects::new(
                     self.max_object_bytes,
                     self.max_cached_object_bytes,
-                    instruments.object_cache_observer(),
-                    instruments.wal_object_cache_observer(),
-                    instruments.content_object_cache_observer(),
                 )),
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),
                 head_anchor_hits: AtomicUsize::new(0),
                 head_anchor_misses: AtomicUsize::new(0),
-                instruments,
             }),
         }
     }
@@ -369,9 +339,16 @@ pub struct MetadataCacheStats {
     /// Head anchors and WAL-tail projections evicted to stay within the
     /// head-state limit.
     pub head_state_evictions: usize,
+    /// Bytes charged to the evicted head anchors and WAL-tail projections,
+    /// including their keys.
+    pub head_state_evicted_bytes: usize,
     /// Head anchors and WAL-tail projections heavier than the whole
     /// head-state limit, which are never kept.
     pub head_state_rejections: usize,
+    /// Bytes that the rejected head anchors and WAL-tail projections would
+    /// have been charged, including their keys and the cache's own
+    /// allocation for each entry.
+    pub head_state_rejected_bytes: usize,
     /// Bytes charged to head anchors and WAL-tail projections now, including
     /// their keys and the cache's own allocation for each entry.
     pub head_state_bytes: usize,

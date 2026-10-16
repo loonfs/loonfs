@@ -80,12 +80,15 @@ async fn a_server_without_the_table_builds_no_local_cache() {
         .await
         .expect("build app");
     assert!(state.local_cache.is_none());
-    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0, 0);
+    let rendered = super::metrics::render(&state);
     assert!(!rendered.contains("loonfs_local_cache_"));
 }
 
+/// Checks that a scrape renders every counter and gauge of the metadata
+/// cache and the grep block cache exactly once, so the recorder's snapshot
+/// doesn't include a second copy of any of them.
 #[tokio::test]
-async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
+async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "cache-metrics-writer");
@@ -93,11 +96,14 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
     let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
-    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0, 0);
+    assert!(
+        state.grep_block_cache.is_some(),
+        "the test config serves grep"
+    );
+    let rendered = super::metrics::render(&state);
 
     for name in [
-        "loonfs_runtime_cache_latest_metadata_view_reads_total",
-        "loonfs_runtime_cache_snapshot_view_reads_total",
+        "loonfs_namespace_head_cache_gets_total",
         "loonfs_metadata_segment_cache_gets_total",
         "loonfs_metadata_segment_cache_inserts_total",
         "loonfs_metadata_segment_cache_evictions_total",
@@ -116,21 +122,27 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
         "loonfs_grep_block_cache_inserts_total",
         "loonfs_grep_block_cache_evictions_total",
     ] {
-        assert!(
-            rendered.contains(&format!("# TYPE {name} counter\n")),
-            "missing counter `{name}`"
+        assert_eq!(
+            rendered
+                .matches(&format!("# TYPE {name} counter\n"))
+                .count(),
+            1,
+            "counter `{name}`"
         );
     }
     for name in [
+        "loonfs_metadata_segment_cache_retained_decoded_bytes",
         "loonfs_head_state_cache_retained_decoded_bytes",
         "loonfs_object_cache_retained_decoded_bytes",
     ] {
-        assert!(
-            rendered.contains(&format!("# TYPE {name} gauge\n")),
-            "missing gauge `{name}`"
+        assert_eq!(
+            rendered.matches(&format!("# TYPE {name} gauge\n")).count(),
+            1,
+            "gauge `{name}`"
         );
     }
     assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
+    assert!(!rendered.contains("loonfs_runtime_cache_"));
 }
 
 #[tokio::test]
@@ -145,14 +157,7 @@ async fn a_configured_local_cache_is_built_and_scraped() {
         .await
         .expect("build app");
     let local_cache = state.local_cache.clone().expect("a local cache");
-    let rendered = super::metrics::render(
-        &state.binding.metrics,
-        Some(local_cache.foyer_stats()),
-        None,
-        0,
-        0,
-        0,
-    );
+    let rendered = super::metrics::render(&state);
     assert!(rendered.contains("loonfs_local_cache_memory_capacity_bytes 4194304\n"));
     assert!(rendered.contains("loonfs_local_cache_disk_capacity_bytes 134217728\n"));
     assert!(rendered.contains("loonfs_local_cache_queue_buffer_overflows 0\n"));

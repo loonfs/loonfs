@@ -140,10 +140,9 @@ impl Fixture {
 
     /// Returns how many read cache lookups of a namespace head hit and how
     /// many missed.
-    fn head_cache_lookups(&self) -> (u64, u64) {
-        let lookups =
-            |result| self.counter("loonfs.namespace_head_cache.gets", &[("result", result)]);
-        (lookups("hit"), lookups("miss"))
+    fn head_cache_lookups(&self) -> (usize, usize) {
+        let stats = self.writer.metadata_cache().stats();
+        (stats.head_anchor_hits, stats.head_anchor_misses)
     }
 
     fn tail_replays(&self) -> u64 {

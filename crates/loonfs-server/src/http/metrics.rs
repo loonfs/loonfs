@@ -1,27 +1,40 @@
 //! Prometheus rendering for the server's operational metrics route.
 
+use super::AppState;
 use crate::local_cache::FoyerCacheStats;
-use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot};
+use loonfs::engine::DecodedBlockCacheStats;
+use loonfs::metrics::{
+    KeyClass, MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS,
+};
+use loonfs::MetadataCacheStats;
 use loonfs_grep::GrepStepBudgetStats;
-use loonfs_http::HttpMetrics;
+use loonfs_http::RequestLimit;
 use std::fmt::Write as _;
 
-pub(super) fn render(
-    metrics: &HttpMetrics,
-    local_cache: Option<FoyerCacheStats>,
-    grep_steps: Option<GrepStepBudgetStats>,
-    upload_permits: usize,
-    download_permits: usize,
-    in_flight_requests: usize,
-) -> String {
-    let mut rendered = render_snapshot(&metrics.snapshot());
+/// Renders the recorder's snapshot, then the values that a scrape reads from
+/// the server's state, such as the caches' stats and the free transfer slots.
+pub(super) fn render(state: &AppState) -> String {
+    let binding = &state.binding;
+    let mut rendered = render_snapshot(&binding.metrics.snapshot());
+    render_metadata_cache(&mut rendered, &state.runtime.metadata_cache().stats());
+    // A server that doesn't serve grep has no grep block cache. Reporting
+    // zeros would incorrectly suggest that the cache is idle.
+    if let Some(grep_block_cache) = &state.grep_block_cache {
+        render_grep_block_cache(&mut rendered, &grep_block_cache.stats());
+    }
     render_scrape_gauges(
         &mut rendered,
-        local_cache,
-        grep_steps,
-        upload_permits,
-        download_permits,
-        in_flight_requests,
+        state.local_cache.as_ref().map(|cache| cache.foyer_stats()),
+        binding
+            .grep
+            .worker()
+            .map(|worker| worker.step_budget().stats()),
+        binding.upload_permits.available_permits(),
+        binding.download_permits.available_permits(),
+        binding
+            .request_limit
+            .as_ref()
+            .map_or(0, RequestLimit::in_flight),
     );
     rendered
 }
@@ -171,6 +184,246 @@ fn write_gauge(
     let _ = writeln!(rendered, "# HELP {name} {description}");
     let _ = writeln!(rendered, "# TYPE {name} gauge");
     let _ = writeln!(rendered, "{name} {value}");
+}
+
+/// The label pairs of one series of a counter.
+type SeriesLabels<'a> = &'a [(&'static str, &'static str)];
+
+/// The labels of a series that has none.
+const NO_LABELS: SeriesLabels<'static> = &[];
+
+/// Writes a counter with one series for each label set. The written name
+/// ends in the `_total` suffix that Prometheus expects of a counter.
+fn write_counter(
+    rendered: &mut String,
+    name: &str,
+    description: &str,
+    series: &[(SeriesLabels<'_>, usize)],
+) {
+    let _ = writeln!(rendered, "# HELP {name}_total {description}");
+    let _ = writeln!(rendered, "# TYPE {name}_total counter");
+    for (series_labels, value) in series {
+        let _ = writeln!(
+            rendered,
+            "{name}_total{} {value}",
+            labels(series_labels, None)
+        );
+    }
+}
+
+/// Returns the `hit` and `miss` series of a lookup counter.
+fn lookups(hits: usize, misses: usize) -> [(SeriesLabels<'static>, usize); 2] {
+    [
+        (&[("result", RESULT_HIT)], hits),
+        (&[("result", RESULT_MISS)], misses),
+    ]
+}
+
+/// Writes the metadata cache's stats as counters and gauges.
+///
+/// The stats are the one source of these values, and the runtime's recorder
+/// doesn't register them. Listing every field makes this code fail to
+/// compile when `MetadataCacheStats` gains a field, which ensures new
+/// statistics are considered for export.
+fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
+    let MetadataCacheStats {
+        segment_hits,
+        segment_misses,
+        segment_inserts,
+        segment_evictions,
+        segment_filter_skips,
+        segment_filter_false_positives,
+        segment_bytes,
+        head_anchor_hits,
+        head_anchor_misses,
+        wal_tail_hits,
+        wal_tail_misses,
+        wal_tail_inserts,
+        head_state_evictions,
+        head_state_evicted_bytes,
+        head_state_rejections,
+        head_state_rejected_bytes,
+        head_state_bytes,
+        wal_object_hits,
+        wal_object_misses,
+        wal_object_inserts,
+        content_object_hits,
+        content_object_misses,
+        content_object_inserts,
+        object_evictions,
+        object_bytes,
+    } = *stats;
+    write_counter(
+        rendered,
+        "loonfs_namespace_head_cache_gets",
+        "Namespace head cache lookups, by outcome",
+        &lookups(head_anchor_hits, head_anchor_misses),
+    );
+
+    write_counter(
+        rendered,
+        "loonfs_metadata_segment_cache_gets",
+        "Decoded metadata-segment cache lookups, by outcome",
+        &lookups(segment_hits, segment_misses),
+    );
+    for (name, description, value) in [
+        (
+            "loonfs_metadata_segment_cache_inserts",
+            "Blocks inserted into the decoded metadata-segment cache",
+            segment_inserts,
+        ),
+        (
+            "loonfs_metadata_segment_cache_evictions",
+            "Blocks evicted from the decoded metadata-segment cache",
+            segment_evictions,
+        ),
+        (
+            "loonfs_metadata_segment_cache_filter_skips",
+            "Segments skipped after their filter ruled out a lookup",
+            segment_filter_skips,
+        ),
+        (
+            "loonfs_metadata_segment_cache_filter_false_positives",
+            "Filter admissions that matched no metadata rows",
+            segment_filter_false_positives,
+        ),
+    ] {
+        write_counter(rendered, name, description, &[(NO_LABELS, value)]);
+    }
+    write_gauge(
+        rendered,
+        "loonfs_metadata_segment_cache_retained_decoded_bytes",
+        "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
+        segment_bytes,
+    );
+
+    write_counter(
+        rendered,
+        "loonfs_wal_tail_projection_cache_gets",
+        "WAL-tail projection cache lookups, by outcome",
+        &lookups(wal_tail_hits, wal_tail_misses),
+    );
+    write_counter(
+        rendered,
+        "loonfs_wal_tail_projection_cache_inserts",
+        "WAL-tail projections inserted into the cache",
+        &[(NO_LABELS, wal_tail_inserts)],
+    );
+
+    for (name, description, value) in [
+        (
+            "loonfs_head_state_cache_evictions",
+            "Head anchors and WAL-tail projections evicted to stay within the head-state budget",
+            head_state_evictions,
+        ),
+        (
+            "loonfs_head_state_cache_evicted_decoded_bytes",
+            "Bytes charged to evicted head state entries, including keys and per-entry bookkeeping",
+            head_state_evicted_bytes,
+        ),
+        (
+            "loonfs_head_state_cache_rejections",
+            "Head anchors and WAL-tail projections heavier than the whole head-state budget",
+            head_state_rejections,
+        ),
+        (
+            "loonfs_head_state_cache_rejected_decoded_bytes",
+            "Bytes charged to rejected head state entries, including keys and per-entry bookkeeping",
+            head_state_rejected_bytes,
+        ),
+    ] {
+        write_counter(rendered, name, description, &[(NO_LABELS, value)]);
+    }
+    write_gauge(
+        rendered,
+        "loonfs_head_state_cache_retained_decoded_bytes",
+        "Bytes currently charged to head anchors and WAL-tail projections, including keys and per-entry bookkeeping",
+        head_state_bytes,
+    );
+
+    // The `key_class` labels match the ones that the object-store metrics
+    // use for the same objects.
+    let (wal_object, content) = (KeyClass::WalObject.as_str(), KeyClass::Content.as_str());
+    write_counter(
+        rendered,
+        "loonfs_object_cache_gets",
+        "Object cache lookups, by key class and outcome",
+        &[
+            (
+                &[("key_class", wal_object), ("result", RESULT_HIT)],
+                wal_object_hits,
+            ),
+            (
+                &[("key_class", wal_object), ("result", RESULT_MISS)],
+                wal_object_misses,
+            ),
+            (
+                &[("key_class", content), ("result", RESULT_HIT)],
+                content_object_hits,
+            ),
+            (
+                &[("key_class", content), ("result", RESULT_MISS)],
+                content_object_misses,
+            ),
+        ],
+    );
+    write_counter(
+        rendered,
+        "loonfs_object_cache_inserts",
+        "Objects inserted into the object cache, by key class",
+        &[
+            (&[("key_class", wal_object)], wal_object_inserts),
+            (&[("key_class", content)], content_object_inserts),
+        ],
+    );
+    write_counter(
+        rendered,
+        "loonfs_object_cache_evictions",
+        "WAL objects and content objects evicted to stay within the object budget",
+        &[(NO_LABELS, object_evictions)],
+    );
+    write_gauge(
+        rendered,
+        "loonfs_object_cache_retained_decoded_bytes",
+        "Bytes currently charged to WAL objects and content objects, including keys and per-entry bookkeeping",
+        object_bytes,
+    );
+}
+
+/// Writes the grep block cache's stats as counters.
+///
+/// Listing every field makes this code fail to compile when
+/// `DecodedBlockCacheStats` gains a field, which ensures new statistics are
+/// considered for export. The fields bound to `_` aren't exported.
+fn render_grep_block_cache(rendered: &mut String, stats: &DecodedBlockCacheStats) {
+    let DecodedBlockCacheStats {
+        hits,
+        misses,
+        inserts,
+        evictions,
+        evicted_decoded_bytes: _,
+        rejections: _,
+        rejected_decoded_bytes: _,
+        cached_decoded_bytes: _,
+    } = *stats;
+    write_counter(
+        rendered,
+        "loonfs_grep_block_cache_gets",
+        "Decoded grep block cache lookups, by outcome",
+        &lookups(hits, misses),
+    );
+    write_counter(
+        rendered,
+        "loonfs_grep_block_cache_inserts",
+        "Blocks inserted into the decoded grep block cache",
+        &[(NO_LABELS, inserts)],
+    );
+    write_counter(
+        rendered,
+        "loonfs_grep_block_cache_evictions",
+        "Blocks evicted from the decoded grep block cache",
+        &[(NO_LABELS, evictions)],
+    );
 }
 
 /// Reads the Linux-only resident-page count for this process.

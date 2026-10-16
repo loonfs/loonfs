@@ -3880,7 +3880,7 @@ fn root_scan_cache(
     memory: Arc<crate::cache::ReadWorkingMemory>,
 ) -> crate::cache::MetadataSegmentCache {
     crate::cache::MetadataSegmentCache::new(
-        Arc::new(crate::cache::SharedSegmentBlocks::new(0, None)),
+        Arc::new(crate::cache::SharedSegmentBlocks::new(0)),
         crate::cache::ObjectStoreScope::new(0),
         memory,
         None,
