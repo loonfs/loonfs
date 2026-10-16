@@ -189,8 +189,7 @@ pub mod publish {
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
-    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, ResolvedFileContent,
-    RootAccess, Writable,
+    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
 };
 pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,

@@ -6,7 +6,6 @@ mod namespaces;
 mod read_result;
 mod reads;
 mod snapshots;
-mod speculative_read;
 mod uploads;
 mod writes;
 mod writes_by_inode;

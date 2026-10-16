@@ -66,32 +66,6 @@ pub struct RuntimeReadContext {
     pub object_cache: Arc<ObjectCache>,
 }
 
-/// Owned metadata for one buffered read, without retaining its metadata view.
-/// The runtime must validate the current path before using speculative bytes.
-#[derive(Debug, Clone)]
-pub struct ResolvedFileContent {
-    /// Entry from the resolved view; old entries cannot authorize current reads.
-    pub entry: PathEntry,
-    /// Complete immutable identity to compare after current-path validation.
-    pub content_ref: ContentRef,
-    /// Location resolved in the entry's metadata view, retaining any pieces
-    /// its WAL tail holds.
-    pub location: ContentLocation,
-}
-
-impl ResolvedFileContent {
-    /// Limits speculation to nonempty files of at most 64 KiB.
-    pub fn supports_speculative_read(&self) -> bool {
-        (1..=crate::storage::content::MAX_SPECULATIVE_CONTENT_BYTES)
-            .contains(&self.content_ref.size_bytes)
-    }
-
-    /// Requires equality of every content-reference field.
-    pub fn has_same_content(&self, other: &Self) -> bool {
-        self.content_ref == other.content_ref
-    }
-}
-
 fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
     ReadLoadContext::pinned_head(
         &context.head,
@@ -580,58 +554,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.load_read_view(context).await?;
         view.get_file_bytes_by_inode(&self.store, inode_id, max_content_bytes, &access)
             .await
-    }
-
-    /// Resolves the metadata half of a buffered read for runtime speculation.
-    pub async fn resolve_file_content(
-        &self,
-        path: impl AsRef<str>,
-        context: &RuntimeReadContext,
-        max_content_bytes: Option<u64>,
-    ) -> Result<ResolvedFileContent> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        let (entry, content_ref) = view
-            .resolve_file_content(path.as_ref(), None, &access)
-            .await?;
-        crate::path::read::ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        Ok(ResolvedFileContent {
-            entry,
-            location: view.resolve_content_location(&content_ref).await?,
-            content_ref,
-        })
-    }
-
-    /// Verifies at most 64 KiB of speculative content, reading it from
-    /// `object_cache` before the store.
-    /// These bytes alone do not establish current path visibility.
-    pub async fn read_speculative_file_content(
-        &self,
-        target: &ResolvedFileContent,
-        object_cache: &ObjectCache,
-    ) -> Result<Vec<u8>> {
-        crate::storage::content::get_speculative_content_bytes(
-            &self.store,
-            object_cache,
-            &target.location,
-            &target.content_ref,
-        )
-        .await
-    }
-
-    /// Fetches and verifies content after `resolve_file_content` authorizes it,
-    /// reading it from `object_cache` before the store.
-    /// A cached target must first be validated against the current view.
-    pub async fn read_resolved_file_content(
-        &self,
-        target: &ResolvedFileContent,
-        object_cache: &ObjectCache,
-    ) -> Result<Vec<u8>> {
-        Ok(target
-            .location
-            .read_bytes(&self.store, Some(object_cache), &target.content_ref)
-            .await?)
     }
 
     /// Opens a chunked stream for the file resolved from the pinned read context.

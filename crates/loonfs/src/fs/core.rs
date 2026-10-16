@@ -125,6 +125,7 @@ impl RuntimeCore {
     /// Returns the position of the namespace's writer session in this
     /// runtime, or `None` when the runtime has no session for the namespace
     /// or the session has no position.
+    #[cfg(test)]
     pub(crate) fn writer_position(
         &self,
         namespace_id: &NamespaceId,

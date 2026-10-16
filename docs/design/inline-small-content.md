@@ -31,7 +31,7 @@ An inline commit records the same `append_file_revision` delta as an uploaded co
 
 The WAL entry is a [piece](../specs/glossary.md#piece), which contains either the whole value at offset 0 or, for an append, the bytes after a prefix that's already durable. The WAL stores those bytes until a fold covers the record. A copy, a restore, a fresh chain, or a direct download can materialize them before the fold, but a same-chain append leaves them in the WAL.
 
-Using the same reference keeps one identity for the same content over its whole life. Revision rows, the change feed, retained receipts, and equality checks (such as the speculative read's same-content test) never see two different references for the same bytes. Readers resolve a reference through the read view and never build a content key directly, so no reader depends on the content object existing as soon as the commit is visible.
+Using the same reference keeps one identity for the same content over its whole life. Revision rows, the change feed, and retained receipts never see two different references for the same bytes. Readers resolve a reference through the read view and never build a content key directly, so no reader depends on the content object existing as soon as the commit is visible.
 
 The writer draws the content ID at random before publication, as it does for staged content. Every fold reads the ID from the log, so racing folds, a restarted fold, and a batch that's planned again at a later WAL number all write the same key.
 
@@ -114,7 +114,7 @@ Inline content has these costs:
 
 ## Threshold measurements
 
-The defaults come from a lab sweep that compared thresholds of 1, 4, 16, and 64 KiB with the uploaded path. At p50, every size was at least three times faster than the uploaded path. The sweep stops at 64 KiB because small-object PUT latency is flat up to about that size, and because 64 KiB matches the speculative read limit. At 64 KiB, warm writes were three times faster at p50 and twice as fast at p90, and the read after a write made no content request.
+The defaults come from a lab sweep that compared thresholds of 1, 4, 16, and 64 KiB with the uploaded path. At p50, every size was at least three times faster than the uploaded path. The sweep stops at 64 KiB because small-object PUT latency is flat up to about that size. At 64 KiB, warm writes were three times faster at p50 and twice as fast at p90, and the read after a write made no content request.
 
 Cold-stat time and fold time grew with the tail. The tails in this table were made of 4 KiB files, and the cold-stat times are compared with a folded namespace:
 
