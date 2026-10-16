@@ -655,17 +655,19 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     assert_eq!(entry.head_seq, positioned.head_seq);
 }
 
-/// Checks that cold loads of one namespace in a reader runtime run one at a
-/// time, so the newer head stays cached whatever order the loads started in.
+/// Checks that a cold load of one namespace in a reader runtime that
+/// finishes after a concurrent load with a newer head leaves the newer head
+/// cached, and that its read starts from that newer head.
 ///
 /// The first load reads the WAL and waits on its manifest check. The writer
-/// commits, and a second read of the namespace waits for the first load to
-/// finish, then confirms the head from the first load's tip and finds the
-/// commit.
+/// commits, and a second read of the namespace loads the head without
+/// waiting for the first load and finds the commit. The first load then
+/// finishes with the head from before the commit.
 #[tokio::test]
 async fn concurrent_cold_loads_of_one_namespace_leave_the_newer_head_cached() {
     let fixture = fixture("concurrent-cold-loads").await;
     let gate = fixture.recording.inner();
+    fixture.recording.reset();
     gate.block_next();
     let (first, (second, commit)) = futures::join!(fixture.reader.stat("/file.txt"), async {
         gate.wait_until_blocked().await;
@@ -674,22 +676,34 @@ async fn concurrent_cold_loads_of_one_namespace_leave_the_newer_head_cached() {
             .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
             .await
             .expect("a commit while the first load waits");
-        // The second read waits for the first load's refresh, and the
-        // release below lets the first load finish.
-        let (second, ()) = futures::join!(fixture.reader.stat("/next.txt"), async {
-            gate.release();
-        });
+        let second = fixture.reader.stat("/next.txt").await;
+        gate.release();
         (second, commit)
     });
     let first = first.expect("the first cold load");
     let second = second.expect("the second read");
+    // The first load found the commit's WAL object missing before the writer
+    // put it, so the first load's own head is from before the commit.
+    let operations = fixture.recording.take();
+    let is_wal = |key: &str| key.starts_with(&wal_prefix(&fixture.namespace_id));
+    let put_at = operations
+        .iter()
+        .position(
+            |operation| matches!(operation, RecordedOperation::Put { key, .. } if is_wal(key)),
+        )
+        .expect("the commit's WAL put");
     assert!(
-        first.head_seq < commit.committed_seq,
-        "the first load's head {} is from before the commit at {}",
-        first.head_seq,
-        commit.committed_seq
+        operations[..put_at].iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::Get { key, result_bytes: 0, .. } if key == operations[put_at].key()
+        )),
+        "{operations:?}"
     );
     assert_eq!(second.head_seq, commit.committed_seq);
+    assert_eq!(
+        first.head_seq, commit.committed_seq,
+        "the first read starts from the cached head, not from its own load's older head"
+    );
     let entry = fixture
         .reader
         .stat_with_options(
