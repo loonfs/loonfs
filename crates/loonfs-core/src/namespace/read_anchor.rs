@@ -4,7 +4,10 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::{load_current_manifest_with_hint, LoadedHint, LoadedManifest};
+use crate::namespace::control::{
+    load_current_manifest_with_hint, load_manifest_by_no, CurrentManifest, LoadedHint,
+    LoadedManifest,
+};
 use crate::namespace::state::NamespaceReadState;
 use crate::object_cache::ObjectCache;
 use crate::wal::{
@@ -159,4 +162,31 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
             kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
         })?
         .is_some())
+}
+
+/// Returns the manifests above `manifest_no`, oldest first, or an empty
+/// list when it has no successor.
+///
+/// Manifest numbers are consecutive, so the walk loads each successor until
+/// one is missing. A tombstone is the last manifest of its namespace, so the
+/// walk ends there.
+pub async fn manifests_above<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+) -> Result<Vec<CurrentManifest>, ControlObjectLoadError> {
+    let mut above = Vec::new();
+    let mut manifest_no = manifest_no;
+    while let Ok(next) = manifest_no.successor() {
+        let Some(loaded) = load_manifest_by_no(store, namespace_id, next).await? else {
+            break;
+        };
+        let deleted = loaded.state.envelope.payload().status.is_deleted();
+        above.push(loaded.state);
+        if deleted {
+            break;
+        }
+        manifest_no = next;
+    }
+    Ok(above)
 }
