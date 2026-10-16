@@ -7,6 +7,7 @@ use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::keys::{content_blob, wal_object};
 use loonfs_objectstore::PutMode;
+use loonfs_types::options::StatOptions;
 use loonfs_types::{DestinationPrecondition, RevisionNo, WalNo};
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -81,8 +82,6 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
             "path",
             "revision",
             "inode",
-            "speculative",
-            "resolved",
             "stream",
             "resumed",
             "inode_stream",
@@ -109,24 +108,6 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     .read_file_revision_by_inode(inode_id, RevisionNo(1), &context, None)
                     .await
                     .expect("inode read"),
-                "speculative" | "resolved" => {
-                    let target = engine
-                        .resolve_file_content(&path, &context, None)
-                        .await
-                        .expect("resolve");
-                    assert!(target.location.is_resident());
-                    if method == "speculative" {
-                        engine
-                            .read_speculative_file_content(&target, &context.object_cache)
-                            .await
-                            .expect("speculative read")
-                    } else {
-                        engine
-                            .read_resolved_file_content(&target, &context.object_cache)
-                            .await
-                            .expect("resolved read")
-                    }
-                }
                 "stream" | "resumed" | "inode_stream" => {
                     let start_offset = if method == "resumed" {
                         value.bytes().len().min(3)
@@ -491,10 +472,9 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         .await
         .expect("object download");
     let inode_id = engine
-        .resolve_file_content("/object", &context, None)
+        .resolve_path("/object", StatOptions::default(), &context)
         .await
         .expect("object entry")
-        .entry
         .inode_id;
     let inode_target = engine
         .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), 0, &context)
@@ -642,11 +622,11 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
         );
         for (index, value) in values.iter().enumerate() {
             let path = format!("/fold-{index}");
-            let target = engine
-                .resolve_file_content(&path, &context, None)
+            let location = engine
+                .resolve_content_location(value.content_ref(), &context)
                 .await
-                .expect("target");
-            assert!(!target.location.has_pieces());
+                .expect("location");
+            assert!(!location.has_pieces());
             store.reset();
             assert_eq!(
                 engine
@@ -660,7 +640,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
                 Vec::new()
             } else {
                 vec![(
-                    target.location.object_key().to_owned(),
+                    location.object_key().to_owned(),
                     Some((0, value.bytes().len() as u64)),
                 )]
             };

@@ -1054,7 +1054,20 @@ impl<M: crate::Mode> Namespace<M> {
         check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        self.get_current_file_bytes(absolute_path, options.consistency)
+        self.core
+            .read(
+                &self.namespace_id,
+                options.consistency,
+                |engine, context| async move {
+                    Ok(engine
+                        .read_file(
+                            absolute_path,
+                            &context,
+                            Some(self.core.inner.config.max_read_content_bytes),
+                        )
+                        .await?)
+                },
+            )
             .await
     }
 

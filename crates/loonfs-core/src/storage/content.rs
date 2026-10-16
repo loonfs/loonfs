@@ -451,23 +451,6 @@ impl<S> std::fmt::Debug for FileContentStream<S> {
     }
 }
 
-pub(crate) const MAX_SPECULATIVE_CONTENT_BYTES: u64 = 64 * 1024;
-
-pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_cache: &ObjectCache,
-    location: &ContentLocation,
-    content_ref: &ContentRef,
-) -> Result<Vec<u8>> {
-    crate::path::read::ensure_within_read_limit(
-        content_ref.size_bytes,
-        Some(MAX_SPECULATIVE_CONTENT_BYTES),
-    )?;
-    Ok(location
-        .read_bytes(store, Some(object_cache), content_ref)
-        .await?)
-}
-
 pub(crate) fn content_object_key_for_ref(
     content_ref: &ContentRef,
 ) -> std::result::Result<String, DurableContentValidationError> {
