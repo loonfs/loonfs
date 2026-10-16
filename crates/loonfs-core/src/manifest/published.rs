@@ -1,13 +1,16 @@
-//! The manifest that a maintenance call published, which a writer session's
-//! commit engine moves its position to.
+//! A manifest that a writer session's commit engine moves its position to:
+//! one that a maintenance call on this runtime published, or one that a read
+//! found above the position under the session's writer epoch.
 
+use crate::namespace::control::CurrentManifest;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::WalNo;
+use loonfs_types::{ChangeSeq, WalNo};
 
-/// A manifest that this runtime published.
+/// A manifest above a writer session's position, under the session's writer
+/// epoch.
 ///
-/// A writer session's commit engine moves its position to the manifest
-/// instead of reloading the namespace (see
+/// The session's commit engine moves its position to the manifest instead
+/// of reloading the namespace (see
 /// [`NamespaceCommitEngine::record_manifest_published`](crate::publish::NamespaceCommitEngine::record_manifest_published)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishedManifest {
@@ -24,6 +27,21 @@ pub enum PublishedManifest {
 }
 
 impl PublishedManifest {
+    /// Returns `manifest` as a position whose basis is at `basis_head_seq`
+    /// moves onto it: a manifest at that head, or a fold through the
+    /// manifest's folded WAL number.
+    pub fn above(manifest: &CurrentManifest, basis_head_seq: ChangeSeq) -> Self {
+        let reference = manifest.manifest();
+        if reference.head_seq == basis_head_seq {
+            Self::SameHead(reference)
+        } else {
+            Self::Fold {
+                manifest: reference,
+                folded_wal_no: manifest.folded_wal_no(),
+            }
+        }
+    }
+
     /// Returns the reference to the published manifest.
     pub fn manifest(&self) -> &ManifestRef {
         match self {
