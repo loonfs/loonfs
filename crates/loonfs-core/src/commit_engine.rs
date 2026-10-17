@@ -781,6 +781,21 @@ impl NamespaceCommitEngine {
         }
     }
 
+    /// Replaces the tail under `replaced`, the key of a position before it
+    /// moved onto a new manifest, with the moved position's tail, so the
+    /// cache doesn't keep charging for the old tail until recency evicts it.
+    fn move_tail(
+        &self,
+        replaced: &WalTailProjectionCacheKey,
+        position: &PublishTailPosition,
+        tail: Arc<ProjectedWalTail>,
+    ) {
+        if let Some(head_state) = &self.head_state {
+            head_state.invalidate_tail(replaced);
+            head_state.insert_tail(position.tail_key(&self.namespace_id), tail);
+        }
+    }
+
     /// Takes the engine's position and the tail it names. A tail the cache no
     /// longer holds drops the position, so the unit reads the tail from the
     /// store.
@@ -855,15 +870,17 @@ impl NamespaceCommitEngine {
         let published_during_fold = self.published_during_fold.take();
         match folded {
             Ok(folded) => {
+                let namespace_id = &self.namespace_id;
                 let moved = self.publish_tail.as_mut().and_then(|position| {
                     let new_basis = position.basis() != &folded.basis;
+                    let replaced = position.tail_key(namespace_id);
                     position
                         .reanchor_after_fold(folded)
-                        .map(|since| (since, new_basis))
+                        .map(|since| (since, new_basis, replaced))
                 });
                 match (moved, &self.publish_tail) {
-                    (Some((since, new_basis)), Some(position)) => {
-                        self.insert_tail(position, since);
+                    (Some((since, new_basis, replaced)), Some(position)) => {
+                        self.move_tail(&replaced, position, since);
                         // The fold published a new basis, or found it current,
                         // after the fold began, so no manifest followed it
                         // then. The position's own basis has no such check.
@@ -922,6 +939,7 @@ impl NamespaceCommitEngine {
         let Some(mut projection) = self.take_cached_projection() else {
             return;
         };
+        let replaced = projection.position.tail_key(&self.namespace_id);
         let outcome = projection.reanchor_after_publish(&published);
         let PublishTailProjection {
             position,
@@ -929,7 +947,7 @@ impl NamespaceCommitEngine {
         } = projection;
         match outcome {
             ReanchorOutcome::Kept => {}
-            ReanchorOutcome::Moved => self.insert_tail(&position, tail_state),
+            ReanchorOutcome::Moved => self.move_tail(&replaced, &position, tail_state),
             ReanchorOutcome::Superseded => {
                 self.invalidate_projection();
                 return;

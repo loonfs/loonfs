@@ -1091,8 +1091,18 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &store, &writer, "gamma").await;
+    let replaced = engine.read_position().expect("a position").tail_key;
 
     engine.record_manifest_published(published.clone());
+    assert!(
+        engine
+            .head_state
+            .as_ref()
+            .expect("head-state cache")
+            .get_tail(&replaced)
+            .is_none(),
+        "the move removes the tail under the position's key from before the move"
+    );
     let moved = engine.wal_fold_input().expect("the position moved");
     assert_eq!(moved.basis.manifest(), published.manifest());
     assert_eq!(moved.wal_tail_objects, 1);

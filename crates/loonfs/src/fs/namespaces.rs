@@ -67,6 +67,7 @@ impl LoonFs<Writable> {
         self.mode
             .publisher
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unknown)
+            .await
     }
 
     /// Forks `source_namespace_id` into `new_namespace_id` at its current head.
@@ -124,16 +125,16 @@ impl LoonFs<Writable> {
         .map_err(Error::from);
         // The fold of the source's tail that a fork of the current head runs
         // isn't reported, so the source's publisher drops its position.
-        let result =
-            self.mode
-                .publisher
-                .finish_namespace_mutation(source_namespace_id, result, |_| {
-                    NamespaceChange::Unknown
-                });
+        let result = self
+            .mode
+            .publisher
+            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
+            .await;
         if result.is_ok() {
             self.mode
                 .publisher
-                .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown);
+                .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown)
+                .await;
         }
         result
     }

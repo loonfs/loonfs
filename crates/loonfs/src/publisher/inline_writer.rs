@@ -1054,7 +1054,8 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
         writer
             .mode
             .publisher
-            .invalidate_namespace(&namespace, NamespaceChange::Unknown);
+            .invalidate_namespace(&namespace, NamespaceChange::Unknown)
+            .await;
         namespace_writer
             .put_file_with_options(
                 &format!("/file-{index}"),
@@ -1413,7 +1414,8 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         writer
             .mode
             .publisher
-            .invalidate_namespace(&namespace, NamespaceChange::Unknown);
+            .invalidate_namespace(&namespace, NamespaceChange::Unknown)
+            .await;
         namespace_writer
             .put_file_with_options(
                 "/during",

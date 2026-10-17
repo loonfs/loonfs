@@ -14,7 +14,7 @@ use loonfs::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -110,6 +110,25 @@ thread_local! {
         .enable_all()
         .build()
         .expect("test runtime");
+}
+
+/// Waits until `recording` has recorded an operation that `matches`, and
+/// fails the test if none arrives within ten seconds.
+pub(crate) async fn wait_for_operation<S>(
+    recording: &RecordingStore<S>,
+    matches: impl Fn(&RecordedOperation) -> bool,
+) {
+    let sent = loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), async {
+        while !recording.snapshot().iter().any(&matches) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        sent.is_ok(),
+        "the operation isn't sent: {:?}",
+        recording.snapshot()
+    );
 }
 
 pub(crate) fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {

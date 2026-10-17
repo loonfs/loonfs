@@ -82,6 +82,7 @@ mod pin;
 mod protocol;
 mod read_working_memory;
 mod recency;
+mod shared_check;
 mod storage;
 mod wal;
 
@@ -125,6 +126,7 @@ pub mod cache {
     pub use crate::object_cache::{ObjectCache, ObjectCacheStats, SharedObjects};
     pub use crate::read_working_memory::{ReadWorkingMemory, ReadWorkingMemoryObserver};
     pub use crate::recency::Recency;
+    pub use crate::shared_check::SharedCheck;
     pub use crate::wal::ProjectedWalTail;
 
     pub use crate::manifest::metadata_compaction_due;

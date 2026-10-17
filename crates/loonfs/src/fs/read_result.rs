@@ -82,9 +82,9 @@ impl RuntimeCore {
             return result;
         }
         // The position becomes the cached head when it's dropped, so the head
-        // is marked unconfirmed after the drop, and then loaded from the
-        // store, which finds the manifest that replaced the read's basis.
-        self.drop_writer_position(namespace_id);
+        // is dropped after the position, and then loaded from the store,
+        // which finds the manifest that replaced the read's basis.
+        self.drop_writer_position(namespace_id).await;
         self.invalidate_namespace_read_cache(namespace_id);
         self.reload_namespace_head(namespace_id).await?;
         let (engine, context) = self

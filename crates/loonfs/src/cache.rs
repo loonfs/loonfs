@@ -1,10 +1,11 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the namespace's cached head. Each
-//! strong read of a cached head sends its own WAL probe to find new commits,
-//! and the interval check of the cached head finds a newer manifest. Each
-//! strong read of the position waits for the session's check for a newer
-//! manifest. An eventual read skips these while its head was confirmed less
-//! than its maximum staleness ago.
+//! strong read of a cached head waits for a refresh, whose WAL probe finds
+//! new commits and whose interval check finds a newer manifest. Each strong
+//! read of the position waits for the session's check for a newer manifest.
+//! The reads that need a refresh or a check share one. An eventual read
+//! skips these while its head was confirmed less than its maximum staleness
+//! ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -72,38 +73,53 @@ impl RuntimeCore {
             });
     }
 
-    /// Returns the namespace's head, confirmed or loaded for this read.
+    /// Returns the namespace's head, confirmed or loaded for a read with
+    /// `consistency`.
     ///
-    /// The read sends its own requests to confirm the head, even while
-    /// another read of the namespace is confirming it. The read installs its
-    /// result through
+    /// One refresh of the namespace's head runs at a time in this runtime,
+    /// and the reads that need one share it (see
+    /// [`SharedCheck`](loonfs_core::cache::SharedCheck)). A read waits for
+    /// the refresh in flight, and then an eventual read takes the head that
+    /// the refresh confirmed if it's within the read's maximum staleness.
+    /// Otherwise the read shares the next refresh, or runs it. So a wave of
+    /// concurrent eventual reads costs at most one refresh, and a wave of
+    /// strong reads at most two.
+    ///
+    /// The refresh installs its result through
     /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
     /// which keeps the newer of the result and the current head, so the
-    /// cached head doesn't move backwards whatever order concurrent reads
-    /// finish in. The read starts from whichever head that returns.
+    /// cached head doesn't move backwards whatever order a refresh and other
+    /// loads finish in. The reads start from whichever head that returns.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
+        consistency: Consistency,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        // Take the record before the refresh reads the timer, so the record
-        // keeps any change marked while the refresh runs, and the refresh's
-        // confirmation, which predates that change, doesn't confirm the head.
         let record = self.inner.head_state.record(namespace_id);
-        let cached = self.inner.head_state.get_head(namespace_id);
-        let result = self
-            .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
-            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
-            .await;
-        match result {
-            Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
-            Err(error) => {
-                self.inner.head_state.unconfirm_head(
-                    namespace_id,
-                    Observation::now(Arc::clone(&self.inner.timer)),
-                );
-                Err(error)
-            }
-        }
+        record
+            .refresh()
+            .run(
+                || self.eventual_head(namespace_id, consistency).map(Ok),
+                || async {
+                    let started = record.generation();
+                    let cached = self.inner.head_state.get_head(namespace_id);
+                    let result = self
+                        .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
+                        .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
+                        .await;
+                    match result {
+                        Ok(candidate) => Ok(self
+                            .inner
+                            .head_state
+                            .replace_head(&record, started, candidate)),
+                        Err(error) => {
+                            self.inner.head_state.invalidate_head(namespace_id);
+                            Err(error)
+                        }
+                    }
+                },
+            )
+            .await
     }
 
     /// Loads the namespace's head from the store, without starting from the
@@ -118,8 +134,9 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         let record = self.inner.head_state.record(namespace_id);
+        let started = record.generation();
         let loaded = self.refresh_namespace_head(namespace_id, None).await?;
-        Ok(self.inner.head_state.replace_head(&record, loaded))
+        Ok(self.inner.head_state.replace_head(&record, started, loaded))
     }
 
     async fn refresh_namespace_head(
@@ -134,16 +151,10 @@ impl RuntimeCore {
             // within the bound. An answer that arrives later may miss one, however
             // recently its probe was sent, so the new check replaces the previous one
             // only after both answers are in.
-            if let Some(checked) = head
-                .basis_checked
-                .clone()
-                .filter(Observation::is_within_revalidation_bound)
-            {
-                let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
-                // An unconfirmed head checks for a successor whatever the
-                // interval, because the runtime learned of a change since the
-                // last check.
-                let check_due = head.head_confirmed.is_none() || checked.age_ms() >= interval_ms;
+            let checked = head.basis_checked.clone();
+            if checked.is_within_revalidation_bound() {
+                let check_due =
+                    checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
@@ -161,9 +172,9 @@ impl RuntimeCore {
                     if checked.is_within_revalidation_bound()
                         && probed.map_err(MetadataProjectionLoadError::LoadHead)?
                     {
-                        head.head_confirmed = Some(observed.clone());
+                        head.head_confirmed = observed.clone();
                         if check_due {
-                            head.basis_checked = Some(observed);
+                            head.basis_checked = observed;
                         }
                         head.head = context.head;
                         return Ok(head);
@@ -233,7 +244,8 @@ impl RuntimeCore {
                 let (head, source) = match self.eventual_head(namespace_id, consistency) {
                     Some(head) => (head, ReadHeadSource::Eventual),
                     None => (
-                        self.load_namespace_head_cached(namespace_id).await?,
+                        self.load_namespace_head_cached(namespace_id, consistency)
+                            .await?,
                         ReadHeadSource::Anchor,
                     ),
                 };
@@ -264,14 +276,8 @@ impl RuntimeCore {
     ) -> Option<Arc<CachedHead>> {
         let max_staleness_ms = self.max_staleness_ms(consistency)?;
         let cached = self.inner.head_state.get_head(namespace_id)?;
-        let confirmed = cached
-            .head_confirmed
-            .as_ref()
-            .is_some_and(|confirmed| confirmed.age_ms() < max_staleness_ms)
-            && cached
-                .basis_checked
-                .as_ref()
-                .is_some_and(Observation::is_within_revalidation_bound);
+        let confirmed = cached.head_confirmed.age_ms() < max_staleness_ms
+            && cached.basis_checked.is_within_revalidation_bound();
         if !confirmed {
             return None;
         }
@@ -399,11 +405,10 @@ impl RuntimeCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
-    /// Marks the namespace's cached head unconfirmed, after this runtime
-    /// learns of a change to the namespace, so the next strong read confirms
-    /// the head from its known tip, and an eventual read doesn't read at it
-    /// until then (see
-    /// [`HeadStateCache::unconfirm_head`](loonfs_core::cache::HeadStateCache::unconfirm_head)).
+    /// Drops the namespace's cached head, after this runtime learns of a
+    /// change whose effect on the head it can't identify, so the next read
+    /// loads the namespace by discovery, whatever its consistency (see
+    /// [`HeadStateCache::invalidate_head`](loonfs_core::cache::HeadStateCache::invalidate_head)).
     /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
     /// instead, which also tells the namespace's publisher what changed.
     ///
@@ -418,10 +423,7 @@ impl RuntimeCore {
     /// recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
-        self.inner.head_state.unconfirm_head(
-            namespace_id,
-            Observation::now(Arc::clone(&self.inner.timer)),
-        );
+        self.inner.head_state.invalidate_head(namespace_id);
     }
 }
 
@@ -431,7 +433,7 @@ fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead
     CachedHead {
         basis: anchor.basis(),
         head: anchor.read_state,
-        basis_checked: Some(observed.clone()),
-        head_confirmed: Some(observed),
+        basis_checked: observed.clone(),
+        head_confirmed: observed,
     }
 }

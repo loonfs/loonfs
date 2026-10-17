@@ -630,8 +630,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 /// older than the reads from that position. The test parks that load's
 /// manifest check until the commit returns. After the takeover, the first
 /// eventual read past its maximum staleness runs the session's check, which
-/// finds the new writer's claim, so the position becomes the namespace's
-/// cached head, marked unconfirmed, and the read loads the namespace again.
+/// finds the new writer's claim, so the runtime drops the position and the
+/// cached head it became, and the read loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
@@ -747,67 +747,74 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     assert_eq!(entry.head_seq, positioned.head_seq);
 }
 
-/// Checks that a cold load of one namespace in a reader runtime that
-/// finishes after a concurrent load with a newer head leaves the newer head
-/// cached, and that its read starts from that newer head.
+/// Checks that the strong reads of one namespace in a reader runtime share
+/// the runtime's refreshes of the namespace's head, and that the refresh
+/// confirms the head for the eventual reads after it.
 ///
-/// The first load reads the WAL and waits on its manifest check. The writer
-/// commits, and a second read of the namespace loads the head without
-/// waiting for the first load and finds the commit. The first load then
-/// finishes with the head from before the commit.
+/// A strong read starts a refresh, whose successor probe the store parks.
+/// Strong reads that arrive during that refresh wait for it, because it
+/// might have sent its probes before they started, and then share the next
+/// one. So the wave sends two WAL probes, one for each refresh, and the
+/// successor probe of the first, because the second refresh is within the
+/// manifest check interval of the first.
 #[tokio::test]
-async fn concurrent_cold_loads_of_one_namespace_leave_the_newer_head_cached() {
-    let fixture = fixture("concurrent-cold-loads").await;
+async fn a_wave_of_strong_reads_shares_at_most_two_refreshes() {
+    let fixture = fixture("strong-wave").await;
+    fixture
+        .reader
+        .stat("/file.txt")
+        .await
+        .expect("cache a view");
+    fixture.clock.advance_ms(INTERVAL_MS);
     let gate = fixture.recording.inner();
-    fixture.recording.reset();
     gate.block_next();
-    let (first, (second, commit)) = futures::join!(fixture.reader.stat("/file.txt"), async {
-        gate.wait_until_blocked().await;
-        let commit = fixture
-            .namespace
-            .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
-            .await
-            .expect("a commit while the first load waits");
-        let second = fixture.reader.stat("/next.txt").await;
-        gate.release();
-        (second, commit)
-    });
-    let first = first.expect("the first cold load");
-    let second = second.expect("the second read");
-    // The first load found the commit's WAL object missing before the writer
-    // put it, so the first load's own head is from before the commit.
+    fixture.recording.reset();
+    let options = strong();
+    let (first, ()) = futures::join!(
+        fixture.reader.stat_with_options("/file.txt", &options),
+        async {
+            gate.wait_until_blocked().await;
+            let mut wave = std::pin::pin!(futures::future::join_all(
+                (0..4).map(|_| fixture.reader.stat_with_options("/file.txt", &options))
+            ));
+            assert!(
+                futures::poll!(wave.as_mut()).is_pending(),
+                "the reads wait for the parked refresh"
+            );
+            gate.release();
+            for entry in wave.await {
+                entry.expect("a read during the refresh");
+            }
+        }
+    );
+    first.expect("the read that started the first refresh");
     let operations = fixture.recording.take();
     let is_wal = |key: &str| key.starts_with(&wal_prefix(&fixture.namespace_id));
-    let put_at = operations
-        .iter()
-        .position(
-            |operation| matches!(operation, RecordedOperation::Put { key, .. } if is_wal(key)),
-        )
-        .expect("the commit's WAL put");
-    assert!(
-        operations[..put_at].iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::Get { key, result_bytes: 0, .. } if key == operations[put_at].key()
-        )),
-        "{operations:?}"
-    );
-    assert_eq!(second.head_seq, commit.committed_seq);
+    let probes = |manifests: bool| {
+        operations
+            .iter()
+            .filter(|operation| match operation {
+                RecordedOperation::Head { key } => manifests && !is_wal(key),
+                RecordedOperation::Get { key, .. } => !manifests && is_wal(key),
+                _ => false,
+            })
+            .count()
+    };
     assert_eq!(
-        first.head_seq, commit.committed_seq,
-        "the first read starts from the cached head, not from its own load's older head"
+        (probes(true), probes(false)),
+        (1, 2),
+        "successor probes and WAL probes: {operations:?}"
     );
-    let entry = fixture
+    fixture
         .reader
-        .stat_with_options(
-            "/next.txt",
-            &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
-                ..StatOptions::default()
-            },
-        )
+        .stat("/file.txt")
         .await
-        .expect("an eventual read after both loads");
-    assert_eq!(entry.head_seq, commit.committed_seq);
+        .expect("an eventual read");
+    assert_eq!(
+        fixture.recording.take(),
+        [],
+        "the refresh confirmed the head"
+    );
     fixture.shutdown().await;
 }
 

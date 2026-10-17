@@ -1,7 +1,7 @@
 //! Reads in a runtime with the namespace's writer session, which start from
 //! the session's position instead of the read cache.
 
-use crate::common::is_manifest_head;
+use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -9,7 +9,7 @@ use loonfs::{
     SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
-use loonfs_objectstore::keys::{hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -65,6 +65,8 @@ pub(crate) enum Parked {
     WalPuts,
     /// HEAD requests for the namespace's manifests.
     ManifestChecks,
+    /// GET requests for the namespace's WAL objects.
+    WalReads,
 }
 
 /// Creates a writer runtime with a one-second maximum staleness, a namespace
@@ -79,6 +81,10 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
         Parked::ManifestChecks => (
             KeyPredicate::manifest(&namespace_id),
             OperationSelector::Head,
+        ),
+        Parked::WalReads => (
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
+            OperationSelector::Get,
         ),
     };
     let recording = Arc::new(RecordingStore::new(
@@ -508,13 +514,13 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
 }
 
 /// Checks that a manifest check that finds a fold this runtime published,
-/// while a publish keeps the engine locked so the position can't move yet,
-/// loads the fold's manifest, finds nothing after it, and keeps the
-/// position without reloading, and that once the publish releases the
-/// engine, reads start from the fold's manifest.
+/// while a publish has the engine locked, loads the fold's manifest, finds
+/// nothing after it, waits for the publish to release the engine, and then
+/// moves the position onto the fold's manifest without reloading, so reads
+/// start from the fold's manifest.
 ///
 /// The fold runs through maintenance while the publish waits for its WAL
-/// put, so the fold's move of the position waits for the engine.
+/// put, so the fold's own move of the position waits for the engine too.
 #[tokio::test]
 async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let fixture = fixture("own-fold-check", Parked::WalPuts).await;
@@ -523,65 +529,83 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let manifest = |manifest_no| RecordedOperation::Head {
         key: metadata_manifest_object(&fixture.namespace_id, &manifest_no),
     };
+    let before = loonfs_core::control::load_namespace_current_manifest(
+        &(fixture.recording.clone() as SharedObjectStore),
+        &fixture.namespace_id,
+    )
+    .await
+    .expect("current manifest")
+    .state
+    .manifest()
+    .manifest_no;
+    let fold_manifest = before.successor().expect("next manifest number");
+    let after_fold = fold_manifest.successor().expect("next manifest number");
     let gate = fixture.recording.inner();
     gate.block_next();
+    fixture.recording.reset();
     let (during, folded) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
-        let folded = maintenance
-            .fold_wal(&fixture.namespace_id)
-            .await
-            .expect("fold");
-        assert_eq!(folded.outcome, FoldWalOutcome::Published);
-        fixture.clock.advance_ms(MAX_STALENESS_MS);
-        let (positions, anchors) = fixture.head_sources();
-        fixture.recording.reset();
-        bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
-            .await
-            .expect("the read doesn't wait for the publish")
-            .expect("stat");
-        let after_fold = folded
-            .manifest_no
-            .successor()
-            .expect("next manifest number");
-        let operations = fixture.recording.take();
-        assert!(
-            operations.len() == 3
-                && operations[0] == manifest(folded.manifest_no)
-                && is_manifest_get(&operations[1], &fixture.namespace_id, folded.manifest_no)
-                && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold),
-            "one HEAD finds the fold's manifest, the read loads it, finds nothing after it, \
-             and reloads nothing: {operations:?}"
-        );
-        assert_eq!(fixture.head_sources(), (positions + 1, anchors));
-        gate.release();
+        let (folded, ()) = futures::join!(maintenance.fold_wal(&fixture.namespace_id), async {
+            // The fold's last request raises the hint, and then its move of
+            // the position waits for the publish's engine.
+            wait_for_operation(&fixture.recording, |operation| {
+                operation.key() == hint(&fixture.namespace_id)
+                    && matches!(operation, RecordedOperation::Put { .. })
+            })
+            .await;
+            fixture.clock.advance_ms(MAX_STALENESS_MS);
+            let (positions, anchors) = fixture.head_sources();
+            fixture.recording.reset();
+            let (entry, ()) = futures::join!(fixture.reader.stat("/small.txt"), async {
+                // The walk ends at the missing manifest after the fold's, and
+                // the check's move waits for the publish's engine.
+                wait_for_operation(&fixture.recording, |operation| {
+                    is_manifest_get(operation, &fixture.namespace_id, after_fold)
+                })
+                .await;
+                gate.release();
+            });
+            entry.expect("stat");
+            let operations = fixture.recording.take();
+            let checked: Vec<_> = operations
+                .iter()
+                .filter(|operation| {
+                    operation
+                        .key()
+                        .starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
+                })
+                .collect();
+            assert!(
+                checked.len() >= 3
+                    && *checked[0] == manifest(fold_manifest)
+                    && is_manifest_get(checked[1], &fixture.namespace_id, fold_manifest)
+                    && is_manifest_get(checked[2], &fixture.namespace_id, after_fold)
+                    && checked[3..].iter().all(|operation| {
+                        is_manifest_get(operation, &fixture.namespace_id, fold_manifest)
+                    }),
+                "one HEAD finds the fold's manifest, the check loads it and finds nothing \
+                 after it, and the read starts from the fold's manifest: {operations:?}"
+            );
+            assert_eq!(
+                fixture.head_sources(),
+                (positions + 1, anchors),
+                "the read starts from the position, without reloading"
+            );
+        });
         folded
     });
+    let folded = folded.expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
     let during = during.expect("the publish succeeds");
     assert_eq!(fixture.tail_replays(), replays);
 
     fixture.recording.reset();
     let entry = fixture.reader.stat("/during.txt").await.expect("stat");
     assert_eq!(entry.head_seq, during.committed_seq);
-    // The read checks the manifest after the fold's, and it reads the fold's
-    // manifest the first time it starts from that manifest.
-    let next = manifest(
-        folded
-            .manifest_no
-            .successor()
-            .expect("next manifest number"),
-    );
-    let fold_manifest = metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no);
-    let operations = fixture.recording.take();
-    assert!(
-        operations.contains(&next)
-            && operations.iter().all(|operation| {
-                *operation == next
-                    || matches!(
-                        operation,
-                        RecordedOperation::Get { key, .. } if *key == fold_manifest
-                    )
-            }),
-        "the read starts from the fold's manifest: {operations:?}"
+    assert_eq!(
+        fixture.recording.take(),
+        [],
+        "the check confirmed the position on the fold's manifest"
     );
     fixture
         .put("/after.txt")
@@ -614,6 +638,104 @@ async fn a_fenced_sessions_next_read_reads_the_store() {
     let entry = fixture.reader.stat("/peer.txt").await.expect("stat");
     assert_eq!(entry.head_seq, peer_commit.committed_seq);
     assert!(!fixture.recording.take().is_empty());
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Checks that a change of unknown effect drops the runtime's view of the
+/// namespace, and that the next read loads the namespace by discovery, even
+/// an eventual read within its maximum staleness.
+///
+/// A fork of the current head folds the source's WAL tail without reporting
+/// the fold, so the runtime drops the source's position and the cached head
+/// that the position becomes.
+#[tokio::test]
+async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() {
+    let fixture = fixture("unknown-change", Parked::WalPuts).await;
+    let commit = fixture.put("/next.txt").await.expect("commit");
+    fixture
+        .writer
+        .fork_namespace(
+            &fixture.namespace_id,
+            &namespace_id("unknown-change-fork"),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("fork");
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    let entry = fixture
+        .reader
+        .stat("/next.txt")
+        .await
+        .expect("an eventual read after the fork");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if *key == hint(&fixture.namespace_id)
+        ),
+        "the read loads the namespace from its hint: {operations:?}"
+    );
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Checks that a refresh that started before a change of unknown effect,
+/// and finishes after the runtime dropped its view for that change, installs
+/// nothing, so the next read loads the namespace by discovery.
+///
+/// A read past the revalidation bound drops the position and loads the
+/// namespace into the read cache. A strong read's refresh of that view then
+/// waits at its WAL probe while a fork, whose fold of the source's tail
+/// isn't reported, drops the view. The refresh's head is from before the
+/// fork, so an eventual read after it would otherwise start from that head
+/// without a request.
+#[tokio::test]
+async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
+    let fixture = fixture("spanning-refresh", Parked::WalReads).await;
+    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    fixture
+        .reader
+        .stat("/small.txt")
+        .await
+        .expect("load the view");
+    let gate = fixture.recording.inner();
+    gate.block_next();
+    let options = strong();
+    let (refreshed, ()) = futures::join!(
+        fixture.reader.stat_with_options("/small.txt", &options),
+        async {
+            gate.wait_until_blocked().await;
+            fixture
+                .writer
+                .fork_namespace(
+                    &fixture.namespace_id,
+                    &namespace_id("spanning-refresh-fork"),
+                    &loonfs_test_support::test_actor(),
+                )
+                .await
+                .expect("fork");
+            gate.release();
+        }
+    );
+    refreshed.expect("the read whose refresh spans the fork");
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    fixture
+        .reader
+        .stat("/small.txt")
+        .await
+        .expect("an eventual read");
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if *key == hint(&fixture.namespace_id)
+        ),
+        "the read loads the namespace from its hint: {operations:?}"
+    );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
 
@@ -651,11 +773,12 @@ async fn a_position_past_the_revalidation_bound_is_not_read_from() {
 /// session's checks, and that the check confirms the position for the
 /// eventual reads after it.
 ///
-/// A strong read starts a check, which the store parks. Strong reads and an
-/// eventual read past its maximum staleness that arrive during that check
-/// wait for it, because it started before they did, and then share the next
-/// one. So the wave sends two HEADs, and an eventual read after it sends
-/// nothing.
+/// A strong read starts a check, which the store parks. Strong reads that
+/// arrive during that check wait for it, because it started before they
+/// did, and then share the next one. An eventual read past its maximum
+/// staleness that arrives during the check waits for it too, and takes the
+/// position that it confirmed. So the wave sends two HEADs, and an eventual
+/// read after it sends nothing.
 #[tokio::test]
 async fn a_wave_of_reads_shares_at_most_two_checks() {
     let fixture = fixture("shared-check", Parked::ManifestChecks).await;

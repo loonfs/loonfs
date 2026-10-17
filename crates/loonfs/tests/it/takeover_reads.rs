@@ -9,7 +9,10 @@ use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{BlockingStore, MemoryStore, OperationContext, OperationKind};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MemoryStore, OperationContext, OperationKind, RecordedOperation,
+    RecordingStore,
+};
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
@@ -59,6 +62,8 @@ struct Takeover {
     namespace_id: NamespaceId,
     store: SharedObjectStore,
     gate: Gate,
+    /// Records the requests of A's runtime.
+    recording: Arc<RecordingStore<Gate>>,
     writer: LoonFs<Writable>,
     namespace: Namespace<Writable>,
     reader: Namespace<ReadOnly>,
@@ -81,8 +86,9 @@ async fn takeover(
         store.clone(),
         parked(&namespace_id),
     ));
-    let gated: SharedObjectStore = gate.clone();
-    let writer = LoonFs::builder_with_store(gated)
+    let recording = Arc::new(RecordingStore::new(gate.clone(), KeyPredicate::any()));
+    let recorded: SharedObjectStore = recording.clone();
+    let writer = LoonFs::builder_with_store(recorded)
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
         .manifest_revalidation_interval_ms(0)
@@ -108,6 +114,7 @@ async fn takeover(
         namespace_id,
         store,
         gate,
+        recording,
         writer,
         namespace,
     }
@@ -283,7 +290,7 @@ async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_cl
 impl Takeover {
     /// Parks A's next commit at its WAL put, runs `during` while it waits,
     /// and checks that A's commit then fails with `writer_fenced`, because B
-    /// took over meanwhile.
+    /// took over meanwhile. `during` releases the gate.
     async fn while_a_commit_waits(&self, during: impl std::future::Future<Output = ()>) {
         self.gate.block_next();
         let actor = loonfs_test_support::test_actor();
@@ -293,7 +300,6 @@ impl Takeover {
                     .await
                     .expect("A's commit waits at its WAL put");
                 during.await;
-                self.gate.release();
             });
         assert_eq!(
             parked.expect_err("B took over during A's commit").code(),
@@ -314,6 +320,34 @@ impl Takeover {
         folded.manifest_no
     }
 
+    /// Waits until the namespace's current manifest is past `manifest_no`.
+    async fn wait_for_manifest_after(&self, manifest_no: ManifestNo) {
+        bounded(STEP, async {
+            while self.current_manifest_no().await <= manifest_no {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a manifest is published");
+    }
+
+    /// Reads `/b` in A's runtime while A's commit waits, and releases the
+    /// commit once the read's check has walked to B's claim at `claim`, so
+    /// the check's drop of A's position waits for A's commit.
+    async fn read_past_the_claim(&self, claim: ManifestNo) {
+        self.recording.reset();
+        let (entry, ()) = futures::join!(self.reader.stat("/b"), async {
+            let claim =
+                loonfs_objectstore::keys::metadata_manifest_object(&self.namespace_id, &claim);
+            crate::common::wait_for_operation(&self.recording, |operation| {
+                matches!(operation, RecordedOperation::Get { key, .. } if *key == claim)
+            })
+            .await;
+            self.gate.release();
+        });
+        entry.expect("a read in A's runtime sees B's commit");
+    }
+
     /// Lets B claim the namespace and commit `/b`.
     async fn peer_commits(&self) {
         self.peer(None)
@@ -327,13 +361,14 @@ impl Takeover {
 }
 
 /// Checks that a read in A's runtime with an interval of 0 sees B's commit
-/// at once when B claims the namespace after a manifest of A's own that A's
-/// position hasn't moved to yet.
+/// when B claims the namespace after a manifest of A's own that A's position
+/// hasn't moved to yet.
 ///
 /// A's fold through maintenance publishes A's manifest while A's commit
 /// waits at its WAL put, so the move of A's position waits for the engine.
 /// The read's check finds A's own manifest first and goes on to the next
-/// number, which is B's claim.
+/// number, which is B's claim, and its drop of the position waits for A's
+/// commit too.
 #[tokio::test]
 async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
     let fixture = takeover(
@@ -344,13 +379,15 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
     .await;
     fixture
         .while_a_commit_waits(async {
-            let own = fixture.maintenance_fold().await;
-            fixture.peer_commits().await;
+            let before = fixture.current_manifest_no().await;
+            let (own, ()) = futures::join!(fixture.maintenance_fold(), async {
+                fixture.wait_for_manifest_after(before).await;
+                fixture.peer_commits().await;
+                let claim = fixture.current_manifest_no().await;
+                assert!(claim > before.successor().expect("A's own manifest"));
+                fixture.read_past_the_claim(claim).await;
+            });
             assert!(fixture.current_manifest_no().await > own);
-            bounded(STEP, fixture.reader.stat("/b"))
-                .await
-                .expect("the read doesn't wait for A's commit")
-                .expect("a read in A's runtime sees B's commit");
         })
         .await;
     fixture.assert_sees_the_takeover().await;
@@ -362,7 +399,7 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 /// B claims the namespace while A's commit waits at its WAL put, and then a
 /// fold through A's maintenance folds over B's claim, so A's own manifest
 /// follows B's claim. The read's check finds B's claim right after A's
-/// position, and drops the position.
+/// position, and drops the position once A's commit releases the engine.
 #[tokio::test]
 async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
     let fixture = takeover(
@@ -375,12 +412,11 @@ async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
         .while_a_commit_waits(async {
             fixture.peer_commits().await;
             let claim = fixture.current_manifest_no().await;
-            let own = fixture.maintenance_fold().await;
+            let (own, ()) = futures::join!(fixture.maintenance_fold(), async {
+                fixture.wait_for_manifest_after(claim).await;
+                fixture.read_past_the_claim(claim).await;
+            });
             assert!(own > claim);
-            bounded(STEP, fixture.reader.stat("/b"))
-                .await
-                .expect("the read doesn't wait for A's commit")
-                .expect("a read in A's runtime sees B's commit");
         })
         .await;
     fixture.assert_sees_the_takeover().await;

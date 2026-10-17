@@ -19,10 +19,12 @@ use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, DecodedSegmentBlock,
     SegmentCacheKey,
 };
+use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
+use crate::shared_check::SharedCheck;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
@@ -286,16 +288,13 @@ pub struct CachedHead {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
     /// The successor check that last confirmed `basis`. A read trusts the
-    /// basis only while this check is younger than the revalidation bound,
-    /// so the check is kept when the head is marked unconfirmed.
-    pub basis_checked: Option<Observation>,
-    /// When the WAL probe last confirmed `head`, or when the head was loaded,
-    /// or `None` when the head is unconfirmed. The observation is taken
-    /// before the probe or the load is sent, so `head` includes every commit
-    /// acknowledged before it. An eventual read within its maximum staleness
-    /// reads at `head` without a request, and a strong read of an unconfirmed
-    /// head checks for a successor manifest whatever the interval.
-    pub head_confirmed: Option<Observation>,
+    /// basis only while this check is younger than the revalidation bound.
+    pub basis_checked: Observation,
+    /// When the WAL probe last confirmed `head`, or when the head was loaded.
+    /// The observation is taken before the probe or the load is sent, so
+    /// `head` includes every commit acknowledged before it. An eventual read
+    /// within its maximum staleness reads at `head` without a request.
+    pub head_confirmed: Observation,
 }
 
 impl CachedHead {
@@ -314,13 +313,18 @@ impl CachedHead {
 ///
 /// The head itself is an immutable [`CachedHead`] snapshot in the head-state
 /// cache, weighed when it's inserted and evicted like any other entry. The
-/// record is a few words kept outside the cache's budget. It lives while a
-/// read or a writer session references it and goes away when the namespace
-/// is idle, which is when no read or position that predates a change can
-/// still install a head.
+/// record is kept outside the cache's budget, with a few words and the head
+/// of the last refresh. It lives while a read or a writer session
+/// references it and goes away when the namespace is idle, which is when no
+/// read or position that predates a change can still install a head.
 #[derive(Debug, Default)]
 pub struct HeadRecord {
     state: std::sync::Mutex<RecordState>,
+    /// The runtime's refreshes of the namespace's head, which the reads of
+    /// the namespace share. It keeps the head that the last refresh
+    /// returned, which the cache might have evicted since, until the next
+    /// refresh or until nothing references the record.
+    refresh: SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>>,
 }
 
 /// The state behind a [`HeadRecord`]'s lock.
@@ -329,12 +333,25 @@ struct RecordState {
     /// The order of the newest head that the record installed or saw. It
     /// stays after the cache evicts that head.
     floor: Option<(ChangeSeq, ManifestNo)>,
-    /// When the head was last marked unconfirmed. A confirmation taken before
-    /// this observation predates the change, so it doesn't confirm the head.
-    unconfirmed_at: Option<Observation>,
+    /// How many times the runtime dropped the namespace's cached head for a
+    /// change of unknown effect. A load installs its head only if the
+    /// generation hasn't moved since the load started.
+    generation: u64,
 }
 
 impl HeadRecord {
+    /// Returns the record's generation, which a load takes before it sends
+    /// anything and passes to [`HeadStateCache::replace_head`].
+    pub fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// Returns the runtime's refreshes of the namespace's head, which the
+    /// reads of the namespace share.
+    pub fn refresh(&self) -> &SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>> {
+        &self.refresh
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, RecordState> {
         // A critical section under this lock compares heads and calls the
         // head-state cache, which doesn't call back into the record, so the
@@ -350,21 +367,11 @@ impl HeadRecord {
 /// records that nothing references.
 const MIN_RECORDS_BEFORE_COMPACTING: usize = 64;
 
-/// Returns whether two optional observations are the same reading.
-fn same_observation(first: &Option<Observation>, second: &Option<Observation>) -> bool {
-    match (first, second) {
-        (Some(first), Some(second)) => !first.is_after(second) && !second.is_after(first),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-/// Returns the newer of two observations of one timer.
-fn newer(first: Option<Observation>, second: Option<Observation>) -> Option<Observation> {
-    match (first, second) {
-        (Some(first), Some(second)) => Some(first.newer(second)),
-        (first, second) => first.or(second),
-    }
+/// Returns `candidate` if it was taken in a later millisecond than `cached`.
+/// Two observations in the same millisecond keep `cached`, so a tie never
+/// moves a confirmation.
+fn later(cached: &Observation, candidate: Observation) -> Option<Observation> {
+    (cached.age_at(&candidate) > 0).then_some(candidate)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -543,6 +550,12 @@ impl HeadStateCache {
     /// Installs `candidate` as the namespace's cached head if it's newer than
     /// the current head, and returns the head that the read starts from.
     ///
+    /// `started` is the record's generation when the load of `candidate`
+    /// began. If [`Self::invalidate_head`] dropped the head since, the load
+    /// might predate the change that the drop is for, so nothing is
+    /// installed, and the read starts from the candidate. The next read then
+    /// loads the head by discovery.
+    ///
     /// The current head is the higher of the cached head and the floor of
     /// `record`, the newest head that the record installed or saw, which
     /// stays after the cache evicts that head. A head is newer when
@@ -552,30 +565,30 @@ impl HeadStateCache {
     /// - A candidate below the current head changes nothing. The read starts
     ///   from the cached head, or from the candidate when the cache evicted
     ///   the head the floor came from.
-    /// - A candidate equal to the cached head takes the newer of each
+    /// - A candidate equal to the cached head takes the later of each
     ///   confirmation, because confirmations only move forward. A new
     ///   snapshot is cached only when a confirmation moved.
     /// - A newer candidate becomes the cached head.
     ///
-    /// A candidate's head confirmation is kept only if it's newer than the
-    /// last time the head was marked unconfirmed, so a read that started
-    /// before a change can't confirm the head again after it. A snapshot too
-    /// large for the cache isn't cached, and the smaller head it replaces is
-    /// dropped with it, so an eventual read misses and confirms through the
-    /// record. The read starts from the candidate, and the floor still
-    /// moves, so the head that reads start from never moves backwards while
-    /// the record lives.
+    /// A snapshot too large for the cache isn't cached, and the smaller head
+    /// it replaces is dropped with it, so an eventual read misses and
+    /// confirms through the record. The read starts from the candidate, and
+    /// the floor still moves, so the head that reads start from never moves
+    /// backwards while the record lives.
     ///
-    /// Every install and invalidation of a namespace's head runs under its
-    /// record's state lock, so the head's entry in the cache can't change
-    /// between this function's peek and its insert, except by an eviction.
-    pub fn replace_head(&self, record: &HeadRecord, mut candidate: CachedHead) -> Arc<CachedHead> {
+    /// Every install and drop of a namespace's head runs under its record's
+    /// lock, so the head's entry in the cache can't change between this
+    /// function's peek and its insert, except by an eviction.
+    pub fn replace_head(
+        &self,
+        record: &HeadRecord,
+        started: u64,
+        candidate: CachedHead,
+    ) -> Arc<CachedHead> {
         let key = self.head_key(&candidate.head.namespace_id);
         let mut state = record.lock();
-        if let Some(unconfirmed_at) = &state.unconfirmed_at {
-            candidate.head_confirmed = candidate
-                .head_confirmed
-                .filter(|confirmed| confirmed.is_after(unconfirmed_at));
+        if state.generation != started {
+            return Arc::new(candidate);
         }
         let cached = self
             .shared
@@ -595,20 +608,18 @@ impl HeadStateCache {
             }
             Some(std::cmp::Ordering::Equal) => match &cached {
                 Some(cached) if cached.order() == candidate.order() => {
-                    let merged = CachedHead {
-                        basis_checked: newer(cached.basis_checked.clone(), candidate.basis_checked),
-                        head_confirmed: newer(
-                            cached.head_confirmed.clone(),
-                            candidate.head_confirmed,
-                        ),
-                        ..CachedHead::clone(cached)
-                    };
-                    if same_observation(&merged.basis_checked, &cached.basis_checked)
-                        && same_observation(&merged.head_confirmed, &cached.head_confirmed)
-                    {
+                    let basis_checked = later(&cached.basis_checked, candidate.basis_checked);
+                    let head_confirmed = later(&cached.head_confirmed, candidate.head_confirmed);
+                    if basis_checked.is_none() && head_confirmed.is_none() {
                         return Arc::clone(cached);
                     }
-                    merged
+                    CachedHead {
+                        basis_checked: basis_checked
+                            .unwrap_or_else(|| cached.basis_checked.clone()),
+                        head_confirmed: head_confirmed
+                            .unwrap_or_else(|| cached.head_confirmed.clone()),
+                        ..CachedHead::clone(cached)
+                    }
                 }
                 _ => candidate,
             },
@@ -630,44 +641,19 @@ impl HeadStateCache {
         next
     }
 
-    /// Marks the namespace's head unconfirmed at `now`, after the runtime
-    /// learns of a change to the namespace, such as a manifest that it
-    /// published itself or found.
+    /// Removes the namespace's cached head, after the runtime learns of a
+    /// change whose effect on the head it can't identify, so the next read
+    /// loads the head by discovery.
     ///
-    /// The cached head is replaced with a copy that has no head confirmation,
-    /// so the next strong read confirms it from the known tip with a WAL
-    /// probe and a successor check, and an eventual read doesn't read at it
-    /// until then. The record keeps the time of the change while something
-    /// references it, so a refresh or a position that confirmed the head
-    /// before the change can't confirm it again.
-    pub fn unconfirm_head(&self, namespace_id: &NamespaceId, now: Observation) {
+    /// The drop moves the record's generation, so a load that started before
+    /// the drop installs nothing when it finishes (see
+    /// [`Self::replace_head`]). A load in flight keeps the record, so the
+    /// generation it took is still on the record that the drop moves.
+    pub fn invalidate_head(&self, namespace_id: &NamespaceId) {
         let record = self.record(namespace_id);
         let mut state = record.lock();
-        state.unconfirmed_at = Some(match state.unconfirmed_at.take() {
-            Some(previous) => previous.newer(now),
-            None => now,
-        });
-        let key = self.head_key(namespace_id);
-        let Some(cached) = self
-            .shared
-            .entries
-            .peek(&key)
-            .and_then(HeadStateEntry::into_head)
-        else {
-            return;
-        };
-        if cached.head_confirmed.is_none() {
-            return;
-        }
-        let unconfirmed = HeadStateEntry::Head(Arc::new(CachedHead {
-            head_confirmed: None,
-            ..CachedHead::clone(&cached)
-        }));
-        let replaced = self.shared.entries.insert(key.clone(), unconfirmed);
-        if !replaced {
-            // The copy wasn't cached, so the confirmed head mustn't stay.
-            self.shared.entries.invalidate(&key);
-        }
+        state.generation += 1;
+        self.shared.entries.invalidate(&self.head_key(namespace_id));
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
@@ -938,8 +924,8 @@ mod tests {
                 head_seq: ChangeSeq(0),
                 payload_checksum: "checksum".to_owned(),
             }),
-            basis_checked: Some(checked.clone()),
-            head_confirmed: Some(checked.clone()),
+            basis_checked: checked.clone(),
+            head_confirmed: checked.clone(),
         }
     }
 
@@ -967,14 +953,6 @@ mod tests {
         head
     }
 
-    /// Removes the namespace's cached head, as eviction would.
-    fn evict_head(cache: &HeadStateCache) {
-        cache
-            .shared
-            .entries
-            .invalidate(&cache.head_key(&namespace("demo")));
-    }
-
     /// Checks that a candidate at a lower head sequence, or at the same
     /// sequence against an earlier manifest, doesn't replace the cached
     /// head, and that the read starts from the cached head.
@@ -983,13 +961,13 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 2, &now));
+        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
             (5, 2)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
             (5, 2)
         );
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
@@ -1004,15 +982,15 @@ mod tests {
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
             (5, 1)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
             (5, 2)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
             (6, 1)
         );
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
@@ -1032,45 +1010,52 @@ mod tests {
         let record = cache.record(&namespace("demo"));
         cache.replace_head(
             &record,
+            record.generation(),
             CachedHead {
-                head_confirmed: Some(late.clone()),
+                head_confirmed: late.clone(),
                 ..head_at(5, 1, &early)
             },
         );
         let merged = cache.replace_head(
             &record,
+            record.generation(),
             CachedHead {
-                basis_checked: Some(late.clone()),
+                basis_checked: late.clone(),
                 ..head_at(5, 1, &early)
             },
         );
-        let age = |check: &Option<Observation>| check.as_ref().map(Observation::age_ms);
-        assert_eq!(age(&merged.basis_checked), Some(0));
-        assert_eq!(age(&merged.head_confirmed), Some(0));
+        assert_eq!(merged.basis_checked.age_ms(), 0);
+        assert_eq!(merged.head_confirmed.age_ms(), 0);
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert!(Arc::ptr_eq(&cached, &merged));
-        let unchanged = cache.replace_head(&record, head_at(5, 1, &early));
+        let unchanged = cache.replace_head(&record, record.generation(), head_at(5, 1, &early));
         assert!(Arc::ptr_eq(&unchanged, &merged));
+        let same_millisecond =
+            cache.replace_head(&record, record.generation(), head_at(5, 1, &late));
+        assert!(
+            Arc::ptr_eq(&same_millisecond, &merged),
+            "a confirmation in the same millisecond doesn't move"
+        );
     }
 
-    /// Checks the record's floor while the cache has evicted the head it
-    /// came from: a candidate below the floor isn't cached and the read
-    /// starts from the candidate, an equal candidate is cached, and a higher
-    /// one is cached and moves the floor.
+    /// Checks the record's floor while the cache has evicted or dropped the
+    /// head it came from: a candidate below the floor isn't cached and the
+    /// read starts from the candidate, an equal candidate is cached, and a
+    /// higher one is cached and moves the floor.
     #[test]
     fn the_record_keeps_out_a_head_below_an_evicted_head() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 2, &now));
-        evict_head(&cache);
+        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
+        cache.invalidate_head(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
             (4, 3)
         );
         assert!(cache.get_head(&namespace("demo")).is_none());
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
             (5, 2)
         );
         assert_eq!(
@@ -1080,43 +1065,34 @@ mod tests {
             Some((5, 2))
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
             (6, 1)
         );
-        evict_head(&cache);
+        cache.invalidate_head(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 9, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 9, &now))),
             (5, 9)
         );
         assert!(cache.get_head(&namespace("demo")).is_none());
     }
 
-    /// Checks that marking the head unconfirmed replaces the cached head
-    /// with a copy that has no head confirmation and keeps its head, basis,
-    /// and successor check, and that a refresh that confirmed the head
-    /// before the change installs its head without a confirmation, whether
-    /// its head is equal or newer, while a later confirmation confirms it.
+    /// Checks that a load that started before the namespace's head was
+    /// dropped installs nothing, and that its read starts from the load's
+    /// own head, while a load that started after the drop installs its head.
     #[test]
-    fn marking_the_head_unconfirmed_clears_its_confirmation() {
-        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+    fn a_load_that_started_before_a_drop_installs_nothing() {
+        let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        let before = Observation::now(clock.clone());
-        cache.replace_head(&record, head_at(5, 2, &before));
-        cache.unconfirm_head(&namespace("demo"), Observation::now(clock.clone()));
-        let cached = cache.get_head(&namespace("demo")).expect("the head stays");
-        assert_eq!(order(&cached), (5, 2));
-        assert!(cached.basis_checked.is_some());
-        assert!(cached.head_confirmed.is_none());
-
-        let equal = cache.replace_head(&record, head_at(5, 2, &before));
-        assert!(equal.head_confirmed.is_none());
-        let newer = cache.replace_head(&record, head_at(6, 2, &before));
-        assert_eq!(order(&newer), (6, 2));
-        assert!(newer.head_confirmed.is_none());
-        let after = Observation::now(clock.clone());
-        let confirmed = cache.replace_head(&record, head_at(6, 2, &after));
-        assert!(confirmed.head_confirmed.is_some());
+        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
+        let started = record.generation();
+        cache.invalidate_head(&namespace("demo"));
+        let head = cache.replace_head(&record, started, head_at(6, 1, &now));
+        assert_eq!(order(&head), (6, 1));
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        let head = cache.replace_head(&record, record.generation(), head_at(6, 1, &now));
+        assert_eq!(order(&head), (6, 1));
+        assert!(cache.get_head(&namespace("demo")).is_some());
     }
 
     /// Checks that a namespace head larger than the whole head-state budget
@@ -1129,7 +1105,7 @@ mod tests {
         let record = cache.record(&namespace("demo"));
         let large = head_with_grants(5, 1_000, &now);
         assert!(large.heap_bytes() > 16 * 4096);
-        let head = cache.replace_head(&record, large);
+        let head = cache.replace_head(&record, record.generation(), large);
         assert_eq!(order(&head), (5, 1));
         assert!(cache.get_head(&namespace("demo")).is_none());
         let stats = cache.stats();
@@ -1149,15 +1125,13 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(4096);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(0, 1, &now));
-        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
-        assert!(cached.head_confirmed.is_some());
+        cache.replace_head(&record, record.generation(), head_at(0, 1, &now));
+        assert!(cache.get_head(&namespace("demo")).is_some());
         let rejections = cache.stats().rejections;
         let large = head_with_grants(1, 1_000, &now);
         assert!(large.heap_bytes() > 4096);
-        let head = cache.replace_head(&record, large);
+        let head = cache.replace_head(&record, record.generation(), large);
         assert_eq!(order(&head), (1, 1));
-        assert!(head.head_confirmed.is_some());
         assert!(cache.get_head(&namespace("demo")).is_none());
         assert_eq!(cache.stats().rejections, rejections + 1);
         assert_eq!(record.lock().floor, Some((ChangeSeq(1), ManifestNo(1))));
@@ -1170,9 +1144,10 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        let small = cache.replace_head(&record, head_at(5, 1, &now));
+        let small = cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
         let before = cache.stats().cached_decoded_bytes;
-        let large = cache.replace_head(&record, head_with_grants(6, 100, &now));
+        let large =
+            cache.replace_head(&record, record.generation(), head_with_grants(6, 100, &now));
         let after = cache.stats().cached_decoded_bytes;
         assert!(
             after >= before + large.heap_bytes() - small.heap_bytes(),
@@ -1189,12 +1164,12 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 1, &now));
-        evict_head(&cache);
+        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
+        cache.invalidate_head(&namespace("demo"));
         drop(record);
         let record = cache.record(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 1, &now))),
             (4, 1)
         );
         assert!(cache.get_head(&namespace("demo")).is_some());
