@@ -178,7 +178,7 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
-            consistency: Consistency::Strong,
+            consistency: Consistency::default(),
         }
     }
 }
@@ -203,15 +203,15 @@ pub(crate) fn check_consistency(consistency: Consistency) -> Result<()> {
     Ok(())
 }
 
-/// Rejects an eventual read of a pinned view (a snapshot, a checkpoint, or a
-/// [`ReadView`](crate::ReadView)). The pin selects the state such a read
-/// sees, so the read has no consistency setting and takes only
-/// [`Consistency::Strong`].
+/// Rejects a read of a pinned view (a snapshot, a checkpoint, or a
+/// [`ReadView`](crate::ReadView)) that sets a consistency. The pin selects
+/// the state such a read sees, so the read has no consistency setting and
+/// takes only the default.
 pub(crate) fn check_pinned_consistency(consistency: Consistency) -> Result<()> {
-    if consistency != Consistency::Strong {
+    if consistency != Consistency::default() {
         return Err(Error::InvalidRequest {
             message: "a read of a snapshot or a read view has no consistency setting, so it \
-                      takes only `strong`"
+                      takes only the default"
                 .to_owned(),
             param: "consistency",
         });

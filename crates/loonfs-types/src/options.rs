@@ -33,22 +33,30 @@ impl std::fmt::Display for AttributeInclusion {
 ///
 /// A pinned read (a snapshot or a checkpoint) has no consistency setting,
 /// because the pin selects the state it reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
     /// Confirm the head before the read, so the read sees every commit
     /// acknowledged before it started.
-    #[default]
     Strong,
     /// Read at the head that was confirmed last while that confirmation is
     /// younger than the maximum staleness, and confirm the head again after
     /// that. The read sees every commit acknowledged before the last
-    /// confirmation, and it may miss commits acknowledged since.
+    /// confirmation, and it may miss commits acknowledged since. This is the
+    /// default, with the runtime's maximum staleness.
     Eventual {
         /// How old the last confirmation can be, or `None` for the runtime's
         /// default maximum staleness. No maximum staleness may exceed the
         /// revalidation bound (`READ_REVALIDATION_BOUND_MS`).
         max_staleness: Option<Duration>,
     },
+}
+
+impl Default for Consistency {
+    fn default() -> Self {
+        Self::Eventual {
+            max_staleness: None,
+        }
+    }
 }
 
 /// Commit settings shared by every filesystem mutation.
@@ -72,7 +80,7 @@ pub struct StatOptions {
     /// Read the entry from this snapshot.
     pub snapshot_id: Option<PinId>,
     /// How recently the read confirms the live head. A snapshot read takes
-    /// only [`Consistency::Strong`].
+    /// only the default.
     pub consistency: Consistency,
 }
 
@@ -81,7 +89,7 @@ impl Default for StatOptions {
         Self {
             include_attributes: AttributeInclusion::Include,
             snapshot_id: None,
-            consistency: Consistency::Strong,
+            consistency: Consistency::default(),
         }
     }
 }
@@ -94,7 +102,7 @@ pub struct ListOptions {
     /// Read the directory from this snapshot.
     pub snapshot_id: Option<PinId>,
     /// How recently each page confirms the live head. A snapshot read takes
-    /// only [`Consistency::Strong`].
+    /// only the default.
     pub consistency: Consistency,
 }
 
@@ -382,9 +390,12 @@ mod tests {
     }
 
     #[test]
-    fn read_options_default_to_strong_reads() {
-        assert_eq!(Consistency::default(), Consistency::Strong);
-        assert_eq!(StatOptions::default().consistency, Consistency::Strong);
-        assert_eq!(ListOptions::default().consistency, Consistency::Strong);
+    fn read_options_default_to_eventual_reads() {
+        let eventual = Consistency::Eventual {
+            max_staleness: None,
+        };
+        assert_eq!(Consistency::default(), eventual);
+        assert_eq!(StatOptions::default().consistency, eventual);
+        assert_eq!(ListOptions::default().consistency, eventual);
     }
 }

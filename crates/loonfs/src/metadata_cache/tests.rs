@@ -443,10 +443,18 @@ async fn read_policy_stays_with_each_binding() {
             async move { (runtime.await.expect("build reader"), recording) }
         };
 
-    let (every_read, every_read_store) =
-        binding(|builder| builder.manifest_revalidation_interval_ms(0)).await;
+    // Both bindings confirm the head on every read, and only one checks
+    // for a successor manifest.
+    let (every_read, every_read_store) = binding(|builder| {
+        builder
+            .manifest_revalidation_interval_ms(0)
+            .max_staleness_ms(0)
+    })
+    .await;
     let (never, never_store) = binding(|builder| {
-        builder.manifest_revalidation_interval_ms(crate::engine::READ_REVALIDATION_BOUND_MS)
+        builder
+            .manifest_revalidation_interval_ms(crate::engine::READ_REVALIDATION_BOUND_MS)
+            .max_staleness_ms(0)
     })
     .await;
     for (runtime, store) in [(&every_read, &every_read_store), (&never, &never_store)] {
@@ -703,6 +711,7 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
             .read_only()
             .metadata_cache(cache.clone())
             .manifest_revalidation_interval_ms(0)
+            .max_staleness_ms(0)
             .build()
             .await
             .expect("build reader");

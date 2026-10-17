@@ -3312,12 +3312,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "strong",
+              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -3579,12 +3579,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "strong",
+              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -3863,12 +3863,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "strong",
+              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -4004,12 +4004,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "strong",
+              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"

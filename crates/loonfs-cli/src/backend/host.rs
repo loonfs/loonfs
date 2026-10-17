@@ -47,6 +47,7 @@ pub(crate) fn client(
         idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         store_kind,
         auth_policy: AuthPolicy::Unauthenticated,
+        consistency: loonfs::Consistency::default(),
     });
     let state = BindingState {
         request_limit: None,

@@ -11,8 +11,9 @@ pub struct ReadFileOptions {
     /// Read the file revision captured by this snapshot instead of the
     /// current one.
     pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before the read. A
-    /// snapshot read takes only [`Consistency::Strong`].
+    /// How recently the server confirms the live head before the read. The
+    /// default sends no consistency parameter, so the server's own default
+    /// applies. A snapshot read takes only the default.
     pub consistency: Consistency,
 }
 
@@ -42,17 +43,24 @@ impl Default for CreateNamespaceOptions {
 pub struct ListChangesOptions {
     /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before each page. A
-    /// snapshot's feed takes only [`Consistency::Strong`].
+    /// How recently the server confirms the live head before each page. The
+    /// default sends no consistency parameter, so the server's own default
+    /// applies. A snapshot's feed takes only the default.
     pub consistency: Consistency,
 }
 
-/// Adds the consistency query parameters of a live read. A `strong` read sends
-/// neither, so the client also works with a server that doesn't accept them.
+/// Adds the consistency query parameters of a live read. A read with the
+/// default consistency sends neither, so the server's own default applies.
 fn push_consistency(query: &mut QueryBuilder, consistency: Consistency) {
-    if let Consistency::Eventual { max_staleness } = consistency {
-        query.push("consistency", "eventual");
-        if let Some(max_staleness) = max_staleness {
+    match consistency {
+        Consistency::Strong => query.push("consistency", "strong"),
+        Consistency::Eventual {
+            max_staleness: None,
+        } => {}
+        Consistency::Eventual {
+            max_staleness: Some(max_staleness),
+        } => {
+            query.push("consistency", "eventual");
             query.push("max_staleness_ms", max_staleness.as_millis());
         }
     }
@@ -918,11 +926,12 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that a `strong` read sends neither consistency parameter, and
-    /// that an eventual read sends `consistency=eventual`, plus
-    /// `max_staleness_ms` when it sets a maximum staleness.
+    /// Checks that a read with the default consistency sends neither
+    /// consistency parameter, that a `strong` read sends `consistency=strong`,
+    /// and that an eventual read with its own maximum staleness sends
+    /// `consistency=eventual` and `max_staleness_ms`.
     #[tokio::test]
-    async fn eventual_reads_send_the_consistency_parameters_and_strong_reads_send_none() {
+    async fn reads_send_the_consistency_parameters_only_when_they_leave_the_default() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
         let read = |consistency| ReadFileOptions {
             consistency,
@@ -958,8 +967,8 @@ mod tests {
         assert_eq!(
             urls,
             [
+                format!("{content}&consistency=strong"),
                 content.to_owned(),
-                format!("{content}&consistency=eventual"),
                 format!("{content}&consistency=eventual&max_staleness_ms=2500"),
             ]
         );

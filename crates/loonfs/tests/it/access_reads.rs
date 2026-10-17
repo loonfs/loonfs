@@ -67,8 +67,11 @@ async fn check_buffered_read_access(content_size: usize) {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // Keep the reader's cache independent so a write cannot invalidate it.
+    // A maximum staleness of 0 confirms the head on every read, as a
+    // `strong` read does, so the next read after a change sees it.
     let reader = LoonFs::builder_with_store(store)
         .read_only()
+        .max_staleness_ms(0)
         .build()
         .await
         .expect("reader")

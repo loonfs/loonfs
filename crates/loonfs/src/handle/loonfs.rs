@@ -393,6 +393,7 @@ mod tests {
         let reader = LoonFs::builder_with_store(recording.clone())
             .metadata_cache(cache.clone())
             .manifest_revalidation_interval_ms(0)
+            .max_staleness_ms(0)
             .read_only()
             .build()
             .await
@@ -409,7 +410,7 @@ mod tests {
         );
         assert!(
             recording.count(OperationSelector::Head) > 0,
-            "the zero interval given before the conversion probes on every read"
+            "the zero interval and staleness given before the conversion probe on every read"
         );
     }
 

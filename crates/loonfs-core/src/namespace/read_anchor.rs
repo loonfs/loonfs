@@ -2,6 +2,7 @@
 
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
+use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{
@@ -164,12 +165,6 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
         .is_some())
 }
 
-/// The most manifests that one check of a writer position moves the position
-/// onto. A walk that finds more drops the position, so the session's next
-/// publish loads the namespace by discovery, which reads the hint instead of
-/// every manifest in between. The walk sends at most one GET more than this.
-const MAX_POSITION_MOVES: usize = 8;
-
 /// Returns the moves of a position at `basis` onto the manifests above it,
 /// oldest first, while each is an active manifest of `writer_epoch`.
 ///
@@ -177,7 +172,7 @@ const MAX_POSITION_MOVES: usize = 8;
 /// one is missing. It returns `None` when `basis` has no successor, when it
 /// finds a manifest of another writer epoch (another writer's claim) or a
 /// tombstone, which settles that the position can't move, and when it finds
-/// more than `MAX_POSITION_MOVES` manifests.
+/// more than [`MAX_POSITION_MOVES`] manifests.
 pub async fn same_epoch_manifests_above<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

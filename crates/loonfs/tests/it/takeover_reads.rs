@@ -64,8 +64,9 @@ struct Takeover {
     reader: Namespace<ReadOnly>,
 }
 
-/// Creates writer A with a manifest check interval of 0 and a namespace
-/// with one commit, so A's session has a position.
+/// Creates writer A with a manifest check interval and a maximum staleness of
+/// 0, so each of A's reads checks for a newer manifest, and a namespace with
+/// one commit, so A's session has a position.
 ///
 /// A's gate parks the next request that `parked` selects once a test calls
 /// `block_next`. `inline_content` sets A's fold limits.
@@ -85,6 +86,7 @@ async fn takeover(
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
         .manifest_revalidation_interval_ms(0)
+        .max_staleness_ms(0)
         .inline_content(inline_content)
         .build()
         .await

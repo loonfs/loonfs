@@ -263,6 +263,7 @@ pub async fn app(
             .auth_token
             .clone()
             .map_or(AuthPolicy::Unauthenticated, AuthPolicy::BearerToken),
+        consistency: config.consistency.consistency(),
     });
     let binding = BindingState {
         request_limit: Some(loonfs_http::RequestLimit::new(

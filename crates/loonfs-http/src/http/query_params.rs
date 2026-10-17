@@ -45,12 +45,15 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
 }
 
 /// Parses the `consistency` and `max_staleness_ms` parameters of a live
-/// read. A read with a `snapshot_id` has no consistency setting, so
-/// `has_snapshot` rejects `consistency` on one.
+/// read, and returns `default` (the binding's configured consistency) when
+/// the request sets neither. A read with a `snapshot_id` has no consistency
+/// setting, so `has_snapshot` rejects `consistency` on one, and the read
+/// takes the type's default.
 pub(super) fn parse_consistency(
     consistency: Option<&str>,
     max_staleness_ms: Option<&str>,
     has_snapshot: bool,
+    default: Consistency,
 ) -> Result<Consistency, ApiResponseError> {
     if has_snapshot && consistency.is_some() {
         return Err(ApiResponseError::new(
@@ -68,7 +71,9 @@ pub(super) fn parse_consistency(
             "max_staleness_ms requires consistency=eventual",
         )
         .with_param("max_staleness_ms")),
-        None | Some("strong") => Ok(Consistency::Strong),
+        None if has_snapshot => Ok(Consistency::default()),
+        None => Ok(default),
+        Some("strong") => Ok(Consistency::Strong),
         Some(other) => Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             &format!("invalid consistency `{other}`: expected `strong` or `eventual`"),
@@ -215,7 +220,7 @@ impl utoipa::PartialSchema for OpenApiConsistency {
         utoipa::openapi::schema::Object::builder()
             .schema_type(utoipa::openapi::schema::Type::String)
             .enum_values(Some(["strong", "eventual"]))
-            .default(Some(serde_json::json!("strong")))
+            .default(Some(serde_json::json!("eventual")))
             .into()
     }
 }

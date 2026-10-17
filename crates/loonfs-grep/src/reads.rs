@@ -5,8 +5,9 @@
 
 use crate::{GrepError, Result};
 use loonfs::{
-    CheckpointFilesPager, CoreError, CurrentFileState, ListCheckpointFilesOptions, Namespace,
-    NamespaceMetadata, ReadOnly, ReadView, StatOptions, MAX_CURRENT_FILES_PER_STAT,
+    CheckpointFilesPager, Consistency, CoreError, CurrentFileState, ListChangesOptions,
+    ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadOnly, ReadView, StatOptions,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
@@ -79,15 +80,20 @@ impl NamespaceReads {
     /// Reads committed changes after `after_seq` as semantic events.
     ///
     /// Returns `rebootstrap_required` when `after_seq` is below the retention
-    /// floor.
+    /// floor. The page is `strong`, because `after_seq` comes from the index,
+    /// which another process may have built past this process's last
+    /// confirmation of the head.
     pub async fn list_changes_after(
         &self,
         after_seq: ChangeSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
+        let options = ListChangesOptions {
+            consistency: Consistency::Strong,
+        };
         Ok(self
             .namespace
-            .list_changes(after_seq)
+            .list_changes_with_options(after_seq, &options)
             .page(page_request(None, limit)?)
             .await?)
     }

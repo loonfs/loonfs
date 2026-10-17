@@ -1225,7 +1225,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target(
@@ -1324,7 +1324,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target_by_inode(
@@ -1433,7 +1433,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     let states = engine
                         .stat_current_files_by_inode(inode_ids, &read_context)
@@ -1473,7 +1473,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     Ok(engine
                         .read_content_ref(content_ref, max_bytes, &read_context)
@@ -1516,7 +1516,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| {
                     let request = request.clone();
                     async move {
@@ -1572,7 +1572,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| {
                     let request = request.clone();
                     let absolute_path = absolute_path.clone();
@@ -1631,7 +1631,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| {
                     let request = request.clone();
                     async move {
@@ -1673,7 +1673,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     let read = engine
                         .read_file_revision(
@@ -1904,7 +1904,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                Consistency::default(),
                 |engine, read_context| async move {
                     let bytes = engine
                         .read_file_revision_by_inode(

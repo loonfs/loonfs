@@ -5,9 +5,10 @@ use crate::common::is_manifest_head;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore,
-    StatOptions, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadFileOptions, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
+use loonfs_core::limits::MAX_POSITION_MOVES;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -37,13 +38,10 @@ fn is_manifest_get(
     )
 }
 
-/// Returns the options of an eventual stat with the runtime's maximum
-/// staleness.
-fn eventual() -> StatOptions {
+/// Returns the options of a strong stat.
+fn strong() -> StatOptions {
     StatOptions {
-        consistency: Consistency::Eventual {
-            max_staleness: None,
-        },
+        consistency: Consistency::Strong,
         ..StatOptions::default()
     }
 }
@@ -201,18 +199,31 @@ impl Fixture {
     }
 }
 
-/// Checks that a stat and a 1 KiB read after a commit in the writer's
-/// runtime start from the writer's position, and that each sends one
-/// request, the session's check of the position's manifest.
+/// Checks that a strong stat and a strong 1 KiB read after a commit in the
+/// writer's runtime start from the writer's position, and that each sends
+/// one request, the session's check of the position's manifest.
 #[tokio::test]
-async fn reads_after_a_commit_send_one_manifest_check_each() {
+async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     let fixture = fixture("position-reads", Parked::WalPuts).await;
     let commit = fixture.put("/next.txt").await.expect("commit");
     let (positions, anchors) = fixture.head_sources();
     fixture.recording.reset();
-    let entry = fixture.reader.stat("/next.txt").await.expect("stat");
+    let entry = fixture
+        .reader
+        .stat_with_options("/next.txt", &strong())
+        .await
+        .expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
-    let file = fixture.reader.read_file("/small.txt").await.expect("read");
+    let file = fixture
+        .reader
+        .read_file_with_options(
+            "/small.txt",
+            &ReadFileOptions {
+                consistency: Consistency::Strong,
+            },
+        )
+        .await
+        .expect("read");
     assert_eq!(file.bytes, [b's'; 1024]);
     let operations = fixture.recording.take();
     assert!(
@@ -225,9 +236,9 @@ async fn reads_after_a_commit_send_one_manifest_check_each() {
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
 }
 
-/// Checks that an eventual read in the writer's runtime within its maximum
-/// staleness of the position's last check starts from the writer's position
-/// and sends no store request.
+/// Checks that a read with the default consistency (eventual) in the
+/// writer's runtime within its maximum staleness of the position's last
+/// check starts from the writer's position and sends no store request.
 #[tokio::test]
 async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     let fixture = fixture("eventual-position-reads", Parked::WalPuts).await;
@@ -235,11 +246,7 @@ async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     let (positions, anchors) = fixture.head_sources();
     let cache_lookups = fixture.head_cache_lookups();
     fixture.recording.reset();
-    let entry = fixture
-        .reader
-        .stat_with_options("/next.txt", &eventual())
-        .await
-        .expect("stat");
+    let entry = fixture.reader.stat("/next.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
     assert_eq!(fixture.recording.take(), []);
     assert_eq!(fixture.head_sources(), (positions + 1, anchors));
@@ -281,10 +288,10 @@ async fn writes_send_no_manifest_check() {
     );
 }
 
-/// Checks that a read while a publish waits for its WAL put starts from the
-/// head before that publish, without waiting for it, and sends nothing but
-/// the session's check, and that a read after the publish returns sees its
-/// commit.
+/// Checks that a strong read while a publish waits for its WAL put starts
+/// from the head before that publish, without waiting for it, and sends
+/// nothing but the session's check, and that a read after the publish
+/// returns sees its commit.
 #[tokio::test]
 async fn a_read_during_a_publish_starts_from_the_head_before_it() {
     let fixture = fixture("read-during-publish", Parked::WalPuts).await;
@@ -294,14 +301,20 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
     let (during, ()) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
         fixture.recording.reset();
-        let entry = bounded(NO_WAIT, fixture.reader.stat("/before.txt"))
-            .await
-            .expect("the read doesn't wait for the publish")
-            .expect("stat");
+        let entry = bounded(
+            NO_WAIT,
+            fixture.reader.stat_with_options("/before.txt", &strong()),
+        )
+        .await
+        .expect("the read doesn't wait for the publish")
+        .expect("stat");
         assert_eq!(entry.head_seq, before.committed_seq);
-        let missing = bounded(NO_WAIT, fixture.reader.stat("/during.txt"))
-            .await
-            .expect("the read doesn't wait for the publish");
+        let missing = bounded(
+            NO_WAIT,
+            fixture.reader.stat_with_options("/during.txt", &strong()),
+        )
+        .await
+        .expect("the read doesn't wait for the publish");
         assert_eq!(
             missing.expect_err("the publish hasn't returned").code(),
             ErrorCode::PathNotFound
@@ -333,8 +346,12 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
 #[tokio::test]
 async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_staleness() {
     for (name, advance_ms, options) in [
-        ("takeover-strong", 0, StatOptions::default()),
-        ("takeover-eventual", MAX_STALENESS_MS, eventual()),
+        ("takeover-strong", 0, strong()),
+        (
+            "takeover-eventual",
+            MAX_STALENESS_MS,
+            StatOptions::default(),
+        ),
     ] {
         let fixture = fixture(name, Parked::WalPuts).await;
         let peer_id = format!("{name}-peer");
@@ -353,10 +370,7 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
         assert_eq!(folded.outcome, FoldWalOutcome::Published, "{name}");
 
         fixture.recording.reset();
-        let inside = fixture
-            .reader
-            .stat_with_options("/peer.txt", &eventual())
-            .await;
+        let inside = fixture.reader.stat("/peer.txt").await;
         assert_eq!(
             inside.expect_err("within the staleness").code(),
             ErrorCode::PathNotFound,
@@ -383,6 +397,49 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
     }
 }
 
+/// Checks that a check whose walk finds more manifests above the position
+/// than one check moves the position onto drops the position, and that the
+/// read reloads the namespace from its hint.
+///
+/// Another runtime folds each of the session's commits, one fold more than
+/// the cap, under the session's writer epoch, so the walk loads one manifest
+/// past the cap and stops there.
+#[tokio::test]
+async fn a_walk_past_its_cap_drops_the_position() {
+    let fixture = fixture("walk-cap", Parked::WalPuts).await;
+    let peer = peer(&fixture, "walk-cap-peer").await;
+    let maintenance = peer.maintenance(writer_id("walk-cap-peer"));
+    for index in 0..=MAX_POSITION_MOVES {
+        fixture
+            .put(&format!("/fill-{index}.txt"))
+            .await
+            .expect("commit");
+        let folded = maintenance
+            .fold_wal(&fixture.namespace_id)
+            .await
+            .expect("fold");
+        assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    }
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    fixture
+        .reader
+        .stat_with_options("/small.txt", &strong())
+        .await
+        .expect("stat");
+    let operations = fixture.recording.take();
+    let reload = operations
+        .iter()
+        .position(|operation| operation.key() == hint(&fixture.namespace_id))
+        .expect("a reload from the hint");
+    let walked = operations[..reload]
+        .iter()
+        .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
+        .count();
+    assert_eq!(walked, MAX_POSITION_MOVES + 1, "{operations:?}");
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
 /// Checks that a fold that another runtime publishes is found by the first
 /// eventual read past its maximum staleness, that the position moves onto
 /// the fold's manifest, and that the session's next publish writes above it
@@ -399,18 +456,14 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
 
     fixture.recording.reset();
-    fixture
-        .reader
-        .stat_with_options("/small.txt", &eventual())
-        .await
-        .expect("stat");
+    fixture.reader.stat("/small.txt").await.expect("stat");
     assert_eq!(fixture.recording.take(), [], "within the staleness");
 
     fixture.clock.advance_ms(MAX_STALENESS_MS);
     let (positions, anchors) = fixture.head_sources();
     fixture
         .reader
-        .stat_with_options("/small.txt", &eventual())
+        .stat("/small.txt")
         .await
         .expect("the check finds the fold");
     let operations = fixture.recording.take();
@@ -445,11 +498,7 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
         "the position moved onto the fold's manifest, so the publish replays nothing"
     );
     fixture.recording.reset();
-    let entry = fixture
-        .reader
-        .stat_with_options("/after.txt", &eventual())
-        .await
-        .expect("stat");
+    let entry = fixture.reader.stat("/after.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
     assert_eq!(
         fixture.recording.take(),
@@ -486,13 +535,10 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
         fixture.clock.advance_ms(MAX_STALENESS_MS);
         let (positions, anchors) = fixture.head_sources();
         fixture.recording.reset();
-        bounded(
-            NO_WAIT,
-            fixture.reader.stat_with_options("/small.txt", &eventual()),
-        )
-        .await
-        .expect("the read doesn't wait for the publish")
-        .expect("stat");
+        bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
+            .await
+            .expect("the read doesn't wait for the publish")
+            .expect("stat");
         let after_fold = folded
             .manifest_no
             .successor()
@@ -597,11 +643,7 @@ async fn a_position_past_the_revalidation_bound_is_not_read_from() {
     fixture.put("/after.txt").await.expect("commit");
     assert_eq!(fixture.tail_replays(), replays + 1);
     fixture.recording.reset();
-    fixture
-        .reader
-        .stat_with_options("/after.txt", &eventual())
-        .await
-        .expect("stat");
+    fixture.reader.stat("/after.txt").await.expect("stat");
     assert_eq!(fixture.recording.take(), []);
 }
 
@@ -621,14 +663,13 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
     let gate = fixture.recording.inner();
     gate.block_next();
     fixture.recording.reset();
-    let (first, ()) = futures::join!(fixture.reader.stat("/small.txt"), async {
+    let first_options = strong();
+    let first = fixture
+        .reader
+        .stat_with_options("/small.txt", &first_options);
+    let (first, ()) = futures::join!(first, async {
         gate.wait_until_blocked().await;
-        let reads = [
-            StatOptions::default(),
-            StatOptions::default(),
-            StatOptions::default(),
-            eventual(),
-        ];
+        let reads = [strong(), strong(), strong(), StatOptions::default()];
         let mut wave =
             pin!(futures::future::join_all(reads.iter().map(|options| {
                 fixture.reader.stat_with_options("/small.txt", options)
@@ -653,11 +694,7 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
         "{operations:?}"
     );
     fixture.recording.reset();
-    fixture
-        .reader
-        .stat_with_options("/small.txt", &eventual())
-        .await
-        .expect("stat");
+    fixture.reader.stat("/small.txt").await.expect("stat");
     assert_eq!(
         fixture.recording.take(),
         [],

@@ -818,6 +818,7 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_staleness_ms: None,
+        consistency: Default::default(),
         max_read_working_bytes: None,
         idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,

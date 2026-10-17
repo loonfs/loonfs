@@ -85,6 +85,8 @@ pub struct BindingConfig {
     pub idle_fold_after_ms: u64,
     pub store_kind: ConfiguredObjectStoreKind,
     pub auth_policy: AuthPolicy,
+    /// The consistency of a live read that doesn't set `consistency`.
+    pub consistency: loonfs::Consistency,
 }
 
 /// The grep handles this binding holds, by job: a binding serves

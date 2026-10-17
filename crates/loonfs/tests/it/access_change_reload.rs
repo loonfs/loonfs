@@ -160,7 +160,11 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
         .put_file("/settle", b"x", actor)
         .await
         .expect("settle");
-    fixture.user.stat("/m/doc").await.expect("warm read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("warm read");
     fixture
 }
 
@@ -291,6 +295,14 @@ impl Fixture {
 
 const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "regrant"];
 
+/// Returns the options of a strong stat.
+fn strong() -> StatOptions {
+    StatOptions {
+        consistency: Consistency::Strong,
+        ..StatOptions::default()
+    }
+}
+
 /// Checks that after a compaction that also claims the compactor epoch on
 /// the same runtime, commits and the reads after them reload nothing.
 ///
@@ -302,11 +314,15 @@ async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
     let fixture = fixture("own-compaction-claim", false).await;
     fixture.compact().await;
     fixture.commit("put_file", 0).await;
-    fixture.user.stat("/m/doc").await.expect("reload");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("reload");
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round + 1).await;
         fixture.recording.reset();
-        let read = fixture.user.stat("/m/doc").await;
+        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
@@ -325,15 +341,16 @@ async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
         for kind in COMMIT_KINDS {
             let user_granted = fixture.commit(kind, round).await;
             fixture.recording.reset();
-            let read = fixture.user.stat("/m/doc").await;
+            let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
             assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
             fixture.assert_no_reload(&format!("round {round}, user after {kind}"));
         }
     }
 }
 
-/// Checks that eventual reads after a compaction on the same runtime don't
-/// reload metadata with the default one-second maximum staleness.
+/// Checks that reads with the default consistency (eventual) after a
+/// compaction on the same runtime don't reload metadata with the default
+/// one-second maximum staleness.
 ///
 /// An eventual read waits for the session's check for a newer manifest when
 /// the position's last check is a second old or older, so the test moves
@@ -341,19 +358,13 @@ async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
 #[tokio::test]
 async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
     let fixture = fixture("own-compaction-staleness", true).await;
-    let eventual = StatOptions {
-        consistency: Consistency::Eventual {
-            max_staleness: None,
-        },
-        ..StatOptions::default()
-    };
     fixture.compact().await;
     for (round, advance_ms) in [0, 1_100, 0, 1_100, 30_000].into_iter().enumerate() {
         fixture.clock.advance_ms(advance_ms);
         let kind = if round % 2 == 0 { "revoke" } else { "regrant" };
         let user_granted = fixture.commit(kind, round).await;
         fixture.recording.reset();
-        let read = fixture.user.stat_with_options("/m/doc", &eventual).await;
+        let read = fixture.user.stat("/m/doc").await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("+{advance_ms} ms, user after {kind}"));
     }
@@ -386,7 +397,11 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
         MetadataCompactionOutcome::BoundedMergePublished
     );
     fixture.recording.reset();
-    fixture.user.stat("/m/doc").await.expect("first read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("first read");
     let operations = fixture.recording.take();
     assert!(
         operations
@@ -397,7 +412,7 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round).await;
         fixture.recording.reset();
-        let read = fixture.user.stat("/m/doc").await;
+        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
@@ -459,7 +474,11 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
             .assert_write_reloads_nothing(2 * round + 1, call)
             .await;
         fixture.recording.reset();
-        fixture.user.stat("/m/doc").await.expect("read");
+        fixture
+            .user
+            .stat_with_options("/m/doc", &strong())
+            .await
+            .expect("read");
         fixture.assert_no_reload(&format!("user after a write after {call}"));
     }
 }
@@ -489,7 +508,11 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
     });
     let checkpoint = checkpoint.expect("checkpoint");
     fixture.recording.reset();
-    fixture.user.stat("/m/doc").await.expect("read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("read");
     // A position left on the replaced manifest would find the checkpoint's
     // manifest as its successor and reload. A position on the checkpoint's
     // manifest checks the manifest after it, and reads no other manifest or
