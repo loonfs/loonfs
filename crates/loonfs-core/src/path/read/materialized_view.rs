@@ -239,31 +239,22 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             manifest_no,
             head_seq: head.seq,
         };
-        if let Some(cache) = load_context.head_state {
-            if let Some(wal_tail) = cache.get_tail(&cache_key) {
-                return Ok(Self {
-                    namespace_id: namespace_id.clone(),
-                    head,
-                    segments,
-                    wal_tail,
-                    anchor,
-                    object_cache: load_context.object_cache,
-                });
-            }
-        }
-        let replayed = load_replayed_wal_tail(
-            store,
-            load_context.object_cache,
-            &manifest_head,
-            &head,
-            &loaded_basis.base_state,
-        )
-        .await
-        .map_err(CoreError::MetadataProjection)?;
-        let wal_tail = Arc::new(replayed.projected_tail);
-        if let Some(cache) = load_context.head_state {
-            cache.insert_tail(cache_key, Arc::clone(&wal_tail));
-        }
+        let replay = || async {
+            load_replayed_wal_tail(
+                store,
+                load_context.object_cache,
+                &manifest_head,
+                &head,
+                &loaded_basis.base_state,
+            )
+            .await
+            .map(|replayed| Arc::new(replayed.projected_tail))
+            .map_err(CoreError::MetadataProjection)
+        };
+        let wal_tail = match load_context.head_state {
+            Some(cache) => cache.get_or_load_tail(&cache_key, replay).await?,
+            None => replay().await?,
+        };
         Ok(Self {
             namespace_id: namespace_id.clone(),
             head,
@@ -1290,10 +1281,15 @@ mod tests {
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::test_support::ops::create;
     use bytes::Bytes;
+    use futures::poll;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
+    };
     use loonfs_types::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use std::collections::BTreeMap;
+    use std::pin::pin;
     use tempfile::TempDir;
 
     fn context() -> MutationContext {
@@ -1421,6 +1417,61 @@ mod tests {
         .expect("one result")
         .expect_err("the publish path refuses the same state");
         assert_eq!(published.code(), read.code());
+    }
+
+    /// Checks that two loads at one head that both find no cached tail
+    /// replay the tail once between them, with one set of WAL GETs.
+    #[tokio::test]
+    async fn concurrent_loads_at_one_head_replay_the_tail_once() {
+        let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
+        let wal_objects =
+            || KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id));
+        let store = RecordingStore::new(
+            BlockingStore::new(store, wal_objects(), OperationSelector::Get),
+            wal_objects(),
+        );
+        let anchor = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
+            .await
+            .expect("read anchor");
+        let basis = anchor.basis();
+        // Once the first load caches the manifest, a load reads nothing from
+        // the store before the WAL objects of the tail.
+        let segment_cache = MetadataSegmentCache::unshared(1 << 20);
+        let (alone, shared) = (
+            HeadStateCache::unshared(1 << 20),
+            HeadStateCache::unshared(1 << 20),
+        );
+        let context = |head_state| {
+            ReadLoadContext::pinned_head(
+                &anchor.read_state,
+                &basis,
+                Some(&segment_cache),
+                Some(head_state),
+                None,
+            )
+        };
+
+        store.reset();
+        load_metadata_view(&store, &namespace_id, context(&alone))
+            .await
+            .expect("a load on its own");
+        let one_replay = store.counts().gets;
+        assert!(one_replay > 0, "the tail has WAL objects");
+
+        store.reset();
+        store.inner().arm();
+        let mut first = pin!(load_metadata_view(&store, &namespace_id, context(&shared)));
+        let mut second = pin!(load_metadata_view(&store, &namespace_id, context(&shared)));
+        assert!(poll!(first.as_mut()).is_pending());
+        assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
+        assert!(poll!(second.as_mut()).is_pending());
+        store.inner().release();
+        let (first, second) = futures::join!(first, second);
+        let (first, second) = (first.expect("first load"), second.expect("second load"));
+        assert!(Arc::ptr_eq(&first.wal_tail, &second.wal_tail));
+        assert_eq!(store.counts().gets, one_replay, "one set of WAL GETs");
+        let stats = shared.stats();
+        assert_eq!((stats.tail_misses, stats.tail_inserts), (1, 1));
     }
 
     #[tokio::test]

@@ -224,13 +224,17 @@ fn lookups(hits: usize, misses: usize) -> [(SeriesLabels<'static>, usize); 2] {
 /// The stats are the one source of these values, and the runtime's recorder
 /// doesn't register them. Listing every field makes this code fail to
 /// compile when `MetadataCacheStats` gains a field, which ensures new
-/// statistics are considered for export.
+/// statistics are considered for export. The fields bound to `_` aren't
+/// exported.
 fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     let MetadataCacheStats {
         segment_hits,
         segment_misses,
         segment_inserts,
         segment_evictions,
+        segment_evicted_bytes: _,
+        segment_rejections: _,
+        segment_rejected_bytes: _,
         segment_filter_skips,
         segment_filter_false_positives,
         segment_bytes,
@@ -239,6 +243,9 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         wal_tail_hits,
         wal_tail_misses,
         wal_tail_inserts,
+        head_state_hits: _,
+        head_state_misses: _,
+        head_state_inserts: _,
         head_state_evictions,
         head_state_evicted_bytes,
         head_state_rejections,
@@ -250,8 +257,18 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         content_object_hits,
         content_object_misses,
         content_object_inserts,
+        object_hits: _,
+        object_misses: _,
+        object_inserts: _,
         object_evictions,
+        object_evicted_bytes: _,
+        object_rejections: _,
+        object_rejected_bytes: _,
         object_bytes,
+        completed_session_hits: _,
+        completed_session_misses: _,
+        completed_session_evictions: _,
+        completed_session_bytes: _,
     } = *stats;
     write_counter(
         rendered,

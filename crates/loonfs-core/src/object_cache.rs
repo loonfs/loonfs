@@ -15,14 +15,13 @@
 //! same check.
 
 use crate::block_cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey,
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, KindCounters,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::ObjectStoreScope;
 use bytes::Bytes;
 use loonfs_types::format::wal::WalObjectEnvelope;
 use loonfs_types::{NamespaceId, WalNo};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,46 +62,33 @@ impl DecodedBlock for CachedObject {
     }
 }
 
+/// Counters and occupancy of the shared objects.
+///
+/// The first fields are the counters that every cache reports (see
+/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats)),
+/// and the rest count the lookups and inserts of each kind of object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectCacheStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub inserts: usize,
+    pub evictions: usize,
+    pub evicted_decoded_bytes: usize,
+    pub rejections: usize,
+    pub rejected_decoded_bytes: usize,
+    pub cached_decoded_bytes: usize,
     pub wal_hits: usize,
     pub wal_misses: usize,
     pub wal_inserts: usize,
     pub content_hits: usize,
     pub content_misses: usize,
     pub content_inserts: usize,
-    pub evictions: usize,
-    pub cached_decoded_bytes: usize,
-}
-
-/// Lookups and inserts of one kind of object.
-#[derive(Default)]
-struct KindCounters {
-    hits: AtomicUsize,
-    misses: AtomicUsize,
-    inserts: AtomicUsize,
-}
-
-impl KindCounters {
-    fn record_lookup<T>(&self, found: Option<T>) -> Option<T> {
-        let counter = match found {
-            Some(_) => &self.hits,
-            None => &self.misses,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-        found
-    }
-
-    fn record_insert(&self) {
-        self.inserts.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 /// Decoded WAL objects and small content objects for every runtime, under
 /// one byte budget and one recency order.
 pub struct SharedObjects {
     entries: DecodedBlockCache<(ObjectStoreScope, ObjectKey), CachedObject>,
-    max_decoded_bytes: usize,
     max_cached_object_bytes: u64,
     wal: KindCounters,
     content: KindCounters,
@@ -112,7 +98,6 @@ impl std::fmt::Debug for SharedObjects {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SharedObjects")
-            .field("max_decoded_bytes", &self.max_decoded_bytes)
             .field("max_cached_object_bytes", &self.max_cached_object_bytes)
             .field("stats", &self.stats())
             .finish_non_exhaustive()
@@ -125,7 +110,6 @@ impl SharedObjects {
     pub fn new(max_decoded_bytes: usize, max_cached_object_bytes: u64) -> Self {
         Self {
             entries: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
-            max_decoded_bytes,
             max_cached_object_bytes,
             wal: KindCounters::default(),
             content: KindCounters::default(),
@@ -134,16 +118,22 @@ impl SharedObjects {
 
     pub fn stats(&self) -> ObjectCacheStats {
         let entries = self.entries.stats();
-        let load = |counter: &AtomicUsize| counter.load(Ordering::Relaxed);
+        let (wal, content) = (self.wal.stats(), self.content.stats());
         ObjectCacheStats {
-            wal_hits: load(&self.wal.hits),
-            wal_misses: load(&self.wal.misses),
-            wal_inserts: load(&self.wal.inserts),
-            content_hits: load(&self.content.hits),
-            content_misses: load(&self.content.misses),
-            content_inserts: load(&self.content.inserts),
+            hits: entries.hits,
+            misses: entries.misses,
+            inserts: entries.inserts,
             evictions: entries.evictions,
+            evicted_decoded_bytes: entries.evicted_decoded_bytes,
+            rejections: entries.rejections,
+            rejected_decoded_bytes: entries.rejected_decoded_bytes,
             cached_decoded_bytes: entries.cached_decoded_bytes,
+            wal_hits: wal.hits,
+            wal_misses: wal.misses,
+            wal_inserts: wal.inserts,
+            content_hits: content.hits,
+            content_misses: content.misses,
+            content_inserts: content.inserts,
         }
     }
 }
@@ -208,40 +198,42 @@ impl ObjectCache {
         namespace_id: &NamespaceId,
         wal_no: WalNo,
     ) -> Option<Arc<WalObjectEnvelope>> {
-        if self.shared.max_decoded_bytes == 0 {
-            return None;
-        }
-        let found = match self.shared.entries.get(&self.wal_key(namespace_id, wal_no)) {
-            Some(CachedObject::Wal(envelope)) => Some(envelope),
-            Some(CachedObject::Content(_)) | None => None,
-        };
-        self.shared.wal.record_lookup(found)
+        self.shared.entries.get_kind(
+            &self.wal_key(namespace_id, wal_no),
+            &self.shared.wal,
+            |object| match object {
+                CachedObject::Wal(envelope) => Some(envelope),
+                CachedObject::Content(_) => None,
+            },
+        )
     }
 
     /// Keeps a WAL object that decoded and matched the number and namespace
     /// of its key.
     pub(crate) fn insert_wal_object(&self, envelope: &Arc<WalObjectEnvelope>) {
         let payload = envelope.payload();
-        if self.shared.entries.insert(
+        self.shared.entries.insert_kind(
             self.wal_key(&payload.namespace_id, payload.wal_no),
             CachedObject::Wal(Arc::clone(envelope)),
-        ) {
-            self.shared.wal.record_insert();
-        }
+            &self.shared.wal,
+        );
     }
 
     /// Returns the first `end` bytes of the content object, if the cache
     /// has at least that many. A range that ends past the largest object
     /// the cache keeps isn't looked up.
     pub(crate) fn get_content(&self, object_key: &str, end: u64) -> Option<Bytes> {
-        if self.shared.max_decoded_bytes == 0 || end > self.shared.max_cached_object_bytes {
+        if end > self.shared.max_cached_object_bytes {
             return None;
         }
-        let found = match self.shared.entries.get(&self.content_key(object_key)) {
-            Some(CachedObject::Content(bytes)) if bytes.len() as u64 >= end => Some(bytes),
-            Some(CachedObject::Content(_) | CachedObject::Wal(_)) | None => None,
-        };
-        self.shared.content.record_lookup(found)
+        self.shared.entries.get_kind(
+            &self.content_key(object_key),
+            &self.shared.content,
+            |object| match object {
+                CachedObject::Content(bytes) if bytes.len() as u64 >= end => Some(bytes),
+                CachedObject::Content(_) | CachedObject::Wal(_) => None,
+            },
+        )
     }
 
     /// Keeps the first bytes of a content object after a read verified them
@@ -262,13 +254,11 @@ impl ObjectCache {
         }
         // A copy keeps the entry's allocation exactly as large as its
         // weight, whatever buffer the store returned the bytes in.
-        if self
-            .shared
-            .entries
-            .insert(key, CachedObject::Content(Bytes::copy_from_slice(bytes)))
-        {
-            self.shared.content.record_insert();
-        }
+        self.shared.entries.insert_kind(
+            key,
+            CachedObject::Content(Bytes::copy_from_slice(bytes)),
+            &self.shared.content,
+        );
     }
 }
 
@@ -277,6 +267,7 @@ mod tests {
     use super::{CachedObject, ObjectCache, ObjectKey, ObjectStoreScope, SharedObjects};
     use crate::block_cache::charged_bytes;
     use bytes::Bytes;
+    use loonfs_types::{NamespaceId, WalNo};
     use std::sync::Arc;
 
     /// Returns the charge of a content entry of `len` bytes under
@@ -380,12 +371,15 @@ mod tests {
         assert_eq!((stats.content_inserts, stats.cached_decoded_bytes), (0, 0));
     }
 
-    /// Checks that a zero budget keeps no objects and records no lookups.
+    /// Checks that a zero budget keeps no objects and records no lookups of
+    /// either kind.
     #[test]
     fn a_zero_budget_keeps_and_counts_nothing() {
         let cache = ObjectCache::unshared(0, 1_000);
         cache.insert_content("key", b"bytes");
         assert!(cache.get_content("key", 5).is_none());
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        assert!(cache.get_wal_object(&namespace_id, WalNo(1)).is_none());
         assert_eq!(cache.stats(), super::ObjectCacheStats::default());
     }
 }
