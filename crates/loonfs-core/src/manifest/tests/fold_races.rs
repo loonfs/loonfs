@@ -585,9 +585,10 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
 
 /// Checks that a session's position moves to its fold's manifest only when
 /// that manifest folds the head the fold started from under the session's
-/// writer epoch, that a published manifest of another epoch, or one that
-/// folds another WAL number, drops the position, and that a fold that
-/// published nothing, or failed, leaves the position where it was.
+/// writer epoch, whether the fold published that manifest or found it
+/// current, that a manifest of another epoch, or one that folds another WAL
+/// number, drops the position, and that a failed fold leaves the position
+/// where it was.
 #[tokio::test]
 async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
     enum Position {
@@ -600,7 +601,8 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         (0, 0, Some(FoldWalOutcome::Published), Position::Moves),
         (1, 0, Some(FoldWalOutcome::Published), Position::Drops),
         (0, 1, Some(FoldWalOutcome::Published), Position::Drops),
-        (0, 0, Some(FoldWalOutcome::AlreadyCurrent), Position::Stays),
+        (0, 0, Some(FoldWalOutcome::AlreadyCurrent), Position::Moves),
+        (0, 1, Some(FoldWalOutcome::AlreadyCurrent), Position::Drops),
         (0, 0, None, Position::Stays),
     ] {
         let mut writer = Writer::open().await;

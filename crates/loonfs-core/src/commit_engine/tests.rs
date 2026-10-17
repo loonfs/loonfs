@@ -848,6 +848,62 @@ async fn a_fold_of_an_evicted_tail_moves_the_position_to_its_manifest() {
     assert_eq!(after.head.seq, before.head.seq);
 }
 
+/// Checks that a writer at the write stop whose fold finds its tail already
+/// folded by another process moves its position onto that process's
+/// manifest, so the writer's next commit succeeds.
+#[tokio::test]
+async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    let mut index = 0;
+    while engine.wal_tail_objects() < Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS) {
+        index += 1;
+        publish_one(&mut engine, &store, &writer, &format!("dir-{index}")).await;
+    }
+    let refused = engine
+        .publish_batch(
+            &store,
+            vec![create_dir("refused", "refused")],
+            &writer,
+            &Deadline::start(timer.clone()),
+        )
+        .await;
+    assert_matches!(
+        refused.results.as_slice(),
+        [Err(error)] if error.code() == ErrorCode::MaintenanceRequired
+    );
+    let deadline = Deadline::start(timer.clone());
+    let content_writes = tokio::sync::Semaphore::new(32);
+    let fold = |input| {
+        fold_wal_tail(
+            &store,
+            None,
+            &namespace_id,
+            input,
+            &deadline,
+            crate::manifest::MetadataRunPolicy::default(),
+            &content_writes,
+        )
+    };
+    let input = engine.begin_wal_fold().expect("tail");
+    let other = fold(None).await.expect("another process folds");
+    assert_eq!(other.response.outcome, crate::FoldWalOutcome::Published);
+    let folded = fold(Some(input)).await.expect("the session's fold");
+    assert_eq!(
+        folded.response.outcome,
+        crate::FoldWalOutcome::AlreadyCurrent
+    );
+    engine.record_wal_fold(Ok(&folded));
+    assert_eq!(
+        engine.read_position().expect("the position moved").basis,
+        other.basis
+    );
+    assert_eq!(engine.wal_tail_objects(), Some(0));
+    publish_one(&mut engine, &store, &writer, "after").await;
+}
+
 /// Creates a writer that folds three times and moves its position after
 /// each fold, and then runs a bounded compaction that publishes the next
 /// manifest.

@@ -116,10 +116,11 @@ impl PublishTailPosition {
         self.fold = None;
     }
 
-    /// Moves the position onto the manifest a fold published, and returns
-    /// the commits published since the fold began, which are the tail above
-    /// the moved position, or `None` when the manifest isn't the fold of
-    /// this position's tail.
+    /// Moves the position onto the manifest that covers a fold's tail (the
+    /// one the fold published, or the current one it found), and returns the
+    /// commits published since the fold began, which are the tail above the
+    /// moved position, or `None` when the manifest isn't the fold of this
+    /// position's tail.
     ///
     /// The manifest has to fold exactly the head the fold started from: the
     /// same sequence and the same WAL number, under the position's writer

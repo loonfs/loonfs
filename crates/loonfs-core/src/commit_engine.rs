@@ -842,10 +842,11 @@ impl NamespaceCommitEngine {
         input
     }
 
-    /// Records how the session's own fold ended. A fold that published moves
-    /// the position to its manifest, or drops the position when it can't
-    /// move there. A fold that published nothing leaves the position where it
-    /// was.
+    /// Records how the session's own fold ended. A fold moves the position
+    /// to the manifest that covers the fold's tail, whether the fold
+    /// published that manifest or found it current, or drops the position
+    /// when it can't move there. A fold that failed leaves the position where
+    /// it was.
     pub fn record_wal_fold(
         &mut self,
         folded: std::result::Result<&crate::manifest::FoldedWalTail, &CoreError>,
@@ -853,20 +854,27 @@ impl NamespaceCommitEngine {
         let fold_observed = self.fold_observed.take();
         let published_during_fold = self.published_during_fold.take();
         match folded {
-            Ok(folded) if folded.response.outcome == crate::FoldWalOutcome::Published => {
-                let since = self
-                    .publish_tail
-                    .as_mut()
-                    .and_then(|position| position.reanchor_after_fold(folded));
-                match (since, &self.publish_tail) {
-                    (Some(since), Some(position)) => {
+            Ok(folded) => {
+                let moved = self.publish_tail.as_mut().and_then(|position| {
+                    let new_basis = position.basis() != &folded.basis;
+                    position
+                        .reanchor_after_fold(folded)
+                        .map(|since| (since, new_basis))
+                });
+                match (moved, &self.publish_tail) {
+                    (Some((since, new_basis)), Some(position)) => {
                         self.insert_tail(position, since);
-                        self.basis_checked = fold_observed;
+                        // The fold published a new basis, or found it current,
+                        // after the fold began, so no manifest followed it
+                        // then. The position's own basis has no such check.
+                        if new_basis {
+                            self.basis_checked = fold_observed;
+                        }
                     }
                     _ => self.invalidate_projection(),
                 }
             }
-            _ => {
+            Err(_) => {
                 if let Some(position) = self.publish_tail.as_mut() {
                     position.end_fold();
                 }
