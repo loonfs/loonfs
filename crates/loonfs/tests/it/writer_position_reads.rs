@@ -1,23 +1,26 @@
 //! Reads in a runtime with the namespace's writer session, which start from
 //! the session's position instead of the read cache.
 
+use crate::common::is_manifest_head;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore,
-    StatOptions, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadFileOptions, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
-use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
+use loonfs_core::limits::MAX_POSITION_MOVES;
+use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) const INTERVAL_MS: u64 = 1_000;
+pub(crate) const MAX_STALENESS_MS: u64 = 1_000;
 
 /// How long a read that must not wait for the store gets before the test
 /// fails.
@@ -33,6 +36,14 @@ fn is_manifest_get(
         operation,
         RecordedOperation::Get { key, .. } if *key == metadata_manifest_object(namespace_id, &manifest_no)
     )
+}
+
+/// Returns the options of a strong stat.
+fn strong() -> StatOptions {
+    StatOptions {
+        consistency: Some(Consistency::Strong),
+        ..StatOptions::default()
+    }
 }
 
 pub(crate) struct Fixture {
@@ -56,8 +67,8 @@ pub(crate) enum Parked {
     ManifestChecks,
 }
 
-/// Creates a writer runtime with a one-second manifest check interval, a
-/// namespace with a 1 KiB file, and a reader on the writer's runtime.
+/// Creates a writer runtime with a one-second maximum staleness, a namespace
+/// with a 1 KiB file, and a reader on the writer's runtime.
 pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
     let namespace_id = namespace_id(name);
     let (keys, operation) = match parked {
@@ -84,7 +95,7 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
-        .manifest_revalidation_interval_ms(INTERVAL_MS)
+        .max_staleness_ms(MAX_STALENESS_MS)
         .monotonic_timer(clock.clone())
         .metrics_recorder(recorder.clone())
         .build()
@@ -162,41 +173,72 @@ impl Fixture {
     }
 
     /// Asserts that the requests since the last reset start with a successor
-    /// check of a manifest, and that they reload the namespace from its hint.
-    fn assert_check_found_a_successor(&self) {
+    /// check of a manifest, that the walk after it loads that manifest and
+    /// no later one, and that the read then reloads the namespace from its
+    /// hint.
+    fn assert_check_stopped_at_the_claim(&self) {
         let operations = self.recording.take();
-        let manifests = metadata_manifest_prefix(&self.namespace_id);
+        let Some(reload) = operations
+            .iter()
+            .position(|operation| operation.key() == hint(&self.namespace_id))
+        else {
+            panic!("no reload from the hint: {operations:?}");
+        };
+        let walked: Vec<&str> = operations[..reload]
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
+            .map(RecordedOperation::key)
+            .collect();
         assert!(
             matches!(
                 operations.first(),
-                Some(RecordedOperation::Head { key }) if key.starts_with(&manifests)
-            ) && operations
-                .iter()
-                .any(|operation| operation.key() == hint(&self.namespace_id)),
-            "a successor check and a reload: {operations:?}"
+                Some(RecordedOperation::Head { key }) if walked == [key.as_str()]
+            ),
+            "a successor check, a walk that stops at the claim, and a reload: {operations:?}"
         );
     }
 }
 
-/// Checks that a stat and a 1 KiB read after a commit in the writer's
-/// runtime send no store request, and that both start from the writer's
-/// position.
+/// Checks that a strong stat and a strong 1 KiB read after a commit in the
+/// writer's runtime start from the writer's position, and that each sends
+/// one request, the session's check of the position's manifest.
 #[tokio::test]
-async fn reads_after_a_commit_send_no_store_request() {
+async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     let fixture = fixture("position-reads", Parked::WalPuts).await;
     let commit = fixture.put("/next.txt").await.expect("commit");
     let (positions, anchors) = fixture.head_sources();
     fixture.recording.reset();
-    let entry = fixture.reader.stat("/next.txt").await.expect("stat");
+    let entry = fixture
+        .reader
+        .stat_with_options("/next.txt", &strong())
+        .await
+        .expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
-    let file = fixture.reader.read_file("/small.txt").await.expect("read");
+    let file = fixture
+        .reader
+        .read_file_with_options(
+            "/small.txt",
+            &ReadFileOptions {
+                consistency: Some(Consistency::Strong),
+            },
+        )
+        .await
+        .expect("read");
     assert_eq!(file.bytes, [b's'; 1024]);
-    assert_eq!(fixture.recording.take(), []);
+    let operations = fixture.recording.take();
+    assert!(
+        operations.len() == 2
+            && operations
+                .iter()
+                .all(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+        "{operations:?}"
+    );
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
 }
 
-/// Checks that an eventual read in the writer's runtime starts from the
-/// writer's position and sends no store request, as a `strong` read does.
+/// Checks that a read with the default consistency (eventual) in the
+/// writer's runtime within its maximum staleness of the position's last
+/// check starts from the writer's position and sends no store request.
 #[tokio::test]
 async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     let fixture = fixture("eventual-position-reads", Parked::WalPuts).await;
@@ -204,17 +246,7 @@ async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     let (positions, anchors) = fixture.head_sources();
     let cache_lookups = fixture.head_cache_lookups();
     fixture.recording.reset();
-    let options = StatOptions {
-        consistency: Consistency::Eventual {
-            max_staleness: None,
-        },
-        ..StatOptions::default()
-    };
-    let entry = fixture
-        .reader
-        .stat_with_options("/next.txt", &options)
-        .await
-        .expect("stat");
+    let entry = fixture.reader.stat("/next.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
     assert_eq!(fixture.recording.take(), []);
     assert_eq!(fixture.head_sources(), (positions + 1, anchors));
@@ -225,9 +257,41 @@ async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     );
 }
 
-/// Checks that a read while a publish waits for its WAL put starts from the
-/// head before that publish, without waiting for it, and that a read after
-/// the publish returns sees its commit.
+/// Checks that writes in the writer's runtime send no check of the
+/// position's manifest. The catalog load and the content preparation before
+/// a write read the position as it is, because the position includes every
+/// commit of the session, and another writer's takeover fences the session
+/// at the write's own publish.
+#[tokio::test]
+async fn writes_send_no_manifest_check() {
+    let fixture = fixture("write-checks", Parked::WalPuts).await;
+    let actor = loonfs_test_support::test_actor();
+    let large = vec![b'l'; 128 * 1024];
+    fixture.recording.reset();
+    fixture.put("/inline.txt").await.expect("an inline put");
+    fixture
+        .namespace
+        .put_file("/large.bin", &large, &actor)
+        .await
+        .expect("a put above the inline threshold");
+    fixture
+        .namespace
+        .append_file("/large.bin", b"more", &actor)
+        .await
+        .expect("an append");
+    let operations = fixture.recording.take();
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+        "{operations:?}"
+    );
+}
+
+/// Checks that a strong read while a publish waits for its WAL put starts
+/// from the head before that publish, without waiting for it, and sends
+/// nothing but the session's check, and that a read after the publish
+/// returns sees its commit.
 #[tokio::test]
 async fn a_read_during_a_publish_starts_from_the_head_before_it() {
     let fixture = fixture("read-during-publish", Parked::WalPuts).await;
@@ -237,19 +301,31 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
     let (during, ()) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
         fixture.recording.reset();
-        let entry = bounded(NO_WAIT, fixture.reader.stat("/before.txt"))
-            .await
-            .expect("the read doesn't wait for the publish")
-            .expect("stat");
+        let entry = bounded(
+            NO_WAIT,
+            fixture.reader.stat_with_options("/before.txt", &strong()),
+        )
+        .await
+        .expect("the read doesn't wait for the publish")
+        .expect("stat");
         assert_eq!(entry.head_seq, before.committed_seq);
-        let missing = bounded(NO_WAIT, fixture.reader.stat("/during.txt"))
-            .await
-            .expect("the read doesn't wait for the publish");
+        let missing = bounded(
+            NO_WAIT,
+            fixture.reader.stat_with_options("/during.txt", &strong()),
+        )
+        .await
+        .expect("the read doesn't wait for the publish");
         assert_eq!(
             missing.expect_err("the publish hasn't returned").code(),
             ErrorCode::PathNotFound
         );
-        assert_eq!(fixture.recording.take(), []);
+        let operations = fixture.recording.take();
+        assert!(
+            operations
+                .iter()
+                .all(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+            "{operations:?}"
+        );
         gate.release();
     });
     let during = during.expect("the publish succeeds");
@@ -258,53 +334,118 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
 }
 
 /// Checks that another writer's takeover is visible in the old writer's
-/// runtime once the manifest check interval passes, and not before.
+/// runtime to a strong read at once, and to an eventual read once its
+/// maximum staleness passes, and not before.
 ///
-/// Inside the interval, reads start from the old session's position and
-/// send nothing. The first read after the interval checks the position's
-/// manifest, finds the new writer's claim, and reloads the namespace.
+/// Within the staleness, an eventual read starts from the old session's
+/// position and sends nothing. A strong read, and the first eventual read
+/// after the staleness, waits for the session's check of the position's
+/// manifest. The check finds the new writer's claim, and its walk stops
+/// there instead of loading the fold that the new writer published above
+/// the claim, so the read reloads the namespace.
 #[tokio::test]
-async fn another_writers_takeover_is_seen_within_one_interval() {
-    let fixture = fixture("takeover-interval", Parked::WalPuts).await;
-    let peer = peer(&fixture, "takeover-peer").await;
-    let peer_commit = peer
-        .open_namespace(&fixture.namespace_id)
-        .expect("open namespace")
-        .put_file("/peer.txt", b"peer", &loonfs_test_support::test_actor())
-        .await
-        .expect("the peer takes over");
+async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_staleness() {
+    for (name, advance_ms, options) in [
+        ("takeover-strong", 0, strong()),
+        (
+            "takeover-eventual",
+            MAX_STALENESS_MS,
+            StatOptions::default(),
+        ),
+    ] {
+        let fixture = fixture(name, Parked::WalPuts).await;
+        let peer_id = format!("{name}-peer");
+        let peer = peer(&fixture, &peer_id).await;
+        let peer_commit = peer
+            .open_namespace(&fixture.namespace_id)
+            .expect("open namespace")
+            .put_file("/peer.txt", b"peer", &loonfs_test_support::test_actor())
+            .await
+            .expect("the peer takes over");
+        let folded = peer
+            .maintenance(writer_id(&peer_id))
+            .fold_wal(&fixture.namespace_id)
+            .await
+            .expect("fold");
+        assert_eq!(folded.outcome, FoldWalOutcome::Published, "{name}");
 
-    fixture.recording.reset();
-    let inside = fixture.reader.stat("/peer.txt").await;
-    assert_eq!(
-        inside.expect_err("inside the interval").code(),
-        ErrorCode::PathNotFound
-    );
-    assert_eq!(fixture.recording.take(), []);
+        fixture.recording.reset();
+        let inside = fixture.reader.stat("/peer.txt").await;
+        assert_eq!(
+            inside.expect_err("within the staleness").code(),
+            ErrorCode::PathNotFound,
+            "{name}"
+        );
+        assert_eq!(fixture.recording.take(), [], "{name}");
 
-    fixture.clock.advance_ms(INTERVAL_MS);
-    let (positions, anchors) = fixture.head_sources();
-    let entry = fixture
-        .reader
-        .stat("/peer.txt")
-        .await
-        .expect("the check finds the claim");
-    assert_eq!(entry.head_seq, peer_commit.committed_seq);
-    fixture.assert_check_found_a_successor();
-    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
-    let fenced = fixture.put("/after.txt").await;
-    assert_eq!(
-        fenced.expect_err("the old session is fenced").code(),
-        ErrorCode::WriterFenced
-    );
+        fixture.clock.advance_ms(advance_ms);
+        let (positions, anchors) = fixture.head_sources();
+        let entry = fixture
+            .reader
+            .stat_with_options("/peer.txt", &options)
+            .await
+            .expect("the check finds the claim");
+        assert_eq!(entry.head_seq, peer_commit.committed_seq, "{name}");
+        fixture.assert_check_stopped_at_the_claim();
+        assert_eq!(fixture.head_sources(), (positions, anchors + 1), "{name}");
+        let fenced = fixture.put("/after.txt").await;
+        assert_eq!(
+            fenced.expect_err("the old session is fenced").code(),
+            ErrorCode::WriterFenced,
+            "{name}"
+        );
+    }
 }
 
-/// Checks that a fold that another runtime publishes is found within one
-/// manifest check interval, that the position moves onto the fold's
-/// manifest, and that the session's next publish writes above it without
-/// loading the namespace from the store.
+/// Checks that a check whose walk finds more manifests above the position
+/// than one check moves the position onto drops the position, and that the
+/// read reloads the namespace from its hint.
+///
+/// Another runtime folds each of the session's commits, one fold more than
+/// the cap, under the session's writer epoch, so the walk loads one manifest
+/// past the cap and stops there.
 #[tokio::test]
-async fn another_runtimes_fold_moves_the_position_within_one_interval() {
+async fn a_walk_past_its_cap_drops_the_position() {
+    let fixture = fixture("walk-cap", Parked::WalPuts).await;
+    let peer = peer(&fixture, "walk-cap-peer").await;
+    let maintenance = peer.maintenance(writer_id("walk-cap-peer"));
+    for index in 0..=MAX_POSITION_MOVES {
+        fixture
+            .put(&format!("/fill-{index}.txt"))
+            .await
+            .expect("commit");
+        let folded = maintenance
+            .fold_wal(&fixture.namespace_id)
+            .await
+            .expect("fold");
+        assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    }
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    fixture
+        .reader
+        .stat_with_options("/small.txt", &strong())
+        .await
+        .expect("stat");
+    let operations = fixture.recording.take();
+    let reload = operations
+        .iter()
+        .position(|operation| operation.key() == hint(&fixture.namespace_id))
+        .expect("a reload from the hint");
+    let walked = operations[..reload]
+        .iter()
+        .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
+        .count();
+    assert_eq!(walked, MAX_POSITION_MOVES + 1, "{operations:?}");
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Checks that a fold that another runtime publishes is found by the first
+/// eventual read past its maximum staleness, that the position moves onto
+/// the fold's manifest, and that the session's next publish writes above it
+/// without loading the namespace from the store.
+#[tokio::test]
+async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
     let fixture = fixture("fold-interval", Parked::WalPuts).await;
     let peer = peer(&fixture, "fold-peer").await;
     let folded = peer
@@ -316,9 +457,9 @@ async fn another_runtimes_fold_moves_the_position_within_one_interval() {
 
     fixture.recording.reset();
     fixture.reader.stat("/small.txt").await.expect("stat");
-    assert_eq!(fixture.recording.take(), [], "inside the interval");
+    assert_eq!(fixture.recording.take(), [], "within the staleness");
 
-    fixture.clock.advance_ms(INTERVAL_MS);
+    fixture.clock.advance_ms(MAX_STALENESS_MS);
     let (positions, anchors) = fixture.head_sources();
     fixture
         .reader
@@ -359,7 +500,11 @@ async fn another_runtimes_fold_moves_the_position_within_one_interval() {
     fixture.recording.reset();
     let entry = fixture.reader.stat("/after.txt").await.expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
-    assert_eq!(fixture.recording.take(), []);
+    assert_eq!(
+        fixture.recording.take(),
+        [],
+        "the check confirmed the position"
+    );
 }
 
 /// Checks that a manifest check that finds a fold this runtime published,
@@ -387,7 +532,7 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
             .await
             .expect("fold");
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
-        fixture.clock.advance_ms(INTERVAL_MS);
+        fixture.clock.advance_ms(MAX_STALENESS_MS);
         let (positions, anchors) = fixture.head_sources();
         fixture.recording.reset();
         bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
@@ -502,34 +647,50 @@ async fn a_position_past_the_revalidation_bound_is_not_read_from() {
     assert_eq!(fixture.recording.take(), []);
 }
 
-/// Checks that reads that arrive while another read checks the position's
-/// manifest start from the position without waiting, so a burst of reads
-/// at the interval sends one HEAD.
+/// Checks that the reads that need a check of the position share the
+/// session's checks, and that the check confirms the position for the
+/// eventual reads after it.
+///
+/// A strong read starts a check, which the store parks. Strong reads and an
+/// eventual read past its maximum staleness that arrive during that check
+/// wait for it, because it started before they did, and then share the next
+/// one. So the wave sends two HEADs, and an eventual read after it sends
+/// nothing.
 #[tokio::test]
-async fn reads_at_the_interval_share_one_manifest_check() {
+async fn a_wave_of_reads_shares_at_most_two_checks() {
     let fixture = fixture("shared-check", Parked::ManifestChecks).await;
-    fixture.clock.advance_ms(INTERVAL_MS);
+    fixture.clock.advance_ms(MAX_STALENESS_MS);
     let gate = fixture.recording.inner();
     gate.block_next();
     fixture.recording.reset();
-    let (checking, ()) = futures::join!(fixture.reader.stat("/small.txt"), async {
+    let first_options = strong();
+    let first = fixture
+        .reader
+        .stat_with_options("/small.txt", &first_options);
+    let (first, ()) = futures::join!(first, async {
         gate.wait_until_blocked().await;
-        for _ in 0..4 {
-            bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
-                .await
-                .expect("a read during the check doesn't wait for it")
-                .expect("stat");
-        }
+        let reads = [strong(), strong(), strong(), StatOptions::default()];
+        let mut wave =
+            pin!(futures::future::join_all(reads.iter().map(|options| {
+                fixture.reader.stat_with_options("/small.txt", options)
+            }),));
+        assert!(
+            futures::poll!(wave.as_mut()).is_pending(),
+            "the reads wait for the parked check"
+        );
         gate.release();
+        for entry in wave.await {
+            entry.expect("a read during the check");
+        }
     });
-    checking.expect("the checking read");
+    first.expect("the read that started the first check");
     let operations = fixture.recording.take();
     assert_eq!(
         operations
             .iter()
-            .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+            .filter(|operation| is_manifest_head(operation, &fixture.namespace_id))
             .count(),
-        1,
+        2,
         "{operations:?}"
     );
     fixture.recording.reset();

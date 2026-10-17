@@ -154,7 +154,7 @@ impl ReadView {
     fn ensure_pinned_options(
         &self,
         requested: Option<&PinId>,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> Result<()> {
         check_pinned_consistency(consistency)?;
         let Some(requested) = requested else {
@@ -1225,7 +1225,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target(
@@ -1324,7 +1324,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target_by_inode(
@@ -1433,7 +1433,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     let states = engine
                         .stat_current_files_by_inode(inode_ids, &read_context)
@@ -1473,7 +1473,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     Ok(engine
                         .read_content_ref(content_ref, max_bytes, &read_context)
@@ -1514,23 +1514,19 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                Consistency::Strong,
-                |engine, read_context| {
-                    let request = request.clone();
-                    async move {
-                        let page = engine.list_trash_page(request, &read_context).await?;
-                        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
-                        Ok(loonfs_types::ListTrashResponse {
-                            namespace_id: self.namespace_id.clone(),
-                            head_seq: read_context.head.seq,
-                            entries: page.items,
-                            next_cursor,
-                        })
-                    }
-                },
-            )
+            .read(&self.namespace_id, None, |engine, read_context| {
+                let request = request.clone();
+                async move {
+                    let page = engine.list_trash_page(request, &read_context).await?;
+                    let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+                    Ok(loonfs_types::ListTrashResponse {
+                        namespace_id: self.namespace_id.clone(),
+                        head_seq: read_context.head.seq,
+                        entries: page.items,
+                        next_cursor,
+                    })
+                }
+            })
             .await
     }
 
@@ -1570,29 +1566,21 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
-            .read(
-                &self.namespace_id,
-                Consistency::Strong,
-                |engine, read_context| {
-                    let request = request.clone();
-                    let absolute_path = absolute_path.clone();
-                    async move {
-                        let (inode_id, page) = engine
-                            .list_file_revisions_page(
-                                absolute_path.as_str(),
-                                request,
-                                &read_context,
-                            )
-                            .await?;
-                        Ok(file_revisions_page_response(
-                            self.namespace_id.clone(),
-                            read_context.head.seq,
-                            page,
-                            inode_id,
-                        )?)
-                    }
-                },
-            )
+            .read(&self.namespace_id, None, |engine, read_context| {
+                let request = request.clone();
+                let absolute_path = absolute_path.clone();
+                async move {
+                    let (inode_id, page) = engine
+                        .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
+                        .await?;
+                    Ok(file_revisions_page_response(
+                        self.namespace_id.clone(),
+                        read_context.head.seq,
+                        page,
+                        inode_id,
+                    )?)
+                }
+            })
             .await
     }
 
@@ -1629,24 +1617,20 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                Consistency::Strong,
-                |engine, read_context| {
-                    let request = request.clone();
-                    async move {
-                        let page = engine
-                            .list_file_revisions_by_inode_page(inode_id, request, &read_context)
-                            .await?;
-                        Ok(file_revisions_page_response(
-                            self.namespace_id.clone(),
-                            read_context.head.seq,
-                            page,
-                            inode_id,
-                        )?)
-                    }
-                },
-            )
+            .read(&self.namespace_id, None, |engine, read_context| {
+                let request = request.clone();
+                async move {
+                    let page = engine
+                        .list_file_revisions_by_inode_page(inode_id, request, &read_context)
+                        .await?;
+                    Ok(file_revisions_page_response(
+                        self.namespace_id.clone(),
+                        read_context.head.seq,
+                        page,
+                        inode_id,
+                    )?)
+                }
+            })
             .await
     }
 
@@ -1673,7 +1657,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     let read = engine
                         .read_file_revision(
@@ -1904,7 +1888,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                Consistency::Strong,
+                None,
                 |engine, read_context| async move {
                     let bytes = engine
                         .read_file_revision_by_inode(
@@ -1969,7 +1953,7 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> Result<ListChangesResponse> {
         check_consistency(consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;

@@ -11,9 +11,10 @@ pub struct ReadFileOptions {
     /// Read the file revision captured by this snapshot instead of the
     /// current one.
     pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before the read. A
-    /// snapshot read takes only [`Consistency::Strong`].
-    pub consistency: Consistency,
+    /// How recently the server confirms the live head before the read, or
+    /// `None` to send no consistency parameter, so the server's default
+    /// applies. A snapshot read takes only `None`.
+    pub consistency: Option<Consistency>,
 }
 
 /// Options for creating a namespace.
@@ -42,18 +43,23 @@ impl Default for CreateNamespaceOptions {
 pub struct ListChangesOptions {
     /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before each page. A
-    /// snapshot's feed takes only [`Consistency::Strong`].
-    pub consistency: Consistency,
+    /// How recently the server confirms the live head before each page, or
+    /// `None` to send no consistency parameter, so the server's default
+    /// applies. A snapshot's feed takes only `None`.
+    pub consistency: Option<Consistency>,
 }
 
-/// Adds the consistency query parameters of a live read. A `strong` read sends
-/// neither, so the client also works with a server that doesn't accept them.
-fn push_consistency(query: &mut QueryBuilder, consistency: Consistency) {
-    if let Consistency::Eventual { max_staleness } = consistency {
-        query.push("consistency", "eventual");
-        if let Some(max_staleness) = max_staleness {
-            query.push("max_staleness_ms", max_staleness.as_millis());
+/// Adds the consistency query parameters of a live read. A read that sets no
+/// consistency sends neither, so the server's default applies.
+fn push_consistency(query: &mut QueryBuilder, consistency: Option<Consistency>) {
+    match consistency {
+        None => {}
+        Some(Consistency::Strong) => query.push("consistency", "strong"),
+        Some(Consistency::Eventual { max_staleness }) => {
+            query.push("consistency", "eventual");
+            if let Some(max_staleness) = max_staleness {
+                query.push("max_staleness_ms", max_staleness.as_millis());
+            }
         }
     }
 }
@@ -918,11 +924,12 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that a `strong` read sends neither consistency parameter, and
-    /// that an eventual read sends `consistency=eventual`, plus
-    /// `max_staleness_ms` when it sets a maximum staleness.
+    /// Checks that a read that sets no consistency sends neither consistency
+    /// parameter, so the server's default applies, and that a read that sets
+    /// one sends `consistency`, plus `max_staleness_ms` when it sets a maximum
+    /// staleness.
     #[tokio::test]
-    async fn eventual_reads_send_the_consistency_parameters_and_strong_reads_send_none() {
+    async fn reads_send_the_consistency_parameters_only_when_they_set_them() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
         let read = |consistency| ReadFileOptions {
             consistency,
@@ -932,16 +939,18 @@ mod tests {
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
+            Outcome::Success(b"file".to_vec()),
         ]);
         let client = client_for(&transport);
         for consistency in [
-            Consistency::Strong,
-            Consistency::Eventual {
+            None,
+            Some(Consistency::Strong),
+            Some(Consistency::Eventual {
                 max_staleness: None,
-            },
-            Consistency::Eventual {
+            }),
+            Some(Consistency::Eventual {
                 max_staleness: Some(std::time::Duration::from_millis(2_500)),
-            },
+            }),
         ] {
             client
                 .read_file_with_options(&spec, &read(consistency))
@@ -959,6 +968,7 @@ mod tests {
             urls,
             [
                 content.to_owned(),
+                format!("{content}&consistency=strong"),
                 format!("{content}&consistency=eventual"),
                 format!("{content}&consistency=eventual&max_staleness_ms=2500"),
             ]

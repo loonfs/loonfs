@@ -58,8 +58,11 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
         Arc::clone(&watched),
         KeyPredicate::any(),
     ));
+    // A maximum staleness of 0 confirms the head on every read, so the warm
+    // read sends its WAL probe.
     let reader = LoonFs::builder_with_store(recording.clone())
         .read_only()
+        .max_staleness_ms(0)
         .build()
         .await
         .expect("reader")

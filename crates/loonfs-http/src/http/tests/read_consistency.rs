@@ -6,7 +6,7 @@ use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::SharedObjectStore;
+use loonfs::{Consistency, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -32,8 +32,9 @@ struct Fixture {
 /// runtime, and a server over the same store that has no writer session for
 /// the namespace, so its reads start from the read cache. The server's
 /// default maximum staleness is the revalidation bound, so an eventual read
-/// stays inside it for the whole test.
-async fn fixture(name: &str) -> Fixture {
+/// stays inside it for the whole test, and `consistency` sets the runtime's
+/// default consistency, or keeps the runtime's own default when `None`.
+async fn fixture(name: &str, consistency: Option<Consistency>) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -67,6 +68,7 @@ async fn fixture(name: &str) -> Fixture {
         TestAppOptions {
             store: Some(store),
             max_staleness_ms: Some(READ_REVALIDATION_BOUND_MS),
+            consistency,
             ..TestAppOptions::default()
         },
     )
@@ -133,7 +135,7 @@ fn with_parameters(route: &str, parameters: &str) -> String {
 /// without a maximum staleness, up to the revalidation bound.
 #[tokio::test]
 async fn consistency_parameters_parse_on_every_live_read_route() {
-    let fixture = fixture("consistency-parse").await;
+    let fixture = fixture("consistency-parse", None).await;
     let bound = format!("consistency=eventual&max_staleness_ms={READ_REVALIDATION_BOUND_MS}");
     for route in fixture.live_read_routes() {
         for parameters in [
@@ -161,7 +163,7 @@ async fn consistency_parameters_parse_on_every_live_read_route() {
 /// request.
 #[tokio::test]
 async fn consistency_rejections_identify_the_parameter() {
-    let fixture = fixture("consistency-rejections").await;
+    let fixture = fixture("consistency-rejections", None).await;
     let above = format!(
         "consistency=eventual&max_staleness_ms={}",
         READ_REVALIDATION_BOUND_MS + 1
@@ -199,29 +201,39 @@ async fn consistency_rejections_identify_the_parameter() {
     }
 }
 
-/// Checks that an eventual read through the server within its maximum staleness sends
-/// no store request, while a `strong` read of the same entry confirms the
-/// head with the store.
+/// Checks that an eventual read through the server within its maximum
+/// staleness sends no store request, and that a `strong` read of the same
+/// entry confirms the head with the store. A read that doesn't set
+/// `consistency` takes the runtime's default, which is eventual unless the
+/// server sets `strong`.
 #[tokio::test]
 async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() {
-    let fixture = fixture("consistency-no-request").await;
     let entry = "/v0/namespaces/demo/filesystem/entry?path=/file.txt";
     let children = "/v0/namespaces/demo/inodes/ino_1/children?include_attributes=false";
-    for uri in [entry, children] {
-        let (status, _) = fixture.get(uri).await;
-        assert_eq!(status, StatusCode::OK, "warm read of {uri}");
+    for (setting, unset_confirms) in [(None, false), (Some(Consistency::Strong), true)] {
+        let fixture = fixture("consistency-no-request", setting).await;
+        for uri in [entry, children] {
+            let (status, _) = fixture.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "warm read of {uri}");
+        }
+        for (parameters, confirms) in [
+            (None, unset_confirms),
+            (Some("consistency=eventual"), false),
+            (Some("consistency=strong"), true),
+        ] {
+            fixture.recording.reset();
+            for uri in [entry, children] {
+                let uri = parameters.map_or(uri.to_owned(), |parameters| {
+                    with_parameters(uri, parameters)
+                });
+                let (status, _) = fixture.get(&uri).await;
+                assert_eq!(status, StatusCode::OK, "{uri}");
+            }
+            assert_eq!(
+                !fixture.recording.take().is_empty(),
+                confirms,
+                "{setting:?} server, {parameters:?}"
+            );
+        }
     }
-    fixture.recording.reset();
-    for uri in [entry, children] {
-        let uri = with_parameters(uri, "consistency=eventual");
-        let (status, _) = fixture.get(&uri).await;
-        assert_eq!(status, StatusCode::OK, "{uri}");
-    }
-    assert_eq!(fixture.recording.take(), []);
-    let (status, _) = fixture.get(entry).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        !fixture.recording.take().is_empty(),
-        "a strong read confirms the head with the store"
-    );
 }

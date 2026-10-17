@@ -155,7 +155,7 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         let options = ReadFileStreamOptions {
             consistency,
@@ -181,7 +181,7 @@ impl ReadTarget {
     pub(super) async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         let options = ReadFileStreamOptions {
             consistency,
@@ -239,7 +239,11 @@ impl ReadTarget {
 
     /// A snapshot's feed has no consistency setting, and the handler rejects
     /// `consistency` with a `snapshot_id` before it reads.
-    fn list_changes(&self, after_seq: ChangeSeq, consistency: Consistency) -> loonfs::ChangesPager {
+    fn list_changes(
+        &self,
+        after_seq: ChangeSeq,
+        consistency: Option<Consistency>,
+    ) -> loonfs::ChangesPager {
         match self {
             Self::Snapshot(view) => view.list_changes(after_seq),
             Self::Live(namespace) => {
@@ -273,7 +277,7 @@ impl ReadTarget {
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
-            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
@@ -338,7 +342,7 @@ pub(super) async fn list_path_entries(
             ("path" = String, Query, description = "The absolute path to read."),
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read."),
-            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
@@ -396,7 +400,7 @@ pub(super) async fn get_path_entry(
             ("path" = String, Query, description = "The absolute path of the file to read."),
             ("revision_no" = Option<RevisionNo>, Query, description = "An earlier revision to read. It can't be combined with `snapshot_id`."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
-            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
@@ -685,7 +689,7 @@ pub(super) async fn create_commit(
             ("after_seq" = loonfs_types::ChangeSeq, Query, description = "The sequence after which to return committed changes."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured."),
-            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `strong` (the default) confirms it before the read, and `eventual` reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness. It can't be combined with `snapshot_id`."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(

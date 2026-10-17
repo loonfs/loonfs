@@ -284,6 +284,10 @@ pub struct ServerConfig {
     /// every read. Unset keeps the runtime default of 1000. At most 1155000,
     /// the revalidation bound.
     pub max_staleness_ms: Option<u64>,
+    /// The runtime's default consistency, which every read that doesn't set
+    /// its own takes.
+    #[serde(default)]
+    pub consistency: ReadConsistency,
     /// Bytes retained by all read, publication, and fold memos. Zero keeps
     /// none. Derived when sized; otherwise defaults to 256 MiB.
     pub max_read_working_bytes: Option<usize>,
@@ -327,6 +331,31 @@ pub struct TlsServerConfig {
     pub cert_path: String,
     /// PEM private key: PKCS#8, PKCS#1 (RSA), or SEC1.
     pub key_path: String,
+}
+
+/// The consistency of the server's live reads that don't set their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadConsistency {
+    /// Read at the head that the server confirmed last while that
+    /// confirmation is younger than `max_staleness_ms`.
+    #[default]
+    Eventual,
+    /// Confirm the head before every read, for a deployment whose readers
+    /// follow writes made through other servers.
+    Strong,
+}
+
+impl ReadConsistency {
+    /// Returns the runtime's default consistency.
+    pub fn consistency(self) -> loonfs::Consistency {
+        match self {
+            Self::Eventual => loonfs::Consistency::Eventual {
+                max_staleness: None,
+            },
+            Self::Strong => loonfs::Consistency::Strong,
+        }
+    }
 }
 
 fn default_maintenance() -> JobMode {
@@ -2314,6 +2343,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.metadata_cache, super::MetadataCacheConfig::default());
         assert_eq!(config.manifest_revalidation_interval_ms, None);
         assert_eq!(config.max_staleness_ms, None);
+        assert_eq!(config.consistency, super::ReadConsistency::Eventual);
         assert_eq!(config.max_read_working_bytes, None);
     }
 
@@ -2326,6 +2356,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 manifest_revalidation_interval_ms = 250
 max_staleness_ms = 5000
+consistency = "strong"
 max_read_working_bytes = 8192
 
 [metadata_cache]
@@ -2342,6 +2373,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
         assert_eq!(config.max_staleness_ms, Some(5000));
+        assert_eq!(config.consistency, super::ReadConsistency::Strong);
         assert_eq!(config.max_read_working_bytes, Some(8192));
         assert_eq!(
             config.metadata_cache,

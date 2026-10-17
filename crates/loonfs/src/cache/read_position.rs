@@ -4,12 +4,12 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
-use loonfs_core::control::{manifest_has_successor, manifests_above};
+use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::PublishedManifest;
 use loonfs_core::{CoreError, MetadataProjectionLoadError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use loonfs_types::ManifestNo;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
@@ -52,9 +52,18 @@ pub(crate) struct ReadPositionSlot {
     /// doesn't keep a confirmation from before the change.
     record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
-    /// Set while one read checks the position's manifest for a successor,
-    /// so concurrent reads send one HEAD.
-    checking: AtomicBool,
+    /// The session's last finished check of the position. A read that runs a
+    /// check keeps this locked until the check ends, so one check runs at a
+    /// time and the reads that need one wait for it. (It's a `tokio` mutex
+    /// because it stays locked across the check's requests.)
+    check: tokio::sync::Mutex<Option<FinishedCheck>>,
+}
+
+/// When the session's last check of its position started, and how it ended.
+#[derive(Debug)]
+struct FinishedCheck {
+    observed: Observation,
+    outcome: Result<(), CoreError>,
 }
 
 impl ReadPositionSlot {
@@ -65,7 +74,7 @@ impl ReadPositionSlot {
             record: head_state.record(namespace_id),
             head_state,
             position: Mutex::default(),
-            checking: AtomicBool::default(),
+            check: tokio::sync::Mutex::default(),
         }
     }
 
@@ -133,17 +142,20 @@ impl ReadPositionSlot {
         true
     }
 
-    /// Records that a HEAD sent at `checked` found no successor of the
-    /// manifest of the position that the read took.
+    /// Records that a check at `checked` found no successor of manifest
+    /// `manifest_no`.
     ///
-    /// The check applies to the position that the slot has now, as
-    /// [`Self::prepare`] explains, unless that position has a later check
-    /// already or the slot has none.
-    fn record_check(&self, checked: Observation) {
+    /// The check applies to the position that the slot has now if that
+    /// position's manifest is `manifest_no` or a later one, as
+    /// [`Self::prepare`] explains, unless the position has a later check
+    /// already.
+    fn record_check(&self, checked: Observation, manifest_no: ManifestNo) {
         let Some(current) = self.current() else {
             return;
         };
-        if current.basis_checked.age_ms() <= checked.age_ms() {
+        if current.basis.manifest_no() < manifest_no
+            || current.basis_checked.age_ms() <= checked.age_ms()
+        {
             return;
         }
         let updated = Arc::new(ReadPosition {
@@ -158,53 +170,20 @@ impl ReadPositionSlot {
             *slot = Some(updated);
         }
     }
-
-    /// Starts a successor check of the position's manifest, or returns
-    /// `None` while another read's check runs.
-    fn start_check(&self) -> Option<PositionCheck<'_>> {
-        // Acquire pairs with the Release in `PositionCheck::drop`, so the
-        // read that starts the next check sees the check recorded before it.
-        self.checking
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| PositionCheck { slot: self })
-    }
-}
-
-/// One read's successor check of a position's manifest. Dropping it, also
-/// when the read is cancelled, lets the next read check.
-struct PositionCheck<'a> {
-    slot: &'a ReadPositionSlot,
-}
-
-impl Drop for PositionCheck<'_> {
-    fn drop(&mut self) {
-        // Release pairs with the Acquire in `ReadPositionSlot::start_check`.
-        self.slot.checking.store(false, Ordering::Release);
-    }
 }
 
 impl RuntimeCore {
     /// Returns the position of the namespace's writer session in this
-    /// runtime for a read to start from, or `None` when the read starts from
-    /// the read cache instead.
+    /// runtime for a read with `max_staleness_ms` to start from, or `None`
+    /// when the read starts from the read cache instead.
     ///
-    /// A read checks the position's manifest for a successor with one HEAD
-    /// once the last check is a manifest revalidation interval old. A
-    /// successor of a later writer epoch is a new writer's claim, which
-    /// drops the position, and the read cache's reload finds the claim.
-    /// Concurrent reads share one check, and a read that finds another
-    /// read's check running starts from the position without waiting. With
-    /// an interval of zero, every read checks for itself, so each read sees
-    /// a claim published before the read started.
-    ///
-    /// A successor that keeps the position's writer epoch (a fold, a
-    /// compaction, a checkpoint, a snapshot, or a retention advance, by this
-    /// runtime or by another process) describes the head this session
-    /// wrote, so the position moves onto it and the read starts from the
-    /// position (see `position_past_same_epoch_successors`). A claim above
-    /// such manifests still drops the position, so the takeover window is
-    /// one interval either way.
+    /// A read takes the position as it is while the position's last check is
+    /// younger than the read's maximum staleness. A read without one (a
+    /// `strong` read), or past it, waits for a check of the position (see
+    /// [`Self::check_writer_position`]) that started after the read did. So a
+    /// read that finds a check running waits for that check and then for the
+    /// next one, which every read that arrives during the first check
+    /// shares, and a wave of concurrent reads costs at most two checks.
     ///
     /// A check is trusted only while its answer arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
@@ -212,6 +191,7 @@ impl RuntimeCore {
     pub(crate) async fn checked_writer_position(
         &self,
         namespace_id: &NamespaceId,
+        max_staleness_ms: Option<u64>,
     ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
         let Some(positions) = self
             .inner
@@ -232,104 +212,95 @@ impl RuntimeCore {
             positions.drop_position(namespace_id);
             return Ok(None);
         }
-        let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
-        if checked.age_ms() < interval_ms {
+        if max_staleness_ms.is_some_and(|max_staleness_ms| checked.age_ms() < max_staleness_ms) {
             return Ok(Some(position));
         }
-        let _check = match slot.start_check() {
-            Some(check) => Some(check),
-            None if interval_ms == 0 => None,
-            None => return Ok(Some(position)),
-        };
-        let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let successor =
-            manifest_has_successor(self.store(), namespace_id, position.basis.manifest_no())
+        let started = Observation::now(Arc::clone(&self.inner.timer));
+        let mut last = slot.check.lock().await;
+        if !last
+            .as_ref()
+            .is_some_and(|check| check.observed.is_after(&started))
+        {
+            let observed = Observation::now(Arc::clone(&self.inner.timer));
+            let outcome = self
+                .check_writer_position(namespace_id, positions.as_ref(), &slot, &observed)
                 .instrument(tracing::debug_span!(
                     target: "loonfs::page",
                     "loonfs.phase",
                     phase = "position_manifest_probe"
                 ))
-                .await
-                .map_err(MetadataProjectionLoadError::LoadHead)?;
-        if !checked.is_within_revalidation_bound() {
-            positions.drop_position(namespace_id);
-            return Ok(None);
+                .await;
+            *last = Some(FinishedCheck { observed, outcome });
         }
-        if successor {
-            let kept = self
-                .position_past_same_epoch_successors(
-                    namespace_id,
-                    positions.as_ref(),
-                    &slot,
-                    position,
-                    observed,
-                )
-                .await?;
-            if kept.is_none() {
-                // The position becomes the cached head, which a successor
-                // makes out of date, so the head is marked unconfirmed after.
-                positions.drop_position(namespace_id);
-                self.invalidate_namespace_read_cache(namespace_id);
-            }
-            return Ok(kept);
+        if let Some(FinishedCheck {
+            outcome: Err(error),
+            ..
+        }) = last.as_ref()
+        {
+            return Err(error.clone());
         }
-        slot.record_check(observed);
-        Ok(Some(position))
+        drop(last);
+        Ok(slot.current())
     }
 
-    /// Returns the position for a read whose check found a successor of the
-    /// position's manifest, or `None` when the read drops the position.
+    /// Checks the position's manifest for a successor with one HEAD, sent
+    /// after `observed`.
     ///
-    /// The read loads the manifests above the position's. While the newest
-    /// is an active manifest of the position's writer epoch, each describes
-    /// the head this session wrote, so the position moves onto them in
-    /// order, as it moves onto the manifests this runtime publishes (see
-    /// [`HeadPositions::move_position`]). A manifest of a later epoch is a
-    /// new writer's claim, and a tombstone ends the namespace, so the read
-    /// drops the position. The walk that ends on the newest manifest is
-    /// that manifest's successor check, so a position that moved onto it
-    /// records the check. A position that a locked engine keeps where it
-    /// was records none, because its manifest has a successor.
-    async fn position_past_same_epoch_successors(
+    /// A HEAD that finds nothing records the check. A HEAD that finds a
+    /// successor starts the walk of [`same_epoch_manifests_above`]. Each
+    /// manifest with the position's writer epoch (a fold, a compaction, a
+    /// checkpoint, a snapshot, or a retention advance, by this runtime or by
+    /// another process) describes the head this session wrote, so the
+    /// position moves onto them in order, as it moves onto the manifests this
+    /// runtime publishes (see [`HeadPositions::move_position`]). The walk
+    /// that ends on the newest manifest is that manifest's successor check,
+    /// so a position that moved onto it records the check. A position that a
+    /// locked engine keeps where it was records none, because its manifest
+    /// has a successor. Anything else the walk finds, or an answer that
+    /// arrives `READ_REVALIDATION_BOUND_MS` or more after the position's last
+    /// check, drops the position.
+    async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
         positions: &dyn HeadPositions,
         slot: &ReadPositionSlot,
-        position: Arc<ReadPosition>,
-        observed: Observation,
-    ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
-        let above = manifests_above(self.store(), namespace_id, position.basis.manifest_no())
-            .instrument(tracing::debug_span!(
-                target: "loonfs::page",
-                "loonfs.phase",
-                phase = "position_manifest_probe"
-            ))
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?;
-        let Some(newest) = above.last() else {
-            return Ok(None);
+        observed: &Observation,
+    ) -> Result<(), CoreError> {
+        let Some(position) = slot.current() else {
+            return Ok(());
         };
-        let payload = newest.envelope.payload();
-        if payload.writer_epoch != position.head.writer_epoch
-            || payload.status.is_deleted()
-            || !position.basis_checked.is_within_revalidation_bound()
-        {
-            return Ok(None);
+        let successor =
+            manifest_has_successor(self.store(), namespace_id, position.basis.manifest_no())
+                .await
+                .map_err(MetadataProjectionLoadError::LoadHead)?;
+        let moves = if successor {
+            same_epoch_manifests_above(
+                self.store(),
+                namespace_id,
+                position.basis.manifest(),
+                position.head.writer_epoch,
+            )
+            .await
+            .map_err(MetadataProjectionLoadError::LoadHead)?
+        } else {
+            Some(Vec::new())
+        };
+        let Some(moves) = moves.filter(|_| position.basis_checked.is_within_revalidation_bound())
+        else {
+            // The position becomes the cached head, which a successor or a
+            // late answer makes out of date, so the head is marked
+            // unconfirmed after.
+            positions.drop_position(namespace_id);
+            self.invalidate_namespace_read_cache(namespace_id);
+            return Ok(());
+        };
+        let newest = moves.last().map_or(position.basis.manifest_no(), |moved| {
+            moved.manifest().manifest_no
+        });
+        for published in moves {
+            positions.move_position(namespace_id, published);
         }
-        let newest_no = newest.manifest().manifest_no;
-        let mut head_seq = position.basis.0.head_seq;
-        for manifest in &above {
-            positions.move_position(namespace_id, PublishedManifest::above(manifest, head_seq));
-            head_seq = manifest.manifest().head_seq;
-        }
-        let current = slot.current();
-        if current
-            .as_ref()
-            .is_some_and(|moved| moved.basis.manifest_no() == newest_no)
-        {
-            slot.record_check(observed);
-            return Ok(slot.current());
-        }
-        Ok(current)
+        slot.record_check(observed.clone(), newest);
+        Ok(())
     }
 }

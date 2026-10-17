@@ -531,6 +531,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .read_only()
         .monotonic_timer(timer.clone())
         .manifest_revalidation_interval_ms(interval_ms)
+        .max_staleness_ms(0)
         .build()
         .await
         .expect("reader");
@@ -608,10 +609,12 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("collected-gap").expect("namespace");
     // The reader's clock doesn't move, so its manifest check doesn't fall due,
-    // and each warm read starts with the WAL probe.
+    // and with a maximum staleness of 0 each warm read starts with the WAL
+    // probe.
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .max_staleness_ms(0)
         .build()
         .await
         .expect("reader");
@@ -689,6 +692,7 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
+        .max_staleness_ms(0)
         .build()
         .await
         .expect("reader");
@@ -782,7 +786,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let namespace_id = NamespaceId::parse("read-after-write").expect("valid namespace id");
 
     let writer = writer_with_cache(&store, "read-after-write-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
+        builder.max_staleness_ms(READ_REVALIDATION_BOUND_MS)
     })
     .await;
     writer
@@ -853,7 +857,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
     let writer = writer_with_cache(&store, "maintained-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
+        builder.max_staleness_ms(READ_REVALIDATION_BOUND_MS)
     })
     .await;
     writer

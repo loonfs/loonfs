@@ -6,6 +6,7 @@ writer_id = "loonfs-server-gcp"
 memory_limit_bytes = 4294967296
 #manifest_revalidation_interval_ms = 1000
 #max_staleness_ms = 1000
+#consistency = "eventual"
 
 # Serving beyond loopback requires TLS. Either terminate it here by
 # uncommenting [tls] below, or set allow_remote_without_tls = true when a

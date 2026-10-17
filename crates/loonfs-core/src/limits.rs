@@ -56,6 +56,13 @@ pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 
+/// The most manifests that one check of a writer position moves it onto.
+///
+/// A walk that finds more drops the position, so the session's next publish
+/// loads the namespace by discovery, which reads the hint instead of every
+/// manifest in between. The walk sends at most one GET more than this.
+pub const MAX_POSITION_MOVES: usize = 8;
+
 /// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
 ///
 /// Every publish surface rejects at this length with `maintenance_required`, so

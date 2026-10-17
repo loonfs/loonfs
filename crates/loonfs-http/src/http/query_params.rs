@@ -45,13 +45,14 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
 }
 
 /// Parses the `consistency` and `max_staleness_ms` parameters of a live
-/// read. A read with a `snapshot_id` has no consistency setting, so
+/// read, or returns `None`, the runtime's default, when the request sets
+/// neither. A read with a `snapshot_id` has no consistency setting, so
 /// `has_snapshot` rejects `consistency` on one.
 pub(super) fn parse_consistency(
     consistency: Option<&str>,
     max_staleness_ms: Option<&str>,
     has_snapshot: bool,
-) -> Result<Consistency, ApiResponseError> {
+) -> Result<Option<Consistency>, ApiResponseError> {
     if has_snapshot && consistency.is_some() {
         return Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
@@ -62,13 +63,14 @@ pub(super) fn parse_consistency(
     }
     let max_staleness = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
     match consistency {
-        Some("eventual") => Ok(Consistency::Eventual { max_staleness }),
+        Some("eventual") => Ok(Some(Consistency::Eventual { max_staleness })),
         None | Some("strong") if max_staleness.is_some() => Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "max_staleness_ms requires consistency=eventual",
         )
         .with_param("max_staleness_ms")),
-        None | Some("strong") => Ok(Consistency::Strong),
+        None => Ok(None),
+        Some("strong") => Ok(Some(Consistency::Strong)),
         Some(other) => Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             &format!("invalid consistency `{other}`: expected `strong` or `eventual`"),
@@ -215,7 +217,7 @@ impl utoipa::PartialSchema for OpenApiConsistency {
         utoipa::openapi::schema::Object::builder()
             .schema_type(utoipa::openapi::schema::Type::String)
             .enum_values(Some(["strong", "eventual"]))
-            .default(Some(serde_json::json!("strong")))
+            .default(Some(serde_json::json!("eventual")))
             .into()
     }
 }

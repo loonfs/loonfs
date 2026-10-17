@@ -139,7 +139,7 @@ impl LoonFs<Writable> {
     }
 }
 
-impl Namespace<Writable> {
+impl<M: crate::Mode> Namespace<M> {
     /// Delete and snapshot management belong to the token holder and to
     /// administrators of an ACL namespace.
     pub(super) async fn ensure_administrator(&self) -> Result<()> {
@@ -152,7 +152,9 @@ impl Namespace<Writable> {
             .await?;
         Ok(engine.ensure_administrator(&context).await?)
     }
+}
 
+impl Namespace<Writable> {
     /// Ends the namespace after folding its final WAL tail, whatever its
     /// head.
     pub async fn delete(&self) -> Result<DeleteNamespaceResponse> {

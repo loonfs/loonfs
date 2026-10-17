@@ -26,11 +26,11 @@ pub(super) struct TestOptions {
 pub(super) struct TestAppOptions {
     pub(super) store: Option<SharedObjectStore>,
     pub(super) direct_transfers: Option<DirectTransferIssuers>,
-    /// The runtime's manifest check interval, or the default when `None`.
-    pub(super) manifest_revalidation_interval_ms: Option<u64>,
     /// The runtime's default maximum staleness of an eventual read, or the default when
     /// `None`.
     pub(super) max_staleness_ms: Option<u64>,
+    /// The runtime's default consistency, or the default when `None`.
+    pub(super) consistency: Option<loonfs::Consistency>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -66,12 +66,12 @@ pub(super) async fn test_app(
     let options = Arc::new(config.binding);
     let metrics = HttpMetrics::new();
     let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store));
-    let builder = match inputs.manifest_revalidation_interval_ms {
-        Some(interval_ms) => builder.manifest_revalidation_interval_ms(interval_ms),
-        None => builder,
-    };
     let builder = match inputs.max_staleness_ms {
         Some(interval_ms) => builder.max_staleness_ms(interval_ms),
+        None => builder,
+    };
+    let builder = match inputs.consistency {
+        Some(consistency) => builder.consistency(consistency),
         None => builder,
     };
     let runtime = builder

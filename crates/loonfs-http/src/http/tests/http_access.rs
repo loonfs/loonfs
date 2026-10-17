@@ -590,29 +590,22 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     assert_eq!(namespace.head_seq, loonfs_types::ChangeSeq(0));
 }
 
-/// Checks that a former server's first read after another server revokes
-/// access sees the revocation, when the former server checks for a newer
-/// manifest on every read.
+/// Checks that a former server's first `strong` read after another server
+/// revokes access sees the revocation.
 ///
 /// Reads on the server that has the namespace's writer session start from
-/// the session's position, and the manifest check finds the new writer's
-/// claim. With the default interval, the revocation is visible there within
-/// one manifest check interval, and with an interval of 0 it's visible on
-/// the first read.
+/// the session's position, and the session's manifest check finds the new
+/// writer's claim. A `strong` read waits for that check, so a client that
+/// changes a permission through one server and reads through another passes
+/// `consistency=strong` on that read.
 #[tokio::test]
-async fn a_former_server_observes_revocation_on_its_first_read_with_a_zero_interval() {
+async fn a_former_server_observes_revocation_on_its_first_strong_read() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_options(&temp_dir.path().join("store"), "old-writer");
     config.binding.serves_maintenance = true;
-    let (old_router, old_state) = test_app(
-        config.clone(),
-        TestAppOptions {
-            manifest_revalidation_interval_ms: Some(0),
-            ..TestAppOptions::default()
-        },
-    )
-    .await
-    .expect("old server");
+    let (old_router, old_state) = test_app(config.clone(), TestAppOptions::default())
+        .await
+        .expect("old server");
     let response = old_router
         .clone()
         .oneshot(request(
@@ -673,7 +666,7 @@ async fn a_former_server_observes_revocation_on_its_first_read_with_a_zero_inter
     let response = old_router
         .oneshot(request(
             "GET",
-            "/v0/namespaces/demo/filesystem/content?path=/team/file",
+            "/v0/namespaces/demo/filesystem/content?path=/team/file&consistency=strong",
             None,
             &[
                 ("Loonfs-Subject", "viewer"),

@@ -169,8 +169,9 @@ pub struct ReadFileStreamOptions {
     /// before driving the stream. Zero reads from the first byte and asks
     /// nothing of the caller.
     pub start_offset: u64,
-    /// How recently the read confirms the live head.
-    pub consistency: Consistency,
+    /// How recently the read confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 impl Default for ReadFileStreamOptions {
@@ -178,17 +179,17 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
-            consistency: Consistency::Strong,
+            consistency: None,
         }
     }
 }
 
 /// Rejects a live read's consistency before the read sends a request, when
 /// its maximum staleness is longer than the revalidation bound.
-pub(crate) fn check_consistency(consistency: Consistency) -> Result<()> {
-    if let Consistency::Eventual {
+pub(crate) fn check_consistency(consistency: Option<Consistency>) -> Result<()> {
+    if let Some(Consistency::Eventual {
         max_staleness: Some(max_staleness),
-    } = consistency
+    }) = consistency
     {
         if max_staleness > Duration::from_millis(READ_REVALIDATION_BOUND_MS) {
             return Err(Error::InvalidRequest {
@@ -203,16 +204,13 @@ pub(crate) fn check_consistency(consistency: Consistency) -> Result<()> {
     Ok(())
 }
 
-/// Rejects an eventual read of a pinned view (a snapshot, a checkpoint, or a
-/// [`ReadView`](crate::ReadView)). The pin selects the state such a read
-/// sees, so the read has no consistency setting and takes only
-/// [`Consistency::Strong`].
-pub(crate) fn check_pinned_consistency(consistency: Consistency) -> Result<()> {
-    if consistency != Consistency::Strong {
+/// Rejects a read of a pinned view (a snapshot, a checkpoint, or a
+/// [`ReadView`](crate::ReadView)) that sets a consistency. The pin selects
+/// the state such a read sees, so the read has no consistency setting.
+pub(crate) fn check_pinned_consistency(consistency: Option<Consistency>) -> Result<()> {
+    if consistency.is_some() {
         return Err(Error::InvalidRequest {
-            message: "a read of a snapshot or a read view has no consistency setting, so it \
-                      takes only `strong`"
-                .to_owned(),
+            message: "a read of a snapshot or a read view has no consistency setting".to_owned(),
             param: "consistency",
         });
     }
@@ -224,7 +222,7 @@ pub(crate) fn check_pinned_consistency(consistency: Consistency) -> Result<()> {
 /// request.
 pub(crate) fn check_snapshot_consistency(
     snapshot_id: Option<&PinId>,
-    consistency: Consistency,
+    consistency: Option<Consistency>,
 ) -> Result<()> {
     match snapshot_id {
         Some(_) => check_pinned_consistency(consistency),
@@ -235,15 +233,17 @@ pub(crate) fn check_snapshot_consistency(
 /// Options for a buffered read of a file's current content.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
-    /// How recently the read confirms the live head.
-    pub consistency: Consistency,
+    /// How recently the read confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 /// Options for reading the change feed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
-    /// How recently each page confirms the live head.
-    pub consistency: Consistency,
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 #[cfg(test)]

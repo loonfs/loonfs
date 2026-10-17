@@ -31,13 +31,14 @@ impl std::fmt::Display for AttributeInclusion {
 
 /// How recently a live read confirms the namespace head before it reads.
 ///
-/// A pinned read (a snapshot or a checkpoint) has no consistency setting,
+/// A read option that leaves its consistency unset (`None`) takes the
+/// runtime's default, which is eventual unless the host sets `strong`. A
+/// pinned read (a snapshot or a checkpoint) has no consistency setting,
 /// because the pin selects the state it reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
     /// Confirm the head before the read, so the read sees every commit
     /// acknowledged before it started.
-    #[default]
     Strong,
     /// Read at the head that was confirmed last while that confirmation is
     /// younger than the maximum staleness, and confirm the head again after
@@ -71,9 +72,9 @@ pub struct StatOptions {
     pub include_attributes: AttributeInclusion,
     /// Read the entry from this snapshot.
     pub snapshot_id: Option<PinId>,
-    /// How recently the read confirms the live head. A snapshot read takes
-    /// only [`Consistency::Strong`].
-    pub consistency: Consistency,
+    /// How recently the read confirms the live head, or `None` for the
+    /// runtime's default. A snapshot read takes only `None`.
+    pub consistency: Option<Consistency>,
 }
 
 impl Default for StatOptions {
@@ -81,7 +82,7 @@ impl Default for StatOptions {
         Self {
             include_attributes: AttributeInclusion::Include,
             snapshot_id: None,
-            consistency: Consistency::Strong,
+            consistency: None,
         }
     }
 }
@@ -93,9 +94,9 @@ pub struct ListOptions {
     pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.
     pub snapshot_id: Option<PinId>,
-    /// How recently each page confirms the live head. A snapshot read takes
-    /// only [`Consistency::Strong`].
-    pub consistency: Consistency,
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default. A snapshot read takes only `None`.
+    pub consistency: Option<Consistency>,
 }
 
 /// The attribute writes and removals one update applies.
@@ -382,9 +383,8 @@ mod tests {
     }
 
     #[test]
-    fn read_options_default_to_strong_reads() {
-        assert_eq!(Consistency::default(), Consistency::Strong);
-        assert_eq!(StatOptions::default().consistency, Consistency::Strong);
-        assert_eq!(ListOptions::default().consistency, Consistency::Strong);
+    fn read_options_leave_the_consistency_to_the_runtime() {
+        assert_eq!(StatOptions::default().consistency, None);
+        assert_eq!(ListOptions::default().consistency, None);
     }
 }

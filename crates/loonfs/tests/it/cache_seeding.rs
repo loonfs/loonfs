@@ -30,7 +30,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     ));
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
-        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+        builder.max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -238,7 +238,9 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
-    let reader = open_runtime(object_store.clone(), "tail-cache-reader");
+    let reader = open_runtime_with(object_store.clone(), "tail-cache-reader", |builder| {
+        builder.max_staleness_ms(0)
+    });
     let writer = open_runtime(object_store, "tail-cache-writer");
 
     writer
@@ -462,7 +464,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder
-            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
             .metadata_cache(
                 MetadataCache::builder()
                     .max_head_state_bytes(budget)
@@ -484,8 +486,10 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
+    // A read view captures a confirmed head, so in the writer's runtime it
+    // waits for the session's check of the position's manifest.
     let _view = block_on(namespace.read_view()).expect("view the namespace");
-    assert_eq!(recording.take(), []);
+    assert_matches!(recording.take().as_slice(), [check] if is_manifest_head(check, &namespace_id));
     for _ in 0..2 {
         fs.read_file_blocking(&namespace_id, "/file.txt")
             .expect("read replays the uncached tail");
@@ -531,7 +535,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
     let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
-        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+        builder.max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -726,7 +730,9 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
-        builder.manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+        builder
+            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            .max_staleness_ms(0)
     });
     let writer = open_runtime(object_store, "control-cache-writer");
 
@@ -905,13 +911,14 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    // Every read probes for a successor manifest, so the read after each
-    // fold moves onto the fold's manifest and reads its new segments through
-    // the cache whatever the wall clock did.
+    // Every read confirms the head and probes for a successor manifest, so
+    // the read after each fold moves onto the fold's manifest and reads its
+    // new segments through the cache whatever the wall clock did.
     let fs = open_runtime_with(store(temp_dir.path()), "maintenance-cold", |builder| {
         builder
             .stored_metadata_block_cache(stored_blocks.clone())
             .manifest_revalidation_interval_ms(0)
+            .max_staleness_ms(0)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())

@@ -1,6 +1,7 @@
 //! Live reads with a consistency setting. A `strong` read confirms the
-//! namespace head before it reads, and an `eventual` read confirms it only
-//! when the last confirmation is older than the read's maximum staleness.
+//! namespace head before it reads, and an `eventual` read (the default)
+//! confirms it only when the last confirmation is older than the read's
+//! maximum staleness.
 
 use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
@@ -12,11 +13,11 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::ids::{namespace_id, writer_id};
+use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
+use loonfs_types::{ChecksumAlgorithm, PageRequest, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
@@ -120,9 +121,17 @@ impl Fixture {
     }
 }
 
-fn eventual(max_staleness_ms: u64) -> Consistency {
-    Consistency::Eventual {
+fn eventual(max_staleness_ms: u64) -> Option<Consistency> {
+    Some(Consistency::Eventual {
         max_staleness: Some(Duration::from_millis(max_staleness_ms)),
+    })
+}
+
+/// Returns the options of a strong stat.
+fn strong() -> StatOptions {
+    StatOptions {
+        consistency: Some(Consistency::Strong),
+        ..StatOptions::default()
     }
 }
 
@@ -276,17 +285,32 @@ async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
 async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     let fixture = fixture("eventual-staleness").await;
     let reader = &fixture.reader;
-    let consistency = Consistency::Eventual {
-        max_staleness: None,
-    };
-    reader.stat("/file.txt").await.expect("strong stat");
+    let consistency = None;
     reader
-        .list("/")
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong stat");
+    reader
+        .list_with_options(
+            "/",
+            &ListOptions {
+                consistency: Some(Consistency::Strong),
+                ..ListOptions::default()
+            },
+        )
         .next()
         .await
         .expect("a page")
         .expect("strong list");
-    reader.read_file("/file.txt").await.expect("strong read");
+    reader
+        .read_file_with_options(
+            "/file.txt",
+            &ReadFileOptions {
+                consistency: Some(Consistency::Strong),
+            },
+        )
+        .await
+        .expect("strong read");
     let (anchors, eventual_reads) = fixture.anchor_sources();
 
     fixture.recording.reset();
@@ -349,6 +373,60 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     fixture.shutdown().await;
 }
 
+/// Checks that a runtime whose default consistency is `strong` confirms the
+/// head on a read that sets none, such as a revision listing, which takes no
+/// options, and that a read that sets `eventual` there sends no request
+/// within its maximum staleness.
+#[tokio::test]
+async fn a_strong_default_confirms_reads_that_set_no_consistency() {
+    let fixture = fixture("strong-default").await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
+        .monotonic_timer(fixture.clock.clone())
+        .consistency(Consistency::Strong)
+        .build()
+        .await
+        .expect("reader")
+        .namespace(&fixture.namespace_id);
+    reader.stat("/file.txt").await.expect("warm read");
+    let actor = loonfs_test_support::test_actor();
+    fixture
+        .namespace
+        .put_file("/next.txt", b"next", &actor)
+        .await
+        .expect("commit");
+    fixture.recording.reset();
+    let revisions = reader
+        .list_file_revisions("/next.txt")
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
+        .await
+        .expect("the listing confirms the head and finds the new file");
+    assert_eq!(revisions.revisions.len(), 1);
+    assert!(!fixture.recording.take().is_empty());
+
+    fixture
+        .namespace
+        .put_file("/later.txt", b"later", &actor)
+        .await
+        .expect("commit");
+    fixture.recording.reset();
+    let options = StatOptions {
+        consistency: eventual(READ_REVALIDATION_BOUND_MS),
+        ..StatOptions::default()
+    };
+    let missing = reader.stat_with_options("/later.txt", &options).await;
+    assert_eq!(
+        missing.expect_err("within the maximum staleness").code(),
+        loonfs::ErrorCode::PathNotFound
+    );
+    assert_eq!(fixture.recording.take(), []);
+    fixture.shutdown().await;
+}
+
 /// Checks that the head that reads start from never moves backwards on a
 /// runtime. An eventual read within its maximum staleness can miss another writer's
 /// commit, but after a `strong` read sees the commit, an eventual read with a
@@ -377,7 +455,10 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
         .expect("eventual read within the maximum staleness");
     assert_eq!(stale.head_seq, before.head_seq);
 
-    let strong = reader.stat("/next.txt").await.expect("strong read");
+    let strong = reader
+        .stat_with_options("/next.txt", &strong())
+        .await
+        .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
     let after = reader
         .stat_with_options("/next.txt", &long)
@@ -429,7 +510,10 @@ async fn keeps_the_head(
     )
     .await;
     let namespace = reader.namespace(namespace_id);
-    namespace.stat("/file.txt").await.expect("strong read");
+    namespace
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong read");
     let misses = reader.metadata_cache().stats().head_anchor_misses;
     namespace
         .stat_with_options(
@@ -492,7 +576,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
     let clock = Arc::new(ManualClock::new(1_000_000));
     let reader = budgeted_reader(&store, clock.clone(), upper).await;
     let namespace = reader.namespace(&namespace_id);
-    let before = namespace.stat("/file.txt").await.expect("strong read");
+    let before = namespace
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong read");
 
     let peer = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id(&format!("b{}", "x".repeat(127))))
@@ -508,7 +595,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("the peer takes over");
     assert!(commit.committed_seq > before.head_seq);
     clock.advance_ms(INTERVAL_MS);
-    let strong = namespace.stat("/peer.txt").await.expect("strong read");
+    let strong = namespace
+        .stat_with_options("/peer.txt", &strong())
+        .await
+        .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
 
     let misses = reader.metadata_cache().stats().head_anchor_misses;
@@ -538,10 +628,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 /// A read that loads the namespace while the writer has no position can
 /// finish after the writer's next commit starts a new position, with a head
 /// older than the reads from that position. The test parks that load's
-/// manifest check until the commit returns. When the takeover's check finds
-/// the new writer's claim, the position becomes the namespace's cached head
-/// and is marked unconfirmed, so an eventual read with a long maximum
-/// staleness confirms the head and loads the namespace again.
+/// manifest check until the commit returns. After the takeover, the first
+/// eventual read past its maximum staleness runs the session's check, which
+/// finds the new writer's claim, so the position becomes the namespace's
+/// cached head, marked unconfirmed, and the read loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
@@ -580,13 +670,15 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
         .put_file("/peer.txt", b"peer", &loonfs_test_support::test_actor())
         .await
         .expect("the peer takes over");
-    fixture.clock.advance_ms(writer_position_reads::INTERVAL_MS);
+    fixture
+        .clock
+        .advance_ms(writer_position_reads::MAX_STALENESS_MS);
     let entry = fixture
         .reader
         .stat_with_options(
             "/during.txt",
             &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                consistency: eventual(writer_position_reads::MAX_STALENESS_MS),
                 ..StatOptions::default()
             },
         )
@@ -720,9 +812,10 @@ async fn concurrent_cold_loads_of_one_namespace_leave_the_newer_head_cached() {
 }
 
 /// Checks that a writer session's position becomes the namespace's cached
-/// head when the session closes. An eventual read within its maximum
-/// staleness then sends no request, and the next strong read sends only the
-/// WAL probe, without loading the namespace from the store.
+/// head when the session closes. A read with the default consistency
+/// (eventual) within its maximum staleness then sends no request, and the
+/// next strong read sends only the WAL probe, without loading the namespace
+/// from the store.
 #[tokio::test]
 async fn a_closed_sessions_position_becomes_the_cached_head() {
     let fixture = writer_position_reads::fixture("closed-session", Parked::WalPuts).await;
@@ -737,15 +830,7 @@ async fn a_closed_sessions_position_becomes_the_cached_head() {
     fixture.recording.reset();
     let entry = fixture
         .reader
-        .stat_with_options(
-            "/next.txt",
-            &StatOptions {
-                consistency: Consistency::Eventual {
-                    max_staleness: None,
-                },
-                ..StatOptions::default()
-            },
-        )
+        .stat("/next.txt")
         .await
         .expect("an eventual read after the close");
     assert_eq!(entry.head_seq, commit.committed_seq);
@@ -753,7 +838,7 @@ async fn a_closed_sessions_position_becomes_the_cached_head() {
 
     let entry = fixture
         .reader
-        .stat("/next.txt")
+        .stat_with_options("/next.txt", &strong())
         .await
         .expect("a strong read after the close");
     assert_eq!(entry.head_seq, commit.committed_seq);

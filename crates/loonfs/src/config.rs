@@ -134,13 +134,15 @@ pub(crate) struct ReadConfig {
     /// call, checked against resolved metadata before any content fetch.
     /// Defaults to [`DEFAULT_MAX_READ_CONTENT_BYTES`].
     pub max_read_content_bytes: u64,
-    /// Minimum monotonic interval between checks for a successor to a cached
-    /// manifest. Zero checks on every read.
+    /// Minimum monotonic interval between checks for a successor to the
+    /// manifest of a cached head. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
     /// The maximum staleness of an eventual read that doesn't set its own: how
-    /// old the confirmation of the cached head may be before the read
-    /// confirms it again. Zero confirms on every read.
+    /// old the confirmation of the head may be before the read confirms it
+    /// again. Zero confirms on every read.
     pub max_staleness_ms: u64,
+    /// The consistency of a read that doesn't set its own.
+    pub consistency: crate::Consistency,
     /// Layout and input limits for metadata compactions.
     pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.

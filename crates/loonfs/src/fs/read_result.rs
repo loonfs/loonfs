@@ -58,7 +58,7 @@ impl RuntimeCore {
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
         read: F,
     ) -> Result<T>
     where

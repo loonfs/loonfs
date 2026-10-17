@@ -1122,9 +1122,10 @@ impl NamespacePublisher {
             }
         };
         let position = self.read_position.prepare(position);
-        if position.is_none() && self.read_position.clear() && self.session_is_fenced() {
-            // Another writer took the namespace over, so the position that
-            // just became the cached head is out of date.
+        if position.is_none() && self.read_position.clear() {
+            // The engine dropped its position because it found a change it
+            // can't follow, such as another writer's claim, so the position
+            // that just became the cached head may be out of date.
             self.runtime_core
                 .invalidate_namespace_read_cache(&self.namespace_id);
         }

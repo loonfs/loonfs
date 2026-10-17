@@ -3,9 +3,9 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    AccessState, AttributeChanges, CreateNamespaceOptions, LoonFs, Maintenance,
+    AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, LoonFs, Maintenance,
     MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadOnly, SharedObjectStore,
-    SnapshotPolicy, Writable,
+    SnapshotPolicy, StatOptions, Writable,
 };
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::keys::{
@@ -82,11 +82,7 @@ struct Fixture {
 /// setup, so a test's compaction publishes one manifest. Either way, the
 /// publisher's cached position moves to each manifest this runtime
 /// publishes.
-async fn fixture(
-    name: &str,
-    manifest_revalidation_interval_ms: u64,
-    claim_compactor: bool,
-) -> Fixture {
+async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
     let namespace_id = namespace_id(name);
     let recording = Arc::new(RecordingStore::new(
         BlockingStore::new(
@@ -102,7 +98,6 @@ async fn fixture(
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
-        .manifest_revalidation_interval_ms(manifest_revalidation_interval_ms)
         .monotonic_timer(clock.clone())
         .metrics_recorder(recorder.clone())
         .build()
@@ -165,7 +160,11 @@ async fn fixture(
         .put_file("/settle", b"x", actor)
         .await
         .expect("settle");
-    fixture.user.stat("/m/doc").await.expect("warm read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("warm read");
     fixture
 }
 
@@ -296,22 +295,34 @@ impl Fixture {
 
 const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "regrant"];
 
+/// Returns the options of a strong stat.
+fn strong() -> StatOptions {
+    StatOptions {
+        consistency: Some(Consistency::Strong),
+        ..StatOptions::default()
+    }
+}
+
 /// Checks that after a compaction that also claims the compactor epoch on
 /// the same runtime, commits and the reads after them reload nothing.
 ///
 /// The compaction publishes two manifests, and the writer's position moves
-/// to each. The revalidation interval is zero, so every read checks the
+/// to each. Every read is strong, so it waits for the session's check of the
 /// position's manifest for a successor.
 #[tokio::test]
 async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
-    let fixture = fixture("own-compaction-claim", 0, false).await;
+    let fixture = fixture("own-compaction-claim", false).await;
     fixture.compact().await;
     fixture.commit("put_file", 0).await;
-    fixture.user.stat("/m/doc").await.expect("reload");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("reload");
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round + 1).await;
         fixture.recording.reset();
-        let read = fixture.user.stat("/m/doc").await;
+        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
@@ -320,32 +331,33 @@ async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
 /// Checks that reads after a compaction on the same runtime don't reload
 /// metadata.
 ///
-/// The revalidation interval is zero, so every read checks for a newer
-/// manifest, as reads more than a second apart do with the default interval.
+/// Every read is strong, so it waits for the session's check for a newer
+/// manifest.
 #[tokio::test]
 async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
-    let fixture = fixture("own-compaction-every-read", 0, true).await;
+    let fixture = fixture("own-compaction-every-read", true).await;
     fixture.compact().await;
     for round in 0..2 {
         for kind in COMMIT_KINDS {
             let user_granted = fixture.commit(kind, round).await;
             fixture.recording.reset();
-            let read = fixture.user.stat("/m/doc").await;
+            let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
             assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
             fixture.assert_no_reload(&format!("round {round}, user after {kind}"));
         }
     }
 }
 
-/// Checks that reads after a compaction on the same runtime don't reload
-/// metadata with the default one-second revalidation interval.
+/// Checks that reads with the default consistency (eventual) after a
+/// compaction on the same runtime don't reload metadata with the default
+/// one-second maximum staleness.
 ///
-/// A read checks for a newer manifest when the last check is more than a
-/// second old, so the test moves the clock past that interval before some
-/// commits.
+/// An eventual read waits for the session's check for a newer manifest when
+/// the position's last check is a second old or older, so the test moves
+/// the clock past the staleness before some commits.
 #[tokio::test]
-async fn reads_past_the_revalidation_interval_reload_nothing_after_a_compaction() {
-    let fixture = fixture("own-compaction-interval", 1_000, true).await;
+async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
+    let fixture = fixture("own-compaction-staleness", true).await;
     fixture.compact().await;
     for (round, advance_ms) in [0, 1_100, 0, 1_100, 30_000].into_iter().enumerate() {
         fixture.clock.advance_ms(advance_ms);
@@ -367,7 +379,7 @@ async fn reads_past_the_revalidation_interval_reload_nothing_after_a_compaction(
 /// namespace from the store.
 #[tokio::test]
 async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
-    let fixture = fixture("other-compaction", 0, false).await;
+    let fixture = fixture("other-compaction", false).await;
     let other_store: SharedObjectStore = fixture.recording.clone();
     let other = LoonFs::builder_with_store(other_store)
         .writer_id(writer_id("other-compaction-maintenance"))
@@ -385,7 +397,11 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
         MetadataCompactionOutcome::BoundedMergePublished
     );
     fixture.recording.reset();
-    fixture.user.stat("/m/doc").await.expect("first read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("first read");
     let operations = fixture.recording.take();
     assert!(
         operations
@@ -396,7 +412,7 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round).await;
         fixture.recording.reset();
-        let read = fixture.user.stat("/m/doc").await;
+        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
@@ -422,7 +438,7 @@ const MAINTENANCE_CALLS: [&str; 7] = [
 /// a WAL tail to fold.
 #[tokio::test]
 async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
-    let fixture = fixture("own-maintenance", 0, false).await;
+    let fixture = fixture("own-maintenance", false).await;
     let (maintenance, namespace_id) = (&fixture.maintenance, &fixture.namespace_id);
     let (mut checkpoint, mut snapshot) = (None, None);
     for (round, call) in MAINTENANCE_CALLS.into_iter().enumerate() {
@@ -458,7 +474,11 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
             .assert_write_reloads_nothing(2 * round + 1, call)
             .await;
         fixture.recording.reset();
-        fixture.user.stat("/m/doc").await.expect("read");
+        fixture
+            .user
+            .stat_with_options("/m/doc", &strong())
+            .await
+            .expect("read");
         fixture.assert_no_reload(&format!("user after a write after {call}"));
     }
 }
@@ -473,7 +493,7 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 /// tail.
 #[tokio::test]
 async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest() {
-    let fixture = fixture("checkpoint-during-publish", 0, false).await;
+    let fixture = fixture("checkpoint-during-publish", false).await;
     fixture.commit("put_file", 0).await;
     let gate = fixture.recording.inner();
     gate.block_next();
@@ -488,7 +508,11 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
     });
     let checkpoint = checkpoint.expect("checkpoint");
     fixture.recording.reset();
-    fixture.user.stat("/m/doc").await.expect("read");
+    fixture
+        .user
+        .stat_with_options("/m/doc", &strong())
+        .await
+        .expect("read");
     // A position left on the replaced manifest would find the checkpoint's
     // manifest as its successor and reload. A position on the checkpoint's
     // manifest checks the manifest after it, and reads no other manifest or

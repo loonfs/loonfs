@@ -33,16 +33,14 @@ async fn current_manifest_no(
         .manifest_no
 }
 
-/// Creates a writer that checks the position's manifest on every read and
-/// reports to `recorder`.
-async fn test_writer_checking_every_read(
+/// Creates a writer that reports to `recorder`.
+async fn test_writer_with_recorder(
     store: SharedStore,
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
-        .manifest_revalidation_interval_ms(0)
         .metrics_recorder(recorder)
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
@@ -330,8 +328,9 @@ async fn a_read_only_runtime_has_no_read_positions() {
 ///
 /// The fold's manifest is durable before the fold raises the namespace's
 /// hint, and the publisher learns of the manifest only once the fold
-/// returns. A read between the two finds a successor of the position's
-/// manifest that this runtime hasn't recorded as its own yet.
+/// returns. A strong read between the two waits for the session's check,
+/// which finds a successor of the position's manifest that this runtime
+/// hasn't recorded as its own yet.
 #[tokio::test]
 async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
     let temp_dir = tempdir().expect("tempdir");
@@ -339,7 +338,7 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
     let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
-        test_writer_checking_every_read(store.clone() as SharedStore, Arc::clone(&recorder)).await;
+        test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
     let namespace = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id))
         .await
         .pop()
@@ -385,7 +384,7 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
     let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
-        test_writer_checking_every_read(store.clone() as SharedStore, Arc::clone(&recorder)).await;
+        test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
