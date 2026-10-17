@@ -928,11 +928,11 @@ A fold works in these steps:
 5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`.
 6. Raise the hint.
 
-A fold doesn't need a writer epoch, and any process can run one. It copies the predecessor's writer and compactor epochs forward. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
 A fold loads the current manifest before its put, and again if its put loses, and then it checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
-A writer session's fold of the tail it retained is bound to the session's writer epoch. If a manifest that the fold loads has a higher writer epoch, another writer has claimed the namespace, so the fold fails with `writer_fenced` instead of rebuilding over the claim, and the session is fenced as it would be by a publish that finds the claim. Without that rule, the old session's runtime could move its [writer position](glossary.md#writer-position) to a manifest after the claim at the old head, and reads there wouldn't see the new writer's commits until the new writer folded them.
+A fold that rebuilds after another writer's claim folds the new writer's log. The old writer session's [writer position](glossary.md#writer-position) doesn't move onto that fold's manifest, as described in [Replaying the visible WAL](#42-replaying-the-visible-wal), and the old session finds that it's fenced at its next commit.
 
 Before it writes segments or publishes the manifest, a fold checks each chain's ordered tail pieces, up to the chain's newest reference. Missing pieces are corruption. The fold checks every whole value that starts at offset 0 before it writes any object.
 
@@ -1042,7 +1042,7 @@ Expiry, read eligibility, eligibility for garbage collection, and removal are se
 
 To create a pin from the current head, LoonFS:
 
-1. Folds the observed WAL tail, and selects a verified current manifest.
+1. Folds the observed WAL tail as the namespace's [maintainer](glossary.md#maintainer), under the current compactor epoch, and selects a verified current manifest.
 2. Writes a new pin with put-if-absent.
 3. Loads the current manifest again.
 4. Checks that the manifest number and payload checksum are the same, that the namespace is active, and that its retention floor is no later than the pinned head sequence.
@@ -1121,7 +1121,7 @@ When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads
 
 ### 9.4 Deleting a namespace
 
-Deletion uses the acquired writer epoch. After the admitted commits finish, LoonFS folds the remaining WAL, and then it publishes the next manifest with a deleted status. That manifest records `deleted_at_ms` from the deletion call's clock, and deletion starts the tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. The tombstone's runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted namespace is at or below `folded_wal_no`. If the fold fails, the namespace stays active, and the deletion can be retried. Data that was already committed stays committed.
+Deletion uses the acquired writer epoch. After the admitted commits finish, LoonFS folds the remaining WAL as the namespace's [maintainer](glossary.md#maintainer), under the current compactor epoch, and then it publishes the next manifest with a deleted status under the writer epoch. That manifest records `deleted_at_ms` from the deletion call's clock, and deletion starts the tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. The tombstone's runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted namespace is at or below `folded_wal_no`. If the fold fails, the namespace stays active, and the deletion can be retried. Data that was already committed stays committed.
 
 An ordinary operation that finds the namespace deleted returns `namespace_deleted`. A cached reader can keep using its active view until its next manifest revalidation is due. Deleting a namespace doesn't immediately remove its content. [Reference roots](#112-reference-roots) defines what garbage collection keeps, and a separate purge operation is outside this specification.
 

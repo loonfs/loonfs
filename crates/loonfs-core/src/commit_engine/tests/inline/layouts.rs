@@ -1129,6 +1129,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         &namespace_id,
         None,
         &deadline,
+        crate::manifest::MetadataRunPolicy::default(),
         &pool,
     ));
     tokio::select! {
@@ -1468,6 +1469,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             &namespace_id,
             Some(fold),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await

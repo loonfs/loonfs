@@ -94,6 +94,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         namespace_id,
         engine.wal_fold_input(),
         &deadline,
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     );
     let collect_during_fold = async {
@@ -157,6 +158,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         namespace_id,
         Some(input.clone()),
         &deadline,
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     );
     let winner = async {
@@ -167,6 +169,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
             namespace_id,
             Some(input),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await
@@ -184,7 +187,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     let (lost, ()) = tokio::join!(loser, winner);
     assert_eq!(
         lost.expect("losing fold").response.outcome,
-        FoldWalOutcome::ManifestAdvanced
+        FoldWalOutcome::AlreadyCurrent
     );
     assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
 }

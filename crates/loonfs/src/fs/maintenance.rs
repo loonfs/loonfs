@@ -413,13 +413,10 @@ impl Maintenance {
                     FoldWalOutcome::Published => WalFoldStepOutcome::Folded {
                         manifest_head_seq: folded.manifest_head_seq,
                     },
-                    // In both cases, this fold did not publish a manifest.
-                    FoldWalOutcome::AlreadyCurrent | FoldWalOutcome::ManifestAdvanced => {
-                        WalFoldStepOutcome::AlreadyPublished {
-                            attempted_seq: folded.target_head_seq,
-                            current_manifest_no: folded.manifest_no,
-                        }
-                    }
+                    FoldWalOutcome::AlreadyCurrent => WalFoldStepOutcome::AlreadyPublished {
+                        attempted_seq: folded.target_head_seq,
+                        current_manifest_no: folded.manifest_no,
+                    },
                 },
                 Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
                     WalFoldStepOutcome::RetriesExhausted {

@@ -822,6 +822,7 @@ impl Interceptor for RivalFold {
                 &loonfs_core::time::Deadline::start(Arc::new(
                     loonfs_types::StdMonotonicTimer::default(),
                 )),
+                loonfs_core::MetadataRunPolicy::default(),
                 &tokio::sync::Semaphore::new(32),
             )
             .await

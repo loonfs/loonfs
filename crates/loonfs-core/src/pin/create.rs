@@ -6,9 +6,8 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::{try_fold_wal, MetadataRunPolicy, PublicationReport, TryFoldWalOutcome};
+use crate::manifest::{fold_wal_tail, MetadataRunPolicy, PublicationReport};
 use crate::time::{Deadline, MonotonicTimer};
-use crate::wal::WalPublishError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, PinId};
@@ -41,37 +40,23 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     let published_slot = std::sync::Mutex::new(None);
     let published = &published_slot;
     let created = retry_while_contended(|| async move {
-        let basis = match try_fold_wal(
+        let folded = fold_wal_tail(
             store,
+            segment_cache,
             namespace_id,
+            None,
             deadline,
             policy,
-            segment_cache,
             content_writes,
         )
-        .await?
-        {
-            TryFoldWalOutcome::Settled(basis) => basis,
-            TryFoldWalOutcome::RaceLost(_) => {
-                return Ok(CasOutcome::Contended(CoreError::WalPublish(
-                    WalPublishError::NumberTaken,
-                )))
-            }
-        };
-        if let Some(manifest) = basis.published() {
+        .await?;
+        if let Some(manifest) = folded.published() {
             *published
                 .lock()
                 .expect("the published-fold slot should not be poisoned") = Some(manifest);
         }
 
-        match create_pin_at_basis(
-            store,
-            namespace_id,
-            owner.clone(),
-            basis.manifest.clone(),
-            context,
-        )
-        .await
+        match create_pin_at_basis(store, namespace_id, owner.clone(), folded.basis.0, context).await
         {
             Ok(pin) => Ok(CasOutcome::Settled(pin)),
             Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasOutcome::Contended(error)),

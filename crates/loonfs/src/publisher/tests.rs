@@ -2058,6 +2058,9 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     );
 }
 
+/// Checks that a session's fold of a tail that the head-state cache can't
+/// keep loads the tail from the store and moves the session's position to
+/// the fold's manifest.
 #[tokio::test]
 async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2112,6 +2115,14 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
     assert!(status.wal_tail_objects < FOLD_AT_WAL_OBJECTS, "{status:?}");
+    let position = writer
+        .core
+        .writer_position(&namespace_id)
+        .expect("the fold moved the position");
+    assert_eq!(
+        Some(position.basis.manifest_no()),
+        status.current_manifest_no
+    );
     writer.shutdown().await.expect("shut down writer");
 }
 
@@ -2232,8 +2243,11 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a session's fold that fails leaves the session's position
+/// where it was, and that the session's next fold, after another process
+/// folded the tail, reloads the tail and folds the rest of it.
 #[tokio::test]
-async fn a_failed_fold_reloads_the_tail() {
+async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let failing = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -2277,8 +2291,28 @@ async fn a_failed_fold_reloads_the_tail() {
         .wait_for_fold()
         .await
         .expect("settle the failed fold");
+    let publisher = writer
+        .mode
+        .publisher
+        .live_publisher(&namespace_id)
+        .expect("live session");
+    let tail_objects = || async {
+        publisher
+            .engine
+            .lock()
+            .await
+            .engine
+            .as_ref()
+            .and_then(NamespaceCommitEngine::wal_tail_objects)
+    };
 
     assert_eq!(failing.attempts(), 1);
+    assert!(
+        tail_objects()
+            .await
+            .is_some_and(|objects| objects >= FOLD_AT_WAL_OBJECTS),
+        "the failed fold kept the position"
+    );
     loonfs_core::fold_wal_tail(
         failing.inner(),
         None,
@@ -2287,6 +2321,7 @@ async fn a_failed_fold_reloads_the_tail() {
         &Deadline::start(Arc::new(
             loonfs_objectstore::timing::StdMonotonicTimer::default(),
         )),
+        loonfs_core::MetadataRunPolicy::default(),
         &tokio::sync::Semaphore::new(32),
     )
     .await
@@ -2297,19 +2332,12 @@ async fn a_failed_fold_reloads_the_tail() {
             "after-fold",
         )))
         .await
-        .expect("reload the folded tail and publish");
-    let publisher = writer
-        .mode
-        .publisher
-        .live_publisher(&namespace_id)
-        .expect("live session");
-    let tail_objects = publisher
-        .engine
-        .lock()
+        .expect("publish on the kept position");
+    namespace
+        .wait_for_fold()
         .await
-        .engine
-        .as_ref()
-        .and_then(NamespaceCommitEngine::wal_tail_objects);
+        .expect("fold the rest of the tail");
+    let tail_objects = tail_objects().await;
     assert!(
         tail_objects.is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS),
         "{tail_objects:?}"
@@ -2408,6 +2436,9 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     writer.shutdown().await.expect("shut down writer");
 }
 
+/// Checks that a session's fold of a tail that an explicit fold already
+/// folded publishes no manifest, and that the publisher counts only the
+/// session folds that published.
 #[tokio::test]
 async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2421,9 +2452,11 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         blocked,
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_b)),
     ));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = crate::LoonFs::builder_with_store(recording.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .execution_budget(one_fold_at_a_time())
+        .metrics_recorder(recorder.clone())
         .build()
         .await
         .expect("build writer");
@@ -2493,6 +2526,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         1,
         "the late fold must not write a second manifest"
     );
+    assert_eq!(counter(&recorder, "loonfs.publisher.wal_folds"), 1);
     writer.shutdown().await.expect("shut down writer");
 }
 

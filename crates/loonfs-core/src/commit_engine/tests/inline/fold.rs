@@ -67,6 +67,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     )
     .await
@@ -151,6 +152,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             &engine.namespace_id,
             Some(input.clone()),
             &Deadline::start(timer.clone()),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await
@@ -251,6 +253,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         &engine.namespace_id,
         Some(input),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     )
     .await
@@ -346,6 +349,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &engine.namespace_id,
             Some(input.clone()),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await,
@@ -385,6 +389,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &engine.namespace_id,
             Some(input.clone()),
             &crate::time::Deadline::start(timer.clone()),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await,
@@ -408,6 +413,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         &engine.namespace_id,
         Some(input),
         &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     )
     .await
@@ -422,9 +428,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
 }
 
 /// Checks that two sessions' folds of the same tail write identical content
-/// objects and publish one manifest, and that the fold of the older session,
-/// which the second session's epoch claim fenced, fails with
-/// `writer_fenced`.
+/// objects and publish one manifest, and that the fold of the older session
+/// finds the tail folded after the second session's epoch claim.
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
     let content_writes = tokio::sync::Semaphore::new(32);
@@ -456,6 +461,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         &first.namespace_id,
         Some(first_input),
         &deadline,
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     );
     let second_fold = async {
@@ -466,6 +472,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
             &second.namespace_id,
             Some(second_input),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await;
@@ -473,12 +480,14 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         result
     };
     let (first_result, second_result) = tokio::join!(first_fold, second_fold);
-    let second_result = second_result.expect("second fold");
-    assert_matches!(
-        first_result.err(),
-        Some(CoreError::WriterFenced(fence)) if fence.active_epoch > fence.fenced_epoch
+    assert_eq!(
+        first_result.expect("first fold").response.outcome,
+        FoldWalOutcome::AlreadyCurrent
     );
-    assert_eq!(second_result.response.outcome, FoldWalOutcome::Published);
+    assert_eq!(
+        second_result.expect("second fold").response.outcome,
+        FoldWalOutcome::Published
+    );
     let keys = content_assemblies(&store);
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
@@ -645,6 +654,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
     )
     .await

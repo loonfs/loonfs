@@ -831,42 +831,54 @@ impl NamespaceCommitEngine {
         })
     }
 
+    /// Starts the session's own fold, and returns the tail to fold, or
+    /// `None` when the fold has to load the tail from the store.
     pub fn begin_wal_fold(&mut self) -> Option<WalFoldInput> {
         self.fold_observed = Some(Observation::now(Arc::clone(&self.timer)));
-        let input = self.wal_fold_input()?;
-        self.publish_tail.as_mut()?.begin_fold();
-        Some(input)
+        let input = self.wal_fold_input();
+        if let Some(position) = self.publish_tail.as_mut() {
+            position.begin_fold();
+        }
+        input
     }
 
-    /// Records how the session's own fold ended: moves the position to the
-    /// fold's manifest, or drops the position when it can't move there.
-    ///
-    /// A fold that found a newer writer's manifest fences the session, as a
-    /// publish that finds one does.
+    /// Records how the session's own fold ended. A fold moves the position
+    /// to the manifest that covers the fold's tail, whether the fold
+    /// published that manifest or found it current, or drops the position
+    /// when it can't move there. A fold that failed leaves the position where
+    /// it was.
     pub fn record_wal_fold(
         &mut self,
         folded: std::result::Result<&crate::manifest::FoldedWalTail, &CoreError>,
     ) {
-        if let Err(CoreError::WriterFenced(fence)) = folded {
-            *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
-        }
         let fold_observed = self.fold_observed.take();
         let published_during_fold = self.published_during_fold.take();
-        let since = match (folded, &mut self.publish_tail) {
-            (Ok(folded), Some(position))
-                if fold_observed.is_some()
-                    && folded.response.outcome == crate::FoldWalOutcome::Published =>
-            {
-                position.reanchor_after_fold(folded)
+        match folded {
+            Ok(folded) => {
+                let moved = self.publish_tail.as_mut().and_then(|position| {
+                    let new_basis = position.basis() != &folded.basis;
+                    position
+                        .reanchor_after_fold(folded)
+                        .map(|since| (since, new_basis))
+                });
+                match (moved, &self.publish_tail) {
+                    (Some((since, new_basis)), Some(position)) => {
+                        self.insert_tail(position, since);
+                        // The fold published a new basis, or found it current,
+                        // after the fold began, so no manifest followed it
+                        // then. The position's own basis has no such check.
+                        if new_basis {
+                            self.basis_checked = fold_observed;
+                        }
+                    }
+                    _ => self.invalidate_projection(),
+                }
             }
-            _ => None,
-        };
-        match (since, &self.publish_tail) {
-            (Some(since), Some(position)) => {
-                self.insert_tail(position, since);
-                self.basis_checked = fold_observed;
+            Err(_) => {
+                if let Some(position) = self.publish_tail.as_mut() {
+                    position.end_fold();
+                }
             }
-            _ => self.invalidate_projection(),
         }
         if let Some(published) = published_during_fold {
             self.record_manifest_published(published);

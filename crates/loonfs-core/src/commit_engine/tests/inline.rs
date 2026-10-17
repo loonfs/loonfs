@@ -505,6 +505,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &engine.namespace_id,
             input,
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            crate::manifest::MetadataRunPolicy::default(),
             &tokio::sync::Semaphore::new(32),
         )
         .await
@@ -525,7 +526,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else if index == 1 {
-            assert_eq!(folded.response.outcome, FoldWalOutcome::ManifestAdvanced);
+            assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
             fold::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }

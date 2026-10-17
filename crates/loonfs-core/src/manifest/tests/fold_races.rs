@@ -1,11 +1,13 @@
 //! A fold that loses its manifest number to another publication.
 
-use super::fold::{fold_wal_tail, FoldedWalTail};
+use super::fold::{fold_wal_tail, FoldWalResponse, FoldedWalTail};
 use super::*;
+use crate::error::Result;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::claim_compactor;
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
+use crate::wal::WalPublishError;
 use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
@@ -72,6 +74,7 @@ impl Rival {
                     namespace_id,
                     Some(WalFoldInput::clone(input)),
                     &deadline(),
+                    crate::manifest::MetadataRunPolicy::default(),
                     &content_writes,
                 )
                 .await
@@ -170,14 +173,14 @@ impl Writer {
     }
 
     async fn fold(&mut self) -> FoldedWalTail {
-        self.fold_against(&[]).await
+        self.fold_against(&[]).await.expect("fold")
     }
 
-    /// Folds the writer's tail. The fold's first manifest put waits while
-    /// the first rival publishes from another process, its next put waits
-    /// for the next rival, and so on. The request log is cleared after each
-    /// rival.
-    async fn fold_against(&mut self, rivals: &[Rival]) -> FoldedWalTail {
+    /// Folds the writer's tail and records the fold's result. The fold's
+    /// first manifest put waits while the first rival publishes from another
+    /// process, its next put waits for the next rival, and so on. The request
+    /// log is cleared after each rival.
+    async fn fold_against(&mut self, rivals: &[Rival]) -> Result<FoldedWalTail> {
         let content_writes = tokio::sync::Semaphore::new(32);
         let input = self.engine.begin_wal_fold().expect("tail");
         let basis = input.basis.manifest_no();
@@ -205,6 +208,7 @@ impl Writer {
                 &self.namespace_id,
                 Some(input),
                 &deadline,
+                crate::manifest::MetadataRunPolicy::default(),
                 &content_writes,
             ),
             async {
@@ -216,8 +220,7 @@ impl Writer {
                 }
             }
         );
-        let folded = folded.expect("fold");
-        self.engine.record_wal_fold(Ok(&folded));
+        self.engine.record_wal_fold(folded.as_ref());
         folded
     }
 
@@ -323,7 +326,10 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
             .await;
         let (_twin_directory, twin) = writer.twin();
 
-        let held = writer.fold_against(std::slice::from_ref(&rival)).await;
+        let held = writer
+            .fold_against(std::slice::from_ref(&rival))
+            .await
+            .expect("held fold");
         let after_park = writer.store.take();
         assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
         assert!(!after_park.iter().any(is_content), "{after_park:?}");
@@ -335,6 +341,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
             &writer.namespace_id,
             None,
             &deadline(),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await
@@ -363,7 +370,8 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
 
     let folded = writer
         .fold_against(&[Rival::Fold(Box::new(older.clone()))])
-        .await;
+        .await
+        .expect("fold");
     let after_park = writer.store.take();
     assert!(
         writer.wal_reads(&after_park).contains(&head.wal_no.0),
@@ -378,31 +386,35 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
     assert_eq!(folded.response.manifest_head_seq, head.seq);
 }
 
+/// Checks that a fold keeps the tail it read through a claim at each
+/// attempt, and that a fold whose every attempt loses stops at the
+/// contention limit and leaves the session's position where it was.
 #[tokio::test]
 async fn a_fold_survives_repeated_compaction_publications() {
-    // The first attempt and every retry each lose to one claim.
-    for (rivals, cold) in [
-        (MAX_CONTENTION_ATTEMPTS, false),
-        (MAX_CONTENTION_ATTEMPTS + 1, true),
-    ] {
+    // Each attempt loses to one claim.
+    for rivals in [MAX_CONTENTION_ATTEMPTS - 1, MAX_CONTENTION_ATTEMPTS] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
-        let basis = writer
-            .engine
-            .wal_fold_input()
-            .expect("tail")
-            .basis
-            .manifest_no();
+        let basis = writer.engine.wal_fold_input().expect("tail").basis;
         let folded = writer
             .fold_against(&vec![Rival::CompactorClaim; rivals])
             .await;
         let after_park = writer.store.take();
-        assert_eq!(!writer.wal_reads(&after_park).is_empty(), cold);
-        assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        assert_eq!(
-            folded.response.manifest_no,
-            ManifestNo(basis.0 + rivals as u64 + 1)
-        );
+        assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
+        if rivals < MAX_CONTENTION_ATTEMPTS {
+            let folded = folded.expect("fold");
+            assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+            assert_eq!(
+                folded.response.manifest_no,
+                ManifestNo(basis.manifest_no().0 + rivals as u64 + 1)
+            );
+        } else {
+            let Err(error) = folded else {
+                panic!("every attempt lost, so the fold should fail");
+            };
+            assert_matches!(error, CoreError::WalPublish(WalPublishError::NumberTaken));
+            assert_eq!(writer.engine.wal_fold_input().expect("tail").basis, basis);
+        }
     }
 }
 
@@ -413,7 +425,7 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
         writer.store.reset();
-        let folded = writer.fold_against(&rivals).await;
+        let folded = writer.fold_against(&rivals).await.expect("fold");
         let operations = writer.store.take();
         assert!(writer.wal_reads(&operations).is_empty(), "{operations:?}");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -489,15 +501,16 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
 }
 
 /// Checks that a session's fold that loses its manifest number to another
-/// writer's epoch claim fails with `writer_fenced` instead of folding over
-/// the claim, and that recording that outcome fences the session and drops
-/// its position.
+/// writer's epoch claim folds the new writer's log over the claim, that the
+/// session's position doesn't move onto that fold's manifest, and that the
+/// session finds that it's fenced at its next commit.
 #[tokio::test]
-async fn a_fold_that_loses_to_a_writer_claim_fences_the_session() {
+async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     let content_writes = tokio::sync::Semaphore::new(32);
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.begin_wal_fold().expect("tail");
+    let head = input.head.clone();
     let claim_no = input
         .basis
         .manifest_no()
@@ -518,6 +531,7 @@ async fn a_fold_that_loses_to_a_writer_claim_fences_the_session() {
             &writer.namespace_id,
             Some(input),
             &fold_deadline,
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         ),
         async {
@@ -532,20 +546,19 @@ async fn a_fold_that_loses_to_a_writer_claim_fences_the_session() {
             gate.release();
         }
     );
-    let Err(error) = folded else {
-        panic!("the fold should end fenced");
-    };
-    assert_matches!(&error, CoreError::WriterFenced(_));
-    let current = crate::namespace::control::load_current_manifest(&other, &writer.namespace_id)
-        .await
-        .expect("current manifest");
+    let folded = folded.expect("the fold folds over the claim");
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_eq!(
-        current.state.manifest().manifest_no,
-        claim_no,
-        "the fold published nothing over the claim"
+        folded.response.manifest_no,
+        claim_no.successor().expect("the number after the claim")
+    );
+    assert_eq!(folded.writer_epoch, WriterEpoch(head.writer_epoch.0 + 1));
+    assert_eq!(
+        folded.folded_wal_no,
+        head.wal_no.successor().expect("the new writer's fence")
     );
 
-    writer.engine.record_wal_fold(Err(&error));
+    writer.engine.record_wal_fold(Ok(&folded));
     assert!(writer.engine.read_position().is_none());
     let results = writer
         .engine
@@ -572,37 +585,64 @@ async fn a_fold_that_loses_to_a_writer_claim_fences_the_session() {
 
 /// Checks that a session's position moves to its fold's manifest only when
 /// that manifest folds the head the fold started from under the session's
-/// writer epoch, and that a manifest of another epoch, or one that folds
-/// another WAL number, drops the position.
+/// writer epoch, whether the fold published that manifest or found it
+/// current, that a manifest of another epoch, or one that folds another WAL
+/// number, drops the position, and that a failed fold leaves the position
+/// where it was.
 #[tokio::test]
 async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
+    enum Position {
+        Moves,
+        Drops,
+        Stays,
+    }
     let content_writes = tokio::sync::Semaphore::new(32);
-    for (epoch_after, wal_after, moves) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+    for (epoch_after, wal_after, outcome, expected) in [
+        (0, 0, Some(FoldWalOutcome::Published), Position::Moves),
+        (1, 0, Some(FoldWalOutcome::Published), Position::Drops),
+        (0, 1, Some(FoldWalOutcome::Published), Position::Drops),
+        (0, 0, Some(FoldWalOutcome::AlreadyCurrent), Position::Moves),
+        (0, 1, Some(FoldWalOutcome::AlreadyCurrent), Position::Drops),
+        (0, 0, None, Position::Stays),
+    ] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
         let input = writer.engine.begin_wal_fold().expect("tail");
+        let before = input.basis.clone();
         let folded = fold_wal_tail(
             &*writer.store,
             None,
             &writer.namespace_id,
             Some(input),
             &deadline(),
+            crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
         )
         .await
         .expect("fold");
-        let recorded = FoldedWalTail {
-            response: folded.response.clone(),
+        let recorded = outcome.map(|outcome| FoldedWalTail {
+            response: FoldWalResponse {
+                outcome,
+                ..folded.response.clone()
+            },
             basis: folded.basis.clone(),
             writer_epoch: WriterEpoch(folded.writer_epoch.0 + epoch_after),
             folded_wal_no: WalNo(folded.folded_wal_no.0 + wal_after),
-        };
-        writer.engine.record_wal_fold(Ok(&recorded));
+        });
+        let failed = CoreError::Internal("the fold failed".to_owned());
+        writer
+            .engine
+            .record_wal_fold(recorded.as_ref().ok_or(&failed));
         let position = writer.engine.read_position();
+        let expected = match expected {
+            Position::Moves => Some(&folded.basis),
+            Position::Drops => None,
+            Position::Stays => Some(&before),
+        };
         assert_eq!(
             position.as_ref().map(|position| &position.basis),
-            moves.then_some(&folded.basis),
-            "epoch +{epoch_after}, WAL number +{wal_after}"
+            expected,
+            "epoch +{epoch_after}, WAL number +{wal_after}, {outcome:?}"
         );
     }
 }

@@ -1105,12 +1105,13 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             .expect("decode fence");
             assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
             assert!(fence.payload().records.is_empty());
-            crate::manifest::fold_wal_with_deadline(
+            crate::manifest::fold_wal_tail(
                 blocked.inner(),
+                None,
                 &namespace_id,
+                None,
                 &Deadline::start(timer_b.clone()),
                 crate::manifest::MetadataRunPolicy::default(),
-                None,
                 &tokio::sync::Semaphore::new(32),
             )
             .await

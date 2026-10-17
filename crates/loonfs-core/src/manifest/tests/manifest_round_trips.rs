@@ -100,6 +100,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &namespace_id,
         Some(input),
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
         &tokio::sync::Semaphore::new(32),
     )
     .await

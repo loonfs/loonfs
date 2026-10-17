@@ -1891,16 +1891,19 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         },
     );
     let overrun = Deadline::start(clock);
-    let error = super::fold::fold_wal_with_deadline(
+    let Err(error) = super::fold::fold_wal_tail(
         &store,
+        None,
         &namespace_id,
+        None,
         &overrun,
         MetadataRunPolicy::default(),
-        None,
         &tokio::sync::Semaphore::new(32),
     )
     .await
-    .expect_err("over-budget publication must abort");
+    else {
+        panic!("over-budget publication must abort");
+    };
     assert_matches!(
         error,
         CoreError::MetadataPublicationBudgetExceeded { .. },

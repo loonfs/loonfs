@@ -1816,18 +1816,15 @@ impl NamespacePublisher {
         };
         let started_at_ms = self.timer.monotonic_now_ms();
         let segment_cache = self.runtime_core.metadata_segment_cache();
+        let config = &self.runtime_core.inner.config;
         let result = loonfs_core::fold_wal_tail(
             self.runtime_core.store(),
             Some(segment_cache.as_ref()),
             &self.namespace_id,
             input,
             &Deadline::start(Arc::clone(&self.timer)),
-            &self
-                .runtime_core
-                .inner
-                .config
-                .execution_budget
-                .content_writes(),
+            config.metadata_run_policy,
+            &config.execution_budget.content_writes(),
         )
         .instrument(phase_span!(
             self.runtime_core,
@@ -1841,10 +1838,13 @@ impl NamespacePublisher {
         self.lock_engine()
             .await
             .record_fold_outcome(result.as_ref());
-        let published = match result {
+        match result {
             Ok(folded) => {
-                self.runtime_core.instruments().publisher_wal_fold();
-                folded.response.outcome == FoldWalOutcome::Published
+                let published = folded.response.outcome == FoldWalOutcome::Published;
+                if published {
+                    self.runtime_core.instruments().publisher_wal_fold();
+                }
+                published
             }
             Err(error) => {
                 let error = Error::Core(error);
@@ -1858,8 +1858,7 @@ impl NamespacePublisher {
                 );
                 false
             }
-        };
-        published
+        }
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now

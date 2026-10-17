@@ -1369,15 +1369,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// candidates once nothing pins them. The report includes the manifest
     /// this call published.
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
-        crate::manifest::fold_wal_with_deadline(
+        let folded = crate::manifest::fold_wal_tail(
             &self.store,
+            self.segment_cache.as_deref(),
             &self.namespace_id,
+            None,
             &crate::time::Deadline::start(Arc::clone(&self.timer)),
             self.effective_run_policy(),
-            self.segment_cache.as_deref(),
             &self.content_writes,
         )
-        .await
+        .await?;
+        Ok(PublicationReport {
+            published: folded.published(),
+            response: folded.response,
+        })
     }
 
     /// Claims the namespace compactor epoch for a maintenance runtime. The
