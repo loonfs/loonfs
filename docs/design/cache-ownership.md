@@ -63,7 +63,7 @@ The budgets stay separate for each kind of entry: segment blocks, heads, tails, 
 
 Why one cache type? All five caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
 
-Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay. SlateDB keeps its 128 MiB meta cache (indexes, filters, and stats) apart from its 512 MiB block cache for the same reason.
+Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay.
 
 ## Costs
 
@@ -97,4 +97,4 @@ Pin the writer's current tail in the shared cache. This uses the same memory as 
 
 Use one budget across all kinds of entry. Segment blocks could then evict a reader's tail, which costs a replay.
 
-Evict nothing, and keep every tail the way SlateDB keeps its memtable and its writer's own state, including the tails of readers. A process without the session can read any number of namespaces, so its tails would grow with each namespace it reads.
+Evict nothing, and keep every tail, including the tails of readers. A process without the session can read any number of namespaces, so its tails would grow with each namespace it reads.
