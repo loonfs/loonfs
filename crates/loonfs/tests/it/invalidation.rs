@@ -70,29 +70,6 @@ fn tail_replays(recorder: &DefaultMetricsRecorder) -> u64 {
     }
 }
 
-/// Head state the writer holds once `fence` and `other` each hold the first
-/// file the fencing test publishes, with nothing evicted.
-async fn first_head_state_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) -> usize {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let writer = writer(&store, "writer-a").await;
-    let mut namespaces = Vec::new();
-    for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
-        writer
-            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
-            .await
-            .expect("create namespace");
-        let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-        namespace
-            .put_file(path, b"a", &loonfs_test_support::test_actor())
-            .await
-            .expect("first put");
-        namespaces.push(namespace);
-    }
-    writer.metadata_cache().stats().head_state_bytes
-}
-
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
 fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &str) -> WriterFence {
     let error = result.expect_err(when);
@@ -247,116 +224,6 @@ async fn fenced_session_cannot_delete_namespace() {
         .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("live writer keeps publishing after the refused delete");
-}
-
-#[tokio::test]
-async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
-    let temp_dir = tempdir().expect("tempdir");
-    let ns_fence = NamespaceId::parse("fence").expect("valid namespace id");
-    let ns_other = NamespaceId::parse("other").expect("valid namespace id");
-    let counting = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::hint(&ns_fence),
-    ));
-    let store: SharedObjectStore = counting.clone();
-
-    // One byte short of both namespaces' head state: publishing to the
-    // other namespace evicts the oldest entry, the fence namespace's tail.
-    let both_namespaces = first_head_state_bytes(&ns_fence, &ns_other).await;
-    let writer_a = writer_with_cache(&store, "writer-a", |builder| {
-        builder.metadata_cache(
-            MetadataCache::builder()
-                .max_head_state_bytes(both_namespaces - 1)
-                .build(),
-        )
-    })
-    .await;
-    writer_a
-        .create_namespace(&ns_fence, &loonfs_test_support::test_actor())
-        .await
-        .expect("create fence namespace");
-    let fence_writer_a = writer_a.open_namespace(&ns_fence).expect("open namespace");
-    writer_a
-        .create_namespace(&ns_other, &loonfs_test_support::test_actor())
-        .await
-        .expect("create other namespace");
-    let other_writer_a = writer_a.open_namespace(&ns_other).expect("open namespace");
-    fence_writer_a
-        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer a first put");
-
-    // Publishing to the other namespace pushes the first namespace's tail
-    // out of the cache. Its publisher, engine position, and writer session
-    // stay behind. The cache also keeps each namespace's head, which is used
-    // less recently than the tail, so it takes a second publish to evict the
-    // tail.
-    for path in ["/spill.txt", "/spill-more.txt"] {
-        other_writer_a
-            .put_file(path, b"s", &loonfs_test_support::test_actor())
-            .await
-            .expect("writer a publishes to the other namespace");
-    }
-    assert!(writer_a.metadata_cache().stats().head_state_evictions > 0);
-    let misses_before_fencing = writer_a.metadata_cache().stats().wal_tail_misses;
-
-    let writer_b = writer(&store, "writer-b").await;
-    let fence_writer_b = writer_b.open_namespace(&ns_fence).expect("open namespace");
-    fence_writer_b
-        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer b takes over the epoch");
-
-    // The rebuilt projection publishes under the epoch the session still
-    // holds, so the takeover surfaces as fencing instead of a silent
-    // re-acquisition.
-    let fence = expect_writer_fenced(
-        fence_writer_a
-            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
-            .await,
-        "superseded writer surfaces fencing",
-    );
-    assert_eq!(
-        writer_a.metadata_cache().stats().wal_tail_misses,
-        misses_before_fencing + 1,
-        "the evicted tail sends the fenced publish to the store"
-    );
-    let head_after_fencing = head_state(&store, &ns_fence).await;
-    assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
-    assert_eq!(
-        fence
-            .active_writer_id
-            .as_ref()
-            .map(|writer| writer.as_str()),
-        Some("writer-b")
-    );
-
-    // More budget pressure, now against a publisher whose session is fenced:
-    // fencing is session state, so no eviction can reach it.
-    other_writer_a
-        .put_file("/spill2.txt", b"s", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer a keeps publishing to the other namespace");
-
-    let hint_raises_after_fencing = counting.count(OperationSelector::CompareAndSwap);
-    expect_writer_fenced(
-        fence_writer_a
-            .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
-            .await,
-        "fenced session stays fenced after eviction",
-    );
-    assert_eq!(
-        counting.count(OperationSelector::CompareAndSwap),
-        hint_raises_after_fencing,
-        "a fenced session must not raise the fenced namespace's hint"
-    );
-    let head = head_state(&store, &ns_fence).await;
-    assert_eq!(head.status, NamespaceStatus::Active {});
-    assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
-    fence_writer_b
-        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
-        .await
-        .expect("live writer is not fenced back");
 }
 
 #[tokio::test]
@@ -773,8 +640,8 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
 }
 
 /// Checks that a read after a write in the writer's runtime sends no
-/// request and reads the WAL tail that the write cached, even after a
-/// snapshot read that loads another view.
+/// request and reads the WAL tail that the writer's position keeps, even
+/// after a snapshot read that loads another view.
 #[tokio::test]
 async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -841,12 +708,15 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
-    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
+    assert_eq!(
+        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        "the read takes the position's tail, not one from the read cache"
+    );
 }
 
 /// Checks that reads in the writer's runtime after a fold see the folded
-/// manifest, and that the next read sends no request and reuses the tail
-/// that the fold left in the cache.
+/// manifest, and that the next read sends no request and takes the tail
+/// that the writer's position keeps after the fold.
 #[tokio::test]
 async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -896,18 +766,24 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
-    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
+    assert_eq!(
+        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        "the read takes the position's tail, not one from the read cache"
+    );
 }
 
+/// Checks that reads that fill the shared head-state cache leave an idle
+/// writer's tail alone, so the writer's next publish reads no tail from the
+/// store.
 #[tokio::test]
-async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_once() {
+async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("idle-writer").expect("namespace");
     let other_id = NamespaceId::parse("other").expect("namespace");
-    // The budget holds exactly the other namespace's head state, which
-    // outweighs the writer's, so one read of it evicts the writer's tail.
+    // The budget fits exactly the other namespace's head state, so one read
+    // of it fills the cache.
     let cache = MetadataCache::builder()
         .max_head_state_bytes(other_head_state_bytes(&other_id).await)
         .build();
@@ -941,7 +817,7 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
         .stat("/")
         .await
         .expect("read the other namespace");
-    assert!(cache.stats().head_state_evictions > 0);
+    assert!(cache.stats().head_state_bytes > 0);
 
     let landed = namespace
         .put_file(
@@ -950,11 +826,11 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect("the publish lands after its tail was evicted");
+        .expect("the publish succeeds after the read pressure");
     assert_eq!(
         tail_replays(&recorder),
-        replays + 1,
-        "the evicted tail is read back from the store exactly once"
+        replays,
+        "the writer's position keeps its tail whatever reads fill the cache"
     );
     let entry = reader
         .namespace(&namespace_id)
@@ -962,64 +838,4 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
         .await
         .expect("read the landed file");
     assert_eq!(entry.head_seq, landed.committed_seq);
-}
-
-#[tokio::test]
-async fn a_tail_evicted_while_its_publish_runs_returns_when_the_publish_lands() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("busy-writer").expect("namespace");
-    let other_id = NamespaceId::parse("other").expect("namespace");
-    let blocking = Arc::new(BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
-    ));
-    let store: SharedObjectStore = blocking.clone();
-    let cache = MetadataCache::builder()
-        .max_head_state_bytes(other_head_state_bytes(&other_id).await)
-        .build();
-    fill_other(&store, &other_id).await;
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        writer_with_cache_and_metrics(&store, "busy-writer", cache.clone(), recorder.clone()).await;
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let actor = loonfs_test_support::test_actor();
-    let put = |path: &'static str| namespace.put_file(path, b"busy", &actor);
-    put("/first.txt").await.expect("first put");
-    let replays = tail_replays(&recorder);
-    let reader = LoonFs::builder_with_store(store.clone())
-        .read_only()
-        .metadata_cache(cache.clone())
-        .build()
-        .await
-        .expect("reader on the shared cache");
-
-    // The put holds its tail while its WAL put is parked. Reading the other
-    // namespace evicts that tail from the cache meanwhile.
-    blocking.block_next();
-    let (landed, ()) = futures::join!(put("/second.txt"), async {
-        blocking.wait_until_blocked().await;
-        reader
-            .namespace(&other_id)
-            .stat("/")
-            .await
-            .expect("read the other namespace");
-        assert!(cache.stats().head_state_evictions > 0);
-        blocking.release();
-    });
-    landed.expect("the put lands with the tail it held");
-    put("/third.txt")
-        .await
-        .expect("the next put starts from the landed tail");
-    assert_eq!(
-        tail_replays(&recorder),
-        replays,
-        "the landed put put its tail back, so nothing was read again"
-    );
 }

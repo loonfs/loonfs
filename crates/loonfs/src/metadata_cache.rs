@@ -240,11 +240,10 @@ impl MetadataCacheBuilder {
     }
 
     /// Sets the decoded bytes of namespace head anchors and WAL-tail
-    /// projections the cache holds. Reads start from this head state, and
-    /// writers keep their WAL tails here between publishes. Defaults to
-    /// [`DEFAULT_MAX_HEAD_STATE_BYTES`]; zero keeps none, so every publish
-    /// reads its tail from the store. An entry heavier than the whole limit
-    /// is not kept.
+    /// projections that the cache keeps for reads. Defaults to
+    /// [`DEFAULT_MAX_HEAD_STATE_BYTES`]. Zero keeps none, so reads cache no
+    /// heads or tails. (A writer session keeps its own WAL tail whatever the
+    /// limit is.) An entry heavier than the whole limit isn't kept.
     pub fn max_head_state_bytes(mut self, max_head_state_bytes: usize) -> Self {
         self.max_head_state_bytes = max_head_state_bytes;
         self

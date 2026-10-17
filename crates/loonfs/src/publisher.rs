@@ -607,12 +607,12 @@ struct NamespacePublisher {
 /// Commit engine and writer session retained by one namespace publisher.
 ///
 /// The session stores the acquired epoch and terminal fencing state. Those
-/// values describe this process and cannot be reconstructed from object
-/// storage. They therefore live for the publisher's lifetime rather than in
-/// an evictable cache. The engine's WAL tail lives in the head-state cache.
+/// values describe this process and can't be reconstructed from object
+/// storage, so the publisher keeps them for its whole life. The engine keeps
+/// its WAL tail with its position until the position is dropped.
 struct EngineSlot {
     /// Built on the first unit of work and kept for the publisher's life.
-    /// Invalidation drops only the position of its WAL tail.
+    /// Invalidation drops only its position and the position's WAL tail.
     engine: Option<NamespaceCommitEngine>,
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionStatus,
@@ -1351,7 +1351,8 @@ impl NamespacePublisher {
             return;
         }
         self.record_panic();
-        // A panic can follow the WAL put, so the cached tail may omit committed bytes.
+        // A panic can follow the WAL put, so the position's tail may omit
+        // committed bytes.
         if let Some(engine) = self.lock_engine().await.engine.as_mut() {
             engine.invalidate_projection();
         }
@@ -1546,7 +1547,6 @@ impl NamespacePublisher {
             )
             .monotonic_timer(Arc::clone(&self.timer))
             .segment_cache(self.runtime_core.metadata_segment_cache())
-            .head_state(self.runtime_core.head_state())
             .writer_session(Arc::clone(&slot.session))
         })
     }

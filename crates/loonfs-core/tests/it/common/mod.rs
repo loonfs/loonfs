@@ -41,6 +41,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
         object_cache: Arc::new(ObjectCache::unshared(0, 0)),
+        tail: None,
     }
 }
 

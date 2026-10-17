@@ -804,7 +804,7 @@ impl PublisherInstruments {
             ),
             tail_replays: recorder.register_counter(
                 "loonfs.publisher.tail_replays",
-                "Publishes that reread the WAL tail from the store instead of finding it in the head-state cache",
+                "Publishes that read the WAL tail from the store because the writer session had no position to start from",
                 &[],
             ),
             batch_size: recorder.register_histogram(

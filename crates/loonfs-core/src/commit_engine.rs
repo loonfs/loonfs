@@ -6,9 +6,7 @@ use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{
-    HeadStateCache, MetadataSegmentCache, PublishedManifest, WalTailProjectionCacheKey,
-};
+use crate::manifest::{MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -17,8 +15,7 @@ use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
-    load_publish_metadata_view, PublishTailPosition, PublishTailProjection, PublishViewEffect,
-    ReanchorOutcome,
+    load_publish_metadata_view, PublishTailPosition, PublishViewEffect, ReanchorOutcome,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
@@ -572,7 +569,8 @@ pub struct WalTailReport {
 /// Where a publish attempt found the WAL tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailSource {
-    /// The head-state cache.
+    /// The engine's position, which kept the tail from an earlier
+    /// publication unit.
     Cached,
     /// The store.
     Store,
@@ -592,15 +590,14 @@ pub struct WalFoldInput {
 
 /// The head that reads in a writer session's runtime start from, taken from
 /// the session's commit engine.
-///
-/// The engine put the WAL tail above `basis` at `head` in its head-state
-/// cache under `tail_key`. A read that finds the tail evicted replays it from
-/// the store and inserts it under the same key.
 #[derive(Debug, Clone)]
 pub struct ReadPosition {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
-    pub tail_key: WalTailProjectionCacheKey,
+    /// The projected WAL tail above `basis` at `head`, which the engine
+    /// keeps with its position. Reads from the position start from this
+    /// tail without replaying the WAL.
+    pub tail: Arc<ProjectedWalTail>,
     /// When a store observation last confirmed `basis` current: the
     /// discovery that loaded it, or a HEAD that found no successor.
     pub basis_checked: Observation,
@@ -652,9 +649,6 @@ pub struct NamespaceCommitEngine {
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
     /// keyed by segment digest. Successor probes verify that the view is current.
     segment_cache: Option<Arc<MetadataSegmentCache>>,
-    /// Where the WAL tail lives between publication units. Without it, every
-    /// unit reads the tail from the store.
-    head_state: Option<Arc<HeadStateCache>>,
 }
 
 impl NamespaceCommitEngine {
@@ -671,19 +665,7 @@ impl NamespaceCommitEngine {
             session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
-            head_state: None,
         }
-    }
-
-    /// An engine that keeps its WAL tail between units in a head-state cache
-    /// of its own, as a runtime's engine does in the shared one.
-    #[cfg(test)]
-    pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
-        Self::new(
-            namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
-        )
-        .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)))
     }
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
@@ -712,13 +694,9 @@ impl NamespaceCommitEngine {
         self
     }
 
-    pub fn head_state(mut self, head_state: Arc<HeadStateCache>) -> Self {
-        self.head_state = Some(head_state);
-        self
-    }
-
-    /// Clears only the rebuildable tail projection. Writer epoch and fencing
-    /// remain in session state and are not reset by cache invalidation.
+    /// Drops the position and its tail, so the next unit reads the tail from
+    /// the store. Writer epoch and fencing remain in session state and are
+    /// not reset.
     pub fn invalidate_projection(&mut self) {
         self.publish_tail = None;
         self.acquired_anchor = None;
@@ -762,58 +740,12 @@ impl NamespaceCommitEngine {
         )
     }
 
-    /// The tail `position` names, if the head-state cache still holds it.
-    fn cached_tail(&self, position: &PublishTailPosition) -> Option<Arc<ProjectedWalTail>> {
-        self.head_state
-            .as_ref()?
-            .get_tail(&position.tail_key(&self.namespace_id))
-    }
-
-    fn insert_tail(&self, position: &PublishTailPosition, tail: Arc<ProjectedWalTail>) {
-        if let Some(head_state) = &self.head_state {
-            head_state.insert_tail(position.tail_key(&self.namespace_id), tail);
-        }
-    }
-
-    fn invalidate_tail(&self, position: &PublishTailPosition) {
-        if let Some(head_state) = &self.head_state {
-            head_state.invalidate_tail(&position.tail_key(&self.namespace_id));
-        }
-    }
-
-    /// Replaces the tail under `replaced`, the key of a position before it
-    /// moved onto a new manifest, with the moved position's tail, so the
-    /// cache doesn't keep charging for the old tail until recency evicts it.
-    fn move_tail(
-        &self,
-        replaced: &WalTailProjectionCacheKey,
-        position: &PublishTailPosition,
-        tail: Arc<ProjectedWalTail>,
-    ) {
-        if let Some(head_state) = &self.head_state {
-            head_state.invalidate_tail(replaced);
-            head_state.insert_tail(position.tail_key(&self.namespace_id), tail);
-        }
-    }
-
-    /// Takes the engine's position and the tail it names. A tail the cache no
-    /// longer holds drops the position, so the unit reads the tail from the
-    /// store.
-    fn take_cached_projection(&mut self) -> Option<PublishTailProjection> {
-        let position = self.publish_tail.take()?;
-        let tail_state = self.cached_tail(&position)?;
-        Some(PublishTailProjection {
-            position,
-            tail_state,
-        })
-    }
-
-    /// Checks the cached WAL tail without store reads or writer acquisition.
+    /// Checks the position's WAL tail for the commit's receipt, without
+    /// store reads or writer acquisition.
     pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
         self.publish_tail
             .as_ref()
-            .and_then(|position| self.cached_tail(position))
-            .is_some_and(|tail| tail.find_commit_receipt(commit_id).is_some())
+            .is_some_and(|position| position.tail.find_commit_receipt(commit_id).is_some())
     }
 
     /// Unfolded WAL objects as of the last publication unit, or `None` when
@@ -829,25 +761,25 @@ impl NamespaceCommitEngine {
     pub fn wal_tail_inline_bytes(&self) -> Option<usize> {
         self.publish_tail
             .as_ref()
-            .map(|position| position.wal_tail_inline_bytes)
+            .map(PublishTailPosition::wal_tail_inline_bytes)
     }
 
-    /// The tail as a fold input, or `None` when the engine has no position or
-    /// the head-state cache no longer holds the tail.
+    /// The position's tail as a fold input, or `None` when the engine has no
+    /// position.
     pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
         let position = self.publish_tail.as_ref()?;
-        let tail_state = self.cached_tail(position)?;
         Some(WalFoldInput {
             head: position.head.clone(),
             basis: position.basis().clone(),
+            tail_state: Arc::clone(&position.tail),
             wal_tail_objects: position.wal_tail_objects,
-            wal_tail_inline_bytes: tail_state.inline_bytes(),
-            tail_state,
+            wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
         })
     }
 
     /// Starts the session's own fold, and returns the tail to fold, or
-    /// `None` when the fold has to load the tail from the store.
+    /// `None` when the engine has no position, so the fold loads the tail
+    /// from the store.
     pub fn begin_wal_fold(&mut self) -> Option<WalFoldInput> {
         self.fold_observed = Some(Observation::now(Arc::clone(&self.timer)));
         let input = self.wal_fold_input();
@@ -870,17 +802,12 @@ impl NamespaceCommitEngine {
         let published_during_fold = self.published_during_fold.take();
         match folded {
             Ok(folded) => {
-                let namespace_id = &self.namespace_id;
-                let moved = self.publish_tail.as_mut().and_then(|position| {
+                let moved = self.publish_tail.as_mut().map(|position| {
                     let new_basis = position.basis() != &folded.basis;
-                    let replaced = position.tail_key(namespace_id);
-                    position
-                        .reanchor_after_fold(folded)
-                        .map(|since| (since, new_basis, replaced))
+                    (position.reanchor_after_fold(folded), new_basis)
                 });
-                match (moved, &self.publish_tail) {
-                    (Some((since, new_basis, replaced)), Some(position)) => {
-                        self.move_tail(&replaced, position, since);
+                match moved {
+                    Some((true, new_basis)) => {
                         // The fold published a new basis, or found it current,
                         // after the fold began, so no manifest followed it
                         // then. The position's own basis has no such check.
@@ -905,15 +832,15 @@ impl NamespaceCommitEngine {
     /// Moves the position to a manifest that this runtime published, as
     /// [`Self::record_wal_fold`] does after the session's own fold, or drops
     /// the position when it can't move there (see
-    /// `PublishTailProjection::reanchor_after_publish` for the rule).
+    /// `PublishTailPosition::reanchor_after_publish` for the rule).
     ///
     /// Later commits then plan against the new manifest, and reads in this
     /// runtime start from it, so a read's manifest check doesn't find the
-    /// new manifest as a successor and drop the position. The cached WAL
-    /// tail is stored again under the new manifest's number. The time of the
-    /// last manifest check stays the same. That check found no successor of the old manifest, so it
-    /// happened before this runtime published the new manifest, and no
-    /// manifest after the new one existed then either.
+    /// new manifest as a successor and drop the position. The position keeps
+    /// the WAL tail above the new manifest. The time of the last manifest
+    /// check stays the same. That check found no successor of the old
+    /// manifest, so it happened before this runtime published the new
+    /// manifest, and no manifest after the new one existed then either.
     ///
     /// A manifest that arrives during a fold waits for the fold to finish,
     /// because the fold's outcome decides which manifest the position uses
@@ -936,24 +863,13 @@ impl NamespaceCommitEngine {
             self.published_during_fold = Some(newest);
             return;
         }
-        let Some(mut projection) = self.take_cached_projection() else {
+        let Some(position) = self.publish_tail.as_mut() else {
             return;
         };
-        let replaced = projection.position.tail_key(&self.namespace_id);
-        let outcome = projection.reanchor_after_publish(&published);
-        let PublishTailProjection {
-            position,
-            tail_state,
-        } = projection;
-        match outcome {
-            ReanchorOutcome::Kept => {}
-            ReanchorOutcome::Moved => self.move_tail(&replaced, &position, tail_state),
-            ReanchorOutcome::Superseded => {
-                self.invalidate_projection();
-                return;
-            }
+        match position.reanchor_after_publish(&published) {
+            ReanchorOutcome::Kept | ReanchorOutcome::Moved => {}
+            ReanchorOutcome::Superseded => self.invalidate_projection(),
         }
-        self.publish_tail = Some(position);
     }
 
     /// Returns the position that reads in this runtime start from, or `None`
@@ -969,7 +885,7 @@ impl NamespaceCommitEngine {
         Some(ReadPosition {
             head: position.head.clone(),
             basis: position.basis().clone(),
-            tail_key: position.tail_key(&self.namespace_id),
+            tail: Arc::clone(&position.tail),
             basis_checked: self.basis_checked.clone()?,
         })
     }
@@ -1101,19 +1017,19 @@ impl NamespaceCommitEngine {
             }
         }
         let acquired_anchor = self.acquired_anchor.take();
-        let cached_projection = match acquired_anchor {
+        let cached_position = match acquired_anchor {
             Some(_) => {
                 self.publish_tail = None;
                 None
             }
-            None => self.take_cached_projection(),
+            None => self.publish_tail.take(),
         };
         let loaded = load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
             acquired_writer,
-            cached_projection,
+            cached_position,
             acquired_anchor,
             Arc::clone(&self.timer),
         )
@@ -1157,11 +1073,10 @@ impl NamespaceCommitEngine {
             &self.content_writes,
         )
         .await;
-        let projection = publish_view.into_projection();
+        let position = publish_view.into_position();
         self.projection_observed = Some(projection_observed);
         let unknown_inline_bytes = published.unconfirmed_inline_bytes;
-        let update =
-            self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
+        let update = self.update_publish_tail_projection(position, published.effect);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
         if update.landed && self.publish_tail.is_some() {
@@ -1181,15 +1096,13 @@ impl NamespaceCommitEngine {
         }
     }
 
-    /// Folds one batch's effect into the unit's tail projection, keeps its
-    /// position, and reports the WAL-tail length the caller schedules
-    /// maintenance on. A tail the cache does not already hold is inserted:
-    /// one a landed put advanced, or one this unit read from the store.
+    /// Folds one batch's effect into the unit's position and its tail, keeps
+    /// the position, and reports the WAL-tail length the caller schedules
+    /// maintenance on.
     fn update_publish_tail_projection(
         &mut self,
-        mut projection: PublishTailProjection,
+        mut position: PublishTailPosition,
         effect: PublishViewEffect,
-        tail_discovered: bool,
     ) -> TailProjectionUpdate {
         let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
         match effect {
@@ -1197,20 +1110,19 @@ impl NamespaceCommitEngine {
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
-                    wal_tail_objects: projection.position.wal_tail_objects,
-                    wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                    wal_tail_objects: position.wal_tail_objects,
+                    wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                     landed: false,
                 };
             }
             PublishViewEffect::Advanced { records, head } => {
-                projection.position.wal_tail_objects += 1;
-                self.invalidate_tail(&projection.position);
-                let applied = Arc::make_mut(&mut projection.tail_state)
+                position.wal_tail_objects += 1;
+                let applied = Arc::make_mut(&mut position.tail)
                     .push_object(&self.namespace_id, &records)
-                    .and_then(|chunk| projection.apply_fold_object(chunk));
+                    .and_then(|chunk| position.apply_fold_object(chunk));
                 if let Err(error) = applied {
-                    // The WAL is already durable. Discard this cache; replay
-                    // and folding will report the accounting error.
+                    // The WAL is already durable. Discard the position;
+                    // replay and folding will report the accounting error.
                     tracing::warn!(
                         namespace_id = %self.namespace_id,
                         error = %error,
@@ -1218,21 +1130,17 @@ impl NamespaceCommitEngine {
                     );
                     self.invalidate_projection();
                     return TailProjectionUpdate {
-                        wal_tail_objects: projection.position.wal_tail_objects,
-                        wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                        wal_tail_objects: position.wal_tail_objects,
+                        wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                         landed: false,
                     };
                 }
-                projection.reanchor(head);
+                position.reanchor(head);
             }
-        }
-        let (position, tail_state) = projection.into_position();
-        if advanced || tail_discovered {
-            self.insert_tail(&position, tail_state);
         }
         let update = TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects,
-            wal_tail_inline_bytes: position.wal_tail_inline_bytes,
+            wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             landed: advanced,
         };
         self.publish_tail = Some(position);
@@ -1253,7 +1161,8 @@ fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {
     (0..count).map(|_| Err(error.clone())).collect()
 }
 
-/// Publishes one batch through a fresh, uncached commit engine.
+/// Publishes one batch through a fresh commit engine, which keeps its
+/// position across the batch's retries.
 pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1285,8 +1194,8 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// Deletes a namespace through a fresh, uncached commit engine: a one-shot
-/// session that acquires its own epoch, exactly like a one-shot publish.
+/// Deletes a namespace through a fresh commit engine: a one-shot session
+/// that acquires its own epoch, exactly like a one-shot publish.
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

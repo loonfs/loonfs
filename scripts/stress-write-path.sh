@@ -66,7 +66,6 @@ runtime|publisher::tests::successful_delete_waits_for_fold_before_evicting_the_n
 runtime|publisher::tests::a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot
 runtime|publisher::tests::inline_writer::fold_completion_reports_only_inline_bytes_published_since_it_began
 runtime|publisher::tests::inline_writer::a_delayed_fold_callback_preserves_a_freshly_observed_tail
-runtime|publisher::tests::inline_writer::a_delayed_fold_callback_preserves_an_uncached_tail
 runtime|publisher::tests::session_compaction::a_session_streaming_compaction_survives_its_own_next_fold
 runtime|publisher::tests::session_compaction::closing_a_session_cancels_its_compaction_and_returns
 runtime|publisher::tests::session_compaction::shutdown_drains_session_compactions

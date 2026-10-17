@@ -70,7 +70,10 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    );
     stale
         .publish_batch(
             &store,

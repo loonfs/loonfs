@@ -683,12 +683,6 @@ impl HeadStateCache {
         }
     }
 
-    pub fn invalidate_tail(&self, key: &WalTailProjectionCacheKey) {
-        self.shared
-            .entries
-            .invalidate(&(self.scope, HeadStateKey::Tail(key.clone())));
-    }
-
     /// Returns the budget needed to cache this WAL-tail projection on its own.
     #[cfg(any(test, feature = "test-support"))]
     pub fn tail_charged_bytes(

@@ -106,7 +106,10 @@ impl Writer {
             .await
             .expect("create");
         Self {
-            engine: NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone()),
+            engine: NamespaceCommitEngine::new(
+                namespace_id.clone(),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            ),
             directory,
             store,
             context,

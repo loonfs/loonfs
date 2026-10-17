@@ -48,6 +48,9 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     /// consistent (any manifest at or below the pinned seq serves it, with
     /// WAL replay covering the rest).
     basis: &'anchor MetadataBasis,
+    /// The projected WAL tail above `basis` at `head`, when the read starts
+    /// from a writer session's position.
+    tail: Option<&'anchor Arc<ProjectedWalTail>>,
     segment_cache: Option<&'cache MetadataSegmentCache>,
     head_state: Option<&'cache HeadStateCache>,
     object_cache: Option<&'cache ObjectCache>,
@@ -57,6 +60,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
     pub(crate) fn pinned_head(
         head: &'anchor NamespaceReadState,
         basis: &'anchor MetadataBasis,
+        tail: Option<&'anchor Arc<ProjectedWalTail>>,
         segment_cache: Option<&'cache MetadataSegmentCache>,
         head_state: Option<&'cache HeadStateCache>,
         object_cache: Option<&'cache ObjectCache>,
@@ -64,6 +68,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
         Self {
             head,
             basis,
+            tail,
             segment_cache,
             head_state,
             object_cache,
@@ -121,7 +126,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
     let basis = loaded.basis();
-    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None);
+    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None, None);
     load_metadata_view(store, namespace_id, context).await
 }
 
@@ -234,6 +239,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             manifest_no,
             manifest_head_seq: manifest_head.seq,
         };
+        if let Some(wal_tail) = load_context.tail {
+            return Ok(Self {
+                namespace_id: namespace_id.clone(),
+                head,
+                segments,
+                wal_tail: Arc::clone(wal_tail),
+                anchor,
+                object_cache: load_context.object_cache,
+            });
+        }
         let cache_key = WalTailProjectionCacheKey {
             namespace_id: namespace_id.clone(),
             manifest_no,

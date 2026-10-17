@@ -444,7 +444,10 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
-    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    );
     publish(&mut stale, &store, "old")
         .await
         .expect("old writer");
@@ -829,6 +832,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         )),
         head_state: std::sync::Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
         object_cache: std::sync::Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        tail: None,
     };
     let error = super::probe_namespace_wal(&store, &mut warm)
         .await
@@ -873,6 +877,7 @@ async fn warm_context_behind(
         segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
         object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        tail: None,
     }
 }
 

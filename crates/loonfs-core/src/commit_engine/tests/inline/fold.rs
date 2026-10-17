@@ -439,7 +439,10 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     publish(&mut first, &store, &context, candidate.clone())
         .await
         .expect("publish");
-    let mut second = NamespaceCommitEngine::with_unshared_head_state(first.namespace_id.clone());
+    let mut second = NamespaceCommitEngine::new(
+        first.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    );
     publish(&mut second, &store, &context, candidate)
         .await
         .expect("replay");
@@ -661,28 +664,14 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
-    let replaced = engine
-        .publish_tail
-        .as_ref()
-        .expect("a position before the fold")
-        .tail_key(&engine.namespace_id);
     engine.record_wal_fold(Ok(&folded));
-    assert!(
-        engine
-            .head_state
-            .as_ref()
-            .expect("head-state cache")
-            .get_tail(&replaced)
-            .is_none(),
-        "the fold removes the tail under the position's key from before the fold"
-    );
     let position = engine.publish_tail.as_ref().expect("retained position");
     assert_eq!(position.basis(), &folded.basis);
     assert_eq!(position.wal_tail_objects, 2);
     assert_eq!(position.head.folded_wal_no, input.head.wal_no);
     let reanchored = engine
         .wal_fold_input()
-        .expect("the reanchored tail is cached")
+        .expect("the moved position keeps its tail")
         .tail_state;
     assert_eq!(reanchored.merged_rows(), expected.merged_rows());
     assert_eq!(reanchored.contents(), expected.contents());
@@ -711,4 +700,61 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
         if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace_id))
     )));
+}
+
+/// Checks that a fold manifest that this runtime published moves the
+/// engine's position together with its tail, with no cache involved: the
+/// moved position keeps only the commit after the fold, its inline bytes
+/// come from that tail, and reads and folds take the same tail.
+#[tokio::test]
+async fn a_published_fold_moves_the_position_with_its_tail() {
+    let content_writes = tokio::sync::Semaphore::new(32);
+    let (_directory, store, mut engine, context) = setup().await;
+    let folded_value = inline(&engine.namespace_id, Bytes::from_static(b"folded"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("folded", vec![folded_value]),
+    )
+    .await
+    .expect("commit before the fold");
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &engine.namespace_id,
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        crate::manifest::MetadataRunPolicy::default(),
+        &content_writes,
+    )
+    .await
+    .expect("a maintenance fold");
+    let published = folded.published().expect("the fold publishes a manifest");
+    let kept = inline(&engine.namespace_id, Bytes::from_static(b"kept"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("kept", vec![kept.clone()]),
+    )
+    .await
+    .expect("commit after the fold");
+
+    engine.record_manifest_published(published.clone());
+    let moved = engine.read_position().expect("the position moved");
+    assert_eq!(moved.basis.manifest(), published.manifest());
+    assert_eq!(moved.tail.chunks().len(), 1);
+    assert_eq!(engine.wal_tail_objects(), Some(1));
+    assert_eq!(engine.wal_tail_inline_bytes(), Some(kept.bytes().len()));
+    let receipt =
+        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    assert!(receipt("kept") && !receipt("folded"));
+    assert!(
+        Arc::ptr_eq(
+            &moved.tail,
+            &engine.wal_fold_input().expect("a fold input").tail_state
+        ),
+        "reads and folds take the position's one tail"
+    );
 }
