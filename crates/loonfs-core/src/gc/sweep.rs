@@ -125,7 +125,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 );
                 // The sweep adds a kept session to the cache, so a later pass
                 // doesn't read its record. Adding it here instead of when the
-                // record is read means that this pass's inserts can't drop an
+                // record is read means that this pass's inserts can't evict an
                 // entry that its own listing hasn't looked up yet.
                 if let (Some(cache), UploadSessionSweep::Retain { .. }) =
                     (self.session_cache, sweep)

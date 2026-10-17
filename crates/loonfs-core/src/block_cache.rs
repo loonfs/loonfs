@@ -57,6 +57,36 @@ pub struct DecodedBlockCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
+/// Lookups and inserts of one kind of entry, in a cache that keeps more than
+/// one kind of entry under one budget.
+///
+/// The cache records a lookup or an insert here only when it records one in
+/// its own counters, so a disabled cache records nothing here either.
+#[derive(Debug, Default)]
+pub(crate) struct KindCounters {
+    hits: AtomicUsize,
+    misses: AtomicUsize,
+    inserts: AtomicUsize,
+}
+
+/// A snapshot of [`KindCounters`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KindStats {
+    pub(crate) hits: usize,
+    pub(crate) misses: usize,
+    pub(crate) inserts: usize,
+}
+
+impl KindCounters {
+    pub(crate) fn stats(&self) -> KindStats {
+        KindStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            inserts: self.inserts.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Returns the initial table, queue, and queued key allocations.
 fn initial_overhead<K: DecodedBlockKey, V>(key: &K) -> usize {
     let bucket_bytes = size_of::<(K, CacheSlot<V>)>() + 1;
@@ -171,6 +201,38 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<V, E>>,
     {
+        self.load_once(cache_key, None, load).await
+    }
+
+    /// Loads like [`Self::get_or_load`], and records the lookup and the
+    /// insert in `kind` too.
+    pub(crate) async fn get_or_load_kind<E, F, Fut>(
+        &self,
+        cache_key: &K,
+        kind: &KindCounters,
+        load: F,
+    ) -> Result<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
+        self.load_once(cache_key, Some(kind), load).await
+    }
+
+    /// Runs one load for the concurrent callers of `cache_key`.
+    ///
+    /// A caller that receives the value of another caller's load records no
+    /// lookup.
+    async fn load_once<E, F, Fut>(
+        &self,
+        cache_key: &K,
+        kind: Option<&KindCounters>,
+        load: F,
+    ) -> Result<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
         let guard = {
             let mut in_flight = self
                 .in_flight
@@ -192,15 +254,25 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             .as_ref()
             .expect("in-flight load should hold its cell")
             .get_or_try_init(|| async {
-                if let Some(block) = self.get(cache_key) {
+                if let Some(block) = self.get_entry(cache_key, kind, Some) {
                     return Ok(block);
                 }
                 let block = load().await?;
-                self.insert(cache_key.clone(), block.clone());
+                self.insert_entry(cache_key.clone(), block.clone(), kind);
                 Ok(block)
             })
             .await
             .cloned()
+    }
+
+    /// Counts the entries that the cache keeps.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("decoded block cache lock should not be poisoned")
+            .entries
+            .len()
     }
 
     #[cfg(test)]
@@ -228,10 +300,48 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         }
     }
 
+    /// Returns the value under `key` and marks it recently used.
+    ///
+    /// A disabled cache returns `None` and records neither a hit nor a miss.
     pub fn get(&self, key: &K) -> Option<V> {
+        self.get_entry(key, None, Some)
+    }
+
+    /// Returns the value under `key` if `accept` takes it, and records the
+    /// lookup in `kind` too: a hit if `accept` took the value, and a miss
+    /// otherwise.
+    pub(crate) fn get_kind<T>(
+        &self,
+        key: &K,
+        kind: &KindCounters,
+        accept: impl FnOnce(V) -> Option<T>,
+    ) -> Option<T> {
+        self.get_entry(key, Some(kind), accept)
+    }
+
+    fn get_entry<T>(
+        &self,
+        key: &K,
+        kind: Option<&KindCounters>,
+        accept: impl FnOnce(V) -> Option<T>,
+    ) -> Option<T> {
         if self.disabled() {
             return None;
         }
+        let found = self.touch_entry(key).and_then(accept);
+        if let Some(kind) = kind {
+            let counter = match found {
+                Some(_) => &kind.hits,
+                None => &kind.misses,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        found
+    }
+
+    /// Returns the value under `key`, marks it recently used, and records a
+    /// hit or a miss.
+    fn touch_entry(&self, key: &K) -> Option<V> {
         let mut inner = self
             .inner
             .lock()
@@ -266,6 +376,16 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// entry first and then the entry itself. When the cache doesn't keep
     /// the entry, the entry that the key already had stays.
     pub fn insert(&self, key: K, block: V) -> bool {
+        self.insert_entry(key, block, None)
+    }
+
+    /// Inserts like [`Self::insert`], and records the insert in `kind` too
+    /// if the cache kept the entry.
+    pub(crate) fn insert_kind(&self, key: K, block: V, kind: &KindCounters) -> bool {
+        self.insert_entry(key, block, Some(kind))
+    }
+
+    fn insert_entry(&self, key: K, block: V, kind: Option<&KindCounters>) -> bool {
         if self.disabled() {
             return false;
         }
@@ -296,7 +416,11 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
         self.evict_over_budget(&mut inner);
-        inner.entries.contains_key(&key)
+        let kept = inner.entries.contains_key(&key);
+        if let Some(kind) = kind.filter(|_| kept) {
+            kind.inserts.fetch_add(1, Ordering::Relaxed);
+        }
+        kept
     }
 
     /// Drops one entry without counting an eviction.

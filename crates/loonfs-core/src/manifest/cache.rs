@@ -17,7 +17,7 @@ use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, DecodedSegmentBlock,
-    SegmentCacheKey,
+    KindCounters, SegmentCacheKey,
 };
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
@@ -78,12 +78,21 @@ impl DecodedBlockKey for ObjectStoreScope {
     }
 }
 
+/// Counters and occupancy of the shared segment blocks.
+///
+/// The first fields are the counters that every cache reports (see
+/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats)),
+/// and the rest count what the segment filters did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataSegmentCacheStats {
     pub hits: usize,
     pub misses: usize,
     pub inserts: usize,
     pub evictions: usize,
+    pub evicted_decoded_bytes: usize,
+    pub rejections: usize,
+    pub rejected_decoded_bytes: usize,
+    pub cached_decoded_bytes: usize,
     /// Segments a scan skipped because their bloom filter ruled the lookup
     /// key out before any index or data fetch.
     pub filter_skips: usize,
@@ -91,7 +100,6 @@ pub struct MetadataSegmentCacheStats {
     /// Approximate: a lookup narrower than the filter key (an exact unbind,
     /// a single revision) can count a true admission here.
     pub filter_false_positives: usize,
-    pub cached_decoded_bytes: usize,
 }
 
 pub(super) type MetadataSegmentCacheKey = SegmentCacheKey;
@@ -148,12 +156,15 @@ impl SharedSegmentBlocks {
             misses: blocks.misses,
             inserts: blocks.inserts,
             evictions: blocks.evictions,
+            evicted_decoded_bytes: blocks.evicted_decoded_bytes,
+            rejections: blocks.rejections,
+            rejected_decoded_bytes: blocks.rejected_decoded_bytes,
+            cached_decoded_bytes: blocks.cached_decoded_bytes,
             filter_skips: self.filter_stats.filter_skips.load(Ordering::Relaxed),
             filter_false_positives: self
                 .filter_stats
                 .filter_false_positives
                 .load(Ordering::Relaxed),
-            cached_decoded_bytes: blocks.cached_decoded_bytes,
         }
     }
 }
@@ -257,17 +268,25 @@ impl MetadataSegmentCache {
     }
 }
 
+/// Counters and occupancy of the shared head state.
+///
+/// The first fields are the counters that every cache reports (see
+/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats)),
+/// and the rest count the lookups and inserts of WAL-tail projections.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HeadStateCacheStats {
-    pub tail_hits: usize,
-    pub tail_misses: usize,
-    pub tail_inserts: usize,
+    pub hits: usize,
+    pub misses: usize,
+    pub inserts: usize,
     pub evictions: usize,
     pub evicted_decoded_bytes: usize,
     /// Entries heavier than the whole budget, which are never kept.
     pub rejections: usize,
     pub rejected_decoded_bytes: usize,
     pub cached_decoded_bytes: usize,
+    pub tail_hits: usize,
+    pub tail_misses: usize,
+    pub tail_inserts: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -426,8 +445,7 @@ impl DecodedBlock for HeadStateEntry {
 /// byte budget and one recency order.
 pub struct SharedHeadState {
     entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
-    max_decoded_bytes: usize,
-    counters: HeadStateCounters,
+    tails: KindCounters,
     records: std::sync::Mutex<HeadRecords>,
 }
 
@@ -445,41 +463,35 @@ impl std::fmt::Debug for SharedHeadState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SharedHeadState")
-            .field("max_decoded_bytes", &self.max_decoded_bytes)
             .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, Default)]
-struct HeadStateCounters {
-    tail_hits: AtomicUsize,
-    tail_misses: AtomicUsize,
-    tail_inserts: AtomicUsize,
 }
 
 impl SharedHeadState {
     pub fn new(max_decoded_bytes: usize) -> Self {
         Self {
             entries: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
-            max_decoded_bytes,
-            counters: HeadStateCounters::default(),
+            tails: KindCounters::default(),
             records: std::sync::Mutex::default(),
         }
     }
 
     pub fn stats(&self) -> HeadStateCacheStats {
         let entries = self.entries.stats();
-        let counters = &self.counters;
+        let tails = self.tails.stats();
         HeadStateCacheStats {
-            tail_hits: counters.tail_hits.load(Ordering::Relaxed),
-            tail_misses: counters.tail_misses.load(Ordering::Relaxed),
-            tail_inserts: counters.tail_inserts.load(Ordering::Relaxed),
+            hits: entries.hits,
+            misses: entries.misses,
+            inserts: entries.inserts,
             evictions: entries.evictions,
             evicted_decoded_bytes: entries.evicted_decoded_bytes,
             rejections: entries.rejections,
             rejected_decoded_bytes: entries.rejected_decoded_bytes,
             cached_decoded_bytes: entries.cached_decoded_bytes,
+            tail_hits: tails.hits,
+            tail_misses: tails.misses,
+            tail_inserts: tails.inserts,
         }
     }
 }
@@ -512,6 +524,10 @@ impl HeadStateCache {
 
     fn head_key(&self, namespace_id: &NamespaceId) -> (CacheScope, HeadStateKey) {
         (self.scope, HeadStateKey::Head(namespace_id.clone()))
+    }
+
+    fn tail_key(&self, key: &WalTailProjectionCacheKey) -> (CacheScope, HeadStateKey) {
+        (self.scope, HeadStateKey::Tail(key.clone()))
     }
 
     /// Returns the namespace's head record, creating it when nothing
@@ -657,30 +673,45 @@ impl HeadStateCache {
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
-        let shared = &self.shared;
-        if shared.max_decoded_bytes == 0 {
-            return None;
-        }
-        let tail = shared
+        self.shared.entries.get_kind(
+            &self.tail_key(key),
+            &self.shared.tails,
+            HeadStateEntry::into_tail,
+        )
+    }
+
+    /// Returns the WAL-tail projection under `key`, or loads it with `load`
+    /// and caches it.
+    ///
+    /// Concurrent calls for one key share one load, so the reads at one head
+    /// that miss its tail replay the tail once.
+    pub(crate) async fn get_or_load_tail<E, F, Fut>(
+        &self,
+        key: &WalTailProjectionCacheKey,
+        load: F,
+    ) -> Result<Arc<ProjectedWalTail>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Arc<ProjectedWalTail>, E>>,
+    {
+        let entry = self
+            .shared
             .entries
-            .get(&(self.scope, HeadStateKey::Tail(key.clone())))
-            .and_then(HeadStateEntry::into_tail);
-        let counter = match &tail {
-            Some(_) => &shared.counters.tail_hits,
-            None => &shared.counters.tail_misses,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-        tail
+            .get_or_load_kind(&self.tail_key(key), &self.shared.tails, || async {
+                load().await.map(HeadStateEntry::Tail)
+            })
+            .await?;
+        Ok(entry
+            .into_tail()
+            .expect("the entry under a tail key should be a tail"))
     }
 
     pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
-        let shared = &self.shared;
-        if shared.entries.insert(
+        self.shared.entries.insert_kind(
             (self.scope, HeadStateKey::Tail(key)),
             HeadStateEntry::Tail(tail),
-        ) {
-            shared.counters.tail_inserts.fetch_add(1, Ordering::Relaxed);
-        }
+            &self.shared.tails,
+        );
     }
 
     /// Returns the budget needed to cache this WAL-tail projection on its own.
@@ -700,9 +731,9 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedHead, DecodedMetadataSegmentBlock, HeadStateCache, MetadataBasis,
-        MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState, ObjectStoreScope,
-        Observation, SharedSegmentBlocks, WalTailProjectionCacheKey,
+        CachedHead, DecodedMetadataSegmentBlock, HeadStateCache, HeadStateCacheStats,
+        MetadataBasis, MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState,
+        ObjectStoreScope, Observation, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
@@ -1173,6 +1204,33 @@ mod tests {
         }
         let records = cache.shared.records.lock().expect("records").records.len();
         assert!(records <= 2 * 64, "{records} records");
+    }
+
+    /// Checks that a zero budget keeps no head and no tail and records no
+    /// lookups, and that a tail load still returns the tail it loaded.
+    #[tokio::test]
+    async fn a_zero_budget_keeps_and_counts_nothing() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(0);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
+        assert!(cache.get_head(&namespace("demo")).is_none());
+
+        let key = WalTailProjectionCacheKey {
+            namespace_id: namespace("demo"),
+            manifest_no: ManifestNo(1),
+            head_seq: ChangeSeq(5),
+        };
+        let tail = Arc::new(ProjectedWalTail::default());
+        cache.insert_tail(key.clone(), Arc::clone(&tail));
+        assert!(cache.get_tail(&key).is_none());
+        let loaded = cache
+            .get_or_load_tail(&key, || async { Ok::<_, String>(Arc::clone(&tail)) })
+            .await
+            .expect("the load returns its tail");
+        assert!(Arc::ptr_eq(&loaded, &tail));
+        assert!(cache.get_tail(&key).is_none());
+        assert_eq!(cache.stats(), HeadStateCacheStats::default());
     }
 
     #[tokio::test]

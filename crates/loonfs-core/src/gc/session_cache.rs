@@ -1,11 +1,13 @@
 //! Completed upload sessions that garbage collection keeps between passes.
 
-use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
+use crate::block_cache::{
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
+    DecodedBlockKey,
+};
+use crate::heap_bytes::HeapBytes;
 use crate::manifest::CacheScope;
 use loonfs_types::{ContentId, UploadId};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// The two facts that garbage collection uses from a completed upload
 /// session's record.
@@ -21,51 +23,48 @@ pub(crate) struct CompletedUploadSession {
     pub(crate) completed_at_ms: u64,
 }
 
+impl DecodedBlock for CompletedUploadSession {
+    fn weight(&self) -> usize {
+        self.heap_bytes()
+    }
+}
+
+impl DecodedBlockKey for UploadId {
+    fn heap_bytes(&self) -> usize {
+        HeapBytes::heap_bytes(self)
+    }
+}
+
 /// Completed upload sessions for every scope, under one byte budget.
 ///
-/// When an insert takes the entries over the budget, every entry is
-/// dropped. A dropped session costs one record read on a later pass.
+/// The cache evicts the least recently used session to stay within the
+/// budget. An evicted session costs one record read on a later pass.
 pub struct SharedCompletedUploadSessions {
-    max_bytes: usize,
-    entries: Mutex<Entries>,
-}
-
-#[derive(Default)]
-struct Entries {
-    sessions: HashMap<(CacheScope, UploadId), CompletedUploadSession>,
-    /// The heap bytes of the keys and values in `sessions`.
-    heap_bytes: usize,
-}
-
-impl Entries {
-    fn bytes(&self) -> usize {
-        hash_map_table_bytes(&self.sessions) + self.heap_bytes
-    }
+    sessions: DecodedBlockCache<(CacheScope, UploadId), CompletedUploadSession>,
 }
 
 impl std::fmt::Debug for SharedCompletedUploadSessions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SharedCompletedUploadSessions")
-            .field("max_bytes", &self.max_bytes)
-            .field("sessions", &self.lock().sessions.len())
-            .finish()
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
     }
 }
 
 impl SharedCompletedUploadSessions {
-    /// Creates an empty set of sessions. A budget of zero keeps none.
+    /// Creates an empty set of sessions under a budget of `max_bytes`.
+    ///
+    /// A budget of zero keeps none.
     pub fn new(max_bytes: usize) -> Self {
         Self {
-            max_bytes,
-            entries: Mutex::default(),
+            sessions: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_bytes)),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
-        self.entries
-            .lock()
-            .expect("completed upload session lock should not be poisoned")
+    /// Counters and occupancy of the sessions of every scope.
+    pub fn stats(&self) -> DecodedBlockCacheStats {
+        self.sessions.stats()
     }
 }
 
@@ -96,56 +95,97 @@ impl CompletedUploadSessionCache {
         )
     }
 
-    /// Returns the completed session, if the cache keeps it.
-    pub(crate) fn get(&self, upload_id: &UploadId) -> Option<CompletedUploadSession> {
-        self.shared
-            .lock()
-            .sessions
-            .get(&(self.scope, upload_id.clone()))
-            .cloned()
+    fn key(&self, upload_id: &UploadId) -> (CacheScope, UploadId) {
+        (self.scope, upload_id.clone())
     }
 
-    /// Adds a completed session, or drops every entry when the addition
-    /// takes the entries over the budget.
+    /// Returns the completed session, if the cache keeps it.
+    pub(crate) fn get(&self, upload_id: &UploadId) -> Option<CompletedUploadSession> {
+        self.shared.sessions.get(&self.key(upload_id))
+    }
+
+    /// Adds a completed session, and evicts the least recently used sessions
+    /// when the addition takes the cache over its budget.
     pub(crate) fn insert(&self, upload_id: UploadId, session: CompletedUploadSession) {
-        let shared = &*self.shared;
-        if shared.max_bytes == 0 {
-            return;
-        }
-        let mut entries = shared.lock();
-        let added_bytes = upload_id.heap_bytes() + session.heap_bytes();
-        match entries.sessions.entry((self.scope, upload_id)) {
-            // The record can't change, so the entry already has these facts.
-            Entry::Occupied(_) => return,
-            Entry::Vacant(vacant) => {
-                vacant.insert(session);
-            }
-        }
-        entries.heap_bytes += added_bytes;
-        if entries.bytes() > shared.max_bytes {
-            *entries = Entries::default();
-        }
+        self.shared
+            .sessions
+            .insert((self.scope, upload_id), session);
     }
 
     /// Removes a session whose record the sweep deletes.
     pub(crate) fn invalidate(&self, upload_id: &UploadId) {
-        let mut entries = self.shared.lock();
-        if let Some(((_, upload_id), session)) = entries
-            .sessions
-            .remove_entry(&(self.scope, upload_id.clone()))
-        {
-            entries.heap_bytes -= upload_id.heap_bytes() + session.heap_bytes();
+        self.shared.sessions.invalidate(&self.key(upload_id));
+    }
+
+    /// Counts the sessions that the cache keeps, under every scope.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.shared.sessions.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompletedUploadSession, CompletedUploadSessionCache};
+    use crate::block_cache::{charged_bytes, DecodedBlockCacheStats};
+    use crate::manifest::CacheScope;
+    use loonfs_types::{ContentId, UploadId};
+
+    fn session() -> CompletedUploadSession {
+        CompletedUploadSession {
+            content_id: ContentId::generate(),
+            completed_at_ms: 1_000,
         }
     }
 
-    /// Counts the sessions under this view's scope.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.shared
-            .lock()
-            .sessions
-            .keys()
-            .filter(|(scope, _)| *scope == self.scope)
-            .count()
+    /// Checks that an insert past the budget evicts the least recently used
+    /// session and keeps the others, and that `invalidate` removes one
+    /// session without counting an eviction.
+    #[test]
+    fn an_insert_past_the_budget_evicts_the_least_recently_used_session() {
+        let upload_ids: Vec<UploadId> = (0..3).map(|_| UploadId::generate()).collect();
+        let fill = |cache: &CompletedUploadSessionCache| {
+            cache.insert(upload_ids[0].clone(), session());
+            cache.insert(upload_ids[1].clone(), session());
+            assert!(cache.get(&upload_ids[0]).is_some());
+        };
+        // The budget fits the first two sessions exactly, after the lookup
+        // marks the first one recently used.
+        let unbounded = CompletedUploadSessionCache::unshared(usize::MAX);
+        fill(&unbounded);
+        let budget = unbounded.shared.stats().cached_decoded_bytes;
+        let cache = CompletedUploadSessionCache::unshared(budget);
+        fill(&cache);
+        assert_eq!(cache.shared.stats().evictions, 0);
+
+        cache.insert(upload_ids[2].clone(), session());
+        assert_eq!(cache.shared.stats().evictions, 1);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&upload_ids[1]).is_none());
+        assert!(cache.get(&upload_ids[0]).is_some());
+        assert!(cache.get(&upload_ids[2]).is_some());
+
+        cache.invalidate(&upload_ids[0]);
+        assert!(cache.get(&upload_ids[0]).is_none());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.shared.stats().evictions, 1);
+    }
+
+    /// Checks that a session heavier than the whole budget is rejected, and
+    /// that a zero budget keeps no session and records nothing.
+    #[test]
+    fn a_session_heavier_than_the_budget_is_rejected_and_a_zero_budget_keeps_none() {
+        let upload_id = UploadId::generate();
+        let charge = charged_bytes(&(CacheScope::new(0), upload_id.clone()), &session());
+        let heavy = CompletedUploadSessionCache::unshared(charge - 1);
+        heavy.insert(upload_id.clone(), session());
+        assert!(heavy.get(&upload_id).is_none());
+        let stats = heavy.shared.stats();
+        assert_eq!((stats.inserts, stats.rejections, stats.misses), (0, 1, 1));
+
+        let disabled = CompletedUploadSessionCache::unshared(0);
+        disabled.insert(upload_id.clone(), session());
+        assert!(disabled.get(&upload_id).is_none());
+        assert_eq!(disabled.shared.stats(), DecodedBlockCacheStats::default());
     }
 }

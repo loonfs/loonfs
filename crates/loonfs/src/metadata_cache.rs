@@ -18,7 +18,7 @@ pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 /// Default limit for namespace head anchors and WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 16 MiB (enough for about
-/// 110,000 sessions).
+/// 50,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 16 * 1024 * 1024;
 /// Default limit for decoded WAL objects and small content objects: 128 MiB.
 pub const DEFAULT_MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;
@@ -50,10 +50,8 @@ pub(crate) enum CacheLookup {
 /// [`LoonFs`](crate::LoonFs) keeps its own head anchors, WAL-tail
 /// projections, and completed upload sessions. The limits bound the whole
 /// cache, and the least recently used entry is evicted first, whichever
-/// runtime it belongs to. Completed upload sessions are the exception: when
-/// an insert takes them over their limit, the cache drops all of them.
-/// Clones share the cache. A runtime built without one creates a private
-/// cache with the default limits.
+/// runtime it belongs to. Clones share the cache. A runtime built without
+/// one creates a private cache with the default limits.
 #[derive(Clone)]
 pub struct MetadataCache {
     inner: Arc<MetadataCacheInner>,
@@ -103,11 +101,15 @@ impl MetadataCache {
         let segments = self.inner.segment_blocks.stats();
         let head_state = self.inner.head_state.stats();
         let objects = self.inner.objects.stats();
+        let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
             segment_hits: segments.hits,
             segment_misses: segments.misses,
             segment_inserts: segments.inserts,
             segment_evictions: segments.evictions,
+            segment_evicted_bytes: segments.evicted_decoded_bytes,
+            segment_rejections: segments.rejections,
+            segment_rejected_bytes: segments.rejected_decoded_bytes,
             segment_filter_skips: segments.filter_skips,
             segment_filter_false_positives: segments.filter_false_positives,
             segment_bytes: segments.cached_decoded_bytes,
@@ -116,6 +118,9 @@ impl MetadataCache {
             wal_tail_hits: head_state.tail_hits,
             wal_tail_misses: head_state.tail_misses,
             wal_tail_inserts: head_state.tail_inserts,
+            head_state_hits: head_state.hits,
+            head_state_misses: head_state.misses,
+            head_state_inserts: head_state.inserts,
             head_state_evictions: head_state.evictions,
             head_state_evicted_bytes: head_state.evicted_decoded_bytes,
             head_state_rejections: head_state.rejections,
@@ -127,8 +132,18 @@ impl MetadataCache {
             content_object_hits: objects.content_hits,
             content_object_misses: objects.content_misses,
             content_object_inserts: objects.content_inserts,
+            object_hits: objects.hits,
+            object_misses: objects.misses,
+            object_inserts: objects.inserts,
             object_evictions: objects.evictions,
+            object_evicted_bytes: objects.evicted_decoded_bytes,
+            object_rejections: objects.rejections,
+            object_rejected_bytes: objects.rejected_decoded_bytes,
             object_bytes: objects.cached_decoded_bytes,
+            completed_session_hits: completed_sessions.hits,
+            completed_session_misses: completed_sessions.misses,
+            completed_session_evictions: completed_sessions.evictions,
+            completed_session_bytes: completed_sessions.cached_decoded_bytes,
         }
     }
 
@@ -254,8 +269,8 @@ impl MetadataCacheBuilder {
     ///
     /// A pass doesn't read the record of a completed session that the cache
     /// keeps. Defaults to [`DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES`]. Zero
-    /// keeps none, so every pass reads every session's record. When an insert
-    /// takes the sessions over the limit, the cache drops all of them.
+    /// keeps none, so every pass reads every session's record. The least
+    /// recently used session is evicted first.
     pub fn max_completed_upload_session_bytes(
         mut self,
         max_completed_upload_session_bytes: usize,
@@ -317,6 +332,16 @@ pub struct MetadataCacheStats {
     pub segment_inserts: usize,
     /// Segment blocks and manifests evicted to stay within the segment limit.
     pub segment_evictions: usize,
+    /// Bytes charged to the evicted segment blocks and manifests, including
+    /// their keys.
+    pub segment_evicted_bytes: usize,
+    /// Segment blocks and manifests heavier than the whole segment limit,
+    /// which are never kept.
+    pub segment_rejections: usize,
+    /// Bytes that the rejected segment blocks and manifests would have been
+    /// charged, including their keys and the cache's own allocation for each
+    /// entry.
+    pub segment_rejected_bytes: usize,
     /// Segments skipped because their bloom filter ruled out a lookup before
     /// any index or data read.
     pub segment_filter_skips: usize,
@@ -335,6 +360,13 @@ pub struct MetadataCacheStats {
     pub wal_tail_misses: usize,
     /// WAL-tail projections inserted.
     pub wal_tail_inserts: usize,
+    /// Head anchor and WAL-tail projection lookups the cache answered.
+    pub head_state_hits: usize,
+    /// Head anchor and WAL-tail projection lookups the cache could not
+    /// answer.
+    pub head_state_misses: usize,
+    /// Head anchors and WAL-tail projections inserted.
+    pub head_state_inserts: usize,
     /// Head anchors and WAL-tail projections evicted to stay within the
     /// head-state limit.
     pub head_state_evictions: usize,
@@ -363,10 +395,39 @@ pub struct MetadataCacheStats {
     pub content_object_misses: usize,
     /// Content objects inserted.
     pub content_object_inserts: usize,
+    /// WAL object and content object lookups that found an entry in the
+    /// cache, including a content entry shorter than the requested range.
+    pub object_hits: usize,
+    /// WAL object and content object lookups that found no entry in the
+    /// cache.
+    pub object_misses: usize,
+    /// WAL objects and content objects inserted.
+    pub object_inserts: usize,
     /// WAL objects and content objects evicted to stay within the object
     /// limit.
     pub object_evictions: usize,
+    /// Bytes charged to the evicted WAL objects and content objects,
+    /// including their keys.
+    pub object_evicted_bytes: usize,
+    /// WAL objects and content objects heavier than the whole object limit,
+    /// which are never kept.
+    pub object_rejections: usize,
+    /// Bytes that the rejected WAL objects and content objects would have
+    /// been charged, including their keys and the cache's own allocation for
+    /// each entry.
+    pub object_rejected_bytes: usize,
     /// Bytes charged to WAL objects and content objects now, including their
     /// keys and the cache's own allocation for each entry.
     pub object_bytes: usize,
+    /// Upload session lookups that found a completed session in the cache.
+    pub completed_session_hits: usize,
+    /// Upload session lookups that found no session in the cache, so the
+    /// pass read the session's record.
+    pub completed_session_misses: usize,
+    /// Completed upload sessions evicted to stay within the completed
+    /// upload session limit.
+    pub completed_session_evictions: usize,
+    /// Bytes charged to completed upload sessions now, including their keys
+    /// and the cache's own allocation for each entry.
+    pub completed_session_bytes: usize,
 }
