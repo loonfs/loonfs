@@ -19,10 +19,12 @@ use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, DecodedSegmentBlock,
     SegmentCacheKey,
 };
+use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
+use crate::shared_check::SharedCheck;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
@@ -311,18 +313,29 @@ impl CachedHead {
 ///
 /// The head itself is an immutable [`CachedHead`] snapshot in the head-state
 /// cache, weighed when it's inserted and evicted like any other entry. The
-/// record is a few words kept outside the cache's budget. It lives while a
-/// read or a writer session references it and goes away when the namespace
-/// is idle, which is when no read or position that predates a change can
-/// still install a head.
+/// record is kept outside the cache's budget, with a few words and the head
+/// of the last refresh. It lives while a read or a writer session
+/// references it and goes away when the namespace is idle, which is when no
+/// read or position that predates a change can still install a head.
 #[derive(Debug, Default)]
 pub struct HeadRecord {
     /// The order of the newest head that the record installed or saw. It
     /// stays after the cache evicts that head.
     floor: std::sync::Mutex<Option<(ChangeSeq, ManifestNo)>>,
+    /// The runtime's refreshes of the namespace's head, which the reads of
+    /// the namespace share. It keeps the head that the last refresh
+    /// returned, which the cache might have evicted since, until the next
+    /// refresh or until nothing references the record.
+    refresh: SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>>,
 }
 
 impl HeadRecord {
+    /// Returns the runtime's refreshes of the namespace's head, which the
+    /// reads of the namespace share.
+    pub fn refresh(&self) -> &SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>> {
+        &self.refresh
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(ChangeSeq, ManifestNo)>> {
         // A critical section under this lock compares heads and calls the
         // head-state cache, which doesn't call back into the record, so the

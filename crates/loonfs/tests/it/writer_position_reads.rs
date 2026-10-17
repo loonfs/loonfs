@@ -709,11 +709,12 @@ async fn a_position_past_the_revalidation_bound_is_not_read_from() {
 /// session's checks, and that the check confirms the position for the
 /// eventual reads after it.
 ///
-/// A strong read starts a check, which the store parks. Strong reads and an
-/// eventual read past its maximum staleness that arrive during that check
-/// wait for it, because it started before they did, and then share the next
-/// one. So the wave sends two HEADs, and an eventual read after it sends
-/// nothing.
+/// A strong read starts a check, which the store parks. Strong reads that
+/// arrive during that check wait for it, because it started before they
+/// did, and then share the next one. An eventual read past its maximum
+/// staleness that arrives during the check waits for it too, and takes the
+/// position that it confirmed. So the wave sends two HEADs, and an eventual
+/// read after it sends nothing.
 #[tokio::test]
 async fn a_wave_of_reads_shares_at_most_two_checks() {
     let fixture = fixture("shared-check", Parked::ManifestChecks).await;

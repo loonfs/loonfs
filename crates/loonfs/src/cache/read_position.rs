@@ -4,7 +4,7 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
-use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
+use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache, SharedCheck};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -54,18 +54,9 @@ pub(crate) struct ReadPositionSlot {
     /// position through, kept while the session lasts.
     record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
-    /// The session's last finished check of the position. A read that runs a
-    /// check keeps this locked until the check ends, so one check runs at a
-    /// time and the reads that need one wait for it. (It's a `tokio` mutex
-    /// because it stays locked across the check's requests.)
-    check: tokio::sync::Mutex<Option<FinishedCheck>>,
-}
-
-/// When the session's last check of its position started, and how it ended.
-#[derive(Debug)]
-struct FinishedCheck {
-    observed: Observation,
-    outcome: Result<(), CoreError>,
+    /// The session's checks of the position, which the reads that need a
+    /// check share.
+    check: SharedCheck<Result<(), CoreError>>,
 }
 
 impl ReadPositionSlot {
@@ -76,7 +67,7 @@ impl ReadPositionSlot {
             record: head_state.record(namespace_id),
             head_state,
             position: Mutex::default(),
-            check: tokio::sync::Mutex::default(),
+            check: SharedCheck::default(),
         }
     }
 
@@ -181,11 +172,12 @@ impl RuntimeCore {
     ///
     /// A read takes the position as it is while the position's last check is
     /// younger than the read's maximum staleness. A read without one (a
-    /// `strong` read), or past it, waits for a check of the position (see
-    /// [`Self::check_writer_position`]) that started after the read did. So a
-    /// read that finds a check running waits for that check and then for the
-    /// next one, which every read that arrives during the first check
-    /// shares, and a wave of concurrent reads costs at most two checks.
+    /// `strong` read), or past it, needs a check of the position (see
+    /// [`Self::check_writer_position`]). It waits for the check in flight,
+    /// and then takes the position if that check confirmed it within the
+    /// read's maximum staleness, or else shares the next check or runs it
+    /// (see [`SharedCheck`]). So a wave of concurrent reads costs at most two
+    /// checks.
     ///
     /// A check is trusted only while its answer arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
@@ -209,44 +201,38 @@ impl RuntimeCore {
         let Some(position) = slot.current() else {
             return Ok(None);
         };
-        let checked = &position.basis_checked;
-        if !checked.is_within_revalidation_bound() {
+        if !position.basis_checked.is_within_revalidation_bound() {
             positions.drop_position(namespace_id).await;
             return Ok(None);
         }
-        if max_staleness_ms.is_some_and(|max_staleness_ms| checked.age_ms() < max_staleness_ms) {
+        let fresh = |position: &ReadPosition| {
+            max_staleness_ms
+                .is_some_and(|max_staleness_ms| position.basis_checked.age_ms() < max_staleness_ms)
+        };
+        if fresh(&position) {
             return Ok(Some(position));
         }
-        let started = Observation::now(Arc::clone(&self.inner.timer));
-        let mut last = slot.check.lock().await;
-        if !last
-            .as_ref()
-            .is_some_and(|check| check.observed.is_after(&started))
-        {
-            let observed = Observation::now(Arc::clone(&self.inner.timer));
-            let outcome = self
-                .check_writer_position(namespace_id, positions.as_ref(), &slot, &observed)
-                .instrument(tracing::debug_span!(
-                    target: "loonfs::page",
-                    "loonfs.phase",
-                    phase = "position_manifest_probe"
-                ))
-                .await;
-            *last = Some(FinishedCheck { observed, outcome });
-        }
-        if let Some(FinishedCheck {
-            outcome: Err(error),
-            ..
-        }) = last.as_ref()
-        {
-            return Err(error.clone());
-        }
-        drop(last);
+        slot.check
+            .run(
+                || {
+                    slot.current()
+                        .filter(|position| fresh(position))
+                        .map(|_| Ok(()))
+                },
+                || {
+                    self.check_writer_position(namespace_id, positions.as_ref(), &slot)
+                        .instrument(tracing::debug_span!(
+                            target: "loonfs::page",
+                            "loonfs.phase",
+                            phase = "position_manifest_probe"
+                        ))
+                },
+            )
+            .await?;
         Ok(slot.current())
     }
 
-    /// Checks the position's manifest for a successor with one HEAD, sent
-    /// after `observed`.
+    /// Checks the position's manifest for a successor with one HEAD.
     ///
     /// A HEAD that finds nothing records the check. A HEAD that finds a
     /// successor starts the walk of [`same_epoch_manifests_above`]. Each
@@ -257,19 +243,19 @@ impl RuntimeCore {
     /// runtime publishes (see [`HeadPositions::move_position`]). The walk
     /// that ends on the newest manifest is that manifest's successor check,
     /// so a position that moved onto it records the check. Anything else
-    /// the walk finds, or an answer that
-    /// arrives `READ_REVALIDATION_BOUND_MS` or more after the position's last
-    /// check, drops the position.
+    /// the walk finds, or an answer that arrives `READ_REVALIDATION_BOUND_MS`
+    /// or more after the position's last check, drops the position. A move
+    /// or a drop waits for a publish that has the engine locked.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
         positions: &dyn HeadPositions,
         slot: &ReadPositionSlot,
-        observed: &Observation,
     ) -> Result<(), CoreError> {
         let Some(position) = slot.current() else {
             return Ok(());
         };
+        let observed = Observation::now(Arc::clone(&self.inner.timer));
         let successor =
             manifest_has_successor(self.store(), namespace_id, position.basis.manifest_no())
                 .await
@@ -301,7 +287,7 @@ impl RuntimeCore {
         for published in moves {
             positions.move_position(namespace_id, published).await;
         }
-        slot.record_check(observed.clone(), newest);
+        slot.record_check(observed, newest);
         Ok(())
     }
 }

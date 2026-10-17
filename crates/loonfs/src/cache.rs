@@ -1,10 +1,11 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the namespace's cached head. Each
-//! strong read of a cached head sends its own WAL probe to find new commits,
-//! and the interval check of the cached head finds a newer manifest. Each
-//! strong read of the position waits for the session's check for a newer
-//! manifest. An eventual read skips these while its head was confirmed less
-//! than its maximum staleness ago.
+//! strong read of a cached head waits for a refresh, whose WAL probe finds
+//! new commits and whose interval check finds a newer manifest. Each strong
+//! read of the position waits for the session's check for a newer manifest.
+//! The reads that need a refresh or a check share one. An eventual read
+//! skips these while its head was confirmed less than its maximum staleness
+//! ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -72,32 +73,49 @@ impl RuntimeCore {
             });
     }
 
-    /// Returns the namespace's head, confirmed or loaded for this read.
+    /// Returns the namespace's head, confirmed or loaded for a read with
+    /// `consistency`.
     ///
-    /// The read sends its own requests to confirm the head, even while
-    /// another read of the namespace is confirming it. The read installs its
-    /// result through
+    /// One refresh of the namespace's head runs at a time in this runtime,
+    /// and the reads that need one share it (see
+    /// [`SharedCheck`](loonfs_core::cache::SharedCheck)). A read waits for
+    /// the refresh in flight, and then an eventual read takes the head that
+    /// the refresh confirmed if it's within the read's maximum staleness.
+    /// Otherwise the read shares the next refresh, or runs it. So a wave of
+    /// concurrent eventual reads costs at most one refresh, and a wave of
+    /// strong reads at most two.
+    ///
+    /// The refresh installs its result through
     /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
     /// which keeps the newer of the result and the current head, so the
-    /// cached head doesn't move backwards whatever order concurrent reads
-    /// finish in. The read starts from whichever head that returns.
+    /// cached head doesn't move backwards whatever order a refresh and other
+    /// loads finish in. The reads start from whichever head that returns.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
+        consistency: Consistency,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         let record = self.inner.head_state.record(namespace_id);
-        let cached = self.inner.head_state.get_head(namespace_id);
-        let result = self
-            .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
-            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
-            .await;
-        match result {
-            Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
-            Err(error) => {
-                self.inner.head_state.invalidate_head(namespace_id);
-                Err(error)
-            }
-        }
+        record
+            .refresh()
+            .run(
+                || self.eventual_head(namespace_id, consistency).map(Ok),
+                || async {
+                    let cached = self.inner.head_state.get_head(namespace_id);
+                    let result = self
+                        .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
+                        .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
+                        .await;
+                    match result {
+                        Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
+                        Err(error) => {
+                            self.inner.head_state.invalidate_head(namespace_id);
+                            Err(error)
+                        }
+                    }
+                },
+            )
+            .await
     }
 
     /// Loads the namespace's head from the store, without starting from the
@@ -221,7 +239,8 @@ impl RuntimeCore {
                 let (head, source) = match self.eventual_head(namespace_id, consistency) {
                     Some(head) => (head, ReadHeadSource::Eventual),
                     None => (
-                        self.load_namespace_head_cached(namespace_id).await?,
+                        self.load_namespace_head_cached(namespace_id, consistency)
+                            .await?,
                         ReadHeadSource::Anchor,
                     ),
                 };
