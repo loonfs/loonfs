@@ -74,13 +74,7 @@ impl<M: crate::Mode> Namespace<M> {
     )]
     pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
-        if self.core.subject.is_some() {
-            self.core
-                .read(&self.namespace_id, crate::Consistency::Strong, |engine, context| async move {
-                    Ok(engine.ensure_administrator(&context).await?)
-                })
-                .await?;
-        }
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .reader_engine(&self.namespace_id)
@@ -119,13 +113,7 @@ impl<M: crate::Mode> Namespace<M> {
         request: PageRequest<SnapshotPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
-        if self.core.subject.is_some() {
-            self.core
-                .read(&self.namespace_id, crate::Consistency::Strong, |engine, context| async move {
-                    Ok(engine.ensure_administrator(&context).await?)
-                })
-                .await?;
-        }
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = self.core.now_ms();
         let requested = request.limit.as_usize();

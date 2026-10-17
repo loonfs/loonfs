@@ -250,6 +250,37 @@ async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
     );
 }
 
+/// Checks that writes in the writer's runtime send no check of the
+/// position's manifest. The catalog load and the content preparation before
+/// a write read the position as it is, because the position includes every
+/// commit of the session, and another writer's takeover fences the session
+/// at the write's own publish.
+#[tokio::test]
+async fn writes_send_no_manifest_check() {
+    let fixture = fixture("write-checks", Parked::WalPuts).await;
+    let actor = loonfs_test_support::test_actor();
+    let large = vec![b'l'; 128 * 1024];
+    fixture.recording.reset();
+    fixture.put("/inline.txt").await.expect("an inline put");
+    fixture
+        .namespace
+        .put_file("/large.bin", &large, &actor)
+        .await
+        .expect("a put above the inline threshold");
+    fixture
+        .namespace
+        .append_file("/large.bin", b"more", &actor)
+        .await
+        .expect("an append");
+    let operations = fixture.recording.take();
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+        "{operations:?}"
+    );
+}
+
 /// Checks that a read while a publish waits for its WAL put starts from the
 /// head before that publish, without waiting for it, and sends nothing but
 /// the session's check, and that a read after the publish returns sees its

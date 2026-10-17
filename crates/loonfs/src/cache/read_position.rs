@@ -2,7 +2,7 @@
 //! namespace with an open writer session start from.
 
 use crate::fs::RuntimeCore;
-use crate::{Consistency, NamespaceId};
+use crate::NamespaceId;
 use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
@@ -174,12 +174,12 @@ impl ReadPositionSlot {
 
 impl RuntimeCore {
     /// Returns the position of the namespace's writer session in this
-    /// runtime for a read with `consistency` to start from, or `None` when
-    /// the read starts from the read cache instead.
+    /// runtime for a read with `max_staleness_ms` to start from, or `None`
+    /// when the read starts from the read cache instead.
     ///
-    /// An eventual read takes the position as it is while the position's
-    /// last check is younger than the read's maximum staleness. Every other
-    /// read waits for a check of the position (see
+    /// A read takes the position as it is while the position's last check is
+    /// younger than the read's maximum staleness. A read without one (a
+    /// `strong` read), or past it, waits for a check of the position (see
     /// [`Self::check_writer_position`]) that started after the read did. So a
     /// read that finds a check running waits for that check and then for the
     /// next one, which every read that arrives during the first check
@@ -191,7 +191,7 @@ impl RuntimeCore {
     pub(crate) async fn checked_writer_position(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        max_staleness_ms: Option<u64>,
     ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
         let Some(positions) = self
             .inner
@@ -212,10 +212,7 @@ impl RuntimeCore {
             positions.drop_position(namespace_id);
             return Ok(None);
         }
-        if self
-            .max_staleness_ms(consistency)
-            .is_some_and(|max_staleness_ms| checked.age_ms() < max_staleness_ms)
-        {
+        if max_staleness_ms.is_some_and(|max_staleness_ms| checked.age_ms() < max_staleness_ms) {
             return Ok(Some(position));
         }
         let started = Observation::now(Arc::clone(&self.inner.timer));

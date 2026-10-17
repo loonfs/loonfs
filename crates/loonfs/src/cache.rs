@@ -18,6 +18,7 @@ use loonfs_core::control::{
     manifest_has_successor, project_anchor_tail, CheckpointReadBasis, MetadataBasis,
     NamespaceReadAnchor, NamespaceReadState, VerifiedNamespaceCatalogEntry,
 };
+use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use std::sync::Arc;
@@ -26,6 +27,31 @@ use tracing::Instrument;
 mod read_position;
 
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
+
+/// How a read confirms the namespace head that it starts from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HeadConfirmation {
+    /// As the read's consistency asks.
+    Consistency(Consistency),
+    /// As a load of the namespace's immutable identity, or a check before a
+    /// write that commits through the writer session, needs: the writer
+    /// position as it is, in a runtime with the namespace's writer session,
+    /// and otherwise the cached head confirmed as a `strong` read confirms
+    /// it.
+    ///
+    /// The position includes every access change and receipt that the
+    /// session committed, and another writer's takeover fences the session
+    /// at the write's own publish, so a check there needs no request. A
+    /// check before an operation that the session doesn't publish, such as
+    /// a snapshot change or a fork, confirms the head as a `strong` read.
+    View,
+}
+
+impl From<Consistency> for HeadConfirmation {
+    fn from(consistency: Consistency) -> Self {
+        Self::Consistency(consistency)
+    }
+}
 
 impl RuntimeCore {
     /// Records whether a load found the namespace's head in the read cache.
@@ -167,7 +193,8 @@ impl RuntimeCore {
         Ok(cached_head(loaded, observed))
     }
 
-    /// Returns the read context of the namespace's current head.
+    /// Returns the read context of the namespace's current head, confirmed
+    /// as `confirmation` asks.
     ///
     /// In a runtime with the namespace's writer session, the head is the
     /// session's position (see [`Self::checked_writer_position`]). Otherwise
@@ -178,10 +205,16 @@ impl RuntimeCore {
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        confirmation: impl Into<HeadConfirmation>,
     ) -> Result<RuntimeReadContext> {
+        let (consistency, position_staleness_ms) = match confirmation.into() {
+            HeadConfirmation::Consistency(consistency) => {
+                (consistency, self.max_staleness_ms(consistency))
+            }
+            HeadConfirmation::View => (Consistency::Strong, Some(READ_REVALIDATION_BOUND_MS)),
+        };
         let (context, source) = match self
-            .checked_writer_position(namespace_id, consistency)
+            .checked_writer_position(namespace_id, position_staleness_ms)
             .await?
         {
             Some(position) => (
@@ -272,12 +305,14 @@ impl RuntimeCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        confirmation: impl Into<HeadConfirmation>,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let read_context = self.current_read_context(namespace_id, consistency).await?;
+        let read_context = self
+            .current_read_context(namespace_id, confirmation)
+            .await?;
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
@@ -351,7 +386,7 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let context = self
-            .current_read_context(namespace_id, Consistency::Strong)
+            .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
