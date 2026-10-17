@@ -2061,11 +2061,11 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     );
 }
 
-/// Checks that a session's fold of a tail that the head-state cache can't
-/// keep loads the tail from the store and moves the session's position to
-/// the fold's manifest.
+/// Checks that a session's fold, in a runtime whose read cache keeps
+/// nothing, folds the tail that the session keeps and moves the session's
+/// position to the fold's manifest.
 #[tokio::test]
-async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
+async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
@@ -2109,7 +2109,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     namespace
         .wait_for_fold()
         .await
-        .expect("fold the uncached tail");
+        .expect("fold the session's tail");
 
     let status = writer
         .maintenance(loonfs_test_support::ids::writer_id("fold-inspection"))
@@ -2902,7 +2902,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
 /// writer's position, which reads start from, and the tail that the writer
 /// publishes from.
 #[tokio::test]
-async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
+async fn maintenance_invalidation_leaves_the_writer_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -2987,110 +2987,119 @@ async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() 
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that the writer and the reads in its runtime share one WAL tail
-/// under the key that the writer's position points to, and that the cache
-/// charges the tail once.
+/// Creates a writer whose store records the WAL requests of `namespace_id`,
+/// and whose eventual reads take a head that was confirmed less than the
+/// revalidation bound ago, so a read sends no request to confirm it.
+async fn wal_recording_writer(
+    root: &Path,
+    namespace_id: &NamespaceId,
+) -> (
+    Arc<RecordingStore<LocalFsStore>>,
+    crate::LoonFs<crate::Writable>,
+) {
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(root).expect("store"),
+        KeyPredicate::prefix(wal_prefix(namespace_id)),
+    ));
+    let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .min_publish_interval_ms(0)
+        .max_staleness_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS)
+        .trace_mode(TraceMode::Remote)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer");
+    (store, writer)
+}
+
+/// Checks that a writer session keeps its WAL tail out of the read cache
+/// while it publishes, folds, and publishes again, and that a read in the
+/// writer's runtime after the fold starts from the position's tail, with no
+/// tail lookup and no WAL GET.
 #[tokio::test]
-async fn a_writer_and_its_reader_share_one_counted_tail() {
+async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let writer = test_writer_with_cache(
-        store,
-        MetadataCache::default(),
-        Arc::new(DefaultMetricsRecorder::new()),
-    )
-    .await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let _namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
+    let (store, writer) = wal_recording_writer(temp_dir.path(), &namespace_id).await;
+    let namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
+    let commit = |name| {
+        namespaces[0].commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
+    };
+    let heads = writer.metadata_cache().stats();
+    assert_eq!(heads.wal_tail_inserts, 0, "{heads:?}");
+
+    commit("before-fold").await.expect("commit before the fold");
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the tail");
+    store.reset();
+    writer
+        .read_only()
+        .namespace(&namespace_id)
+        .stat("/before-fold")
+        .await
+        .expect("read after the fold");
+    assert_eq!(
+        store.count(OperationSelector::Read),
+        0,
+        "{:?}",
+        store.take()
+    );
+    commit("after-fold").await.expect("commit after the fold");
+
+    let stats = writer.metadata_cache().stats();
+    assert_eq!(stats.wal_tail_misses, heads.wal_tail_misses, "{stats:?}");
+    assert_eq!(stats.wal_tail_inserts, 0, "{stats:?}");
+    assert_eq!(stats.head_state_evictions, 0, "{stats:?}");
+    assert_eq!(
+        stats.head_state_bytes, heads.head_state_bytes,
+        "the publishes and the fold add nothing to the read cache: {stats:?}"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the end of a writer session hands the position's head and
+/// tail to the read cache, so a read in the same runtime after the session
+/// ends starts from the cached head and takes the tail from the cache, with
+/// no WAL GET.
+#[tokio::test]
+async fn a_closed_session_hands_its_head_and_tail_to_the_read_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let (store, writer) = wal_recording_writer(temp_dir.path(), &namespace_id).await;
+    let mut namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
+    namespaces
+        .pop()
+        .expect("one namespace")
+        .close()
+        .await
+        .expect("close the session");
+    assert!(
+        writer.core.writer_position(&namespace_id).is_none(),
+        "the registry forgot the session"
+    );
+
+    store.reset();
+    let before = writer.metadata_cache().stats();
     writer
         .read_only()
         .namespace(&namespace_id)
         .stat("/docs")
         .await
-        .expect("read the published directory");
-
-    let stats = writer.metadata_cache().stats();
+        .expect("read after the session ends");
+    let after = writer.metadata_cache().stats();
+    assert_eq!(after.wal_tail_hits, before.wal_tail_hits + 1, "{after:?}");
+    assert_eq!(after.wal_tail_misses, before.wal_tail_misses, "{after:?}");
     assert_eq!(
-        stats.wal_tail_inserts, 1,
-        "the publish inserts its tail once"
-    );
-    assert_eq!(stats.wal_tail_misses, 0, "the read starts from that tail");
-    let head_state = &writer.core.inner.head_state;
-    let position = writer
-        .core
-        .writer_position(&namespace_id)
-        .expect("the publish stores the writer's position");
-    let tail = head_state
-        .get_tail(&position.tail_key)
-        .expect("the position points to the writer's tail");
-    assert_eq!(
-        Arc::strong_count(&tail),
-        2,
-        "between publishes only the cache and this test hold the tail"
-    );
-    let retained = writer.metadata_cache().stats().head_state_bytes;
-    assert!(
-        retained >= tail.decoded_bytes() && retained < 2 * tail.decoded_bytes(),
-        "the cache holds one tail plus its table and queue: {retained} bytes"
+        store.count(OperationSelector::Read),
+        0,
+        "{:?}",
+        store.take()
     );
     writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn writer_tails_stay_within_the_head_state_budget() {
-    const NAMESPACES: usize = 8;
-    const ADMITTED: usize = 2;
-
-    let budget_bytes = one_namespace_head_state_bytes().await * ADMITTED;
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = test_writer_with_cache(
-        store,
-        MetadataCache::builder()
-            .max_head_state_bytes(budget_bytes)
-            .build(),
-        recorder.clone(),
-    )
-    .await;
-    let namespaces = test_namespaces(NAMESPACES);
-
-    let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
-
-    let stats = writer.metadata_cache().stats();
-    assert!(
-        stats.head_state_bytes <= budget_bytes,
-        "writer tails must fit the head-state budget of {budget_bytes}: {stats:?}"
-    );
-    assert!(stats.head_state_evictions > 0, "{stats:?}");
-    assert_eq!(
-        counter(&recorder, "loonfs.publisher.tail_replays"),
-        u64::try_from(NAMESPACES).expect("small count"),
-        "each session's first publish has no tail to start from"
-    );
-
-    for (namespace, replays) in [
-        (&namespace_writers[NAMESPACES - 1], 0),
-        (&namespace_writers[0], 1),
-    ] {
-        let before = counter(&recorder, "loonfs.publisher.tail_replays");
-        namespace
-            .commit_candidate(CommitCandidate::new(create_directory_request(
-                "again", "again",
-            )))
-            .await
-            .expect("commit");
-        assert_eq!(
-            counter(&recorder, "loonfs.publisher.tail_replays") - before,
-            replays,
-            "only the least recently published namespace replays its tail"
-        );
-    }
-
-    writer
-        .shutdown()
-        .await
-        .expect("drain settles every publisher");
 }
 
 #[tokio::test]
@@ -3141,19 +3150,11 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
         .expect("drain settles every publisher");
 }
 
-/// What one namespace's WAL tail weighs after a single publish, so a budget
-/// can be stated in whole namespaces instead of a guessed constant, with the
-/// namespace's cached head included.
-async fn one_namespace_head_state_bytes() -> usize {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let writer = test_writer(store).await;
-    let _namespace_writers = publish_once_into_each(&writer, &test_namespaces(1)).await;
-    writer.metadata_cache().stats().head_state_bytes
-}
-
+/// Checks that with a zero head-state limit the read cache keeps nothing,
+/// and that each writer session keeps its own tail, so a session's second
+/// commit reads no tail from the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zero_head_state_limit_keeps_no_writer_tail() {
+async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -3180,8 +3181,8 @@ async fn a_zero_head_state_limit_keeps_no_writer_tail() {
     assert_eq!(writer.metadata_cache().stats().head_state_bytes, 0);
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
-        u64::try_from(namespaces.len() + 1).expect("small count"),
-        "with nothing kept, every publish reads its tail from the store"
+        u64::try_from(namespaces.len()).expect("small count"),
+        "only each session's first publish reads its tail from the store"
     );
     assert_eq!(
         registry.shared.lock_state().sessions.len(),

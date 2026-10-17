@@ -4,7 +4,9 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
-use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache, SharedCheck};
+use loonfs_core::cache::{
+    CachedHead, HeadRecord, HeadStateCache, SharedCheck, WalTailProjectionCacheKey,
+};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -48,7 +50,7 @@ pub(crate) trait HeadPositions: Send + Sync {
 #[derive(Debug)]
 pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
-    /// as the namespace's cached head.
+    /// as the namespace's cached head, with the position's tail.
     head_state: Arc<HeadStateCache>,
     /// The namespace's head record, which [`Self::clear`] installs the
     /// position through, kept while the session lasts.
@@ -118,10 +120,27 @@ impl ReadPositionSlot {
     /// first read after the position starts from a head at least as new as
     /// the reads from the position returned, whatever older load finishes
     /// after it.
+    ///
+    /// The position's WAL tail goes into the read cache before the head,
+    /// under the key of the position's manifest and head, so the next read
+    /// from that head takes the tail without replaying the WAL. A tail under
+    /// its key is never wrong (see
+    /// [`RuntimeCore::invalidate_namespace_read_cache`]), so the slot hands
+    /// the tail over at every end of a position. After another writer's
+    /// claim, the caller then drops the cached head, and the tail stays
+    /// unused unless a later load finds the same head.
     pub(crate) fn clear(&self) -> bool {
         let Some(position) = self.current() else {
             return false;
         };
+        self.head_state.insert_tail(
+            WalTailProjectionCacheKey {
+                namespace_id: position.head.namespace_id.clone(),
+                manifest_no: position.basis.manifest_no(),
+                head_seq: position.head.seq,
+            },
+            Arc::clone(&position.tail),
+        );
         self.head_state.replace_head(
             &self.record,
             self.record.generation(),

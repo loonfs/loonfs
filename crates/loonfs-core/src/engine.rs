@@ -31,6 +31,7 @@ use crate::storage::content::{
     StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::api::v0::{
     Commit, CompleteUploadBody, ListChangesResponse, UploadPartChecksumClaim, UploadSession,
@@ -64,12 +65,17 @@ pub struct RuntimeReadContext {
     pub segment_cache: Arc<MetadataSegmentCache>,
     pub head_state: Arc<HeadStateCache>,
     pub object_cache: Arc<ObjectCache>,
+    /// The projected WAL tail above `basis` at `head`, when the context
+    /// starts from a writer session's position. Reads then take this tail
+    /// and don't look one up in `head_state`.
+    pub tail: Option<Arc<ProjectedWalTail>>,
 }
 
 fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
     ReadLoadContext::pinned_head(
         &context.head,
         &context.basis,
+        context.tail.as_ref(),
         Some(&context.segment_cache),
         Some(&context.head_state),
         Some(&context.object_cache),
@@ -1494,6 +1500,7 @@ mod tests {
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
             head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
             object_cache: Arc::new(ObjectCache::unshared(0, 0)),
+            tail: None,
         };
         let changes = reader
             .list_changes_after(

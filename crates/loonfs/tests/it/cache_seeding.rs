@@ -18,10 +18,11 @@ use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-/// Checks that reads in the writer's runtime reuse the WAL-tail projection
-/// that each put cached, and send no request to confirm the head.
+/// Checks that reads in the writer's runtime take the WAL tail that the
+/// writer's position keeps, send no request to confirm the head, and leave
+/// the read cache's tails alone.
 #[test]
-fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
+fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let recording = Arc::new(RecordingStore::new(
@@ -46,20 +47,14 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("first read is served from the projection the put cached");
+        .expect("first read is served from the position's tail");
     assert_eq!(recording.take(), []);
-    let after_first = fs.metadata_cache_stats();
-    assert_eq!(after_first.wal_tail_misses, 0);
-    assert!(after_first.wal_tail_inserts >= 1);
-    assert!(after_first.wal_tail_hits >= 1);
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("second read should reuse cached WAL-tail projection");
+        .expect("second read reuses the position's tail");
     assert_eq!(recording.take(), []);
-    let after_second = fs.metadata_cache_stats();
-    assert!(after_second.wal_tail_hits > after_first.wal_tail_hits);
 
     fs.put_file_blocking(
         &namespace_id,
@@ -71,11 +66,18 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("read after local mutation reuses the projection the mutation cached");
+        .expect("read after local mutation takes the tail the mutation extended");
     assert_eq!(recording.take(), []);
-    let after_mutation = fs.metadata_cache_stats();
-    assert_eq!(after_mutation.wal_tail_misses, 0);
-    assert!(after_mutation.wal_tail_hits > after_second.wal_tail_hits);
+    let stats = fs.metadata_cache_stats();
+    assert_eq!(
+        (
+            stats.wal_tail_hits,
+            stats.wal_tail_misses,
+            stats.wal_tail_inserts
+        ),
+        (0, 0, 0),
+        "reads from the position never look a tail up in the read cache"
+    );
 }
 
 #[test]
@@ -271,8 +273,9 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     assert!(raw_store.wal_get_count() > 0);
 }
 
-/// Checks that a cache with zero limits keeps no WAL tail, so every read
-/// in the writer's runtime replays the tail from the store.
+/// Checks that a cache with zero limits keeps nothing, and that reads in the
+/// writer's runtime still take the tail that the writer's position keeps,
+/// so they read no WAL object.
 #[test]
 fn a_cache_with_zero_limits_keeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -302,15 +305,14 @@ fn a_cache_with_zero_limits_keeps_nothing() {
     block_on(fs.writer.drain()).expect("finish hints");
     raw_store.reset_wal_get_count();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("first read should project WAL tail");
+        .expect("first read takes the position's tail");
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("second read should project WAL tail again");
-    // Each read starts from the writer's position and replays the two WAL
-    // objects above its manifest, because no tail is kept.
-    assert_eq!(raw_store.wal_get_count(), 4);
+        .expect("second read takes the position's tail again");
+    assert_eq!(raw_store.wal_get_count(), 0);
     let stats = fs.metadata_cache_stats();
     assert_eq!(stats.wal_tail_hits, 0);
     assert_eq!(stats.wal_tail_misses, 0);
+    assert_eq!(stats.head_state_bytes, 0);
 }
 
 /// Creates `first` and `other`, each holding one file of five bytes, so the
@@ -448,8 +450,8 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
 }
 
 /// Checks that a WAL tail heavier than the head-state budget isn't kept, so
-/// each read in the writer's runtime replays it from the store, and that the
-/// read sends nothing else.
+/// each read in a runtime without the writer session replays it from the
+/// store, and that the read sends nothing else.
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     // Half of a namespace's anchor and tail together has no room for the
@@ -462,18 +464,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         KeyPredicate::any(),
     ));
     let object_store: SharedObjectStore = recording.clone();
-    let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
-        builder
-            .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
-            .metadata_cache(
-                MetadataCache::builder()
-                    .max_head_state_bytes(budget)
-                    .max_object_bytes(0)
-                    .build(),
-            )
-    });
-    let namespace = fs.reader.namespace(&namespace_id);
-
+    let fs = open_runtime(object_store.clone(), "tail-oversized-test");
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
     fs.put_file_blocking(
@@ -483,16 +474,27 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-
     block_on(fs.writer.drain()).expect("finish hints");
+    let reader = block_on(
+        loonfs::LoonFs::builder_with_store(object_store)
+            .read_only()
+            .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            .metadata_cache(
+                MetadataCache::builder()
+                    .max_head_state_bytes(budget)
+                    .max_object_bytes(0)
+                    .build(),
+            )
+            .build(),
+    )
+    .expect("reader");
+    let namespace = reader.namespace(&namespace_id);
+    block_on(namespace.stat("/")).expect("load the namespace's head");
+    let before = reader.metadata_cache().stats();
+
     recording.reset();
-    // A read view captures a confirmed head, so in the writer's runtime it
-    // waits for the session's check of the position's manifest.
-    let _view = block_on(namespace.read_view()).expect("view the namespace");
-    assert_matches!(recording.take().as_slice(), [check] if is_manifest_head(check, &namespace_id));
     for _ in 0..2 {
-        fs.read_file_blocking(&namespace_id, "/file.txt")
-            .expect("read replays the uncached tail");
+        block_on(namespace.read_file("/file.txt")).expect("read replays the uncached tail");
         let operations = recording.take();
         assert_eq!(operations.len(), 2);
         // The bounded replay overlaps its reads, so they finish in either order.
@@ -517,10 +519,13 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             [1, 2].map(|wal_no| format!("namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst"))
         );
     }
-    let stats = fs.metadata_cache_stats();
-    assert_eq!(stats.wal_tail_misses, 2);
+    let stats = reader.metadata_cache().stats();
+    assert_eq!(stats.wal_tail_misses, before.wal_tail_misses + 2);
     assert_eq!(stats.wal_tail_hits, 0);
-    assert_eq!(stats.head_state_rejections, 3);
+    assert_eq!(
+        stats.head_state_rejections,
+        before.head_state_rejections + 2
+    );
     assert_eq!(stats.head_state_evictions, 0);
     assert!(stats.head_state_bytes <= budget);
 }
@@ -567,7 +572,10 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     assert_eq!(recording.take(), []);
     let after_read = fs.metadata_cache_stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
-    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
+    assert_eq!(
+        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        "the read takes the new position's tail"
+    );
 }
 
 /// Returns how many reads took the head they started from, summed over

@@ -74,7 +74,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         writer_id: context.writer_id.clone(),
         writer_epoch: head.writer_epoch,
     };
-    let projection = crate::protocol::load_publish_metadata_view(
+    let position = crate::protocol::load_publish_metadata_view(
         &store,
         None,
         &namespace_id,
@@ -84,15 +84,15 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         crate::test_support::std_timer(),
     )
     .await
-    .expect("load publish projection")
-    .into_projection();
+    .expect("load publish position")
+    .into_position();
 
     let input = crate::publish::WalFoldInput {
         wal_tail_inline_bytes: 0,
-        head: projection.position.head.clone(),
-        basis: projection.position.basis().clone(),
-        tail_state: Arc::clone(&projection.tail_state),
-        wal_tail_objects: projection.position.wal_tail_objects,
+        head: position.head.clone(),
+        basis: position.basis().clone(),
+        tail_state: Arc::clone(&position.tail),
+        wal_tail_objects: position.wal_tail_objects,
     };
     let response = fold::fold_wal_tail(
         &store,

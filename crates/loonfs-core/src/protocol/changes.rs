@@ -341,6 +341,7 @@ mod tests {
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
             head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
             object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+            tail: None,
         };
         let engine = NamespaceEngine::reader(
             &store,

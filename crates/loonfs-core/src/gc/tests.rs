@@ -1280,6 +1280,7 @@ async fn read_context<S: ObjectStore + ?Sized>(
         segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
         object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        tail: None,
     }
 }
 

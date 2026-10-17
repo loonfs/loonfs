@@ -98,12 +98,6 @@ async fn the_read_position_follows_each_commit() {
             current_manifest_no(&store, &namespace_id).await,
             "{name}"
         );
-        assert_eq!(position.tail_key.head_seq, commit.committed_seq, "{name}");
-        assert_eq!(
-            position.tail_key.manifest_no,
-            position.basis.manifest_no(),
-            "{name}"
-        );
     }
     let reader = writer.read_only();
     assert_eq!(

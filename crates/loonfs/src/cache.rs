@@ -13,7 +13,7 @@ use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
 use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
-use loonfs_core::cache::{CachedHead, WalTailProjectionCacheKey};
+use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailProjectionCacheKey};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor_cached, load_snapshot_read_basis,
     manifest_has_successor, project_anchor_tail, CheckpointReadBasis, MetadataBasis,
@@ -160,7 +160,8 @@ impl RuntimeCore {
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
-                    let mut context = self.read_context(head.head.clone(), head.basis.clone());
+                    let mut context =
+                        self.read_context(head.head.clone(), head.basis.clone(), None);
                     let probed = loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
                         .await;
@@ -237,7 +238,11 @@ impl RuntimeCore {
             .await?
         {
             Some(position) => (
-                self.read_context(position.head.clone(), position.basis.clone()),
+                self.read_context(
+                    position.head.clone(),
+                    position.basis.clone(),
+                    Some(Arc::clone(&position.tail)),
+                ),
                 ReadHeadSource::Position,
             ),
             None => {
@@ -250,7 +255,7 @@ impl RuntimeCore {
                     ),
                 };
                 (
-                    self.read_context(head.head.clone(), head.basis.clone()),
+                    self.read_context(head.head.clone(), head.basis.clone(), None),
                     source,
                 )
             }
@@ -298,10 +303,16 @@ impl RuntimeCore {
         )
     }
 
+    /// Returns the read context of `head` and `basis`.
+    ///
+    /// `tail` is the WAL tail of a writer session's position, which reads
+    /// from the position take instead of a tail from the read cache. Every
+    /// other read passes `None` and looks its tail up in the read cache.
     pub(crate) fn read_context(
         &self,
         head: NamespaceReadState,
         basis: MetadataBasis,
+        tail: Option<Arc<ProjectedWalTail>>,
     ) -> RuntimeReadContext {
         RuntimeReadContext {
             head,
@@ -309,6 +320,7 @@ impl RuntimeCore {
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             head_state: Arc::clone(&self.inner.head_state),
             object_cache: Arc::clone(&self.inner.object_cache),
+            tail,
         }
     }
 
@@ -389,7 +401,7 @@ impl RuntimeCore {
         (
             self.reader_engine(namespace_id)
                 .with_authorization_head(live),
-            self.read_context(pinned.head, pinned.basis),
+            self.read_context(pinned.head, pinned.basis, None),
         )
     }
 
@@ -412,15 +424,16 @@ impl RuntimeCore {
     /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
     /// instead, which also tells the namespace's publisher what changed.
     ///
-    /// Cached WAL-tail projections stay, the tails writers publish from
-    /// included. A tail is keyed by namespace, manifest number, and head
-    /// sequence, and that key identifies one immutable fact: a namespace id
-    /// identifies one lifetime, each manifest and WAL number identifies one
-    /// object that is never replaced or recreated, a fence adds no rows, and
-    /// a writer inserts only a tail it read from the store, a put it saw
-    /// written, or the commits since a fold it published. A tail whose key
-    /// the confirmed head no longer uses is never wrong, only unused, and
-    /// recency evicts it.
+    /// Cached WAL-tail projections stay. A tail is keyed by namespace,
+    /// manifest number, and head sequence, and that key identifies one
+    /// immutable fact: a namespace id identifies one lifetime, each manifest
+    /// and WAL number identifies one object that is never replaced or
+    /// recreated, a fence adds no rows, and a read inserts only a tail it
+    /// read from the store or extended with WAL objects it read. The tail
+    /// that a writer session's position ends with (see
+    /// [`ReadPositionSlot::clear`]) is the tail of a head that the session
+    /// wrote. A tail whose key the confirmed head no longer uses is never
+    /// wrong, only unused, and recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
         self.inner.head_state.invalidate_head(namespace_id);
