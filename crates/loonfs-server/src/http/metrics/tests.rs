@@ -207,6 +207,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
             content_object_inserts: 23,
             object_evictions: 24,
             object_bytes: 25,
+            ..MetadataCacheStats::default()
         },
     );
     render_grep_block_cache(
