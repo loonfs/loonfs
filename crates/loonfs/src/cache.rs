@@ -1,9 +1,10 @@
 //! The heads that runtime reads start from: the position of the namespace's
 //! writer session in this runtime, or else the namespace's cached head. Each
 //! strong read of a cached head sends its own WAL probe to find new commits,
-//! and the interval check of either head finds a newer manifest. An eventual
-//! read skips both while the cached head was confirmed less than its maximum
-//! staleness ago.
+//! and the interval check of the cached head finds a newer manifest. Each
+//! strong read of the position waits for the session's check for a newer
+//! manifest. An eventual read skips these while its head was confirmed less
+//! than its maximum staleness ago.
 
 use crate::fs::RuntimeCore;
 use crate::metadata_cache::CacheLookup;
@@ -169,18 +170,20 @@ impl RuntimeCore {
     /// Returns the read context of the namespace's current head.
     ///
     /// In a runtime with the namespace's writer session, the head is the
-    /// session's position (see [`Self::checked_writer_position`]), whatever
-    /// the consistency. Otherwise it's the namespace's cached head. An
-    /// eventual read takes the cached head as it is while it was confirmed
-    /// less than the read's maximum staleness ago (see
-    /// [`Self::eventual_head`]), and every other read confirms or loads the
-    /// head.
+    /// session's position (see [`Self::checked_writer_position`]). Otherwise
+    /// it's the namespace's cached head. An eventual read takes either head
+    /// as it is while it was confirmed less than the read's maximum
+    /// staleness ago (see [`Self::eventual_head`] for the cached head), and
+    /// every other read confirms or loads the head.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
         consistency: Consistency,
     ) -> Result<RuntimeReadContext> {
-        let (context, source) = match self.checked_writer_position(namespace_id).await? {
+        let (context, source) = match self
+            .checked_writer_position(namespace_id, consistency)
+            .await?
+        {
             Some(position) => (
                 self.read_context(position.head.clone(), position.basis.clone()),
                 ReadHeadSource::Position,
@@ -218,13 +221,7 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         consistency: Consistency,
     ) -> Option<Arc<CachedHead>> {
-        let Consistency::Eventual { max_staleness } = consistency else {
-            return None;
-        };
-        let max_staleness_ms = max_staleness
-            .map_or(self.inner.config.max_staleness_ms, |max_staleness| {
-                u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
-            });
+        let max_staleness_ms = self.max_staleness_ms(consistency)?;
         let cached = self.inner.head_state.get_head(namespace_id)?;
         let confirmed = cached
             .head_confirmed
@@ -239,6 +236,19 @@ impl RuntimeCore {
         }
         self.record_head_lookup(true);
         Some(cached)
+    }
+
+    /// Returns the maximum staleness of a read with `consistency`, or `None`
+    /// for a `strong` read.
+    fn max_staleness_ms(&self, consistency: Consistency) -> Option<u64> {
+        let Consistency::Eventual { max_staleness } = consistency else {
+            return None;
+        };
+        Some(
+            max_staleness.map_or(self.inner.config.max_staleness_ms, |max_staleness| {
+                u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
+            }),
+        )
     }
 
     pub(crate) fn read_context(

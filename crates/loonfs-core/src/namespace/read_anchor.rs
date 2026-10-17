@@ -2,11 +2,10 @@
 
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
-use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
+use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{
-    load_current_manifest_with_hint, load_manifest_by_no, CurrentManifest, LoadedHint,
-    LoadedManifest,
+    load_current_manifest_with_hint, load_manifest_by_no, LoadedHint, LoadedManifest,
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::object_cache::ObjectCache;
@@ -14,7 +13,8 @@ use crate::wal::{
     discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ChangeSeq, CompactorEpoch, ManifestNo, NamespaceId};
+use loonfs_types::format::control::ManifestRef;
+use loonfs_types::{ChangeSeq, CompactorEpoch, ManifestNo, NamespaceId, WriterEpoch};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -164,29 +164,41 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
         .is_some())
 }
 
-/// Returns the manifests above `manifest_no`, oldest first, or an empty
-/// list when it has no successor.
+/// The most manifests that one check of a writer position moves the position
+/// onto. A walk that finds more drops the position, so the session's next
+/// publish loads the namespace by discovery, which reads the hint instead of
+/// every manifest in between. The walk sends at most one GET more than this.
+const MAX_POSITION_MOVES: usize = 8;
+
+/// Returns the moves of a position at `basis` onto the manifests above it,
+/// oldest first, while each is an active manifest of `writer_epoch`.
 ///
 /// Manifest numbers are consecutive, so the walk loads each successor until
-/// one is missing. A tombstone is the last manifest of its namespace, so the
-/// walk ends there.
-pub async fn manifests_above<S: ObjectStore + ?Sized>(
+/// one is missing. It returns `None` when `basis` has no successor, when it
+/// finds a manifest of another writer epoch (another writer's claim) or a
+/// tombstone, which settles that the position can't move, and when it finds
+/// more than `MAX_POSITION_MOVES` manifests.
+pub async fn same_epoch_manifests_above<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-) -> Result<Vec<CurrentManifest>, ControlObjectLoadError> {
-    let mut above = Vec::new();
-    let mut manifest_no = manifest_no;
-    while let Ok(next) = manifest_no.successor() {
-        let Some(loaded) = load_manifest_by_no(store, namespace_id, next).await? else {
+    basis: &ManifestRef,
+    writer_epoch: WriterEpoch,
+) -> Result<Option<Vec<PublishedManifest>>, ControlObjectLoadError> {
+    let mut moves = Vec::new();
+    let (mut manifest_no, mut head_seq) = (basis.manifest_no, basis.head_seq);
+    while moves.len() <= MAX_POSITION_MOVES {
+        let Ok(next) = manifest_no.successor() else {
             break;
         };
-        let deleted = loaded.state.envelope.payload().status.is_deleted();
-        above.push(loaded.state);
-        if deleted {
+        let Some(loaded) = load_manifest_by_no(store, namespace_id, next).await? else {
+            return Ok((!moves.is_empty()).then_some(moves));
+        };
+        let payload = loaded.state.envelope.payload();
+        if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
             break;
         }
-        manifest_no = next;
+        moves.push(PublishedManifest::above(&loaded.state, head_seq));
+        (manifest_no, head_seq) = (next, loaded.state.manifest().head_seq);
     }
-    Ok(above)
+    Ok(None)
 }

@@ -2,6 +2,7 @@
 //! the writer session's position, and no cache lifecycle event (invalidation,
 //! LRU eviction, or running with zero cache limits) erases writer fencing.
 
+use crate::common::is_manifest_head;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -768,11 +769,12 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
     reader.metadata_cache().stats().head_state_bytes
 }
 
-/// Checks that a read after a write in the writer's runtime sends no
-/// request and reads the WAL tail that the write cached, even after a
-/// snapshot read that loads another view.
+/// Checks that a read after a write in the writer's runtime sends no request
+/// but the session's check of the position's manifest, and reads the WAL
+/// tail that the write cached, even after a snapshot read that loads another
+/// view.
 #[tokio::test]
-async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
+async fn a_read_after_a_write_sends_one_manifest_check_and_replays_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -781,10 +783,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("read-after-write").expect("valid namespace id");
 
-    let writer = writer_with_cache(&store, "read-after-write-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
-    })
-    .await;
+    let writer = writer(&store, "read-after-write-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -834,15 +833,16 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
         .stat("/docs/fresh.txt")
         .await
         .expect("read after write");
-    assert_eq!(recording.take(), []);
+    assert_matches!(recording.take().as_slice(), [check] if is_manifest_head(check, &namespace_id));
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }
 
 /// Checks that reads in the writer's runtime after a fold see the folded
-/// manifest, and that the next read sends no request and reuses the tail
-/// that the fold left in the cache.
+/// manifest, and that the next read sends no request but the session's check
+/// of the position's manifest, and reuses the tail that the fold left in the
+/// cache.
 #[tokio::test]
 async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -852,10 +852,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     ));
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
-    let writer = writer_with_cache(&store, "maintained-writer", |builder| {
-        builder.manifest_revalidation_interval_ms(READ_REVALIDATION_BOUND_MS)
-    })
-    .await;
+    let writer = writer(&store, "maintained-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -889,7 +886,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     recording.reset();
     let before_read = reader.metadata_cache().stats();
     namespace.stat("/file.txt").await.expect("next read");
-    assert_eq!(recording.take(), []);
+    assert_matches!(recording.take().as_slice(), [check] if is_manifest_head(check, &namespace_id));
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);

@@ -135,7 +135,7 @@ impl<M> LoonFsBuilder<M> {
     }
 
     /// Sets the minimum interval, in milliseconds, between checks for a
-    /// successor to a cached manifest.
+    /// successor to the manifest of a cached head.
     ///
     /// Defaults to 1000, and zero checks on every read. A value above
     /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
@@ -152,10 +152,11 @@ impl<M> LoonFsBuilder<M> {
     /// doesn't set its own (see
     /// [`Consistency::Eventual`](crate::Consistency::Eventual)).
     ///
-    /// In a runtime without the namespace's writer session, an eventual read
-    /// reads at the head that the runtime confirmed last, without a request,
-    /// while that confirmation is younger than the maximum staleness. Defaults to
-    /// 1000, and zero confirms the head on every read. A value above
+    /// An eventual read reads at the head that the runtime confirmed last
+    /// (the position of the namespace's writer session, or else the cached
+    /// head), without a request, while that confirmation is younger than the
+    /// maximum staleness. Defaults to 1000, and zero confirms the head on
+    /// every read. A value above
     /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`].
     pub fn max_staleness_ms(mut self, max_staleness_ms: u64) -> Self {

@@ -48,6 +48,20 @@ pub(crate) fn wal_probe(
     }
 }
 
+/// Returns whether `operation` is a HEAD of one of the namespace's manifests,
+/// which is the request that the writer session's check of its position
+/// sends.
+pub(crate) fn is_manifest_head(
+    operation: &loonfs_test_support::stores::RecordedOperation,
+    namespace_id: &NamespaceId,
+) -> bool {
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(namespace_id);
+    matches!(
+        operation,
+        loonfs_test_support::stores::RecordedOperation::Head { key } if key.starts_with(&manifests)
+    )
+}
+
 pub(crate) fn assert_wal_probe(
     operations: Vec<loonfs_test_support::stores::RecordedOperation>,
     namespace_id: &NamespaceId,

@@ -538,10 +538,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 /// A read that loads the namespace while the writer has no position can
 /// finish after the writer's next commit starts a new position, with a head
 /// older than the reads from that position. The test parks that load's
-/// manifest check until the commit returns. When the takeover's check finds
-/// the new writer's claim, the position becomes the namespace's cached head
-/// and is marked unconfirmed, so an eventual read with a long maximum
-/// staleness confirms the head and loads the namespace again.
+/// manifest check until the commit returns. After the takeover, the first
+/// eventual read past its maximum staleness runs the session's check, which
+/// finds the new writer's claim, so the position becomes the namespace's
+/// cached head, marked unconfirmed, and the read loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
@@ -580,13 +580,15 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
         .put_file("/peer.txt", b"peer", &loonfs_test_support::test_actor())
         .await
         .expect("the peer takes over");
-    fixture.clock.advance_ms(writer_position_reads::INTERVAL_MS);
+    fixture
+        .clock
+        .advance_ms(writer_position_reads::MAX_STALENESS_MS);
     let entry = fixture
         .reader
         .stat_with_options(
             "/during.txt",
             &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                consistency: eventual(writer_position_reads::MAX_STALENESS_MS),
                 ..StatOptions::default()
             },
         )

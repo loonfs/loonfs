@@ -304,64 +304,46 @@ async fn check_eventual_read_access(content_size: usize) {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// The manifest check interval of the former writer's runtime in
-/// [`check_former_writer_read`].
-#[derive(Debug, Clone, Copy)]
-enum CheckInterval {
-    /// An interval of 0: every read checks for a newer manifest.
-    Zero,
-    /// The default interval of one second. The test moves the runtime's
-    /// clock past it before the read.
-    Default,
-}
-
-/// Checks that a former writer's first read after another writer revokes
-/// access sees the revocation when its runtime checks for a newer manifest
-/// on every read.
+/// Checks that a former writer's first strong read after another writer
+/// revokes access sees the revocation, whether or not its runtime read the
+/// file before the handoff.
 ///
 /// Reads in a runtime with the namespace's writer session start from the
-/// session's position, and only the manifest check finds another writer's
-/// takeover. With an interval of 0, every read checks, so the revocation is
-/// visible on the first read.
+/// session's position, and the session's check of the position's manifest
+/// finds another writer's takeover. A strong read waits for that check, so
+/// the revocation is visible on the first read.
 #[tokio::test]
-async fn a_former_writer_sees_revocation_on_its_first_read_with_a_zero_interval() {
-    check_former_writer_read(false, CheckInterval::Zero).await;
-}
-
-/// Checks the same guarantee as
-/// [`a_former_writer_sees_revocation_on_its_first_read_with_a_zero_interval`]
-/// when the former writer's runtime read the file before the handoff.
-#[tokio::test]
-async fn a_former_writer_sees_revocation_after_a_warm_read_with_a_zero_interval() {
-    check_former_writer_read(true, CheckInterval::Zero).await;
-}
-
-/// Checks that a former writer sees another writer's revocation within one
-/// manifest check interval under the default interval: the first read after
-/// the interval passes finds the new writer's claim manifest and doesn't
-/// return the file.
-#[tokio::test]
-async fn a_former_writer_sees_revocation_within_one_default_interval() {
+async fn a_former_writer_sees_revocation_on_its_first_strong_read() {
     for warm_before_handoff in [false, true] {
-        check_former_writer_read(warm_before_handoff, CheckInterval::Default).await;
+        check_former_writer_read(warm_before_handoff, Consistency::Strong).await;
     }
 }
 
-async fn check_former_writer_read(warm_before_handoff: bool, interval: CheckInterval) {
+/// Checks that a former writer sees another writer's revocation once an
+/// eventual read's maximum staleness passes: the first eventual read after
+/// that waits for the session's check, finds the new writer's claim
+/// manifest, and doesn't return the file.
+#[tokio::test]
+async fn a_former_writer_sees_revocation_past_the_maximum_staleness() {
+    for warm_before_handoff in [false, true] {
+        let eventual = Consistency::Eventual {
+            max_staleness: None,
+        };
+        check_former_writer_read(warm_before_handoff, eventual).await;
+    }
+}
+
+async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consistency) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
-    let builder = LoonFs::builder_with_store(store.clone())
+    let old_writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("old-writer"))
         .min_publish_interval_ms(0)
-        .monotonic_timer(clock.clone());
-    let old_writer = match interval {
-        CheckInterval::Zero => builder.manifest_revalidation_interval_ms(0),
-        CheckInterval::Default => builder,
-    }
-    .build()
-    .await
-    .expect("old writer");
+        .monotonic_timer(clock.clone())
+        .build()
+        .await
+        .expect("old writer");
     let namespace_id = namespace_id("access-handoff");
     old_writer
         .create_namespace_with_options(
@@ -441,12 +423,12 @@ async fn check_former_writer_read(warm_before_handoff: bool, interval: CheckInte
         )
         .await
         .expect("revoke read access");
-    if let CheckInterval::Default = interval {
+    if let Consistency::Eventual { .. } = consistency {
         clock.advance_ms(1_000);
     }
     assert_eq!(
         namespace
-            .read_file("/team/file")
+            .read_file_with_options("/team/file", &ReadFileOptions { consistency })
             .await
             .expect_err("the read observes the revocation")
             .code(),
