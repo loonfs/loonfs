@@ -661,7 +661,21 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
+    let replaced = engine
+        .publish_tail
+        .as_ref()
+        .expect("a position before the fold")
+        .tail_key(&engine.namespace_id);
     engine.record_wal_fold(Ok(&folded));
+    assert!(
+        engine
+            .head_state
+            .as_ref()
+            .expect("head-state cache")
+            .get_tail(&replaced)
+            .is_none(),
+        "the fold removes the tail under the position's key from before the fold"
+    );
     let position = engine.publish_tail.as_ref().expect("retained position");
     assert_eq!(position.basis(), &folded.basis);
     assert_eq!(position.wal_tail_objects, 2);
