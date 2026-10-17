@@ -65,6 +65,8 @@ pub(crate) enum Parked {
     WalPuts,
     /// HEAD requests for the namespace's manifests.
     ManifestChecks,
+    /// GET requests for the namespace's WAL objects.
+    WalReads,
 }
 
 /// Creates a writer runtime with a one-second maximum staleness, a namespace
@@ -79,6 +81,10 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
         Parked::ManifestChecks => (
             KeyPredicate::manifest(&namespace_id),
             OperationSelector::Head,
+        ),
+        Parked::WalReads => (
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
+            OperationSelector::Get,
         ),
     };
     let recording = Arc::new(RecordingStore::new(
@@ -663,6 +669,64 @@ async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() 
         .await
         .expect("an eventual read after the fork");
     assert_eq!(entry.head_seq, commit.committed_seq);
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if *key == hint(&fixture.namespace_id)
+        ),
+        "the read loads the namespace from its hint: {operations:?}"
+    );
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Checks that a refresh that started before a change of unknown effect,
+/// and finishes after the runtime dropped its view for that change, installs
+/// nothing, so the next read loads the namespace by discovery.
+///
+/// A read past the revalidation bound drops the position and loads the
+/// namespace into the read cache. A strong read's refresh of that view then
+/// waits at its WAL probe while a fork, whose fold of the source's tail
+/// isn't reported, drops the view. The refresh's head is from before the
+/// fork, so an eventual read after it would otherwise start from that head
+/// without a request.
+#[tokio::test]
+async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
+    let fixture = fixture("spanning-refresh", Parked::WalReads).await;
+    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    fixture
+        .reader
+        .stat("/small.txt")
+        .await
+        .expect("load the view");
+    let gate = fixture.recording.inner();
+    gate.block_next();
+    let options = strong();
+    let (refreshed, ()) = futures::join!(
+        fixture.reader.stat_with_options("/small.txt", &options),
+        async {
+            gate.wait_until_blocked().await;
+            fixture
+                .writer
+                .fork_namespace(
+                    &fixture.namespace_id,
+                    &namespace_id("spanning-refresh-fork"),
+                    &loonfs_test_support::test_actor(),
+                )
+                .await
+                .expect("fork");
+            gate.release();
+        }
+    );
+    refreshed.expect("the read whose refresh spans the fork");
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    fixture
+        .reader
+        .stat("/small.txt")
+        .await
+        .expect("an eventual read");
     let operations = fixture.recording.take();
     assert!(
         matches!(

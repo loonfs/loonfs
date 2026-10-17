@@ -101,13 +101,17 @@ impl RuntimeCore {
             .run(
                 || self.eventual_head(namespace_id, consistency).map(Ok),
                 || async {
+                    let started = record.generation();
                     let cached = self.inner.head_state.get_head(namespace_id);
                     let result = self
                         .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
                         .await;
                     match result {
-                        Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
+                        Ok(candidate) => Ok(self
+                            .inner
+                            .head_state
+                            .replace_head(&record, started, candidate)),
                         Err(error) => {
                             self.inner.head_state.invalidate_head(namespace_id);
                             Err(error)
@@ -130,8 +134,9 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         let record = self.inner.head_state.record(namespace_id);
+        let started = record.generation();
         let loaded = self.refresh_namespace_head(namespace_id, None).await?;
-        Ok(self.inner.head_state.replace_head(&record, loaded))
+        Ok(self.inner.head_state.replace_head(&record, started, loaded))
     }
 
     async fn refresh_namespace_head(

@@ -319,9 +319,7 @@ impl CachedHead {
 /// read or position that predates a change can still install a head.
 #[derive(Debug, Default)]
 pub struct HeadRecord {
-    /// The order of the newest head that the record installed or saw. It
-    /// stays after the cache evicts that head.
-    floor: std::sync::Mutex<Option<(ChangeSeq, ManifestNo)>>,
+    state: std::sync::Mutex<RecordState>,
     /// The runtime's refreshes of the namespace's head, which the reads of
     /// the namespace share. It keeps the head that the last refresh
     /// returned, which the cache might have evicted since, until the next
@@ -329,19 +327,37 @@ pub struct HeadRecord {
     refresh: SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>>,
 }
 
+/// The state behind a [`HeadRecord`]'s lock.
+#[derive(Debug, Default)]
+struct RecordState {
+    /// The order of the newest head that the record installed or saw. It
+    /// stays after the cache evicts that head.
+    floor: Option<(ChangeSeq, ManifestNo)>,
+    /// How many times the runtime dropped the namespace's cached head for a
+    /// change of unknown effect. A load installs its head only if the
+    /// generation hasn't moved since the load started.
+    generation: u64,
+}
+
 impl HeadRecord {
+    /// Returns the record's generation, which a load takes before it sends
+    /// anything and passes to [`HeadStateCache::replace_head`].
+    pub fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
     /// Returns the runtime's refreshes of the namespace's head, which the
     /// reads of the namespace share.
     pub fn refresh(&self) -> &SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>> {
         &self.refresh
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(ChangeSeq, ManifestNo)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecordState> {
         // A critical section under this lock compares heads and calls the
         // head-state cache, which doesn't call back into the record, so the
         // lock isn't poisoned by anything that the record's own code doesn't
         // control.
-        self.floor
+        self.state
             .lock()
             .expect("the head record lock should not be poisoned")
     }
@@ -534,6 +550,12 @@ impl HeadStateCache {
     /// Installs `candidate` as the namespace's cached head if it's newer than
     /// the current head, and returns the head that the read starts from.
     ///
+    /// `started` is the record's generation when the load of `candidate`
+    /// began. If [`Self::invalidate_head`] dropped the head since, the load
+    /// might predate the change that the drop is for, so nothing is
+    /// installed, and the read starts from the candidate. The next read then
+    /// loads the head by discovery.
+    ///
     /// The current head is the higher of the cached head and the floor of
     /// `record`, the newest head that the record installed or saw, which
     /// stays after the cache evicts that head. A head is newer when
@@ -554,21 +576,29 @@ impl HeadStateCache {
     /// the floor still moves, so the head that reads start from never moves
     /// backwards while the record lives.
     ///
-    /// Every install of a namespace's head runs under its record's lock, so
-    /// the head's entry in the cache can't change between this function's
-    /// peek and its insert, except by an eviction or by
-    /// [`Self::invalidate_head`], which removes the entry the way an
-    /// eviction does.
-    pub fn replace_head(&self, record: &HeadRecord, candidate: CachedHead) -> Arc<CachedHead> {
+    /// Every install and drop of a namespace's head runs under its record's
+    /// lock, so the head's entry in the cache can't change between this
+    /// function's peek and its insert, except by an eviction.
+    pub fn replace_head(
+        &self,
+        record: &HeadRecord,
+        started: u64,
+        candidate: CachedHead,
+    ) -> Arc<CachedHead> {
         let key = self.head_key(&candidate.head.namespace_id);
-        let mut floor = record.lock();
+        let mut state = record.lock();
+        if state.generation != started {
+            return Arc::new(candidate);
+        }
         let cached = self
             .shared
             .entries
             .peek(&key)
             .and_then(HeadStateEntry::into_head);
-        let current = floor.max(cached.as_ref().map(|cached| cached.order()));
-        *floor = current;
+        let current = state
+            .floor
+            .max(cached.as_ref().map(|cached| cached.order()));
+        state.floor = current;
         let next = match current.map(|current| candidate.order().cmp(&current)) {
             Some(std::cmp::Ordering::Less) => {
                 return match cached {
@@ -595,7 +625,7 @@ impl HeadStateCache {
             },
             Some(std::cmp::Ordering::Greater) | None => candidate,
         };
-        *floor = Some(next.order());
+        state.floor = Some(next.order());
         let next = Arc::new(next);
         let installed = self
             .shared
@@ -615,10 +645,14 @@ impl HeadStateCache {
     /// change whose effect on the head it can't identify, so the next read
     /// loads the head by discovery.
     ///
-    /// The record's floor stays while something references the record, so a
-    /// load that finishes later still can't install a head below the newest
-    /// one that the record saw.
+    /// The drop moves the record's generation, so a load that started before
+    /// the drop installs nothing when it finishes (see
+    /// [`Self::replace_head`]). A load in flight keeps the record, so the
+    /// generation it took is still on the record that the drop moves.
     pub fn invalidate_head(&self, namespace_id: &NamespaceId) {
+        let record = self.record(namespace_id);
+        let mut state = record.lock();
+        state.generation += 1;
         self.shared.entries.invalidate(&self.head_key(namespace_id));
     }
 
@@ -927,13 +961,13 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 2, &now));
+        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
             (5, 2)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
             (5, 2)
         );
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
@@ -948,15 +982,15 @@ mod tests {
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
             (5, 1)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
             (5, 2)
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
             (6, 1)
         );
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
@@ -976,6 +1010,7 @@ mod tests {
         let record = cache.record(&namespace("demo"));
         cache.replace_head(
             &record,
+            record.generation(),
             CachedHead {
                 head_confirmed: late.clone(),
                 ..head_at(5, 1, &early)
@@ -983,6 +1018,7 @@ mod tests {
         );
         let merged = cache.replace_head(
             &record,
+            record.generation(),
             CachedHead {
                 basis_checked: late.clone(),
                 ..head_at(5, 1, &early)
@@ -992,9 +1028,10 @@ mod tests {
         assert_eq!(merged.head_confirmed.age_ms(), 0);
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert!(Arc::ptr_eq(&cached, &merged));
-        let unchanged = cache.replace_head(&record, head_at(5, 1, &early));
+        let unchanged = cache.replace_head(&record, record.generation(), head_at(5, 1, &early));
         assert!(Arc::ptr_eq(&unchanged, &merged));
-        let same_millisecond = cache.replace_head(&record, head_at(5, 1, &late));
+        let same_millisecond =
+            cache.replace_head(&record, record.generation(), head_at(5, 1, &late));
         assert!(
             Arc::ptr_eq(&same_millisecond, &merged),
             "a confirmation in the same millisecond doesn't move"
@@ -1010,15 +1047,15 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 2, &now));
+        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
         cache.invalidate_head(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 3, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
             (4, 3)
         );
         assert!(cache.get_head(&namespace("demo")).is_none());
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 2, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
             (5, 2)
         );
         assert_eq!(
@@ -1028,15 +1065,34 @@ mod tests {
             Some((5, 2))
         );
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(6, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
             (6, 1)
         );
         cache.invalidate_head(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(5, 9, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(5, 9, &now))),
             (5, 9)
         );
         assert!(cache.get_head(&namespace("demo")).is_none());
+    }
+
+    /// Checks that a load that started before the namespace's head was
+    /// dropped installs nothing, and that its read starts from the load's
+    /// own head, while a load that started after the drop installs its head.
+    #[test]
+    fn a_load_that_started_before_a_drop_installs_nothing() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(1 << 20);
+        let record = cache.record(&namespace("demo"));
+        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
+        let started = record.generation();
+        cache.invalidate_head(&namespace("demo"));
+        let head = cache.replace_head(&record, started, head_at(6, 1, &now));
+        assert_eq!(order(&head), (6, 1));
+        assert!(cache.get_head(&namespace("demo")).is_none());
+        let head = cache.replace_head(&record, record.generation(), head_at(6, 1, &now));
+        assert_eq!(order(&head), (6, 1));
+        assert!(cache.get_head(&namespace("demo")).is_some());
     }
 
     /// Checks that a namespace head larger than the whole head-state budget
@@ -1049,7 +1105,7 @@ mod tests {
         let record = cache.record(&namespace("demo"));
         let large = head_with_grants(5, 1_000, &now);
         assert!(large.heap_bytes() > 16 * 4096);
-        let head = cache.replace_head(&record, large);
+        let head = cache.replace_head(&record, record.generation(), large);
         assert_eq!(order(&head), (5, 1));
         assert!(cache.get_head(&namespace("demo")).is_none());
         let stats = cache.stats();
@@ -1069,16 +1125,16 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(4096);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(0, 1, &now));
+        cache.replace_head(&record, record.generation(), head_at(0, 1, &now));
         assert!(cache.get_head(&namespace("demo")).is_some());
         let rejections = cache.stats().rejections;
         let large = head_with_grants(1, 1_000, &now);
         assert!(large.heap_bytes() > 4096);
-        let head = cache.replace_head(&record, large);
+        let head = cache.replace_head(&record, record.generation(), large);
         assert_eq!(order(&head), (1, 1));
         assert!(cache.get_head(&namespace("demo")).is_none());
         assert_eq!(cache.stats().rejections, rejections + 1);
-        assert_eq!(*record.lock(), Some((ChangeSeq(1), ManifestNo(1))));
+        assert_eq!(record.lock().floor, Some((ChangeSeq(1), ManifestNo(1))));
     }
 
     /// Checks that a head that grows within the budget is charged its new
@@ -1088,9 +1144,10 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        let small = cache.replace_head(&record, head_at(5, 1, &now));
+        let small = cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
         let before = cache.stats().cached_decoded_bytes;
-        let large = cache.replace_head(&record, head_with_grants(6, 100, &now));
+        let large =
+            cache.replace_head(&record, record.generation(), head_with_grants(6, 100, &now));
         let after = cache.stats().cached_decoded_bytes;
         assert!(
             after >= before + large.heap_bytes() - small.heap_bytes(),
@@ -1107,12 +1164,12 @@ mod tests {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
         let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, head_at(5, 1, &now));
+        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
         cache.invalidate_head(&namespace("demo"));
         drop(record);
         let record = cache.record(&namespace("demo"));
         assert_eq!(
-            order(&cache.replace_head(&record, head_at(4, 1, &now))),
+            order(&cache.replace_head(&record, record.generation(), head_at(4, 1, &now))),
             (4, 1)
         );
         assert!(cache.get_head(&namespace("demo")).is_some());

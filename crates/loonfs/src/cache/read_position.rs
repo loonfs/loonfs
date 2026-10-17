@@ -124,6 +124,7 @@ impl ReadPositionSlot {
         };
         self.head_state.replace_head(
             &self.record,
+            self.record.generation(),
             CachedHead {
                 head: position.head.clone(),
                 basis: position.basis.clone(),
