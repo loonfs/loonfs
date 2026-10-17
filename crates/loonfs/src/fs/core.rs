@@ -141,9 +141,9 @@ impl RuntimeCore {
     /// Drops the position of the namespace's writer session in this runtime,
     /// if there is one, so reads start from the read cache until the
     /// session's next publish loads the namespace.
-    pub(crate) fn drop_writer_position(&self, namespace_id: &NamespaceId) {
+    pub(crate) async fn drop_writer_position(&self, namespace_id: &NamespaceId) {
         if let Some(positions) = self.inner.head_positions.get().and_then(Weak::upgrade) {
-            positions.drop_position(namespace_id);
+            positions.drop_position(namespace_id).await;
         }
     }
 

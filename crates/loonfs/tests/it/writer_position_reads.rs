@@ -1,7 +1,7 @@
 //! Reads in a runtime with the namespace's writer session, which start from
 //! the session's position instead of the read cache.
 
-use crate::common::is_manifest_head;
+use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
@@ -9,7 +9,7 @@ use loonfs::{
     SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
-use loonfs_objectstore::keys::{hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -508,13 +508,13 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
 }
 
 /// Checks that a manifest check that finds a fold this runtime published,
-/// while a publish keeps the engine locked so the position can't move yet,
-/// loads the fold's manifest, finds nothing after it, and keeps the
-/// position without reloading, and that once the publish releases the
-/// engine, reads start from the fold's manifest.
+/// while a publish has the engine locked, loads the fold's manifest, finds
+/// nothing after it, waits for the publish to release the engine, and then
+/// moves the position onto the fold's manifest without reloading, so reads
+/// start from the fold's manifest.
 ///
 /// The fold runs through maintenance while the publish waits for its WAL
-/// put, so the fold's move of the position waits for the engine.
+/// put, so the fold's own move of the position waits for the engine too.
 #[tokio::test]
 async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let fixture = fixture("own-fold-check", Parked::WalPuts).await;
@@ -523,65 +523,83 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let manifest = |manifest_no| RecordedOperation::Head {
         key: metadata_manifest_object(&fixture.namespace_id, &manifest_no),
     };
+    let before = loonfs_core::control::load_namespace_current_manifest(
+        &(fixture.recording.clone() as SharedObjectStore),
+        &fixture.namespace_id,
+    )
+    .await
+    .expect("current manifest")
+    .state
+    .manifest()
+    .manifest_no;
+    let fold_manifest = before.successor().expect("next manifest number");
+    let after_fold = fold_manifest.successor().expect("next manifest number");
     let gate = fixture.recording.inner();
     gate.block_next();
+    fixture.recording.reset();
     let (during, folded) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
-        let folded = maintenance
-            .fold_wal(&fixture.namespace_id)
-            .await
-            .expect("fold");
-        assert_eq!(folded.outcome, FoldWalOutcome::Published);
-        fixture.clock.advance_ms(MAX_STALENESS_MS);
-        let (positions, anchors) = fixture.head_sources();
-        fixture.recording.reset();
-        bounded(NO_WAIT, fixture.reader.stat("/small.txt"))
-            .await
-            .expect("the read doesn't wait for the publish")
-            .expect("stat");
-        let after_fold = folded
-            .manifest_no
-            .successor()
-            .expect("next manifest number");
-        let operations = fixture.recording.take();
-        assert!(
-            operations.len() == 3
-                && operations[0] == manifest(folded.manifest_no)
-                && is_manifest_get(&operations[1], &fixture.namespace_id, folded.manifest_no)
-                && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold),
-            "one HEAD finds the fold's manifest, the read loads it, finds nothing after it, \
-             and reloads nothing: {operations:?}"
-        );
-        assert_eq!(fixture.head_sources(), (positions + 1, anchors));
-        gate.release();
+        let (folded, ()) = futures::join!(maintenance.fold_wal(&fixture.namespace_id), async {
+            // The fold's last request raises the hint, and then its move of
+            // the position waits for the publish's engine.
+            wait_for_operation(&fixture.recording, |operation| {
+                operation.key() == hint(&fixture.namespace_id)
+                    && matches!(operation, RecordedOperation::Put { .. })
+            })
+            .await;
+            fixture.clock.advance_ms(MAX_STALENESS_MS);
+            let (positions, anchors) = fixture.head_sources();
+            fixture.recording.reset();
+            let (entry, ()) = futures::join!(fixture.reader.stat("/small.txt"), async {
+                // The walk ends at the missing manifest after the fold's, and
+                // the check's move waits for the publish's engine.
+                wait_for_operation(&fixture.recording, |operation| {
+                    is_manifest_get(operation, &fixture.namespace_id, after_fold)
+                })
+                .await;
+                gate.release();
+            });
+            entry.expect("stat");
+            let operations = fixture.recording.take();
+            let checked: Vec<_> = operations
+                .iter()
+                .filter(|operation| {
+                    operation
+                        .key()
+                        .starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
+                })
+                .collect();
+            assert!(
+                checked.len() >= 3
+                    && *checked[0] == manifest(fold_manifest)
+                    && is_manifest_get(checked[1], &fixture.namespace_id, fold_manifest)
+                    && is_manifest_get(checked[2], &fixture.namespace_id, after_fold)
+                    && checked[3..].iter().all(|operation| {
+                        is_manifest_get(operation, &fixture.namespace_id, fold_manifest)
+                    }),
+                "one HEAD finds the fold's manifest, the check loads it and finds nothing \
+                 after it, and the read starts from the fold's manifest: {operations:?}"
+            );
+            assert_eq!(
+                fixture.head_sources(),
+                (positions + 1, anchors),
+                "the read starts from the position, without reloading"
+            );
+        });
         folded
     });
+    let folded = folded.expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
     let during = during.expect("the publish succeeds");
     assert_eq!(fixture.tail_replays(), replays);
 
     fixture.recording.reset();
     let entry = fixture.reader.stat("/during.txt").await.expect("stat");
     assert_eq!(entry.head_seq, during.committed_seq);
-    // The read checks the manifest after the fold's, and it reads the fold's
-    // manifest the first time it starts from that manifest.
-    let next = manifest(
-        folded
-            .manifest_no
-            .successor()
-            .expect("next manifest number"),
-    );
-    let fold_manifest = metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no);
-    let operations = fixture.recording.take();
-    assert!(
-        operations.contains(&next)
-            && operations.iter().all(|operation| {
-                *operation == next
-                    || matches!(
-                        operation,
-                        RecordedOperation::Get { key, .. } if *key == fold_manifest
-                    )
-            }),
-        "the read starts from the fold's manifest: {operations:?}"
+    assert_eq!(
+        fixture.recording.take(),
+        [],
+        "the check confirmed the position on the fold's manifest"
     );
     fixture
         .put("/after.txt")

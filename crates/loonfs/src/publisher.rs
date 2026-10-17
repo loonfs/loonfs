@@ -29,6 +29,7 @@ use crate::{
     MaintenanceCancellation, MetadataMaintenanceOutcome,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
+use futures::future::BoxFuture;
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS};
@@ -241,6 +242,13 @@ impl RegistryShared {
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         lock_state(&self.state)
     }
+
+    fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
+        self.lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone())
+    }
 }
 
 impl HeadPositions for RegistryShared {
@@ -251,27 +259,26 @@ impl HeadPositions for RegistryShared {
             .map(|live| Arc::clone(&live.publisher.read_position))
     }
 
-    fn drop_position(&self, namespace_id: &NamespaceId) {
-        let publisher = self
-            .lock_state()
-            .sessions
-            .get(namespace_id)
-            .map(|live| live.publisher.clone());
-        if let Some(publisher) = publisher {
-            publisher.read_position.clear();
-            publisher.change_position(PositionChange::Drop);
-        }
+    fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(publisher) = self.live_publisher(namespace_id) {
+                publisher.change_position(PositionChange::Drop).await;
+            }
+        })
     }
 
-    fn move_position(&self, namespace_id: &NamespaceId, published: PublishedManifest) {
-        let publisher = self
-            .lock_state()
-            .sessions
-            .get(namespace_id)
-            .map(|live| live.publisher.clone());
-        if let Some(publisher) = publisher {
-            publisher.change_position(PositionChange::Reanchor(published));
-        }
+    fn move_position<'a>(
+        &'a self,
+        namespace_id: &'a NamespaceId,
+        published: PublishedManifest,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(publisher) = self.live_publisher(namespace_id) {
+                publisher
+                    .change_position(PositionChange::Reanchor(published))
+                    .await;
+            }
+        })
     }
 }
 
@@ -382,19 +389,24 @@ impl PublisherRegistry {
     /// changed the namespace, and marks the namespace's cached head
     /// unconfirmed when the mutation published a manifest or may have
     /// changed the namespace in ways this runtime doesn't know.
-    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId, change: NamespaceChange) {
+    pub(crate) async fn invalidate_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        change: NamespaceChange,
+    ) {
         match change {
             NamespaceChange::Published(published) => {
                 self.runtime_core
                     .invalidate_namespace_read_cache(namespace_id);
-                self.record_manifest_published(namespace_id, published);
+                self.record_manifest_published(namespace_id, published)
+                    .await;
             }
             NamespaceChange::Unchanged => {}
             NamespaceChange::Unknown => {
                 self.runtime_core
                     .invalidate_namespace_read_cache(namespace_id);
                 if let Some(publisher) = self.live_publisher(namespace_id) {
-                    publisher.change_position(PositionChange::Drop);
+                    publisher.change_position(PositionChange::Drop).await;
                 }
             }
         }
@@ -404,7 +416,7 @@ impl PublisherRegistry {
     /// [`should_invalidate_after_result`](crate::fs::should_invalidate_after_result)
     /// selects it. `change` describes a successful result. A failed result
     /// may have changed the namespace in ways this runtime doesn't know.
-    pub(crate) fn finish_namespace_mutation<T>(
+    pub(crate) async fn finish_namespace_mutation<T>(
         &self,
         namespace_id: &NamespaceId,
         result: Result<T, Error>,
@@ -412,7 +424,7 @@ impl PublisherRegistry {
     ) -> Result<T, Error> {
         if crate::fs::should_invalidate_after_result(&result) {
             let change = result.as_ref().map_or(NamespaceChange::Unknown, change);
-            self.invalidate_namespace(namespace_id, change);
+            self.invalidate_namespace(namespace_id, change).await;
         }
         result
     }
@@ -421,22 +433,20 @@ impl PublisherRegistry {
     /// published, or drops the publisher's position when it can't move
     /// there, so that later commits and reads in this runtime start from the
     /// newest manifest.
-    pub(crate) fn record_manifest_published(
+    pub(crate) async fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
         published: PublishedManifest,
     ) {
         if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.change_position(PositionChange::Reanchor(published));
+            publisher
+                .change_position(PositionChange::Reanchor(published))
+                .await;
         }
     }
 
     fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
-        self.shared
-            .lock_state()
-            .sessions
-            .get(namespace_id)
-            .map(|live| live.publisher.clone())
+        self.shared.live_publisher(namespace_id)
     }
 
     /// Returns the writer sessions that this runtime's reads start from.
@@ -555,24 +565,6 @@ enum PositionChange {
 }
 
 impl PositionChange {
-    /// Combines two changes that wait for the same engine into one.
-    ///
-    /// A drop replaces a move. Of two moves, the move to the newer manifest
-    /// is kept, because applying it alone either moves the position to that
-    /// manifest or drops the position.
-    fn then(self, later: Self) -> Self {
-        match (self, later) {
-            (Self::Reanchor(earlier), Self::Reanchor(later)) => {
-                if earlier.manifest().manifest_no > later.manifest().manifest_no {
-                    Self::Reanchor(earlier)
-                } else {
-                    Self::Reanchor(later)
-                }
-            }
-            _ => Self::Drop,
-        }
-    }
-
     fn apply(self, engine: &mut NamespaceCommitEngine) {
         match self {
             Self::Reanchor(published) => engine.record_manifest_published(published),
@@ -596,11 +588,6 @@ struct NamespacePublisher {
     /// tail, so a publication cannot change that tail before the reservation.
     /// Lock it through [`Self::lock_engine`].
     engine: Arc<AsyncMutex<EngineSlot>>,
-    /// A change to the engine's position that arrived while a publish, a
-    /// delete, or a fold had the engine locked. The task that has the engine
-    /// locked applies it when it releases the engine, or the next task to
-    /// lock the engine does.
-    pending_position: Arc<Mutex<Option<PositionChange>>>,
     /// The engine's position as of the last release of the engine, which
     /// reads in this runtime start from.
     read_position: Arc<ReadPositionSlot>,
@@ -656,11 +643,10 @@ impl EngineSlot {
 /// The engine of one publisher, locked through
 /// [`NamespacePublisher::lock_engine`].
 ///
-/// Releasing it applies a position change that waited for the engine, and
-/// stores the engine's position where reads start from it (see
+/// Releasing it stores the engine's position where reads start from it (see
 /// [`NamespacePublisher::release_engine`]). Every task that locks the engine
 /// goes through this guard, so the stored position matches the engine as of
-/// its last release, or is empty while a drop waits for the engine.
+/// its last release.
 struct LockedEngine<'a> {
     publisher: &'a NamespacePublisher,
     /// `None` only while `drop` runs.
@@ -900,7 +886,6 @@ impl NamespacePublisher {
                 session: Arc::clone(&session),
                 last_known_wal_tail_inline_bytes: None,
             })),
-            pending_position: Arc::new(Mutex::new(None)),
             read_position,
             session,
             shared: Arc::downgrade(&registry.shared),
@@ -1028,112 +1013,50 @@ impl NamespacePublisher {
         matches!(*lock_state(&self.session), WriterSessionStatus::Fenced(_))
     }
 
-    /// Applies `change` to the engine's position now, or leaves it for the
-    /// task that has the engine locked.
+    /// Applies `change` to the engine's position once no other task has the
+    /// engine locked.
     ///
-    /// The change waits in `pending_position` first, so the task that has
-    /// the engine locked applies it when it releases the engine, or the next
-    /// task to lock the engine applies it. Nothing is skipped.
-    ///
-    /// Until then, reads keep the position they have, except that a drop
-    /// clears it at once. A position on a manifest that this runtime has
-    /// replaced still reads correctly, because garbage collection keeps that
-    /// manifest's objects for at least one grace.
-    fn change_position(&self, change: PositionChange) {
-        let drops = {
-            let mut pending = lock_state(&self.pending_position);
-            let change = match pending.take() {
-                Some(earlier) => earlier.then(change),
-                None => change,
-            };
-            let drops = matches!(change, PositionChange::Drop);
-            *pending = Some(change);
-            drops
-        };
-        if !self.release_engine_if_free() && drops {
-            self.read_position.clear();
-        }
-    }
-
-    /// Locks the engine if no task has it locked and releases it at once,
-    /// which applies a position change that waited for it. Returns whether
-    /// the engine was free.
-    fn release_engine_if_free(&self) -> bool {
-        match self.engine.try_lock() {
-            Ok(slot) => {
-                drop(LockedEngine {
-                    publisher: self,
-                    slot: Some(slot),
-                });
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Applies the position change that waited for the engine, if any.
-    fn apply_pending_position(&self, engine: &mut NamespaceCommitEngine) {
-        let change = lock_state(&self.pending_position).take();
-        if let Some(change) = change {
+    /// Until then, reads keep the position they have. A position on a
+    /// manifest that this runtime has replaced still reads correctly,
+    /// because garbage collection keeps that manifest's objects for at least
+    /// one grace.
+    async fn change_position(&self, change: PositionChange) {
+        let mut slot = self.lock_engine().await;
+        if let Some(engine) = slot.engine.as_mut() {
             change.apply(engine);
         }
     }
 
-    /// Locks the engine and applies the position change that waited for it.
     async fn lock_engine(&self) -> LockedEngine<'_> {
-        let mut slot = self.engine.lock().await;
-        match slot.engine.as_mut() {
-            Some(engine) => self.apply_pending_position(engine),
-            // An engine built later starts without a position to change.
-            None => drop(lock_state(&self.pending_position).take()),
-        }
         LockedEngine {
             publisher: self,
-            slot: Some(slot),
+            slot: Some(self.engine.lock().await),
         }
     }
 
-    /// Applies the position change that waited for the engine, stores the
-    /// engine's position for reads, and releases the engine.
-    ///
-    /// The position is stored while `pending_position` is locked, and only
-    /// when no drop is queued. A drop that [`Self::change_position`] queues
-    /// clears the slot itself, either at once or through the next release,
-    /// so a release never puts back a position that a queued drop removed.
-    /// An engine with no position clears the slot before the lock is taken,
-    /// because clearing the slot installs the position as the namespace's
-    /// cached head, which calls into the cache's metrics.
-    fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
+    /// Stores the engine's position for reads, and releases the engine.
+    fn release_engine(&self, slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
-            // from the namespace's cached head until the next release, and
-            // the change waits for the next task that locks the engine.
+            // from the namespace's cached head until the next release.
             self.read_position.clear();
             return;
         }
-        let position = match slot.engine.as_mut() {
-            Some(engine) => {
-                self.apply_pending_position(engine);
-                engine.read_position()
-            }
+        let position = slot
+            .engine
+            .as_ref()
+            .and_then(NamespaceCommitEngine::read_position);
+        match self.read_position.prepare(position) {
+            Some(position) => self.read_position.store(position),
             None => {
-                drop(lock_state(&self.pending_position).take());
-                None
-            }
-        };
-        let position = self.read_position.prepare(position);
-        if position.is_none() && self.read_position.clear() {
-            // The engine dropped its position because it found a change it
-            // can't follow, such as another writer's claim, so the position
-            // that just became the cached head may be out of date.
-            self.runtime_core
-                .invalidate_namespace_read_cache(&self.namespace_id);
-        }
-        {
-            let pending = lock_state(&self.pending_position);
-            let drops = matches!(*pending, Some(PositionChange::Drop));
-            if let Some(position) = position.filter(|_| !drops) {
-                self.read_position.store(position);
+                if self.read_position.clear() {
+                    // The engine dropped its position because it found a
+                    // change it can't follow, such as another writer's claim,
+                    // so the position that just became the cached head may
+                    // be out of date.
+                    self.runtime_core
+                        .invalidate_namespace_read_cache(&self.namespace_id);
+                }
             }
         }
         drop(slot);

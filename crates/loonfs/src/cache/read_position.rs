@@ -3,6 +3,7 @@
 
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
+use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadRecord, HeadStateCache};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
@@ -23,16 +24,19 @@ pub(crate) trait HeadPositions: Send + Sync {
     fn read_position_slot(&self, namespace_id: &NamespaceId) -> Option<Arc<ReadPositionSlot>>;
 
     /// Drops the position of the namespace's writer session, both the copy
-    /// that reads take and the commit engine's own, so the session's next
-    /// publish loads the namespace from the store.
-    fn drop_position(&self, namespace_id: &NamespaceId);
+    /// that reads take and the commit engine's own, once no other task has
+    /// the engine locked, so the session's next publish loads the namespace
+    /// from the store.
+    fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()>;
 
     /// Moves the position of the namespace's writer session onto
     /// `published`, a manifest above the position's, the way the session's
-    /// own publications move it: at once when no task has the engine
-    /// locked, otherwise when the task that has it releases it. It never
-    /// waits for the engine.
-    fn move_position(&self, namespace_id: &NamespaceId, published: PublishedManifest);
+    /// own publications move it, once no other task has the engine locked.
+    fn move_position<'a>(
+        &'a self,
+        namespace_id: &'a NamespaceId,
+        published: PublishedManifest,
+    ) -> BoxFuture<'a, ()>;
 }
 
 /// The position of one writer session's commit engine, kept where reads can
@@ -209,7 +213,7 @@ impl RuntimeCore {
         };
         let checked = &position.basis_checked;
         if !checked.is_within_revalidation_bound() {
-            positions.drop_position(namespace_id);
+            positions.drop_position(namespace_id).await;
             return Ok(None);
         }
         if max_staleness_ms.is_some_and(|max_staleness_ms| checked.age_ms() < max_staleness_ms) {
@@ -254,9 +258,8 @@ impl RuntimeCore {
     /// position moves onto them in order, as it moves onto the manifests this
     /// runtime publishes (see [`HeadPositions::move_position`]). The walk
     /// that ends on the newest manifest is that manifest's successor check,
-    /// so a position that moved onto it records the check. A position that a
-    /// locked engine keeps where it was records none, because its manifest
-    /// has a successor. Anything else the walk finds, or an answer that
+    /// so a position that moved onto it records the check. Anything else
+    /// the walk finds, or an answer that
     /// arrives `READ_REVALIDATION_BOUND_MS` or more after the position's last
     /// check, drops the position.
     async fn check_writer_position(
@@ -290,7 +293,7 @@ impl RuntimeCore {
             // The position becomes the cached head, which a successor or a
             // late answer makes out of date, so the head is marked
             // unconfirmed after.
-            positions.drop_position(namespace_id);
+            positions.drop_position(namespace_id).await;
             self.invalidate_namespace_read_cache(namespace_id);
             return Ok(());
         };
@@ -298,7 +301,7 @@ impl RuntimeCore {
             moved.manifest().manifest_no
         });
         for published in moves {
-            positions.move_position(namespace_id, published);
+            positions.move_position(namespace_id, published).await;
         }
         slot.record_check(observed.clone(), newest);
         Ok(())

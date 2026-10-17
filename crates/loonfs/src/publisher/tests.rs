@@ -2914,7 +2914,8 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance
         .publisher
-        .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged);
+        .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged)
+        .await;
     assert!(writer.core.writer_position(&namespace_id).is_some());
     namespaces[0]
         .commit_candidate(CommitCandidate::new(create_directory_request(
@@ -2932,8 +2933,9 @@ async fn maintenance_invalidation_leaves_the_writer_tail_cached() {
 }
 
 /// Checks that a drop of the writer's position that arrives during a publish
-/// waits for the publish to release the engine, instead of being skipped, so
-/// the next publish reads its tail from the store.
+/// waits for the publish to release the engine, that reads keep the position
+/// until then, and that the drop then removes the position, so the next
+/// publish reads its tail from the store.
 #[tokio::test]
 async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2955,13 +2957,26 @@ async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() 
     store.block_next();
     let (during, ()) = futures::join!(commit("during"), async {
         store.wait_until_blocked().await;
-        writer
+        let mut drop = std::pin::pin!(writer
             .mode
             .publisher
-            .invalidate_namespace(&namespace_id, NamespaceChange::Unknown);
+            .invalidate_namespace(&namespace_id, NamespaceChange::Unknown));
+        assert!(
+            futures::poll!(drop.as_mut()).is_pending(),
+            "the drop waits for the publish"
+        );
+        assert!(
+            writer.core.writer_position(&namespace_id).is_some(),
+            "reads keep the position while the publish runs"
+        );
         store.release();
+        drop.await;
     });
     during.expect("the publish succeeds");
+    assert!(
+        writer.core.writer_position(&namespace_id).is_none(),
+        "the drop applied once the publish released the engine"
+    );
     commit("after").await.expect("publish after the drop");
 
     assert_eq!(

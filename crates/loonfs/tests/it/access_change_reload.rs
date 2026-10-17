@@ -1,6 +1,7 @@
 //! Storage requests and access checks for reads and writes after this
 //! runtime or another one publishes a newer manifest.
 
+use crate::common::wait_for_operation;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, LoonFs, Maintenance,
@@ -483,14 +484,14 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
     }
 }
 
-/// Checks that a publish in flight while a checkpoint folds the WAL tail
-/// moves to the checkpoint's manifest before it releases the engine, so
-/// reads start from the checkpoint's manifest.
+/// Checks that a checkpoint that folds the WAL tail while a publish is in
+/// flight moves the position onto the checkpoint's manifest once the publish
+/// releases the engine, so reads start from the checkpoint's manifest.
 ///
 /// The publish's WAL put waits until the checkpoint has folded the commits
-/// before it, so the checkpoint's manifest misses the publish's own commit.
-/// The next read finds no newer manifest, and the next write replays no WAL
-/// tail.
+/// before it and raised the hint, so the checkpoint's manifest misses the
+/// publish's own commit. The next read finds no newer manifest, and the next
+/// write replays no WAL tail.
 #[tokio::test]
 async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest() {
     let fixture = fixture("checkpoint-during-publish", false).await;
@@ -499,11 +500,22 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
     gate.block_next();
     let (_, checkpoint) = futures::join!(fixture.commit("put_file", 1), async {
         gate.wait_until_blocked().await;
-        let checkpoint = fixture
-            .maintenance
-            .create_checkpoint(&fixture.namespace_id, "during")
-            .await;
-        gate.release();
+        fixture.recording.reset();
+        let (checkpoint, ()) = futures::join!(
+            fixture
+                .maintenance
+                .create_checkpoint(&fixture.namespace_id, "during"),
+            async {
+                // The checkpoint's last request raises the hint, and then
+                // its move of the position waits for the publish's engine.
+                wait_for_operation(&fixture.recording, |operation| {
+                    operation.key() == hint(&fixture.namespace_id)
+                        && matches!(operation, RecordedOperation::Put { .. })
+                })
+                .await;
+                gate.release();
+            }
+        );
         checkpoint
     });
     let checkpoint = checkpoint.expect("checkpoint");

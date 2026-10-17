@@ -199,7 +199,8 @@ impl Namespace<Writable> {
         let snapshot = self
             .mode
             .publisher
-            .finish_namespace_mutation(&self.namespace_id, result, NamespaceChange::of_report)?
+            .finish_namespace_mutation(&self.namespace_id, result, NamespaceChange::of_report)
+            .await?
             .response;
         if let Err(error) = self
             .ensure_live_snapshot_limit(policy.max_live_per_namespace, 0)
@@ -290,6 +291,7 @@ impl Namespace<Writable> {
         self.mode
             .publisher
             .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
+            .await
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
@@ -318,5 +320,6 @@ impl Namespace<Writable> {
         self.mode
             .publisher
             .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
+            .await
     }
 }

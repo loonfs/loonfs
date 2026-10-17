@@ -477,7 +477,8 @@ impl Maintenance {
             .map_err(Error::Core)?;
         if let Some(published) = claimed.published {
             self.publisher
-                .record_manifest_published(namespace_id, published);
+                .record_manifest_published(namespace_id, published)
+                .await;
         }
         epochs.insert(namespace_id.clone(), claimed.response);
         Ok(claimed.response)
@@ -549,10 +550,12 @@ impl Maintenance {
                 manifest,
                 bottom_anchored_merge_blocked,
             } => {
-                self.publisher.invalidate_namespace(
-                    namespace_id,
-                    NamespaceChange::Published(PublishedManifest::SameHead(manifest)),
-                );
+                self.publisher
+                    .invalidate_namespace(
+                        namespace_id,
+                        NamespaceChange::Published(PublishedManifest::SameHead(manifest)),
+                    )
+                    .await;
                 tracing::info!(
                     families = ?group.families(),
                     merged_delta_rows,
@@ -701,10 +704,12 @@ impl Maintenance {
             .compaction_finished(&outcome, elapsed_ms);
         match &outcome {
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published { manifest, .. }) => {
-                self.publisher.invalidate_namespace(
-                    namespace_id,
-                    NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
-                );
+                self.publisher
+                    .invalidate_namespace(
+                        namespace_id,
+                        NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
+                    )
+                    .await;
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(
@@ -768,7 +773,8 @@ impl Maintenance {
         // inside its bound never lists a segment that a pass deleted
         // (format.md sections 11.2 and 11.4).
         self.publisher
-            .invalidate_namespace(namespace_id, NamespaceChange::Unchanged);
+            .invalidate_namespace(namespace_id, NamespaceChange::Unchanged)
+            .await;
         Ok(report)
     }
 
@@ -823,6 +829,7 @@ impl Maintenance {
         .map_err(Error::from);
         self.publisher
             .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+            .await
             .map(|report| report.response)
     }
 
@@ -928,6 +935,7 @@ impl Maintenance {
             .map_err(Error::from);
         self.publisher
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
+            .await
     }
 
     /// Folds the visible WAL tail into a new manifest.
@@ -1000,6 +1008,7 @@ impl Maintenance {
             .map_err(Error::from);
         self.publisher
             .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+            .await
             .map(|report| report.response)
     }
 
@@ -1014,6 +1023,7 @@ impl Maintenance {
                 .map_err(Error::from);
             self.publisher
                 .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+                .await
                 .map(|report| report.response)
                 .inspect_err(|error| tracing::debug!(%error))
         }

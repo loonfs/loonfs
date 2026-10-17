@@ -149,8 +149,8 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a change of unknown effect drops the position at once when
-/// the engine is idle, and that the next commit stores one again.
+/// Checks that a change of unknown effect drops the position, and that the
+/// next commit stores one again.
 #[tokio::test]
 async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -160,7 +160,8 @@ async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
     writer
         .mode
         .publisher
-        .invalidate_namespace(&namespace_id, NamespaceChange::Unknown);
+        .invalidate_namespace(&namespace_id, NamespaceChange::Unknown)
+        .await;
     assert!(writer.core.writer_position(&namespace_id).is_none());
     let commit = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
@@ -174,42 +175,6 @@ async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
             .writer_position(&namespace_id)
             .map(|position| position.head.seq),
         Some(commit.committed_seq)
-    );
-    writer.shutdown().await.expect("shutdown");
-}
-
-/// Checks that a drop that arrives while a publish has the engine locked
-/// clears the position at once, and that the publish applies the drop when
-/// it releases the engine.
-#[tokio::test]
-async fn a_drop_during_a_publish_clears_the_read_position_at_once() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let (writer, namespace) = published_namespace(store.clone() as SharedStore).await;
-    store.block_next();
-    let (during, ()) = futures::join!(
-        namespace.commit_candidate(CommitCandidate::new(create_directory_request(
-            "during", "during"
-        ))),
-        async {
-            store.wait_until_blocked().await;
-            assert!(writer.core.writer_position(&namespace_id).is_some());
-            writer
-                .mode
-                .publisher
-                .invalidate_namespace(&namespace_id, NamespaceChange::Unknown);
-            assert!(
-                writer.core.writer_position(&namespace_id).is_none(),
-                "the queued drop clears the position before the publish ends"
-            );
-            store.release();
-        }
-    );
-    during.expect("the publish succeeds");
-    assert!(
-        writer.core.writer_position(&namespace_id).is_none(),
-        "the publish applied the drop when it released the engine"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -236,17 +201,30 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         ))),
         async {
             store.wait_until_blocked().await;
-            let checkpoint = maintenance
-                .create_checkpoint(&namespace_id, "during")
-                .await
-                .expect("checkpoint");
-            let kept = writer
-                .core
-                .writer_position(&namespace_id)
-                .expect("reads keep the position while the publish runs");
-            assert_eq!(kept.basis.manifest_no(), before.basis.manifest_no());
-            store.release();
-            checkpoint
+            let (checkpoint, ()) = futures::join!(
+                maintenance.create_checkpoint(&namespace_id, "during"),
+                async {
+                    // The checkpoint's manifest is durable, and its move of
+                    // the position waits for the publish's engine.
+                    bounded(Duration::from_secs(10), async {
+                        let shared = store.clone() as SharedStore;
+                        while current_manifest_no(&shared, &namespace_id).await
+                            <= before.basis.manifest_no()
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the checkpoint publishes its manifest");
+                    let kept = writer
+                        .core
+                        .writer_position(&namespace_id)
+                        .expect("reads keep the position while the publish runs");
+                    assert_eq!(kept.basis.manifest_no(), before.basis.manifest_no());
+                    store.release();
+                }
+            );
+            checkpoint.expect("checkpoint")
         }
     );
     let during = during.expect("the publish succeeds");
