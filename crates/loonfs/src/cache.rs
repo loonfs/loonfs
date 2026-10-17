@@ -85,9 +85,6 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        // Take the record before the refresh reads the timer, so the record
-        // keeps any change marked while the refresh runs, and the refresh's
-        // confirmation, which predates that change, doesn't confirm the head.
         let record = self.inner.head_state.record(namespace_id);
         let cached = self.inner.head_state.get_head(namespace_id);
         let result = self
@@ -97,10 +94,7 @@ impl RuntimeCore {
         match result {
             Ok(candidate) => Ok(self.inner.head_state.replace_head(&record, candidate)),
             Err(error) => {
-                self.inner.head_state.unconfirm_head(
-                    namespace_id,
-                    Observation::now(Arc::clone(&self.inner.timer)),
-                );
+                self.inner.head_state.invalidate_head(namespace_id);
                 Err(error)
             }
         }
@@ -134,16 +128,10 @@ impl RuntimeCore {
             // within the bound. An answer that arrives later may miss one, however
             // recently its probe was sent, so the new check replaces the previous one
             // only after both answers are in.
-            if let Some(checked) = head
-                .basis_checked
-                .clone()
-                .filter(Observation::is_within_revalidation_bound)
-            {
-                let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
-                // An unconfirmed head checks for a successor whatever the
-                // interval, because the runtime learned of a change since the
-                // last check.
-                let check_due = head.head_confirmed.is_none() || checked.age_ms() >= interval_ms;
+            let checked = head.basis_checked.clone();
+            if checked.is_within_revalidation_bound() {
+                let check_due =
+                    checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
@@ -161,9 +149,9 @@ impl RuntimeCore {
                     if checked.is_within_revalidation_bound()
                         && probed.map_err(MetadataProjectionLoadError::LoadHead)?
                     {
-                        head.head_confirmed = Some(observed.clone());
+                        head.head_confirmed = observed.clone();
                         if check_due {
-                            head.basis_checked = Some(observed);
+                            head.basis_checked = observed;
                         }
                         head.head = context.head;
                         return Ok(head);
@@ -264,14 +252,8 @@ impl RuntimeCore {
     ) -> Option<Arc<CachedHead>> {
         let max_staleness_ms = self.max_staleness_ms(consistency)?;
         let cached = self.inner.head_state.get_head(namespace_id)?;
-        let confirmed = cached
-            .head_confirmed
-            .as_ref()
-            .is_some_and(|confirmed| confirmed.age_ms() < max_staleness_ms)
-            && cached
-                .basis_checked
-                .as_ref()
-                .is_some_and(Observation::is_within_revalidation_bound);
+        let confirmed = cached.head_confirmed.age_ms() < max_staleness_ms
+            && cached.basis_checked.is_within_revalidation_bound();
         if !confirmed {
             return None;
         }
@@ -399,11 +381,10 @@ impl RuntimeCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
-    /// Marks the namespace's cached head unconfirmed, after this runtime
-    /// learns of a change to the namespace, so the next strong read confirms
-    /// the head from its known tip, and an eventual read doesn't read at it
-    /// until then (see
-    /// [`HeadStateCache::unconfirm_head`](loonfs_core::cache::HeadStateCache::unconfirm_head)).
+    /// Drops the namespace's cached head, after this runtime learns of a
+    /// change whose effect on the head it can't identify, so the next read
+    /// loads the namespace by discovery, whatever its consistency (see
+    /// [`HeadStateCache::invalidate_head`](loonfs_core::cache::HeadStateCache::invalidate_head)).
     /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
     /// instead, which also tells the namespace's publisher what changed.
     ///
@@ -418,10 +399,7 @@ impl RuntimeCore {
     /// recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
-        self.inner.head_state.unconfirm_head(
-            namespace_id,
-            Observation::now(Arc::clone(&self.inner.timer)),
-        );
+        self.inner.head_state.invalidate_head(namespace_id);
     }
 }
 
@@ -431,7 +409,7 @@ fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead
     CachedHead {
         basis: anchor.basis(),
         head: anchor.read_state,
-        basis_checked: Some(observed.clone()),
-        head_confirmed: Some(observed),
+        basis_checked: observed.clone(),
+        head_confirmed: observed,
     }
 }

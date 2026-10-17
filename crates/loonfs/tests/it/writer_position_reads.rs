@@ -635,6 +635,46 @@ async fn a_fenced_sessions_next_read_reads_the_store() {
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
 
+/// Checks that a change of unknown effect drops the runtime's view of the
+/// namespace, and that the next read loads the namespace by discovery, even
+/// an eventual read within its maximum staleness.
+///
+/// A fork of the current head folds the source's WAL tail without reporting
+/// the fold, so the runtime drops the source's position and the cached head
+/// that the position becomes.
+#[tokio::test]
+async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() {
+    let fixture = fixture("unknown-change", Parked::WalPuts).await;
+    let commit = fixture.put("/next.txt").await.expect("commit");
+    fixture
+        .writer
+        .fork_namespace(
+            &fixture.namespace_id,
+            &namespace_id("unknown-change-fork"),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("fork");
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    let entry = fixture
+        .reader
+        .stat("/next.txt")
+        .await
+        .expect("an eventual read after the fork");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if *key == hint(&fixture.namespace_id)
+        ),
+        "the read loads the namespace from its hint: {operations:?}"
+    );
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
 /// Checks that a read doesn't start from a position whose last manifest
 /// check is past the revalidation bound. A check's answer can't confirm the
 /// position then, so the read drops the position and reloads the namespace,

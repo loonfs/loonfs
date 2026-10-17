@@ -50,10 +50,8 @@ pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head.
     head_state: Arc<HeadStateCache>,
-    /// The namespace's head record, which the slot keeps while the session
-    /// lasts. A change that the runtime learns of while the session has a
-    /// position stays on the record, so the position's install when it ends
-    /// doesn't keep a confirmation from before the change.
+    /// The namespace's head record, which [`Self::clear`] installs the
+    /// position through, kept while the session lasts.
     record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// The session's last finished check of the position. A read that runs a
@@ -138,8 +136,8 @@ impl ReadPositionSlot {
             CachedHead {
                 head: position.head.clone(),
                 basis: position.basis.clone(),
-                basis_checked: Some(position.basis_checked.clone()),
-                head_confirmed: Some(position.basis_checked.clone()),
+                basis_checked: position.basis_checked.clone(),
+                head_confirmed: position.basis_checked.clone(),
             },
         );
         *self.lock() = None;
@@ -291,8 +289,8 @@ impl RuntimeCore {
         let Some(moves) = moves.filter(|_| position.basis_checked.is_within_revalidation_bound())
         else {
             // The position becomes the cached head, which a successor or a
-            // late answer makes out of date, so the head is marked
-            // unconfirmed after.
+            // late answer makes out of date, so the head is dropped after it,
+            // and the next read loads the namespace by discovery.
             positions.drop_position(namespace_id).await;
             self.invalidate_namespace_read_cache(namespace_id);
             return Ok(());

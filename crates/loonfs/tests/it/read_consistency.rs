@@ -630,8 +630,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 /// older than the reads from that position. The test parks that load's
 /// manifest check until the commit returns. After the takeover, the first
 /// eventual read past its maximum staleness runs the session's check, which
-/// finds the new writer's claim, so the position becomes the namespace's
-/// cached head, marked unconfirmed, and the read loads the namespace again.
+/// finds the new writer's claim, so the runtime drops the position and the
+/// cached head it became, and the read loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;

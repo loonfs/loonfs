@@ -386,9 +386,9 @@ impl PublisherRegistry {
     }
 
     /// Tells the namespace's publisher how a mutation outside the publisher
-    /// changed the namespace, and marks the namespace's cached head
-    /// unconfirmed when the mutation published a manifest or may have
-    /// changed the namespace in ways this runtime doesn't know.
+    /// changed the namespace, and drops the namespace's cached head when the
+    /// mutation may have changed the namespace in ways this runtime doesn't
+    /// know.
     pub(crate) async fn invalidate_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -396,8 +396,6 @@ impl PublisherRegistry {
     ) {
         match change {
             NamespaceChange::Published(published) => {
-                self.runtime_core
-                    .invalidate_namespace_read_cache(namespace_id);
                 self.record_manifest_published(namespace_id, published)
                     .await;
             }
@@ -531,7 +529,8 @@ impl PublisherRegistry {
 #[derive(Debug, Clone)]
 pub(crate) enum NamespaceChange {
     /// The mutation published this manifest. The publisher moves to it, or
-    /// drops its position when it can't move there.
+    /// drops its position when it can't move there. The cached head stays,
+    /// because the manifest is at the head that the namespace already had.
     Published(PublishedManifest),
     /// The mutation published no manifest, such as a garbage collection pass
     /// or a change to a pin. The publisher keeps its position, and the
@@ -539,7 +538,7 @@ pub(crate) enum NamespaceChange {
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime
     /// doesn't know, such as creating it or failing with a stale head. The
-    /// publisher drops its position.
+    /// publisher drops its position, and the runtime drops its cached head.
     Unknown,
 }
 

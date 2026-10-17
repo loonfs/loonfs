@@ -23,7 +23,7 @@ For a position, the session's check sets both times, when it finds no successor 
 
 No read starts from a view whose check time is [`READ_REVALIDATION_BOUND_MS`](../specs/glossary.md#revalidation-bound) old or older, because garbage collection can delete the segments of a superseded manifest once its grace window passes, and freshness and collection share this bound. LoonFS reloads such a view by discovery. In the writer's process, the read drops the position first, and the session's next publish reloads its projection.
 
-The publisher never copies its position into the read cache. When the session closes, is fenced, or drops its position, the position becomes the read cache's view with both of its times, so the next read starts from a head at least as new as any head that a read from the position returned.
+The publisher never copies its position into the read cache. When the session closes or drops its position, the position becomes the read cache's view with both of its times, so the next read starts from a head at least as new as any head that a read from the position returned.
 
 ## One refresh procedure
 
@@ -50,7 +50,7 @@ An `eventual` read sees every commit acknowledged before the view's confirmation
 
 In the writer's process, an `eventual` read starts from the position and sends no request while the position was confirmed within the read's maximum staleness. The position includes this process's own commits, and all a request could add is another writer's claim, which the session's check finds once the read's maximum staleness has passed. A `strong` read waits for the session's check, so it sees another writer's claim before it reads (see the next section).
 
-A process marks a view "unconfirmed" when it creates, forks, or deletes the namespace, when a maintenance call in the process publishes a manifest for the namespace, and when it finds its writer session fenced. LoonFS refreshes an unconfirmed view before the next read, with either setting, so a read that follows one of those events in the same process sees the result. In a process without the writer session, a read that checks authorization or a receipt before a write confirms the head whatever the caller asked for, because the check is part of the write. In the writer's process, a check before a commit reads the position as it is, because the position includes every access change and receipt that the session committed, and another writer's takeover fences the session at the commit's own publish. A check before a snapshot change or a fork, which the session doesn't publish, confirms the head in either process.
+A process drops its view when it creates, forks, or deletes the namespace, when a mutation's outcome is unknown, and when it finds its writer session fenced, because it can't tell how those events moved the head. The next read loads the namespace by discovery, with either setting, so a read that follows one of those events in the same process sees the result. A manifest that a maintenance call in the process publishes doesn't drop the view, because the manifest is at the head the namespace already had, so the writer position moves onto it and a cached view stays as it is. In a process without the writer session, a read that checks authorization or a receipt before a write confirms the head whatever the caller asked for, because the check is part of the write. In the writer's process, a check before a commit reads the position as it is, because the position includes every access change and receipt that the session committed, and another writer's takeover fences the session at the commit's own publish. A check before a snapshot change or a fork, which the session doesn't publish, confirms the head in either process.
 
 A pinned read (through a snapshot or a checkpoint) has no consistency setting, because the pin selects its state.
 
@@ -72,7 +72,7 @@ The session's check:
 4. If the HEAD finds a successor, walks the manifests above the position's manifest. If the newest is an active manifest with the session's writer epoch, the check moves the position onto those manifests in order and records the check. Each of them describes a head that this session wrote, and the walk that ends on the newest manifest is that manifest's successor check.
 5. If the walk finds a manifest with a later writer epoch (another writer's claim) or a namespace tombstone, drops the position. The session's next publish then runs discovery and finds the fence.
 
-A position that the check drops becomes the read cache's view, marked unconfirmed.
+A position that the check drops doesn't stay as the read cache's view either, so the next read loads the namespace by discovery.
 
 So in the writer's process, a check costs one HEAD, or the walk when the HEAD finds a successor. A session with no reads sends nothing, and a session under `eventual` reads sends one HEAD per maximum staleness, which is also the session's fencing check while it isn't publishing. No timer is involved, because a read runs the check, and the check ends with the HEAD or the walk.
 
