@@ -43,6 +43,7 @@ use std::path::Path;
 fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
     TestAppOptions {
         max_staleness_ms: None,
+        consistency: None,
         store: Some(store),
         direct_transfers: None,
     }
@@ -2941,6 +2942,7 @@ mod direct_download {
             test_options(directory.path(), "download-server"),
             TestAppOptions {
                 max_staleness_ms: None,
+                consistency: None,
                 store: Some(store),
                 direct_transfers: Some(transfers),
             },
@@ -3228,6 +3230,7 @@ mod direct_download {
             test_options(directory.path(), "inode-download-bodies"),
             TestAppOptions {
                 max_staleness_ms: None,
+                consistency: None,
                 store: None,
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),
@@ -3495,6 +3498,7 @@ mod direct_download {
             config,
             TestAppOptions {
                 max_staleness_ms: None,
+                consistency: None,
                 store: Some(store),
                 direct_transfers,
             },
@@ -3737,6 +3741,7 @@ mod direct_download {
             config,
             TestAppOptions {
                 max_staleness_ms: None,
+                consistency: None,
                 store: Some(store),
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),

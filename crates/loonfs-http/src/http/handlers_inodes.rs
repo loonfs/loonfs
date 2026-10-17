@@ -107,7 +107,6 @@ pub(super) async fn get_inode(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let entry = target
@@ -185,7 +184,6 @@ pub(super) async fn list_inode_children(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let listing = target
@@ -299,7 +297,6 @@ pub(super) async fn get_file_content_by_inode(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
@@ -363,7 +360,6 @@ pub(super) async fn get_file_revision_content_by_inode(
             query.consistency.as_deref(),
             query.max_staleness_ms.as_deref(),
             false,
-            state.options.consistency,
         )?,
         ..ReadFileStreamOptions::default()
     };

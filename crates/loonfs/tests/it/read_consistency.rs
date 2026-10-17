@@ -13,11 +13,11 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::ids::{namespace_id, writer_id};
+use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
+use loonfs_types::{ChecksumAlgorithm, PageRequest, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,16 +121,16 @@ impl Fixture {
     }
 }
 
-fn eventual(max_staleness_ms: u64) -> Consistency {
-    Consistency::Eventual {
+fn eventual(max_staleness_ms: u64) -> Option<Consistency> {
+    Some(Consistency::Eventual {
         max_staleness: Some(Duration::from_millis(max_staleness_ms)),
-    }
+    })
 }
 
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Consistency::Strong,
+        consistency: Some(Consistency::Strong),
         ..StatOptions::default()
     }
 }
@@ -285,7 +285,7 @@ async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
 async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     let fixture = fixture("eventual-staleness").await;
     let reader = &fixture.reader;
-    let consistency = Consistency::default();
+    let consistency = None;
     reader
         .stat_with_options("/file.txt", &strong())
         .await
@@ -294,7 +294,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .list_with_options(
             "/",
             &ListOptions {
-                consistency: Consistency::Strong,
+                consistency: Some(Consistency::Strong),
                 ..ListOptions::default()
             },
         )
@@ -306,7 +306,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .read_file_with_options(
             "/file.txt",
             &ReadFileOptions {
-                consistency: Consistency::Strong,
+                consistency: Some(Consistency::Strong),
             },
         )
         .await
@@ -370,6 +370,60 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
             && wal_key.starts_with(&wal_prefix(&fixture.namespace_id))
     );
     assert_eq!(fixture.anchor_sources(), (anchors + 1, eventual_reads + 3));
+    fixture.shutdown().await;
+}
+
+/// Checks that a runtime whose default consistency is `strong` confirms the
+/// head on a read that sets none, such as a revision listing, which takes no
+/// options, and that a read that sets `eventual` there sends no request
+/// within its maximum staleness.
+#[tokio::test]
+async fn a_strong_default_confirms_reads_that_set_no_consistency() {
+    let fixture = fixture("strong-default").await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
+        .monotonic_timer(fixture.clock.clone())
+        .consistency(Consistency::Strong)
+        .build()
+        .await
+        .expect("reader")
+        .namespace(&fixture.namespace_id);
+    reader.stat("/file.txt").await.expect("warm read");
+    let actor = loonfs_test_support::test_actor();
+    fixture
+        .namespace
+        .put_file("/next.txt", b"next", &actor)
+        .await
+        .expect("commit");
+    fixture.recording.reset();
+    let revisions = reader
+        .list_file_revisions("/next.txt")
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
+        .await
+        .expect("the listing confirms the head and finds the new file");
+    assert_eq!(revisions.revisions.len(), 1);
+    assert!(!fixture.recording.take().is_empty());
+
+    fixture
+        .namespace
+        .put_file("/later.txt", b"later", &actor)
+        .await
+        .expect("commit");
+    fixture.recording.reset();
+    let options = StatOptions {
+        consistency: eventual(READ_REVALIDATION_BOUND_MS),
+        ..StatOptions::default()
+    };
+    let missing = reader.stat_with_options("/later.txt", &options).await;
+    assert_eq!(
+        missing.expect_err("within the maximum staleness").code(),
+        loonfs::ErrorCode::PathNotFound
+    );
+    assert_eq!(fixture.recording.take(), []);
     fixture.shutdown().await;
 }
 

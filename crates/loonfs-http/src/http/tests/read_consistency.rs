@@ -32,9 +32,9 @@ struct Fixture {
 /// runtime, and a server over the same store that has no writer session for
 /// the namespace, so its reads start from the read cache. The server's
 /// default maximum staleness is the revalidation bound, so an eventual read
-/// stays inside it for the whole test, and `consistency` is the server's
-/// setting for a read that doesn't set its own.
-async fn fixture(name: &str, consistency: Consistency) -> Fixture {
+/// stays inside it for the whole test, and `consistency` sets the runtime's
+/// default consistency, or keeps the runtime's own default when `None`.
+async fn fixture(name: &str, consistency: Option<Consistency>) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -63,12 +63,12 @@ async fn fixture(name: &str, consistency: Consistency) -> Fixture {
     writer.shutdown().await.expect("writer shutdown");
     let mut options = test_options(directory.path(), name);
     options.grep = JobMode::Disabled;
-    options.binding.consistency = consistency;
     let (router, _state) = test_app(
         options,
         TestAppOptions {
             store: Some(store),
             max_staleness_ms: Some(READ_REVALIDATION_BOUND_MS),
+            consistency,
             ..TestAppOptions::default()
         },
     )
@@ -135,7 +135,7 @@ fn with_parameters(route: &str, parameters: &str) -> String {
 /// without a maximum staleness, up to the revalidation bound.
 #[tokio::test]
 async fn consistency_parameters_parse_on_every_live_read_route() {
-    let fixture = fixture("consistency-parse", Consistency::default()).await;
+    let fixture = fixture("consistency-parse", None).await;
     let bound = format!("consistency=eventual&max_staleness_ms={READ_REVALIDATION_BOUND_MS}");
     for route in fixture.live_read_routes() {
         for parameters in [
@@ -163,7 +163,7 @@ async fn consistency_parameters_parse_on_every_live_read_route() {
 /// request.
 #[tokio::test]
 async fn consistency_rejections_identify_the_parameter() {
-    let fixture = fixture("consistency-rejections", Consistency::default()).await;
+    let fixture = fixture("consistency-rejections", None).await;
     let above = format!(
         "consistency=eventual&max_staleness_ms={}",
         READ_REVALIDATION_BOUND_MS + 1
@@ -204,14 +204,13 @@ async fn consistency_rejections_identify_the_parameter() {
 /// Checks that an eventual read through the server within its maximum
 /// staleness sends no store request, and that a `strong` read of the same
 /// entry confirms the head with the store. A read that doesn't set
-/// `consistency` is eventual, unless the server's `consistency` setting is
-/// `strong`.
+/// `consistency` takes the runtime's default, which is eventual unless the
+/// server sets `strong`.
 #[tokio::test]
 async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() {
     let entry = "/v0/namespaces/demo/filesystem/entry?path=/file.txt";
     let children = "/v0/namespaces/demo/inodes/ino_1/children?include_attributes=false";
-    for (setting, unset_confirms) in [(Consistency::default(), false), (Consistency::Strong, true)]
-    {
+    for (setting, unset_confirms) in [(None, false), (Some(Consistency::Strong), true)] {
         let fixture = fixture("consistency-no-request", setting).await;
         for uri in [entry, children] {
             let (status, _) = fixture.get(uri).await;

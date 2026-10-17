@@ -911,13 +911,14 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    // Every read probes for a successor manifest, so the read after each
-    // fold moves onto the fold's manifest and reads its new segments through
-    // the cache whatever the wall clock did.
+    // Every read confirms the head and probes for a successor manifest, so
+    // the read after each fold moves onto the fold's manifest and reads its
+    // new segments through the cache whatever the wall clock did.
     let fs = open_runtime_with(store(temp_dir.path()), "maintenance-cold", |builder| {
         builder
             .stored_metadata_block_cache(stored_blocks.clone())
             .manifest_revalidation_interval_ms(0)
+            .max_staleness_ms(0)
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())

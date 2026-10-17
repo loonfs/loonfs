@@ -41,7 +41,7 @@ fn is_manifest_get(
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Consistency::Strong,
+        consistency: Some(Consistency::Strong),
         ..StatOptions::default()
     }
 }
@@ -219,7 +219,7 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
         .read_file_with_options(
             "/small.txt",
             &ReadFileOptions {
-                consistency: Consistency::Strong,
+                consistency: Some(Consistency::Strong),
             },
         )
         .await

@@ -89,7 +89,7 @@ impl NamespaceReads {
         limit: usize,
     ) -> Result<ListChangesResponse> {
         let options = ListChangesOptions {
-            consistency: Consistency::Strong,
+            consistency: Some(Consistency::Strong),
         };
         Ok(self
             .namespace

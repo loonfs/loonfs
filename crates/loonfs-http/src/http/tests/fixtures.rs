@@ -29,6 +29,8 @@ pub(super) struct TestAppOptions {
     /// The runtime's default maximum staleness of an eventual read, or the default when
     /// `None`.
     pub(super) max_staleness_ms: Option<u64>,
+    /// The runtime's default consistency, or the default when `None`.
+    pub(super) consistency: Option<loonfs::Consistency>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -50,7 +52,6 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
-            consistency: loonfs::Consistency::default(),
         },
         grep: JobMode::ServeAndMaintain,
         writer_id: WriterId::parse(writer_id).expect("writer id"),
@@ -67,6 +68,10 @@ pub(super) async fn test_app(
     let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store));
     let builder = match inputs.max_staleness_ms {
         Some(interval_ms) => builder.max_staleness_ms(interval_ms),
+        None => builder,
+    };
+    let builder = match inputs.consistency {
+        Some(consistency) => builder.consistency(consistency),
         None => builder,
     };
     let runtime = builder

@@ -1220,7 +1220,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         );
         assert_eq!(
             schema.get("default").and_then(Value::as_str),
-            Some("strong")
+            Some("eventual")
         );
         let max_staleness = query_parameter(paths, path, "get", "max_staleness_ms");
         assert_eq!(max_staleness.get("required"), Some(&Value::Bool(false)));

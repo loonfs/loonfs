@@ -141,6 +141,8 @@ pub(crate) struct ReadConfig {
     /// old the confirmation of the head may be before the read confirms it
     /// again. Zero confirms on every read.
     pub max_staleness_ms: u64,
+    /// The consistency of a read that doesn't set its own.
+    pub consistency: crate::Consistency,
     /// Layout and input limits for metadata compactions.
     pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.

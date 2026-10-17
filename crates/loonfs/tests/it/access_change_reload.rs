@@ -298,7 +298,7 @@ const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "reg
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Consistency::Strong,
+        consistency: Some(Consistency::Strong),
         ..StatOptions::default()
     }
 }

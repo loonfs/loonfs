@@ -31,8 +31,9 @@ pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
 /// How a read confirms the namespace head that it starts from.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HeadConfirmation {
-    /// As the read's consistency asks.
-    Consistency(Consistency),
+    /// As the read's consistency asks, or as the runtime's default
+    /// consistency when the read sets none.
+    Consistency(Option<Consistency>),
     /// As a load of the namespace's immutable identity, or a check before a
     /// write that commits through the writer session, needs: the writer
     /// position as it is, in a runtime with the namespace's writer session,
@@ -47,9 +48,15 @@ pub(crate) enum HeadConfirmation {
     View,
 }
 
+impl From<Option<Consistency>> for HeadConfirmation {
+    fn from(consistency: Option<Consistency>) -> Self {
+        Self::Consistency(consistency)
+    }
+}
+
 impl From<Consistency> for HeadConfirmation {
     fn from(consistency: Consistency) -> Self {
-        Self::Consistency(consistency)
+        Self::Consistency(Some(consistency))
     }
 }
 
@@ -209,6 +216,7 @@ impl RuntimeCore {
     ) -> Result<RuntimeReadContext> {
         let (consistency, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
+                let consistency = consistency.unwrap_or(self.inner.config.consistency);
                 (consistency, self.max_staleness_ms(consistency))
             }
             HeadConfirmation::View => (Consistency::Strong, Some(READ_REVALIDATION_BOUND_MS)),

@@ -155,7 +155,7 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         let options = ReadFileStreamOptions {
             consistency,
@@ -181,7 +181,7 @@ impl ReadTarget {
     pub(super) async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
-        consistency: Consistency,
+        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         let options = ReadFileStreamOptions {
             consistency,
@@ -239,7 +239,11 @@ impl ReadTarget {
 
     /// A snapshot's feed has no consistency setting, and the handler rejects
     /// `consistency` with a `snapshot_id` before it reads.
-    fn list_changes(&self, after_seq: ChangeSeq, consistency: Consistency) -> loonfs::ChangesPager {
+    fn list_changes(
+        &self,
+        after_seq: ChangeSeq,
+        consistency: Option<Consistency>,
+    ) -> loonfs::ChangesPager {
         match self {
             Self::Snapshot(view) => view.list_changes(after_seq),
             Self::Live(namespace) => {
@@ -310,7 +314,6 @@ pub(super) async fn list_path_entries(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let listing = target
@@ -370,7 +373,6 @@ pub(super) async fn get_path_entry(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let entry = target
@@ -432,7 +434,6 @@ pub(super) async fn get_file_content(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
@@ -717,7 +718,6 @@ pub(super) async fn list_changes(
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
         snapshot_id.is_some(),
-        state.options.consistency,
     )?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let response = target

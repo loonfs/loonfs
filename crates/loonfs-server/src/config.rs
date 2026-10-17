@@ -284,7 +284,8 @@ pub struct ServerConfig {
     /// every read. Unset keeps the runtime default of 1000. At most 1155000,
     /// the revalidation bound.
     pub max_staleness_ms: Option<u64>,
-    /// The consistency of a live read that doesn't set `consistency`.
+    /// The runtime's default consistency, which every read that doesn't set
+    /// its own takes.
     #[serde(default)]
     pub consistency: ReadConsistency,
     /// Bytes retained by all read, publication, and fold memos. Zero keeps
@@ -346,10 +347,12 @@ pub enum ReadConsistency {
 }
 
 impl ReadConsistency {
-    /// Returns the consistency of a read that doesn't set its own.
+    /// Returns the runtime's default consistency.
     pub fn consistency(self) -> loonfs::Consistency {
         match self {
-            Self::Eventual => loonfs::Consistency::default(),
+            Self::Eventual => loonfs::Consistency::Eventual {
+                max_staleness: None,
+            },
             Self::Strong => loonfs::Consistency::Strong,
         }
     }

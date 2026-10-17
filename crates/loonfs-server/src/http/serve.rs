@@ -263,7 +263,6 @@ pub async fn app(
             .auth_token
             .clone()
             .map_or(AuthPolicy::Unauthenticated, AuthPolicy::BearerToken),
-        consistency: config.consistency.consistency(),
     });
     let binding = BindingState {
         request_limit: Some(loonfs_http::RequestLimit::new(
@@ -350,6 +349,7 @@ pub(super) async fn build_handles(
     if let Some(interval_ms) = config.max_staleness_ms {
         builder = builder.max_staleness_ms(interval_ms);
     }
+    builder = builder.consistency(config.consistency.consistency());
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }

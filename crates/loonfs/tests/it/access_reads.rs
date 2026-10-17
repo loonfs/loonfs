@@ -275,9 +275,9 @@ async fn check_eventual_read_access(content_size: usize) {
         .with_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
     let eventual = ReadFileOptions {
-        consistency: Consistency::Eventual {
+        consistency: Some(Consistency::Eventual {
             max_staleness: None,
-        },
+        }),
     };
     let read = namespace
         .read_file_with_options("/team/file", &eventual)
@@ -431,7 +431,12 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     }
     assert_eq!(
         namespace
-            .read_file_with_options("/team/file", &ReadFileOptions { consistency })
+            .read_file_with_options(
+                "/team/file",
+                &ReadFileOptions {
+                    consistency: Some(consistency),
+                },
+            )
             .await
             .expect_err("the read observes the revocation")
             .code(),
