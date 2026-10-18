@@ -17,9 +17,9 @@ mod tests;
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 /// Default limit for namespace head anchors and WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
-/// Default limit for completed upload sessions, 16 MiB (enough for about
+/// Default limit for completed upload sessions, 32 MiB (enough for about
 /// 110,000 sessions).
-pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
 /// Default limit for decoded WAL objects and small content objects: 128 MiB.
 pub const DEFAULT_MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;
 /// Default size of the largest content object the cache keeps: 1 MiB.
@@ -50,10 +50,8 @@ pub(crate) enum CacheLookup {
 /// [`LoonFs`](crate::LoonFs) keeps its own head anchors, WAL-tail
 /// projections, and completed upload sessions. The limits bound the whole
 /// cache, and the least recently used entry is evicted first, whichever
-/// runtime it belongs to. Completed upload sessions are the exception: when
-/// an insert takes them over their limit, the cache drops all of them.
-/// Clones share the cache. A runtime built without one creates a private
-/// cache with the default limits.
+/// runtime it belongs to. Clones share the cache. A runtime built without
+/// one creates a private cache with the default limits.
 #[derive(Clone)]
 pub struct MetadataCache {
     inner: Arc<MetadataCacheInner>,
@@ -103,6 +101,7 @@ impl MetadataCache {
         let segments = self.inner.segment_blocks.stats();
         let head_state = self.inner.head_state.stats();
         let objects = self.inner.objects.stats();
+        let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
             segment_hits: segments.hits,
             segment_misses: segments.misses,
@@ -129,6 +128,10 @@ impl MetadataCache {
             content_object_inserts: objects.content_inserts,
             object_evictions: objects.evictions,
             object_bytes: objects.cached_decoded_bytes,
+            completed_session_hits: completed_sessions.hits,
+            completed_session_misses: completed_sessions.misses,
+            completed_session_evictions: completed_sessions.evictions,
+            completed_session_bytes: completed_sessions.cached_decoded_bytes,
         }
     }
 
@@ -254,8 +257,8 @@ impl MetadataCacheBuilder {
     ///
     /// A pass doesn't read the record of a completed session that the cache
     /// keeps. Defaults to [`DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES`]. Zero
-    /// keeps none, so every pass reads every session's record. When an insert
-    /// takes the sessions over the limit, the cache drops all of them.
+    /// keeps none, so every pass reads every session's record. The least
+    /// recently used session is evicted first.
     pub fn max_completed_upload_session_bytes(
         mut self,
         max_completed_upload_session_bytes: usize,
@@ -369,4 +372,15 @@ pub struct MetadataCacheStats {
     /// Bytes charged to WAL objects and content objects now, including their
     /// keys and the cache's own allocation for each entry.
     pub object_bytes: usize,
+    /// Upload session lookups that found a completed session in the cache.
+    pub completed_session_hits: usize,
+    /// Upload session lookups that found no session in the cache, so the
+    /// pass read the session's record.
+    pub completed_session_misses: usize,
+    /// Completed upload sessions evicted to stay within the completed
+    /// upload session limit.
+    pub completed_session_evictions: usize,
+    /// Bytes charged to completed upload sessions now, including their keys
+    /// and the cache's own allocation for each entry.
+    pub completed_session_bytes: usize,
 }
