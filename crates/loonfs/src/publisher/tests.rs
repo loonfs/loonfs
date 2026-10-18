@@ -198,7 +198,10 @@ fn lost_wal_put_ack_store(
     }, InjectedError::Transport("lost WAL put acknowledgement".to_owned())).apply_then_fail()
 }
 
-fn test_runtime_core(store: SharedStore) -> RuntimeCore {
+fn test_runtime_core(
+    store: SharedStore,
+    metadata_run_policy: loonfs_core::MetadataRunPolicy,
+) -> RuntimeCore {
     let execution_budget = ExecutionBudget::default();
     let metadata_cache =
         MetadataCache::default().bind(&store, execution_budget.read_working_memory(), None);
@@ -212,7 +215,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
             consistency: crate::Consistency::Eventual {
                 max_staleness: None,
             },
-            metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
+            metadata_run_policy,
             trace_mode: TraceMode::Remote,
             store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
         },
@@ -243,7 +246,7 @@ struct TestRuntime {
 
 fn test_runtime(store: SharedStore) -> TestRuntime {
     TestRuntime {
-        core: test_runtime_core(store),
+        core: test_runtime_core(store, loonfs_core::MetadataRunPolicy::default()),
         bits: test_writer_bits(),
     }
 }
@@ -1437,6 +1440,63 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         create_directory_request("too-late", "too-late"),
     );
     assert_matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. }));
+}
+
+/// Checks that a deletion folds the WAL tail with the runtime's configured
+/// run policy, not the default policy.
+#[tokio::test]
+async fn deletion_folds_the_tail_with_the_configured_run_policy() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let one_row_segments = loonfs_core::MetadataRunPolicy {
+        max_rows_per_segment: NonZeroUsize::MIN,
+        ..loonfs_core::MetadataRunPolicy::default()
+    };
+    let runtime = TestRuntime {
+        core: test_runtime_core(store.clone(), one_row_segments),
+        bits: test_writer_bits(),
+    };
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    for name in ["a", "b"] {
+        let receiver = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request(name, name),
+        );
+        recv_commit(receiver, name).await;
+    }
+    let diagnostics = loonfs_core::cache::load_namespace_diagnostics(
+        store.as_ref(),
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("load namespace diagnostics");
+    assert!(diagnostics.wal_tail_objects > 0, "the tail is unfolded");
+
+    publisher
+        .submit_delete(DeleteNamespaceOptions::default())
+        .await
+        .expect("delete");
+    let deleted =
+        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .expect("load the deleted manifest")
+            .state;
+    let payload = deleted.envelope.payload();
+    assert!(payload.status.is_deleted());
+    let row_counts: Vec<u64> = payload
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .map(|segment| segment.row_count)
+        .collect();
+    assert!(
+        row_counts.len() > 1 && row_counts.iter().all(|rows| *rows == 1),
+        "every folded segment has one row: {row_counts:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

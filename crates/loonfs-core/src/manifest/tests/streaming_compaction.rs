@@ -3048,6 +3048,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
             now_ms: 5_000,
         },
+        MetadataRunPolicy::default(),
     )
     .await
     .expect("delete while the job runs");

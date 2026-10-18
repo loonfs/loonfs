@@ -368,6 +368,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         &namespace_id,
         DeleteNamespaceOptions::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -536,6 +537,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &source,
         DeleteNamespaceOptions::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -582,6 +584,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &clone,
         DeleteNamespaceOptions::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -2379,6 +2382,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         &clone,
         DeleteNamespaceOptions::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -3076,6 +3080,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         namespace_id,
         Default::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -3134,6 +3139,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             &namespace_id,
             Default::default(),
             &setup,
+            crate::manifest::MetadataRunPolicy::default(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             crate::test_support::std_timer(),
         )
@@ -3657,6 +3663,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         &namespace_id,
         Default::default(),
         &context(deleted_at),
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )

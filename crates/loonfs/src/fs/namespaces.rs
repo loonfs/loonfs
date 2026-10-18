@@ -205,7 +205,12 @@ pub(crate) async fn delete_namespace_with_engine(
 ) -> Result<DeleteNamespaceResponse> {
     let context = core.mutation_context(&writer.identity);
     let result = engine
-        .delete_namespace(core.store(), options, &context)
+        .delete_namespace(
+            core.store(),
+            options,
+            &context,
+            core.inner.config.metadata_run_policy,
+        )
         .await
         .map_err(Error::from);
     // What follows a deletion depends on the namespace being deleted, not on

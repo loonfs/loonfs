@@ -37,7 +37,12 @@ async fn deletion_budget_includes_writer_acquisition() {
     )
     .monotonic_timer(clock.clone());
     store.block_next();
-    let delete = publisher.delete_namespace(&store, Default::default(), &context);
+    let delete = publisher.delete_namespace(
+        &store,
+        Default::default(),
+        &context,
+        crate::manifest::MetadataRunPolicy::default(),
+    );
     let delay = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
@@ -97,7 +102,12 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         namespace_id,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
-    .delete_namespace(&store, Default::default(), &context)
+    .delete_namespace(
+        &store,
+        Default::default(),
+        &context,
+        crate::manifest::MetadataRunPolicy::default(),
+    )
     .await
     .expect("delete");
     let candidate = CommitCandidate::new(CommitIntent::single(
@@ -207,6 +217,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             acquired_writer.clone(),
             &context,
             &deadline,
+            crate::manifest::MetadataRunPolicy::default(),
             None,
             &tokio::sync::Semaphore::new(32),
         )

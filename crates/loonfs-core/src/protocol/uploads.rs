@@ -2577,6 +2577,7 @@ mod tests {
             namespace_id,
             Default::default(),
             &context(3_000),
+            crate::manifest::MetadataRunPolicy::default(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             crate::test_support::std_timer(),
         )
