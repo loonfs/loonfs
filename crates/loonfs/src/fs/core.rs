@@ -172,8 +172,9 @@ impl RuntimeCore {
         Arc::clone(&self.inner.metadata_segment_cache)
     }
 
-    /// This core's view of the head-state cache, where publishers keep their
-    /// WAL tails between publication units.
+    /// This core's view of the head-state cache, where each writer session's
+    /// position becomes the namespace's cached head, with its WAL tail, when
+    /// the position ends.
     pub(crate) fn head_state(&self) -> Arc<HeadStateCache> {
         Arc::clone(&self.inner.head_state)
     }

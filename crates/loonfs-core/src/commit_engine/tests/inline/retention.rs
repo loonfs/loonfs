@@ -285,7 +285,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let old = load_metadata_view(
         &store,
         &namespace_id,
-        ReadLoadContext::pinned_head(&pinned.head, &pinned.basis, None, None, None),
+        ReadLoadContext::pinned_head(&pinned.head, &pinned.basis, None, None, None, None),
     )
     .await
     .expect("fresh snapshot view");

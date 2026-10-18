@@ -2,7 +2,6 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_core::cache::HeadStateCache;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
     load_checkpoint_statistics, load_namespace_current_manifest, load_namespace_statistics,
@@ -86,8 +85,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         let mut engine = NamespaceCommitEngine::new(
             ns.clone(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
-        )
-        .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
+        );
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitIntent::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
@@ -128,7 +126,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 .activity,
             initial.activity
         );
-        let input = cached.then(|| engine.wal_fold_input().expect("cached projection"));
+        let input = cached.then(|| engine.wal_fold_input().expect("the position's tail"));
         loonfs_core::fold_wal_tail(
             &store,
             None,

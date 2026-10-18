@@ -1,7 +1,9 @@
 //! Reads of published inline content and projection accounting.
 
 use super::*;
-use crate::cache::{HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheKey};
+use crate::cache::{
+    HeadStateCache, HeadStateCacheStats, MetadataSegmentCache, WalTailProjectionCacheKey,
+};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
@@ -19,6 +21,7 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
         segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
         head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
         object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        tail: None,
     }
 }
 
@@ -188,14 +191,11 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .await;
     assert!(result.results[0].is_ok());
     let state = publisher.read_position().expect("published state");
+    let tail = state.tail;
     let context = RuntimeReadContext {
-        head_state: Arc::clone(publisher.head_state.as_ref().expect("head state")),
+        tail: Some(Arc::clone(&tail)),
         ..read_context(state.head, state.basis)
     };
-    let tail = context
-        .head_state
-        .get_tail(&cache_key(&context))
-        .expect("the publish put its tail in the head-state cache");
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
     assert!(
@@ -207,7 +207,6 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
                 .sum::<usize>()
                 + value.bytes().len()
     );
-    assert!(context.head_state.stats().cached_decoded_bytes >= tail_bytes);
     let cloned = tail.as_ref().clone();
     assert_eq!(
         tail.content(value.content_ref()).expect("bytes").pieces[0]
@@ -245,11 +244,15 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .key()
         .starts_with(&wal_prefix(&publisher.namespace_id))));
     assert_no_content_requests(&store);
+    assert_eq!(
+        context.head_state.stats(),
+        HeadStateCacheStats::default(),
+        "reads from the position's tail neither look up nor insert a tail"
+    );
 
-    let old_key = cache_key(&context);
     let old_tail = Arc::as_ptr(&tail) as usize;
     // Holding the tail here would make the publish copy it.
-    drop(tail);
+    drop((tail, context));
     let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
     let published = publisher
         .publish_batch(
@@ -261,17 +264,10 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .await;
     assert!(published.results[0].is_ok());
     let later = publisher.read_position().expect("later state");
-    let new_key = cache_key(&read_context(later.head, later.basis));
-    assert!(context.head_state.get_tail(&old_key).is_none());
     assert_eq!(
-        Arc::as_ptr(
-            &context
-                .head_state
-                .get_tail(&new_key)
-                .expect("the publish moved its tail to the new head")
-        ) as usize,
+        Arc::as_ptr(&later.tail) as usize,
         old_tail,
-        "the publish extends the cached tail in place"
+        "the publish extends the position's tail in place"
     );
 }
 
@@ -290,15 +286,7 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
             )
             .await;
         assert!(published.results[0].is_ok());
-        let state = publisher.read_position().expect("published state");
-        tails.push(
-            publisher
-                .head_state
-                .as_ref()
-                .expect("head state")
-                .get_tail(&cache_key(&read_context(state.head, state.basis)))
-                .expect("the publish cached its tail"),
-        );
+        tails.push(publisher.read_position().expect("published state").tail);
     }
     let (held, extended) = (&tails[0], &tails[1]);
     assert!(

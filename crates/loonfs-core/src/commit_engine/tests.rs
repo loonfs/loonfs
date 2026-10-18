@@ -352,8 +352,11 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .expect("bootstrap");
 
     let session = SharedWriterSessionStatus::default();
-    let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-        .writer_session(Arc::clone(&session));
+    let mut engine_a1 = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .writer_session(Arc::clone(&session));
     engine_a1
         .publish_batch(
             &store,
@@ -462,8 +465,11 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-        .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .monotonic_timer(timer.clone());
     for (name, advance_ms) in [
         ("alpha", 0),
         ("beta", WAL_PUBLISH_BUDGET_MS - 1),
@@ -532,8 +538,11 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-        .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .monotonic_timer(timer.clone());
     publish_one(&mut engine, &store, &writer, "alpha").await;
     let basis = engine.read_position().expect("landed").basis.manifest_no();
 
@@ -601,8 +610,11 @@ async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloa
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-        .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .monotonic_timer(timer.clone());
     publish_one(&mut engine, &store, &writer, "alpha").await;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
     publish_one(&mut engine, &store, &writer, "beta").await;
@@ -680,9 +692,12 @@ async fn writer_after_one_publish(
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-        .monotonic_timer(timer.clone())
-        .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .monotonic_timer(timer.clone())
+    .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
     publish_one(&mut engine, store, &writer, "alpha").await;
     (engine, timer, writer)
 }
@@ -812,40 +827,6 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
                 .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
         "{operations:?}"
     );
-}
-
-/// Checks that a session's fold of a tail that the head-state cache no
-/// longer holds loads the tail from the store and still moves the position
-/// to the fold's manifest.
-#[tokio::test]
-async fn a_fold_of_an_evicted_tail_moves_the_position_to_its_manifest() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, _writer) = writer_after_one_publish(&store, &namespace_id).await;
-    let before = engine.read_position().expect("a position after a publish");
-    engine
-        .head_state
-        .as_ref()
-        .expect("head-state cache")
-        .invalidate_tail(&before.tail_key);
-    assert!(engine.begin_wal_fold().is_none(), "the tail was evicted");
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        None,
-        &Deadline::start(timer),
-        crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
-    )
-    .await
-    .expect("fold");
-    assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
-    engine.record_wal_fold(Ok(&folded));
-    let after = engine.read_position().expect("the position moved");
-    assert_eq!(after.basis, folded.basis);
-    assert_eq!(after.head.seq, before.head.seq);
 }
 
 /// Checks that a writer at the write stop whose fold finds its tail already
@@ -1007,8 +988,8 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
 /// `NamespaceReadState` as the manifest it replaces, and that both manifests
 /// list runs.
 ///
-/// `PublishTailPosition::reanchor_after_compaction` depends on both facts to
-/// keep the cached WAL tail after a compaction.
+/// `PublishTailPosition::reanchor_after_publish` depends on both facts to
+/// keep the position's WAL tail after a compaction.
 #[tokio::test]
 async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
     use crate::manifest::load_namespace_manifest_envelope;
@@ -1037,7 +1018,7 @@ async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
 /// Checks that a writer moved to its own compaction's manifest publishes on
 /// that manifest without reading the WAL tail or the hint again.
 #[tokio::test]
-async fn a_writer_moved_after_its_own_compaction_keeps_its_cached_tail() {
+async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
@@ -1091,18 +1072,8 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &store, &writer, "gamma").await;
-    let replaced = engine.read_position().expect("a position").tail_key;
 
     engine.record_manifest_published(published.clone());
-    assert!(
-        engine
-            .head_state
-            .as_ref()
-            .expect("head-state cache")
-            .get_tail(&replaced)
-            .is_none(),
-        "the move removes the tail under the position's key from before the move"
-    );
     let moved = engine.wal_fold_input().expect("the position moved");
     assert_eq!(moved.basis.manifest(), published.manifest());
     assert_eq!(moved.wal_tail_objects, 1);

@@ -244,6 +244,11 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     if let Some(tail) = tail.filter(|_| extended) {
         context.head_state.insert_tail(cache_key, tail);
     }
+    if state.seq != context.head.seq {
+        // The context's tail is the tail at the head that the probe moved
+        // past, so the context's reads look the new head's tail up instead.
+        context.tail = None;
+    }
     context.head = state;
     Ok(true)
 }

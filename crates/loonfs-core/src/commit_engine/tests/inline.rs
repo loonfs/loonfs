@@ -44,7 +44,10 @@ async fn setup() -> (
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id);
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    );
     engine
         .session_writer_epoch(&store, &context)
         .await
