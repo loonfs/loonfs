@@ -360,6 +360,7 @@ async fn bindings_share_one_capacity() {
     let one_binding = measured.stats();
     let cache = MetadataCache::builder()
         .max_segment_bytes(one_binding.segment_bytes)
+        .max_head_bytes(one_binding.head_bytes)
         .max_head_state_bytes(one_binding.head_state_bytes)
         .build();
 
@@ -372,11 +373,13 @@ async fn bindings_share_one_capacity() {
         stats.segment_bytes <= one_binding.segment_bytes,
         "{stats:?}"
     );
+    assert!(stats.head_bytes <= one_binding.head_bytes, "{stats:?}");
     assert!(
         stats.head_state_bytes <= one_binding.head_state_bytes,
         "{stats:?}"
     );
     assert!(stats.segment_evictions > 0, "{stats:?}");
+    assert!(stats.head_evictions > 0, "{stats:?}");
     assert!(stats.head_state_evictions > 0, "{stats:?}");
 }
 

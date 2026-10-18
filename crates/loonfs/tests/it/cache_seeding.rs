@@ -339,21 +339,34 @@ fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, Names
 }
 
 /// What one namespace's head state weighs after a cold read of its file:
-/// the head anchor and the WAL-tail projection.
-fn one_namespace_head_state_bytes() -> usize {
+/// the head anchor in the head cache, and the WAL-tail projection in the
+/// tail cache.
+fn one_namespace_head_state_bytes() -> HeadStateBytes {
     let temp_dir = tempdir().expect("tempdir");
     let shared_store = store(temp_dir.path());
     let (first, _) = two_namespaces_with_one_file(shared_store.clone());
     let fs = open_runtime(shared_store, "head-state-measure");
     fs.read_file_blocking(&first, "/file.txt")
         .expect("cold read");
-    fs.metadata_cache_stats().head_state_bytes
+    let stats = fs.metadata_cache_stats();
+    HeadStateBytes {
+        head: stats.head_bytes,
+        tail: stats.head_state_bytes,
+    }
+}
+
+/// The bytes that one namespace's head anchor and WAL-tail projection
+/// weigh in their caches.
+struct HeadStateBytes {
+    head: usize,
+    tail: usize,
 }
 
 #[test]
 fn head_state_evicts_by_bytes_anchors_included() {
-    // Room for one namespace's head state, not for two.
-    let budget = one_namespace_head_state_bytes() * 5 / 4;
+    // Room for one namespace's head and tail, not for two.
+    let one = one_namespace_head_state_bytes();
+    let (head_budget, budget) = (one.head * 5 / 4, one.tail * 5 / 4);
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
@@ -364,6 +377,7 @@ fn head_state_evicts_by_bytes_anchors_included() {
     let fs = open_runtime_with(raw_store.store(), "head-state-budget", |builder| {
         builder.metadata_cache(
             MetadataCache::builder()
+                .max_head_bytes(head_budget)
                 .max_head_state_bytes(budget)
                 .max_object_bytes(0)
                 .build(),
@@ -375,8 +389,8 @@ fn head_state_evicts_by_bytes_anchors_included() {
     fs.read_file_blocking(&other, "/file.txt")
         .expect("cache the other namespace's head state");
     let after_other = fs.metadata_cache_stats();
-    assert!(after_other.head_state_evictions > 0);
-    assert!(after_other.head_state_bytes <= budget);
+    assert!(after_other.head_evictions > 0 && after_other.head_state_evictions > 0);
+    assert!(after_other.head_bytes <= head_budget && after_other.head_state_bytes <= budget);
 
     raw_store.reset_control_get_counts();
     let file = fs
@@ -446,7 +460,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
         0,
         "no namespace's head was dropped and loaded again"
     );
-    assert_eq!(reader.metadata_cache().stats().head_state_evictions, 0);
+    assert_eq!(reader.metadata_cache().stats().head_evictions, 0);
 }
 
 /// Checks that a WAL tail heavier than the head-state budget isn't kept, so
@@ -454,9 +468,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
 /// store, and that the read sends nothing else.
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
-    // Half of a namespace's anchor and tail together has no room for the
-    // tail, which outweighs the anchor.
-    let budget = one_namespace_head_state_bytes() / 2;
+    let budget = one_namespace_head_state_bytes().tail / 2;
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("first");
     let recording = Arc::new(RecordingStore::new(

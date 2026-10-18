@@ -501,11 +501,15 @@ pub struct LocalCacheConfig {
 }
 
 /// The server's `[metadata_cache]` table: the limits of the one metadata
-/// cache the server builds at startup. Omitted fields are derived when sized.
+/// cache the server builds at startup.
+///
+/// Omitted fields are derived when sized, except `max_head_bytes`, which
+/// defaults to 16 MiB with or without sizing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCacheConfig {
     pub max_segment_bytes: Option<usize>,
+    pub max_head_bytes: Option<usize>,
     pub max_head_state_bytes: Option<usize>,
     pub max_object_bytes: Option<usize>,
 }
@@ -835,6 +839,7 @@ pub(crate) struct MemorySizing {
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
+    head: MemoryTerm,
     head_state: MemoryTerm,
     object: MemoryTerm,
     pub(crate) grep: MemoryTerm,
@@ -846,9 +851,10 @@ pub(crate) struct MemorySizing {
 }
 
 impl MemorySizing {
-    fn terms(&self) -> [(&MemoryTerm, usize); 7] {
+    fn terms(&self) -> [(&MemoryTerm, usize); 8] {
         [
             (&self.segment, 1),
+            (&self.head, 1),
             (&self.head_state, 1),
             (&self.object, 1),
             (&self.grep, usize::from(self.serves_grep)),
@@ -861,6 +867,7 @@ impl MemorySizing {
     pub(crate) fn metadata_cache(&self) -> MetadataCache {
         MetadataCache::builder()
             .max_segment_bytes(self.segment.bytes)
+            .max_head_bytes(self.head.bytes)
             .max_head_state_bytes(self.head_state.bytes)
             .max_object_bytes(self.object.bytes)
             .build()
@@ -946,9 +953,18 @@ impl ServerConfig {
             ),
         ];
         let headroom = limit.unwrap_or(0) / 10;
+        // The head cache's budget isn't a share of managed memory, because a
+        // head's size depends on the namespace, not on the host.
+        let head = MemoryTerm::new(
+            "metadata_cache.max_head_bytes",
+            self.metadata_cache.max_head_bytes,
+            None,
+            loonfs::DEFAULT_MAX_HEAD_BYTES,
+        );
         let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
-        let managed =
-            (limit.unwrap_or(0) as u128).saturating_sub(fixed_bytes + headroom as u128) as usize;
+        let managed = (limit.unwrap_or(0) as u128)
+            .saturating_sub(fixed_bytes + headroom as u128 + head.bytes as u128)
+            as usize;
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
         let serves_grep = self.grep.mode.serves();
@@ -975,6 +991,7 @@ impl ServerConfig {
                 share(if serves_grep { 30 } else { 40 }),
                 loonfs::DEFAULT_MAX_SEGMENT_BYTES,
             ),
+            head,
             head_state: MemoryTerm::new(
                 "metadata_cache.max_head_state_bytes",
                 self.metadata_cache.max_head_state_bytes,
@@ -1143,26 +1160,33 @@ root = "unused"
                 [134_217_728, 494_927_872, 201_326_592]
             );
             assert_eq!(memory.headroom, 429_496_729);
-            assert_eq!(memory.managed, 3_034_998_375);
+            assert_eq!(
+                (memory.head.bytes, memory.head.source),
+                (16_777_216, "default"),
+                "the head budget isn't derived"
+            );
+            assert_eq!(memory.managed, 3_018_221_159);
             assert_eq!(
                 memory.segment.bytes,
                 if mode.serves() {
-                    910_499_512
+                    905_466_347
                 } else {
-                    1_213_999_350
+                    1_207_288_463
                 }
             );
-            assert_eq!(memory.head_state.bytes, 303_499_837);
-            assert_eq!(memory.object.bytes, 303_499_837);
+            assert_eq!(memory.head_state.bytes, 301_822_115);
+            assert_eq!(memory.object.bytes, 301_822_115);
             assert_eq!(
                 memory.grep.bytes,
-                if mode.serves() { 303_499_837 } else { 0 }
+                if mode.serves() { 301_822_115 } else { 0 }
             );
-            assert_eq!(memory.read_working.bytes, 606_999_675);
-            assert_eq!(memory.publication.bytes, 303_499_837);
-            assert_eq!(memory.merge_input.bytes, 151_749_918);
+            assert_eq!(memory.read_working.bytes, 603_644_231);
+            assert_eq!(memory.publication.bytes, 301_822_115);
+            assert_eq!(memory.merge_input.bytes, 150_911_057);
             for (term, _) in memory.terms() {
-                assert_eq!(term.source, "derived");
+                if term.name != memory.head.name {
+                    assert_eq!(term.source, "derived");
+                }
             }
         }
         assert_eq!(config.max_concurrent_reads, 64);
@@ -1187,7 +1211,7 @@ max_segment_bytes = 67108864
         let memory = config.validate().expect("smaller segment cache fits");
         assert_eq!(memory.segment.bytes, 67_108_864);
         assert_eq!(memory.segment.source, "set");
-        assert_eq!(memory.head_state.bytes, 303_499_837);
+        assert_eq!(memory.head_state.bytes, 301_822_115);
         config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
         let error = config.validate().expect_err("overrides must fit");
         assert!(error
@@ -1206,6 +1230,7 @@ max_read_working_bytes = 0
 max_merge_input_bytes = 67108864
 [metadata_cache]
 max_segment_bytes = 67108864
+max_head_bytes = 8388608
 max_head_state_bytes = 0
 max_object_bytes = 16777216
 [publication]
@@ -1224,6 +1249,7 @@ max_cache_bytes = 0
             memory.terms().map(|(term, count)| (term.bytes, count)),
             [
                 (67_108_864, 1),
+                (8_388_608, 1),
                 (0, 1),
                 (16_777_216, 1),
                 (0, 1),
@@ -1258,6 +1284,7 @@ max_cache_bytes = 0
                 "managed",
                 "268435456",
                 "metadata_cache.max_segment_bytes",
+                "metadata_cache.max_head_bytes",
                 "metadata_cache.max_head_state_bytes",
                 "metadata_cache.max_object_bytes",
                 "grep.max_cache_bytes",
@@ -1281,6 +1308,7 @@ max_cache_bytes = 0
             .expect("unsized config");
         assert!(memory.limit.is_none());
         assert_eq!(memory.segment.bytes, 268_435_456);
+        assert_eq!(memory.head.bytes, 16_777_216);
         assert_eq!(memory.head_state.bytes, 67_108_864);
         assert_eq!(memory.object.bytes, 134_217_728);
         assert_eq!(memory.grep.bytes, 268_435_456);
@@ -1319,7 +1347,7 @@ max_cache_bytes = 0
         let memory = memory_config("")
             .memory_sizing(limit)
             .expect("cgroup sizes config");
-        assert_eq!(memory.managed, 3_034_998_375);
+        assert_eq!(memory.managed, 3_018_221_159);
         assert_eq!(memory.limit.expect("cgroup limit").source, "derived");
     }
 
@@ -2361,6 +2389,7 @@ max_read_working_bytes = 8192
 
 [metadata_cache]
 max_segment_bytes = 16384
+max_head_bytes = 1024
 max_head_state_bytes = 4096
 max_object_bytes = 2048
 
@@ -2379,6 +2408,7 @@ root = "/tmp/loonfs-server"
             config.metadata_cache,
             super::MetadataCacheConfig {
                 max_segment_bytes: Some(16384),
+                max_head_bytes: Some(1024),
                 max_head_state_bytes: Some(4096),
                 max_object_bytes: Some(2048),
             }
@@ -2395,6 +2425,7 @@ writer_id = "loonfs-server"
 
 [metadata_cache]
 max_segment_bytes = 0
+max_head_bytes = 0
 max_head_state_bytes = 0
 max_object_bytes = 0
 
@@ -2409,6 +2440,7 @@ root = "/tmp/loonfs-server"
             config.metadata_cache,
             super::MetadataCacheConfig {
                 max_segment_bytes: Some(0),
+                max_head_bytes: Some(0),
                 max_head_state_bytes: Some(0),
                 max_object_bytes: Some(0),
             }

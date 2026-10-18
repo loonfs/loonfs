@@ -80,15 +80,15 @@ fixed = 128 MiB
       + max_connections x 472 KiB
       + (max_concurrent_uploads + max_concurrent_downloads) x 8 MiB
 headroom = 10% of memory_limit_bytes
-managed = memory_limit_bytes - fixed - headroom
+managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
 ```
 
-The fixed terms cover the process's own cost, response data that the HTTP transport retains, and transfer chunks. The headroom covers memory that the allocator retains. Startup fails if managed memory is below 256 MiB, or if the final pools plus the fixed costs and headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
+The fixed terms cover the process's own cost, response data that the HTTP transport retains, and transfer chunks. The headroom covers memory that the allocator retains. The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of managed memory, because the memory that namespace heads need depends on the namespaces that the server reads, not on the host. It's 16 MiB unless you set it, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus the fixed costs and headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
 
 | Pool | Share of managed memory | Setting |
 | --- | ---: | --- |
 | Metadata segment cache | 30% | `metadata_cache.max_segment_bytes` |
-| Head state cache | 10% | `metadata_cache.max_head_state_bytes` |
+| Head state cache (WAL tails) | 10% | `metadata_cache.max_head_state_bytes` |
 | Object cache | 10% | `metadata_cache.max_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
 | Read working memory | 20% | `max_read_working_bytes` |
@@ -296,8 +296,10 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs_server_busy_rejections_total` | Counter, `kind` label | A concurrency refusal: `request`, `upload`, or `download`. Connections wait instead, so they don't increment this counter. |
 | `loonfs_namespace_head_cache_gets_total` | Counter, `result` label | A read that starts from the read cache looks up its namespace head: `hit` or `miss`. |
 | `loonfs.read_head.source` | Counter, `source` label | A read takes the namespace head it starts from: `position` when the server has the namespace's writer session, so the read sends no request to confirm the head except the session's check for a newer manifest, `anchor` when the head comes from the read cache and the read confirms it, or `eventual` when an `eventual` read takes the read cache's head within its maximum staleness, without a request. |
-| `loonfs_head_state_cache_evictions_total` | Counter | A namespace head or WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. A namespace head larger than the limit isn't cached, and each read of it loads it on its own. |
-| `loonfs_head_state_cache_retained_decoded_bytes` | Gauge | Bytes charged to the namespace heads and WAL-tail projections in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
+| `loonfs_head_cache_evictions_total` | Counter | A namespace head is evicted at the `metadata_cache.max_head_bytes` limit. A namespace head larger than the limit isn't cached, and each read of it loads it on its own. |
+| `loonfs_head_cache_retained_decoded_bytes` | Gauge | Bytes charged to the namespace heads in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
+| `loonfs_head_state_cache_evictions_total` | Counter | A WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. A WAL-tail projection never evicts a namespace head, because heads have a limit of their own. |
+| `loonfs_head_state_cache_retained_decoded_bytes` | Gauge | Bytes charged to the WAL-tail projections in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_metadata_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the entries in the metadata segment cache, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs.publisher.tail_replays` | Counter | A publish reads the WAL tail from the store, because the session has no position to start from. This happens on a session's first publish, after a failed publish, when a successor manifest or WAL object that another process wrote is found, after a fork of the namespace's head, and after about 19 minutes without confirming the basis. After a shorter quiet period, the session confirms the tip with two HEAD requests, and it doesn't read the tail again. A manifest that this runtime publishes itself doesn't cause a replay, because after a fold, a compaction, a checkpoint, a snapshot, or a retention advance in the same runtime, the session moves to the new manifest and keeps the tail above it. Garbage collection publishes no manifest, so it doesn't cause a replay either. |
 | `loonfs.publisher.sessions_open` | Gauge | Open writer sessions, and sessions whose admitted work is still finishing. A fenced session stops being counted once its work ends. |
@@ -356,7 +358,8 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | --- | --- | --- | --- | --- |
 | Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 30%, or 40% without grep. 256 MiB without a memory limit | Decoded metadata blocks and manifests | Steady |
 | Grep cache | `grep.max_cache_bytes` | Derived: 10%. 256 MiB without a memory limit | Decoded grep blocks and manifests when serving queries | Steady |
-| Head state | `metadata_cache.max_head_state_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached namespace heads and WAL tails for reads, for any number of namespaces | Steady |
+| Head cache | `metadata_cache.max_head_bytes` | 16 MiB, with or without a memory limit | Cached namespace heads for reads, about 18,000 namespaces at 0.9 KB each | Steady |
+| Head state | `metadata_cache.max_head_state_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
 | Object cache | `metadata_cache.max_object_bytes` | Derived: 10%. 128 MiB without a memory limit | Decoded WAL objects, and verified content objects of up to 1 MiB, that reads keep for later reads | Steady |
 | Publication queue | `publication.max_estimated_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |

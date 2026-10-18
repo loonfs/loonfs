@@ -16,23 +16,21 @@
 use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockKey, DecodedSegmentBlock,
-    KindCounters, SegmentCacheKey,
+    CheckStart, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
+    DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
 };
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
-use crate::shared_check::SharedCheck;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 /// The scope under which a shared cache keeps one runtime's head state.
 ///
@@ -268,32 +266,23 @@ impl MetadataSegmentCache {
     }
 }
 
-/// Counters and occupancy of the shared head state.
-///
-/// The first fields are the counters that every cache reports (see
-/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats)),
-/// and the rest count the lookups and inserts of WAL-tail projections.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HeadStateCacheStats {
-    pub hits: usize,
-    pub misses: usize,
-    pub inserts: usize,
-    pub evictions: usize,
-    pub evicted_decoded_bytes: usize,
-    /// Entries heavier than the whole budget, which are never kept.
-    pub rejections: usize,
-    pub rejected_decoded_bytes: usize,
-    pub cached_decoded_bytes: usize,
-    pub tail_hits: usize,
-    pub tail_misses: usize,
-    pub tail_inserts: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailProjectionCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
     pub head_seq: ChangeSeq,
+}
+
+impl DecodedBlockKey for WalTailProjectionCacheKey {
+    fn heap_bytes(&self) -> usize {
+        HeapBytes::heap_bytes(&self.namespace_id)
+    }
+}
+
+impl DecodedBlockKey for NamespaceId {
+    fn heap_bytes(&self) -> usize {
+        HeapBytes::heap_bytes(self)
+    }
 }
 
 /// A namespace head and the metadata basis it was read against, with the
@@ -317,9 +306,28 @@ pub struct CachedHead {
 }
 
 impl CachedHead {
-    /// The order that [`HeadStateCache::replace_head`] compares heads in.
+    /// The durable order that [`HeadStateCache::replace_head`] compares heads
+    /// in: head sequence, then manifest number.
     fn order(&self) -> (ChangeSeq, ManifestNo) {
         (self.head.seq, self.basis.manifest_no())
+    }
+
+    /// Returns whether this head replaces `cached`: whether it's newer in the
+    /// durable order, or the same head with a later confirmation and no
+    /// earlier one.
+    fn supersedes(&self, cached: &CachedHead) -> bool {
+        match self.order().cmp(&cached.order()) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                let checks = [
+                    (&cached.basis_checked, &self.basis_checked),
+                    (&cached.head_confirmed, &self.head_confirmed),
+                ];
+                checks.iter().all(|(cached, own)| own.age_at(cached) == 0)
+                    && checks.iter().any(|(cached, own)| cached.age_at(own) > 0)
+            }
+        }
     }
 
     fn heap_bytes(&self) -> usize {
@@ -327,64 +335,17 @@ impl CachedHead {
     }
 }
 
-/// What one runtime has learned about one namespace's head while a read or
-/// a writer session uses the record.
-///
-/// The head itself is an immutable [`CachedHead`] snapshot in the head-state
-/// cache, weighed when it's inserted and evicted like any other entry. The
-/// record is kept outside the cache's budget, with a few words and the head
-/// of the last refresh. It lives while a read or a writer session
-/// references it and goes away when the namespace is idle, which is when no
-/// read or position that predates a change can still install a head.
-#[derive(Debug, Default)]
-pub struct HeadRecord {
-    state: std::sync::Mutex<RecordState>,
-    /// The runtime's refreshes of the namespace's head, which the reads of
-    /// the namespace share. It keeps the head that the last refresh
-    /// returned, which the cache might have evicted since, until the next
-    /// refresh or until nothing references the record.
-    refresh: SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>>,
-}
-
-/// The state behind a [`HeadRecord`]'s lock.
-#[derive(Debug, Default)]
-struct RecordState {
-    /// The order of the newest head that the record installed or saw. It
-    /// stays after the cache evicts that head.
-    floor: Option<(ChangeSeq, ManifestNo)>,
-    /// How many times the runtime dropped the namespace's cached head for a
-    /// change of unknown effect. A load installs its head only if the
-    /// generation hasn't moved since the load started.
-    generation: u64,
-}
-
-impl HeadRecord {
-    /// Returns the record's generation, which a load takes before it sends
-    /// anything and passes to [`HeadStateCache::replace_head`].
-    pub fn generation(&self) -> u64 {
-        self.lock().generation
-    }
-
-    /// Returns the runtime's refreshes of the namespace's head, which the
-    /// reads of the namespace share.
-    pub fn refresh(&self) -> &SharedCheck<std::result::Result<Arc<CachedHead>, CoreError>> {
-        &self.refresh
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, RecordState> {
-        // A critical section under this lock compares heads and calls the
-        // head-state cache, which doesn't call back into the record, so the
-        // lock isn't poisoned by anything that the record's own code doesn't
-        // control.
-        self.state
-            .lock()
-            .expect("the head record lock should not be poisoned")
+impl DecodedBlock for Arc<CachedHead> {
+    fn weight(&self) -> usize {
+        arc_bytes::<CachedHead>() + CachedHead::heap_bytes(self)
     }
 }
 
-/// The number of head records the map keeps before its first scan for
-/// records that nothing references.
-const MIN_RECORDS_BEFORE_COMPACTING: usize = 64;
+impl DecodedBlock for Arc<ProjectedWalTail> {
+    fn weight(&self) -> usize {
+        ProjectedWalTail::decoded_bytes(self)
+    }
+}
 
 /// Returns `candidate` if it was taken in a later millisecond than `cached`.
 /// Two observations in the same millisecond keep `cached`, so a tie never
@@ -393,106 +354,42 @@ fn later(cached: &Observation, candidate: Observation) -> Option<Observation> {
     (cached.age_at(&candidate) > 0).then_some(candidate)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum HeadStateKey {
-    Head(NamespaceId),
-    Tail(WalTailProjectionCacheKey),
-}
-
-impl DecodedBlockKey for HeadStateKey {
-    fn heap_bytes(&self) -> usize {
-        match self {
-            Self::Head(namespace_id)
-            | Self::Tail(WalTailProjectionCacheKey { namespace_id, .. }) => {
-                HeapBytes::heap_bytes(namespace_id)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum HeadStateEntry {
-    Head(Arc<CachedHead>),
-    Tail(Arc<ProjectedWalTail>),
-}
-
-impl HeadStateEntry {
-    fn into_head(self) -> Option<Arc<CachedHead>> {
-        match self {
-            Self::Head(head) => Some(head),
-            Self::Tail(_) => None,
-        }
-    }
-
-    fn into_tail(self) -> Option<Arc<ProjectedWalTail>> {
-        match self {
-            Self::Tail(tail) => Some(tail),
-            Self::Head(_) => None,
-        }
-    }
-}
-
-impl DecodedBlock for HeadStateEntry {
-    fn weight(&self) -> usize {
-        match self {
-            Self::Head(head) => arc_bytes::<CachedHead>() + head.heap_bytes(),
-            Self::Tail(tail) => tail.decoded_bytes(),
-        }
-    }
-}
-
-/// Namespace heads and WAL-tail projections for every scope, under one
-/// byte budget and one recency order.
+/// Namespace heads and WAL-tail projections for every scope, each kind
+/// under its own byte budget and recency order, so a tail can't evict a
+/// head.
 pub struct SharedHeadState {
-    entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
-    tails: KindCounters,
-    records: std::sync::Mutex<HeadRecords>,
-}
-
-/// The live [`HeadRecord`]s of every scope.
-#[derive(Debug, Default)]
-struct HeadRecords {
-    records: HashMap<(CacheScope, NamespaceId), Weak<HeadRecord>>,
-    /// The map's length at which the next lookup drops the records that
-    /// nothing references. It doubles with the live records, so the scan
-    /// costs a constant amount per lookup on average.
-    compact_at: usize,
+    heads: DecodedBlockCache<(CacheScope, NamespaceId), Arc<CachedHead>>,
+    tails: DecodedBlockCache<(CacheScope, WalTailProjectionCacheKey), Arc<ProjectedWalTail>>,
 }
 
 impl std::fmt::Debug for SharedHeadState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SharedHeadState")
-            .field("stats", &self.stats())
+            .field("head_stats", &self.head_stats())
+            .field("tail_stats", &self.tail_stats())
             .finish_non_exhaustive()
     }
 }
 
 impl SharedHeadState {
-    pub fn new(max_decoded_bytes: usize) -> Self {
+    /// Returns head state that keeps up to `max_head_bytes` of namespace
+    /// heads and up to `max_tail_bytes` of WAL-tail projections.
+    pub fn new(max_head_bytes: usize, max_tail_bytes: usize) -> Self {
         Self {
-            entries: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
-            tails: KindCounters::default(),
-            records: std::sync::Mutex::default(),
+            heads: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_head_bytes)),
+            tails: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_tail_bytes)),
         }
     }
 
-    pub fn stats(&self) -> HeadStateCacheStats {
-        let entries = self.entries.stats();
-        let tails = self.tails.stats();
-        HeadStateCacheStats {
-            hits: entries.hits,
-            misses: entries.misses,
-            inserts: entries.inserts,
-            evictions: entries.evictions,
-            evicted_decoded_bytes: entries.evicted_decoded_bytes,
-            rejections: entries.rejections,
-            rejected_decoded_bytes: entries.rejected_decoded_bytes,
-            cached_decoded_bytes: entries.cached_decoded_bytes,
-            tail_hits: tails.hits,
-            tail_misses: tails.misses,
-            tail_inserts: tails.inserts,
-        }
+    /// Returns the counters and occupancy of the namespace heads.
+    pub fn head_stats(&self) -> DecodedBlockCacheStats {
+        self.heads.stats()
+    }
+
+    /// Returns the counters and occupancy of the WAL-tail projections.
+    pub fn tail_stats(&self) -> DecodedBlockCacheStats {
+        self.tails.stats()
     }
 }
 
@@ -508,176 +405,141 @@ impl HeadStateCache {
         Self { shared, scope }
     }
 
-    /// A view over head state no other view reads.
+    /// A view over head state no other view reads, with a budget of
+    /// `max_decoded_bytes` for heads and another for tails.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedHeadState::new(max_decoded_bytes)),
+            Arc::new(SharedHeadState::new(max_decoded_bytes, max_decoded_bytes)),
             CacheScope::new(0),
         )
     }
 
-    /// Counters for the whole shared cache, across every scope.
-    pub fn stats(&self) -> HeadStateCacheStats {
-        self.shared.stats()
+    /// Counters of the namespace heads in the whole shared cache, across
+    /// every scope.
+    pub fn head_stats(&self) -> DecodedBlockCacheStats {
+        self.shared.head_stats()
     }
 
-    fn head_key(&self, namespace_id: &NamespaceId) -> (CacheScope, HeadStateKey) {
-        (self.scope, HeadStateKey::Head(namespace_id.clone()))
+    /// Counters of the WAL-tail projections in the whole shared cache,
+    /// across every scope.
+    pub fn tail_stats(&self) -> DecodedBlockCacheStats {
+        self.shared.tail_stats()
     }
 
-    fn tail_key(&self, key: &WalTailProjectionCacheKey) -> (CacheScope, HeadStateKey) {
-        (self.scope, HeadStateKey::Tail(key.clone()))
+    fn head_key(&self, namespace_id: &NamespaceId) -> (CacheScope, NamespaceId) {
+        (self.scope, namespace_id.clone())
     }
 
-    /// Returns the namespace's head record, creating it when nothing
-    /// references one.
-    pub fn record(&self, namespace_id: &NamespaceId) -> Arc<HeadRecord> {
-        // A critical section under this lock only edits a map, so it can't
-        // panic and poison the lock.
-        let mut records = self
-            .shared
-            .records
-            .lock()
-            .expect("the head record map lock should not be poisoned");
-        let key = (self.scope, namespace_id.clone());
-        if let Some(record) = records.records.get(&key).and_then(Weak::upgrade) {
-            return record;
-        }
-        if records.records.len() >= records.compact_at {
-            records
-                .records
-                .retain(|_, record| record.strong_count() > 0);
-            records.compact_at = (2 * records.records.len()).max(MIN_RECORDS_BEFORE_COMPACTING);
-        }
-        let record = Arc::new(HeadRecord::default());
-        records.records.insert(key, Arc::downgrade(&record));
-        record
+    fn tail_key(&self, key: &WalTailProjectionCacheKey) -> (CacheScope, WalTailProjectionCacheKey) {
+        (self.scope, key.clone())
     }
 
     /// Returns the namespace's cached head and marks it recently used.
     pub fn get_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedHead>> {
+        self.shared.heads.get(&self.head_key(namespace_id))
+    }
+
+    /// Returns `current()`, or the head that a check of the namespace's head
+    /// returns, which the concurrent reads of the namespace share.
+    ///
+    /// A read waits for the check in flight, and then takes `current()` when
+    /// it's `Some`, or else the outcome of a check that started after the
+    /// read arrived, or else runs `check` (see [`SharedCheck`]). So a wave of
+    /// concurrent reads costs at most two checks. The head that `check`
+    /// returns is installed through [`Self::replace_head`], and the reads
+    /// start from the head that it returns.
+    ///
+    /// If [`Self::invalidate_head`] dropped the head while the check ran, the
+    /// check might predate the change that the drop is for. If an eviction
+    /// dropped it, the evicted head might be newer than the check's. Either
+    /// way, nothing is installed, the reads start from the check's head, and
+    /// the next read loads the head afresh.
+    ///
+    /// [`SharedCheck`]: crate::cache::SharedCheck
+    pub async fn check_or_join_head<F, Fut>(
+        &self,
+        namespace_id: &NamespaceId,
+        current: impl FnOnce() -> Option<Arc<CachedHead>>,
+        check: F,
+    ) -> std::result::Result<Arc<CachedHead>, CoreError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<CachedHead, CoreError>>,
+    {
         self.shared
-            .entries
-            .get(&self.head_key(namespace_id))
-            .and_then(HeadStateEntry::into_head)
+            .heads
+            .check_or_join(&self.head_key(namespace_id), current, |start| async move {
+                let candidate = check().await?;
+                Ok(self.install_head(Some(start), candidate))
+            })
+            .await
     }
 
     /// Installs `candidate` as the namespace's cached head if it's newer than
-    /// the current head, and returns the head that the read starts from.
+    /// the cached head, and returns the head that a read starts from.
     ///
-    /// `started` is the record's generation when the load of `candidate`
-    /// began. If [`Self::invalidate_head`] dropped the head since, the load
-    /// might predate the change that the drop is for, so nothing is
-    /// installed, and the read starts from the candidate. The next read then
-    /// loads the head by discovery.
+    /// A head is newer when its sequence is higher, or when its sequence is
+    /// the same and its basis is a later manifest.
     ///
-    /// The current head is the higher of the cached head and the floor of
-    /// `record`, the newest head that the record installed or saw, which
-    /// stays after the cache evicts that head. A head is newer when
-    /// its sequence is higher, or when its sequence is the same and its basis
-    /// is a later manifest.
-    ///
-    /// - A candidate below the current head changes nothing. The read starts
-    ///   from the cached head, or from the candidate when the cache evicted
-    ///   the head the floor came from.
+    /// - A candidate below the cached head changes nothing, and the read
+    ///   starts from the cached head.
     /// - A candidate equal to the cached head takes the later of each
     ///   confirmation, because confirmations only move forward. A new
     ///   snapshot is cached only when a confirmation moved.
     /// - A newer candidate becomes the cached head.
     ///
+    /// The cache compares the heads and inserts under one lock, so a head
+    /// never replaces a newer one, whatever order the installs run in.
+    ///
     /// A snapshot too large for the cache isn't cached, and the smaller head
     /// it replaces is dropped with it, so an eventual read misses and
-    /// confirms through the record. The read starts from the candidate, and
-    /// the floor still moves, so the head that reads start from never moves
-    /// backwards while the record lives.
-    ///
-    /// Every install and drop of a namespace's head runs under its record's
-    /// lock, so the head's entry in the cache can't change between this
-    /// function's peek and its insert, except by an eviction.
-    pub fn replace_head(
-        &self,
-        record: &HeadRecord,
-        started: u64,
-        candidate: CachedHead,
-    ) -> Arc<CachedHead> {
+    /// confirms the head with a check. The read starts from the candidate.
+    pub fn replace_head(&self, candidate: CachedHead) -> Arc<CachedHead> {
+        self.install_head(None, candidate)
+    }
+
+    /// Installs `candidate` as [`Self::replace_head`] does, unless an
+    /// invalidation or an eviction of the head passed `start`, the start of
+    /// the check that loaded `candidate`.
+    fn install_head(&self, start: Option<CheckStart>, candidate: CachedHead) -> Arc<CachedHead> {
         let key = self.head_key(&candidate.head.namespace_id);
-        let mut state = record.lock();
-        if state.generation != started {
-            return Arc::new(candidate);
-        }
-        let cached = self
-            .shared
-            .entries
-            .peek(&key)
-            .and_then(HeadStateEntry::into_head);
-        let current = state
-            .floor
-            .max(cached.as_ref().map(|cached| cached.order()));
-        state.floor = current;
-        let next = match current.map(|current| candidate.order().cmp(&current)) {
-            Some(std::cmp::Ordering::Less) => {
-                return match cached {
-                    Some(cached) if cached.order() == current.expect("a current head") => cached,
-                    _ => Arc::new(candidate),
-                };
-            }
-            Some(std::cmp::Ordering::Equal) => match &cached {
-                Some(cached) if cached.order() == candidate.order() => {
-                    let basis_checked = later(&cached.basis_checked, candidate.basis_checked);
-                    let head_confirmed = later(&cached.head_confirmed, candidate.head_confirmed);
-                    if basis_checked.is_none() && head_confirmed.is_none() {
-                        return Arc::clone(cached);
-                    }
-                    CachedHead {
-                        basis_checked: basis_checked
-                            .unwrap_or_else(|| cached.basis_checked.clone()),
-                        head_confirmed: head_confirmed
-                            .unwrap_or_else(|| cached.head_confirmed.clone()),
-                        ..CachedHead::clone(cached)
-                    }
+        let next = match self.shared.heads.peek(&key) {
+            Some(cached) if cached.order() == candidate.order() => {
+                let basis_checked = later(&cached.basis_checked, candidate.basis_checked);
+                let head_confirmed = later(&cached.head_confirmed, candidate.head_confirmed);
+                if basis_checked.is_none() && head_confirmed.is_none() {
+                    return cached;
                 }
-                _ => candidate,
-            },
-            Some(std::cmp::Ordering::Greater) | None => candidate,
+                CachedHead {
+                    basis_checked: basis_checked.unwrap_or_else(|| cached.basis_checked.clone()),
+                    head_confirmed: head_confirmed.unwrap_or_else(|| cached.head_confirmed.clone()),
+                    ..CachedHead::clone(&cached)
+                }
+            }
+            _ => candidate,
         };
-        state.floor = Some(next.order());
         let next = Arc::new(next);
-        let installed = self
-            .shared
-            .entries
-            .insert(key.clone(), HeadStateEntry::Head(Arc::clone(&next)));
-        if !installed {
-            // The cache didn't keep the new head, because its snapshot is too
-            // large for the budget or the cache is disabled. The cached head
-            // is older, and an eventual read doesn't consult the record, so
-            // the older head mustn't stay.
-            self.shared.entries.invalidate(&key);
-        }
-        next
+        self.shared
+            .heads
+            .insert_if(key, Arc::clone(&next), start, |cached| {
+                next.supersedes(cached)
+            })
+            .unwrap_or(next)
     }
 
     /// Removes the namespace's cached head, after the runtime learns of a
     /// change whose effect on the head it can't identify, so the next read
     /// loads the head by discovery.
     ///
-    /// The drop moves the record's generation, so a load that started before
-    /// the drop installs nothing when it finishes (see
-    /// [`Self::replace_head`]). A load in flight keeps the record, so the
-    /// generation it took is still on the record that the drop moves.
+    /// A check of the head in flight installs nothing when it finishes (see
+    /// [`Self::check_or_join_head`]).
     pub fn invalidate_head(&self, namespace_id: &NamespaceId) {
-        let record = self.record(namespace_id);
-        let mut state = record.lock();
-        state.generation += 1;
-        self.shared.entries.invalidate(&self.head_key(namespace_id));
+        self.shared.heads.invalidate(&self.head_key(namespace_id));
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
-        self.shared.entries.get_kind(
-            &self.tail_key(key),
-            &self.shared.tails,
-            HeadStateEntry::into_tail,
-        )
+        self.shared.tails.get(&self.tail_key(key))
     }
 
     /// Returns the WAL-tail projection under `key`, or loads it with `load`
@@ -694,24 +556,14 @@ impl HeadStateCache {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Arc<ProjectedWalTail>, E>>,
     {
-        let entry = self
-            .shared
-            .entries
-            .get_or_load_kind(&self.tail_key(key), &self.shared.tails, || async {
-                load().await.map(HeadStateEntry::Tail)
-            })
-            .await?;
-        Ok(entry
-            .into_tail()
-            .expect("the entry under a tail key should be a tail"))
+        self.shared
+            .tails
+            .get_or_load(&self.tail_key(key), load)
+            .await
     }
 
     pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
-        self.shared.entries.insert_kind(
-            (self.scope, HeadStateKey::Tail(key)),
-            HeadStateEntry::Tail(tail),
-            &self.shared.tails,
-        );
+        self.shared.tails.insert((self.scope, key), tail);
     }
 
     /// Returns the budget needed to cache this WAL-tail projection on its own.
@@ -721,28 +573,29 @@ impl HeadStateCache {
         key: &WalTailProjectionCacheKey,
         tail: &Arc<ProjectedWalTail>,
     ) -> usize {
-        crate::block_cache::charged_bytes(
-            &(self.scope, HeadStateKey::Tail(key.clone())),
-            &HeadStateEntry::Tail(Arc::clone(tail)),
-        )
+        crate::block_cache::charged_bytes(&self.tail_key(key), tail)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedHead, DecodedMetadataSegmentBlock, HeadStateCache, HeadStateCacheStats,
+        CacheScope, CachedHead, CoreError, DecodedMetadataSegmentBlock, HeadStateCache,
         MetadataBasis, MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState,
         ObjectStoreScope, Observation, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
+    use futures::poll;
     use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
     use loonfs_types::format::segment_blocks::DecodedDataBlock;
     use loonfs_types::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use loonfs_types::{WalNo, WriterEpoch};
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    use tokio::sync::watch;
 
     fn block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
         DecodedMetadataSegmentBlock::Data {
@@ -926,7 +779,12 @@ mod tests {
     /// Creates a head for namespace `demo` at head sequence `seq` against
     /// manifest `manifest_no`, with both checks at `checked`.
     fn head_at(seq: u64, manifest_no: u64, checked: &Observation) -> CachedHead {
-        let namespace_id = namespace("demo");
+        head_of("demo", seq, manifest_no, checked)
+    }
+
+    /// Creates a head like [`head_at`] for namespace `name`.
+    fn head_of(name: &str, seq: u64, manifest_no: u64, checked: &Observation) -> CachedHead {
+        let namespace_id = namespace(name);
         CachedHead {
             head: NamespaceReadState {
                 namespace_id: namespace_id.clone(),
@@ -978,23 +836,37 @@ mod tests {
         head
     }
 
-    /// Checks that a candidate at a lower head sequence, or at the same
-    /// sequence against an earlier manifest, doesn't replace the cached
-    /// head, and that the read starts from the cached head.
-    #[test]
-    fn a_lower_head_does_not_replace_the_cached_head() {
+    /// Creates a check of a head that waits until `released` is true, and
+    /// then returns `head`.
+    async fn check_after(
+        released: &watch::Receiver<bool>,
+        head: CachedHead,
+    ) -> Result<CachedHead, CoreError> {
+        released
+            .clone()
+            .wait_for(|released| *released)
+            .await
+            .expect("the test keeps the sender");
+        Ok(head)
+    }
+
+    /// Checks that a check whose head is lower than the cached head, at a
+    /// lower head sequence or at the same sequence against an earlier
+    /// manifest, doesn't replace the cached head, and that the read starts
+    /// from the cached head.
+    #[tokio::test]
+    async fn a_lower_head_does_not_replace_the_cached_head() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
-            (5, 2)
-        );
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
-            (5, 2)
-        );
+        cache.replace_head(head_at(5, 2, &now));
+        for lower in [head_at(4, 3, &now), head_at(5, 1, &now)] {
+            let read = cache
+                .check_or_join_head(&namespace("demo"), || None, || async { Ok(lower) })
+                .await
+                .expect("the check's head");
+            assert_eq!(order(&read), (5, 2));
+        }
+        assert_eq!(order(&cache.replace_head(head_at(4, 3, &now))), (5, 2));
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert_eq!(order(&cached), (5, 2));
     }
@@ -1005,19 +877,10 @@ mod tests {
     fn a_higher_head_or_a_later_manifest_replaces_the_cached_head() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(5, 1, &now))),
-            (5, 1)
-        );
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
-            (5, 2)
-        );
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
-            (6, 1)
-        );
+        for (seq, manifest_no) in [(5, 1), (5, 2), (6, 1)] {
+            let installed = cache.replace_head(head_at(seq, manifest_no, &now));
+            assert_eq!(order(&installed), (seq, manifest_no));
+        }
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert_eq!(order(&cached), (6, 1));
     }
@@ -1032,108 +895,182 @@ mod tests {
         clock.advance_ms(10);
         let late = Observation::now(clock.clone());
         let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(
-            &record,
-            record.generation(),
-            CachedHead {
-                head_confirmed: late.clone(),
-                ..head_at(5, 1, &early)
-            },
-        );
-        let merged = cache.replace_head(
-            &record,
-            record.generation(),
-            CachedHead {
-                basis_checked: late.clone(),
-                ..head_at(5, 1, &early)
-            },
-        );
+        cache.replace_head(CachedHead {
+            head_confirmed: late.clone(),
+            ..head_at(5, 1, &early)
+        });
+        let merged = cache.replace_head(CachedHead {
+            basis_checked: late.clone(),
+            ..head_at(5, 1, &early)
+        });
         assert_eq!(merged.basis_checked.age_ms(), 0);
         assert_eq!(merged.head_confirmed.age_ms(), 0);
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert!(Arc::ptr_eq(&cached, &merged));
-        let unchanged = cache.replace_head(&record, record.generation(), head_at(5, 1, &early));
+        let unchanged = cache.replace_head(head_at(5, 1, &early));
         assert!(Arc::ptr_eq(&unchanged, &merged));
-        let same_millisecond =
-            cache.replace_head(&record, record.generation(), head_at(5, 1, &late));
+        let same_millisecond = cache.replace_head(head_at(5, 1, &late));
         assert!(
             Arc::ptr_eq(&same_millisecond, &merged),
             "a confirmation in the same millisecond doesn't move"
         );
     }
 
-    /// Checks the record's floor while the cache has evicted or dropped the
-    /// head it came from: a candidate below the floor isn't cached and the
-    /// read starts from the candidate, an equal candidate is cached, and a
-    /// higher one is cached and moves the floor.
-    #[test]
-    fn the_record_keeps_out_a_head_below_an_evicted_head() {
+    /// Checks that a check during which the head is invalidated, or during
+    /// which a newer head is installed and then evicted, installs nothing,
+    /// that the read starts from the check's own head, and that the next
+    /// check installs its head.
+    #[tokio::test]
+    async fn a_check_whose_head_is_dropped_while_it_runs_installs_nothing() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(5, 2, &now));
-        cache.invalidate_head(&namespace("demo"));
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(4, 3, &now))),
-            (4, 3)
+        let demo = namespace("demo");
+        let budget = charged_bytes(
+            &(CacheScope::new(0), demo.clone()),
+            &Arc::new(head_at(7, 1, &now)),
         );
-        assert!(cache.get_head(&namespace("demo")).is_none());
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(5, 2, &now))),
-            (5, 2)
-        );
-        assert_eq!(
+        let invalidate = |cache: &HeadStateCache| cache.invalidate_head(&demo);
+        let evict = |cache: &HeadStateCache| {
+            cache.replace_head(head_at(7, 1, &now));
+            assert!(cache.get_head(&demo).is_some(), "the newer head fits");
+            // A head of another namespace, charged the same, takes its place.
+            cache.replace_head(head_of("omed", 7, 1, &now));
+            assert!(cache.get_head(&demo).is_none(), "the newer head is evicted");
+        };
+        for drop_head in [&invalidate as &dyn Fn(&HeadStateCache), &evict] {
+            let cache = HeadStateCache::unshared(budget);
+            let (release, released) = watch::channel(false);
+            let mut read = pin!(cache.check_or_join_head(
+                &demo,
+                || None,
+                || { check_after(&released, head_at(6, 1, &now)) }
+            ));
+            assert!(poll!(read.as_mut()).is_pending());
+            drop_head(&cache);
+            release.send(true).expect("the check waits for the release");
+            let read = read.await.expect("the check's head");
+            assert_eq!(
+                order(&read),
+                (6, 1),
+                "the read starts from the check's head"
+            );
+            assert!(
+                cache.get_head(&demo).is_none(),
+                "the check installs nothing"
+            );
             cache
-                .get_head(&namespace("demo"))
-                .map(|cached| order(&cached)),
-            Some((5, 2))
-        );
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(6, 1, &now))),
-            (6, 1)
-        );
-        cache.invalidate_head(&namespace("demo"));
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(5, 9, &now))),
-            (5, 9)
-        );
-        assert!(cache.get_head(&namespace("demo")).is_none());
+                .check_or_join_head(&demo, || None, || async { Ok(head_at(6, 1, &now)) })
+                .await
+                .expect("the next check's head");
+            let cached = cache
+                .get_head(&demo)
+                .expect("the next check installs its head");
+            assert_eq!(order(&cached), (6, 1));
+        }
     }
 
-    /// Checks that a load that started before the namespace's head was
-    /// dropped installs nothing, and that its read starts from the load's
-    /// own head, while a load that started after the drop installs its head.
-    #[test]
-    fn a_load_that_started_before_a_drop_installs_nothing() {
+    /// Checks that the reads of one head that arrive while a check runs
+    /// share one more check, that a read of another namespace runs its own
+    /// check alongside, and that the heads keep no in-flight entry once the
+    /// reads are done.
+    #[tokio::test]
+    async fn a_wave_of_reads_of_one_head_shares_at_most_two_checks() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
-        let started = record.generation();
-        cache.invalidate_head(&namespace("demo"));
-        let head = cache.replace_head(&record, started, head_at(6, 1, &now));
-        assert_eq!(order(&head), (6, 1));
-        assert!(cache.get_head(&namespace("demo")).is_none());
-        let head = cache.replace_head(&record, record.generation(), head_at(6, 1, &now));
-        assert_eq!(order(&head), (6, 1));
+        let checks = AtomicUsize::new(0);
+        let (release, released) = watch::channel(false);
+        let read = |name: &'static str, seq| {
+            let (cache, checks, released, now) = (&cache, &checks, &released, &now);
+            async move {
+                cache
+                    .check_or_join_head(
+                        &namespace(name),
+                        || None,
+                        || {
+                            checks.fetch_add(1, AtomicOrdering::SeqCst);
+                            check_after(released, head_of(name, seq, 1, now))
+                        },
+                    )
+                    .await
+                    .expect("the check's head")
+            }
+        };
+        let mut first = pin!(read("demo", 5));
+        assert!(poll!(first.as_mut()).is_pending());
+        let mut wave = pin!(futures::future::join_all((0..4).map(|_| read("demo", 6))));
+        assert!(poll!(wave.as_mut()).is_pending());
+        let mut other = pin!(read("omed", 1));
+        assert!(poll!(other.as_mut()).is_pending());
+        assert_eq!(
+            checks.load(AtomicOrdering::SeqCst),
+            2,
+            "the other namespace's check runs alongside the first"
+        );
+        release.send(true).expect("the checks wait for the release");
+        let (first, wave, other) = futures::join!(first, wave, other);
+        assert_eq!(order(&first), (5, 1));
+        let wave: Vec<_> = wave.iter().map(|head| order(head)).collect();
+        assert_eq!(wave, [(6, 1); 4], "the wave shares the second check");
+        assert_eq!(order(&other), (1, 1));
+        assert_eq!(checks.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(cache.shared.heads.in_flight_len(), 0);
+    }
+
+    /// Checks that WAL-tail projections, from small ones to ones heavier
+    /// than the tail budget, evict no namespace head while they evict each
+    /// other.
+    #[test]
+    fn a_tail_of_any_size_evicts_no_head() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadStateCache::unshared(4096);
+        cache.replace_head(head_at(5, 1, &now));
+        for (index, inodes) in [1, 4, 16, 64, 256].into_iter().cycle().take(20).enumerate() {
+            let rows = (0..inodes)
+                .map(|inode| InodeRecord {
+                    inode_id: InodeId(inode),
+                    inode_kind: InodeKind::File,
+                    committed_seq: ChangeSeq(3),
+                    commit_id: loonfs_types::CommitId::parse("c_cache_row").expect("commit id"),
+                    committed_by: loonfs_test_support::test_actor(),
+                    committed_at_ms: 3_000,
+                })
+                .collect();
+            let rows = MetadataState::from_rows(
+                rows,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            let key = WalTailProjectionCacheKey {
+                namespace_id: namespace("demo"),
+                manifest_no: ManifestNo(index as u64),
+                head_seq: ChangeSeq(5),
+            };
+            cache.insert_tail(key, Arc::new(ProjectedWalTail::from_rows(rows)));
+        }
+        let (heads, tails) = (cache.head_stats(), cache.tail_stats());
+        assert!(tails.evictions > 0 && tails.rejections > 0, "{tails:?}");
+        assert_eq!(heads.evictions, 0, "{heads:?}");
         assert!(cache.get_head(&namespace("demo")).is_some());
     }
 
-    /// Checks that a namespace head larger than the whole head-state budget
-    /// isn't cached, that the cache keeps only the bytes it weighed, and
-    /// that nothing keeps the head once the read that loaded it is done.
+    /// Checks that a namespace head larger than the whole head budget isn't
+    /// cached, that the cache keeps only the bytes it weighed, and that
+    /// nothing keeps the head once the read that loaded it is done.
     #[test]
     fn a_head_larger_than_the_budget_is_not_cached() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(4096);
-        let record = cache.record(&namespace("demo"));
         let large = head_with_grants(5, 1_000, &now);
         assert!(large.heap_bytes() > 16 * 4096);
-        let head = cache.replace_head(&record, record.generation(), large);
+        let head = cache.replace_head(large);
         assert_eq!(order(&head), (5, 1));
         assert!(cache.get_head(&namespace("demo")).is_none());
-        let stats = cache.stats();
+        let stats = cache.head_stats();
         assert_eq!(stats.rejections, 1);
         assert!(stats.cached_decoded_bytes <= 4096, "{stats:?}");
         let weak = Arc::downgrade(&head);
@@ -1144,22 +1081,35 @@ mod tests {
     /// Checks that a newer head too large for the cache drops the smaller
     /// head it replaces: the read starts from the newer head, the cache has
     /// no head for the namespace afterwards, the cache records the refusal
-    /// as a rejection, and the record's floor is at the newer head.
-    #[test]
-    fn a_newer_head_too_large_to_cache_drops_the_older_head() {
+    /// as a rejection, and a check that was in flight installs its older
+    /// head nowhere afterwards.
+    #[tokio::test]
+    async fn a_newer_head_too_large_to_cache_drops_the_older_head() {
         let now = crate::test_support::observed_now();
+        let demo = namespace("demo");
         let cache = HeadStateCache::unshared(4096);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(0, 1, &now));
-        assert!(cache.get_head(&namespace("demo")).is_some());
-        let rejections = cache.stats().rejections;
+        cache.replace_head(head_at(0, 1, &now));
+        assert!(cache.get_head(&demo).is_some());
+        let rejections = cache.head_stats().rejections;
+        let (release, released) = watch::channel(false);
+        let mut check = pin!(cache.check_or_join_head(
+            &demo,
+            || None,
+            || { check_after(&released, head_at(0, 2, &now)) }
+        ));
+        assert!(poll!(check.as_mut()).is_pending());
         let large = head_with_grants(1, 1_000, &now);
         assert!(large.heap_bytes() > 4096);
-        let head = cache.replace_head(&record, record.generation(), large);
+        let head = cache.replace_head(large);
         assert_eq!(order(&head), (1, 1));
-        assert!(cache.get_head(&namespace("demo")).is_none());
-        assert_eq!(cache.stats().rejections, rejections + 1);
-        assert_eq!(record.lock().floor, Some((ChangeSeq(1), ManifestNo(1))));
+        assert!(cache.get_head(&demo).is_none());
+        assert_eq!(cache.head_stats().rejections, rejections + 1);
+        release.send(true).expect("the check waits for the release");
+        assert_eq!(order(&check.await.expect("the check's head")), (0, 2));
+        assert!(
+            cache.get_head(&demo).is_none(),
+            "a check that started before the newer head installs nothing"
+        );
     }
 
     /// Checks that a head that grows within the budget is charged its new
@@ -1168,12 +1118,10 @@ mod tests {
     fn a_larger_head_is_charged_its_weight() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        let small = cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
-        let before = cache.stats().cached_decoded_bytes;
-        let large =
-            cache.replace_head(&record, record.generation(), head_with_grants(6, 100, &now));
-        let after = cache.stats().cached_decoded_bytes;
+        let small = cache.replace_head(head_at(5, 1, &now));
+        let before = cache.head_stats().cached_decoded_bytes;
+        let large = cache.replace_head(head_with_grants(6, 100, &now));
+        let after = cache.head_stats().cached_decoded_bytes;
         assert!(
             after >= before + large.heap_bytes() - small.heap_bytes(),
             "{before} bytes before, {after} after"
@@ -1182,38 +1130,13 @@ mod tests {
         assert!(Arc::ptr_eq(&cached, &large));
     }
 
-    /// Checks that the record map drops a record that nothing references, and
-    /// that the next record of an idle namespace starts with no floor.
-    #[test]
-    fn an_idle_namespace_gets_a_fresh_record() {
-        let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
-        cache.invalidate_head(&namespace("demo"));
-        drop(record);
-        let record = cache.record(&namespace("demo"));
-        assert_eq!(
-            order(&cache.replace_head(&record, record.generation(), head_at(4, 1, &now))),
-            (4, 1)
-        );
-        assert!(cache.get_head(&namespace("demo")).is_some());
-        drop(record);
-        for index in 0..200 {
-            drop(cache.record(&namespace(&format!("idle-{index}"))));
-        }
-        let records = cache.shared.records.lock().expect("records").records.len();
-        assert!(records <= 2 * 64, "{records} records");
-    }
-
     /// Checks that a zero budget keeps no head and no tail and records no
     /// lookups, and that a tail load still returns the tail it loaded.
     #[tokio::test]
     async fn a_zero_budget_keeps_and_counts_nothing() {
         let now = crate::test_support::observed_now();
         let cache = HeadStateCache::unshared(0);
-        let record = cache.record(&namespace("demo"));
-        cache.replace_head(&record, record.generation(), head_at(5, 1, &now));
+        cache.replace_head(head_at(5, 1, &now));
         assert!(cache.get_head(&namespace("demo")).is_none());
 
         let key = WalTailProjectionCacheKey {
@@ -1230,7 +1153,7 @@ mod tests {
             .expect("the load returns its tail");
         assert!(Arc::ptr_eq(&loaded, &tail));
         assert!(cache.get_tail(&key).is_none());
-        assert_eq!(cache.stats(), HeadStateCacheStats::default());
+        assert_eq!((cache.head_stats(), cache.tail_stats()), Default::default());
     }
 
     #[tokio::test]

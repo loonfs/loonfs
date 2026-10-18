@@ -240,6 +240,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .build(),
         )

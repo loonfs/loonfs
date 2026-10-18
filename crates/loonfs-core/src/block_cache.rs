@@ -1,15 +1,16 @@
 //! Shared cache for decoded immutable objects.
 
+use crate::error::CoreError;
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
+use crate::shared_check::SharedCheck;
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::OnceCell;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub trait DecodedBlock: Clone {
     /// The decoded bytes this value holds, charged against the cache budget.
@@ -110,28 +111,58 @@ pub struct DecodedBlockCache<K, V> {
     config: DecodedBlockCacheConfig,
     inner: Mutex<Inner<K, V>>,
     stats: StatsInner,
-    in_flight: Mutex<HashMap<K, Arc<OnceCell<V>>>>,
 }
 
-struct LoadGuard<'a, K: Eq + Hash, V> {
-    in_flight: &'a Mutex<HashMap<K, Arc<OnceCell<V>>>>,
-    cache_key: &'a K,
-    cell: Option<Arc<OnceCell<V>>>,
+/// The loads and checks of one key in flight.
+#[derive(Debug)]
+struct InFlight<V> {
+    /// The join that the key's concurrent loads and checks share. A check
+    /// shares its error with the callers that wait for it, and a load shares
+    /// only a value.
+    join: Arc<SharedCheck<Result<V, CoreError>>>,
+    /// How many times an invalidation or an eviction dropped the key since
+    /// the entry was created.
+    drops: u64,
 }
 
-impl<K: Eq + Hash, V> Drop for LoadGuard<'_, K, V> {
+/// The drops of a key when a load or a check of that key started.
+///
+/// [`DecodedBlockCache::insert_if`] inserts nothing for a start that an
+/// invalidation or an eviction of the key has passed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CheckStart {
+    drops: u64,
+}
+
+/// One caller's reference to the in-flight entry of a key.
+///
+/// The entry goes when its last caller leaves, so the cache keeps an entry
+/// only for a key with a caller.
+struct InFlightGuard<'a, K: DecodedBlockKey, V: DecodedBlock> {
+    cache: &'a DecodedBlockCache<K, V>,
+    key: &'a K,
+    join: Option<Arc<SharedCheck<Result<V, CoreError>>>>,
+}
+
+impl<K: DecodedBlockKey, V: DecodedBlock> InFlightGuard<'_, K, V> {
+    fn join(&self) -> &SharedCheck<Result<V, CoreError>> {
+        self.join
+            .as_deref()
+            .expect("an in-flight guard keeps its join until it drops")
+    }
+}
+
+impl<K: DecodedBlockKey, V: DecodedBlock> Drop for InFlightGuard<'_, K, V> {
     fn drop(&mut self) {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .expect("decoded block cache in-flight lock should not be poisoned");
+        let mut inner = self.cache.lock();
         // Release the reference under the lock so concurrent drops cannot both leave an entry.
-        drop(self.cell.take());
-        if in_flight
-            .get(self.cache_key)
-            .is_some_and(|cell| Arc::strong_count(cell) == 1)
+        drop(self.join.take());
+        if inner
+            .in_flight
+            .get(self.key)
+            .is_some_and(|entry| Arc::strong_count(&entry.join) == 1)
         {
-            in_flight.remove(self.cache_key);
+            inner.in_flight.remove(self.key);
         }
     }
 }
@@ -143,7 +174,6 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
             .field("config", &self.config)
             .field("inner", &self.inner)
             .field("stats", &self.stats)
-            .field("in_flight", &self.in_flight)
             .finish_non_exhaustive()
     }
 }
@@ -158,6 +188,10 @@ struct Inner<K, V> {
     /// Deletion can reduce `HashMap::capacity` without releasing its table.
     /// Keep the largest allocation until the table is explicitly shrunk.
     table_bytes: usize,
+    /// The keys with a load or a check in flight. The engine's lock covers
+    /// these with the entries, so an insert can compare a key's drops and
+    /// insert in one step.
+    in_flight: HashMap<K, InFlight<V>>,
 }
 
 #[derive(Debug)]
@@ -189,105 +223,119 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 charged_bytes: 0,
                 order_key_bytes: 0,
                 table_bytes: 0,
+                in_flight: HashMap::new(),
             }),
             stats: StatsInner::default(),
-            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Loads a missing value once when callers request the same key concurrently.
+    fn lock(&self) -> MutexGuard<'_, Inner<K, V>> {
+        self.inner
+            .lock()
+            .expect("decoded block cache lock should not be poisoned")
+    }
+
+    /// Returns the value under `cache_key`, or loads it with `load` and
+    /// caches it.
+    ///
+    /// Concurrent callers of one key share one load, so a caller that
+    /// arrives while a load is in flight takes the value of that load and
+    /// records no lookup. A load that fails shares nothing, and the next
+    /// caller loads again. A load during which an invalidation or an
+    /// eviction dropped the key caches nothing, and returns its value to its
+    /// callers uncached.
     pub async fn get_or_load<E, F, Fut>(&self, cache_key: &K, load: F) -> Result<V, E>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<V, E>>,
     {
-        self.load_once(cache_key, None, load).await
-    }
-
-    /// Loads like [`Self::get_or_load`], and records the lookup and the
-    /// insert in `kind` too.
-    pub(crate) async fn get_or_load_kind<E, F, Fut>(
-        &self,
-        cache_key: &K,
-        kind: &KindCounters,
-        load: F,
-    ) -> Result<V, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<V, E>>,
-    {
-        self.load_once(cache_key, Some(kind), load).await
-    }
-
-    /// Runs one load for the concurrent callers of `cache_key`.
-    ///
-    /// A caller that receives the value of another caller's load records no
-    /// lookup.
-    async fn load_once<E, F, Fut>(
-        &self,
-        cache_key: &K,
-        kind: Option<&KindCounters>,
-        load: F,
-    ) -> Result<V, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<V, E>>,
-    {
-        let guard = {
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .expect("decoded block cache in-flight lock should not be poisoned");
-            let cell = Arc::clone(
-                in_flight
-                    .entry(cache_key.clone())
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            );
-            LoadGuard {
-                in_flight: &self.in_flight,
-                cache_key,
-                cell: Some(cell),
-            }
-        };
+        let guard = self.join(cache_key);
         guard
-            .cell
-            .as_ref()
-            .expect("in-flight load should hold its cell")
-            .get_or_try_init(|| async {
-                if let Some(block) = self.get_entry(cache_key, kind, Some) {
-                    return Ok(block);
-                }
-                let block = load().await?;
-                self.insert_entry(cache_key.clone(), block.clone(), kind);
-                Ok(block)
-            })
+            .join()
+            .load(
+                || self.get(cache_key),
+                || {
+                    let start = self.start(cache_key);
+                    async move {
+                        let block = load().await?;
+                        self.insert_entry(cache_key.clone(), block.clone(), None, Some(start));
+                        Ok(block)
+                    }
+                },
+            )
             .await
-            .cloned()
+    }
+
+    /// Returns `current()`, or the outcome of a check of `key` that the
+    /// concurrent callers of `key` share, as [`SharedCheck::run`] describes.
+    ///
+    /// A caller waits for the check in flight, and then returns `current()`
+    /// when it's `Some`, or else the outcome of a check that started after
+    /// the caller arrived, or else the outcome of `check`, which it runs.
+    /// So a wave of concurrent callers costs at most two checks. `check`
+    /// receives the start of the check, which it passes to
+    /// [`Self::insert_if`] with the value that it inserts.
+    pub(crate) async fn check_or_join<F, Fut>(
+        &self,
+        key: &K,
+        current: impl FnOnce() -> Option<V>,
+        check: F,
+    ) -> Result<V, CoreError>
+    where
+        F: FnOnce(CheckStart) -> Fut,
+        Fut: std::future::Future<Output = Result<V, CoreError>>,
+    {
+        let guard = self.join(key);
+        guard
+            .join()
+            .run(|| current().map(Ok), || check(self.start(key)))
+            .await
+    }
+
+    /// Returns a reference to the in-flight entry of `key`, creating the
+    /// entry when the key has none.
+    fn join<'a>(&'a self, key: &'a K) -> InFlightGuard<'a, K, V> {
+        let mut inner = self.lock();
+        let entry = inner
+            .in_flight
+            .entry(key.clone())
+            .or_insert_with(|| InFlight {
+                join: Arc::default(),
+                drops: 0,
+            });
+        InFlightGuard {
+            cache: self,
+            key,
+            join: Some(Arc::clone(&entry.join)),
+        }
+    }
+
+    /// Returns the start of a load or a check of `key`, whose caller keeps
+    /// the key's in-flight entry.
+    fn start(&self, key: &K) -> CheckStart {
+        let drops = self
+            .lock()
+            .in_flight
+            .get(key)
+            .expect("a load or a check keeps the in-flight entry of its key")
+            .drops;
+        CheckStart { drops }
     }
 
     /// Counts the entries that the cache keeps.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned")
-            .entries
-            .len()
+        self.lock().entries.len()
     }
 
+    /// Counts the keys with a load or a check in flight.
     #[cfg(test)]
-    fn in_flight_len(&self) -> usize {
-        self.in_flight
-            .lock()
-            .expect("decoded block cache in-flight lock should not be poisoned")
-            .len()
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.lock().in_flight.len()
     }
 
     pub fn stats(&self) -> DecodedBlockCacheStats {
-        let inner = self
-            .inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned");
+        let inner = self.lock();
         DecodedBlockCacheStats {
             hits: self.stats.hits.load(Ordering::Relaxed),
             misses: self.stats.misses.load(Ordering::Relaxed),
@@ -342,10 +390,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// Returns the value under `key`, marks it recently used, and records a
     /// hit or a miss.
     fn touch_entry(&self, key: &K) -> Option<V> {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned");
+        let mut inner = self.lock();
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -359,12 +404,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// Returns a cached value without touching its recency or counting a
     /// hit or a miss.
     pub fn peek(&self, key: &K) -> Option<V> {
-        self.inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned")
-            .entries
-            .get(key)
-            .map(|slot| slot.block.clone())
+        self.lock().entries.get(key).map(|slot| slot.block.clone())
     }
 
     /// Inserts `block` under `key`, then evicts the least recently used
@@ -376,30 +416,114 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// entry first and then the entry itself. When the cache doesn't keep
     /// the entry, the entry that the key already had stays.
     pub fn insert(&self, key: K, block: V) -> bool {
-        self.insert_entry(key, block, None)
+        self.insert_entry(key, block, None, None)
     }
 
     /// Inserts like [`Self::insert`], and records the insert in `kind` too
     /// if the cache kept the entry.
     pub(crate) fn insert_kind(&self, key: K, block: V, kind: &KindCounters) -> bool {
-        self.insert_entry(key, block, Some(kind))
+        self.insert_entry(key, block, Some(kind), None)
     }
 
-    fn insert_entry(&self, key: K, block: V, kind: Option<&KindCounters>) -> bool {
+    /// Inserts like [`Self::insert`], unless `start` is the start of a load
+    /// that an invalidation or an eviction of `key` has passed.
+    fn insert_entry(
+        &self,
+        key: K,
+        block: V,
+        kind: Option<&KindCounters>,
+        start: Option<CheckStart>,
+    ) -> bool {
         if self.disabled() {
             return false;
         }
-        let stored_key = key.clone();
-        let entry_charge = block.weight().saturating_add(stored_key.heap_bytes());
-        let charged_bytes = entry_charge.saturating_add(initial_overhead::<K, V>(&stored_key));
-        if charged_bytes > self.config.max_decoded_bytes {
-            self.record_rejection(charged_bytes);
+        let entry_charge = match self.entry_charge(&key, &block) {
+            Ok(entry_charge) => entry_charge,
+            Err(charged_bytes) => {
+                self.record_rejection(charged_bytes);
+                return false;
+            }
+        };
+        let mut inner = self.lock();
+        if start.is_some_and(|start| inner.dropped_since(&key, start)) {
             return false;
         }
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned");
+        let kept = self.put(&mut inner, key, block, entry_charge);
+        if let Some(kind) = kind.filter(|_| kept) {
+            kind.inserts.fetch_add(1, Ordering::Relaxed);
+        }
+        kept
+    }
+
+    /// Inserts `value` under `key` if the key has no entry or `newer`
+    /// returns true for the key's entry, and returns the key's entry when
+    /// `newer` returns false.
+    ///
+    /// The cache's lock covers the comparison and the insert, so values that
+    /// replace each other in an order (such as a namespace's heads) never
+    /// replace a newer value. (`newer` runs under that lock, so it compares
+    /// the two values and does nothing else.)
+    ///
+    /// `start` is the start of the load or the check that produced `value`,
+    /// if one did. If an invalidation or an eviction dropped the key since
+    /// then, `value` might be older than the value that was dropped, so
+    /// nothing is inserted.
+    ///
+    /// A disabled cache keeps nothing. If `newer` accepts `value` but
+    /// `value` is heavier than the whole budget, the key's older entry goes
+    /// too, and the key is dropped for the loads and checks in flight, as
+    /// [`Self::invalidate`] drops it. So no read takes the older value, and
+    /// no load that started before this insert installs an older value
+    /// afterwards.
+    pub(crate) fn insert_if(
+        &self,
+        key: K,
+        value: V,
+        start: Option<CheckStart>,
+        newer: impl FnOnce(&V) -> bool,
+    ) -> Option<V> {
+        if self.disabled() {
+            return None;
+        }
+        let entry_charge = self.entry_charge(&key, &value);
+        let mut inner = self.lock();
+        if start.is_some_and(|start| inner.dropped_since(&key, start)) {
+            return None;
+        }
+        if let Some(cached) = inner.entries.get(&key).map(|slot| &slot.block) {
+            if !newer(cached) {
+                return Some(cached.clone());
+            }
+        }
+        match entry_charge {
+            Ok(entry_charge) => {
+                self.put(&mut inner, key, value, entry_charge);
+            }
+            Err(charged_bytes) => {
+                inner.drop_key(&key);
+                self.record_rejection(charged_bytes);
+            }
+        }
+        None
+    }
+
+    /// Returns the charge of an entry of `block` under `key`, or the bytes
+    /// that the entry would have been charged if that's more than the whole
+    /// budget.
+    fn entry_charge(&self, key: &K, block: &V) -> Result<usize, usize> {
+        let entry_charge = block.weight().saturating_add(key.heap_bytes());
+        let charged_bytes = entry_charge.saturating_add(initial_overhead::<K, V>(key));
+        if charged_bytes > self.config.max_decoded_bytes {
+            return Err(charged_bytes);
+        }
+        Ok(entry_charge)
+    }
+
+    /// Puts `block` under `key` in place of the key's entry, evicts the
+    /// least recently used entries until the cache is within its budget
+    /// again, and returns whether the cache kept the new entry.
+    fn put(&self, inner: &mut Inner<K, V>, key: K, block: V, entry_charge: usize) -> bool {
+        let stored_key = key.clone();
         if let Some(previous) = inner.entries.remove(&key) {
             inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
         }
@@ -415,24 +539,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
-        self.evict_over_budget(&mut inner);
-        let kept = inner.entries.contains_key(&key);
-        if let Some(kind) = kind.filter(|_| kept) {
-            kind.inserts.fetch_add(1, Ordering::Relaxed);
-        }
-        kept
+        self.evict_over_budget(inner);
+        inner.entries.contains_key(&key)
     }
 
     /// Drops one entry without counting an eviction.
+    ///
+    /// A load or a check of the key in flight inserts nothing afterwards,
+    /// even when the cache had no entry for the key, because it might have
+    /// started before the change that the invalidation is for.
     pub fn invalidate(&self, key: &K) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("decoded block cache lock should not be poisoned");
-        if let Some(slot) = inner.entries.remove(key) {
-            inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
-            inner.shrink_if_sparse();
-        }
+        self.lock().drop_key(key);
     }
 
     fn disabled(&self) -> bool {
@@ -448,6 +565,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             if slot_is_live(&inner.entries, &candidate, stamp) {
                 let slot = inner.entries.remove(&candidate).expect("live entry");
                 inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
+                inner.count_drop(&candidate);
                 self.record_eviction(slot.charged_bytes);
             }
             inner.shrink_if_sparse();
@@ -470,6 +588,32 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
 }
 
 impl<K: DecodedBlockKey, V> Inner<K, V> {
+    /// Returns whether an invalidation or an eviction dropped `key` since
+    /// `start`, or whether the key's in-flight entry is gone.
+    fn dropped_since(&self, key: &K, start: CheckStart) -> bool {
+        self.in_flight
+            .get(key)
+            .is_none_or(|entry| entry.drops != start.drops)
+    }
+
+    /// Records that `key` was dropped, for the loads and checks of the key
+    /// in flight.
+    fn count_drop(&mut self, key: &K) {
+        if let Some(entry) = self.in_flight.get_mut(key) {
+            entry.drops += 1;
+        }
+    }
+
+    /// Removes the key's entry, if it has one, and records the drop for the
+    /// loads and checks of the key in flight.
+    fn drop_key(&mut self, key: &K) {
+        self.count_drop(key);
+        if let Some(slot) = self.entries.remove(key) {
+            self.charged_bytes = self.charged_bytes.saturating_sub(slot.charged_bytes);
+            self.shrink_if_sparse();
+        }
+    }
+
     fn retained_bytes(&self) -> usize {
         self.charged_bytes
             .saturating_add(self.order_key_bytes)
@@ -668,6 +812,7 @@ mod tests {
     };
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone)]
     struct Block(usize);
@@ -750,6 +895,60 @@ mod tests {
             assert_eq!(newcomer.expect("new waiter should finish").0, 5);
             assert_eq!(store.counts().gets, 1);
             assert_eq!(cache.in_flight_len(), 0);
+        }
+    }
+
+    /// Checks that a load during which an invalidation or an eviction drops
+    /// its key returns its value to its callers uncached, and that the next
+    /// call loads the key afresh and caches it.
+    #[tokio::test]
+    async fn a_load_whose_key_is_dropped_while_it_runs_caches_nothing() {
+        let (key, other) = ("a".to_owned(), "b".to_owned());
+        let invalidate = |cache: &DecodedBlockCache<String, Block>| cache.invalidate(&key);
+        let evict = |cache: &DecodedBlockCache<String, Block>| {
+            assert!(cache.insert(key.clone(), Block(10)));
+            assert!(cache.insert(other.clone(), Block(10)));
+            assert!(
+                cache.peek(&key).is_none(),
+                "the second insert evicts the key"
+            );
+        };
+        for drop_key in [
+            &invalidate as &dyn Fn(&DecodedBlockCache<String, Block>),
+            &evict,
+        ] {
+            let budget = charged_bytes(&key, &Block(10));
+            let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+            let loads = AtomicUsize::new(0);
+            let (release, released) = tokio::sync::watch::channel(false);
+            let load = || {
+                cache.get_or_load(&key, || async {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    released
+                        .clone()
+                        .wait_for(|released| *released)
+                        .await
+                        .expect("the test keeps the sender");
+                    Ok::<_, String>(Block(7))
+                })
+            };
+            let mut first = pin!(load());
+            assert!(poll!(first.as_mut()).is_pending());
+            let mut waiter = pin!(load());
+            assert!(poll!(waiter.as_mut()).is_pending());
+            drop_key(&cache);
+            release.send(true).expect("the load waits for the release");
+            let (first, waiter) = futures::join!(first, waiter);
+            assert_eq!((first.expect("first").0, waiter.expect("waiter").0), (7, 7));
+            assert_eq!(
+                loads.load(Ordering::SeqCst),
+                1,
+                "the waiter takes the value"
+            );
+            assert!(cache.peek(&key).is_none(), "the load caches nothing");
+            load().await.expect("the next load");
+            assert_eq!(loads.load(Ordering::SeqCst), 2);
+            assert_eq!(cache.peek(&key).map(|block| block.0), Some(7));
         }
     }
 

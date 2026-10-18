@@ -86,6 +86,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .build(),
         )
@@ -155,6 +156,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .build(),
         )

@@ -78,45 +78,35 @@ impl RuntimeCore {
     ///
     /// One refresh of the namespace's head runs at a time in this runtime,
     /// and the reads that need one share it (see
-    /// [`SharedCheck`](loonfs_core::cache::SharedCheck)). A read waits for
-    /// the refresh in flight, and then an eventual read takes the head that
-    /// the refresh confirmed if it's within the read's maximum staleness.
-    /// Otherwise the read shares the next refresh, or runs it. So a wave of
-    /// concurrent eventual reads costs at most one refresh, and a wave of
-    /// strong reads at most two.
+    /// [`HeadStateCache::check_or_join_head`](loonfs_core::cache::HeadStateCache::check_or_join_head)).
+    /// A read waits for the refresh in flight, and then an eventual read
+    /// takes the head that the refresh confirmed if it's within the read's
+    /// maximum staleness. Otherwise the read shares the next refresh, or
+    /// runs it. So a wave of concurrent eventual reads costs at most one
+    /// refresh, and a wave of strong reads at most two.
     ///
     /// The refresh installs its result through
     /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
-    /// which keeps the newer of the result and the current head, so the
-    /// cached head doesn't move backwards whatever order a refresh and other
-    /// loads finish in. The reads start from whichever head that returns.
+    /// which keeps the newer of the result and the cached head, so the
+    /// cached head doesn't move backwards whatever order a refresh and the
+    /// end of a writer position finish in. The reads start from whichever
+    /// head that returns.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
         consistency: Consistency,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        let record = self.inner.head_state.record(namespace_id);
-        record
-            .refresh()
-            .run(
-                || self.eventual_head(namespace_id, consistency).map(Ok),
+        let head_state = &self.inner.head_state;
+        head_state
+            .check_or_join_head(
+                namespace_id,
+                || self.eventual_head(namespace_id, consistency),
                 || async {
-                    let started = record.generation();
-                    let cached = self.inner.head_state.get_head(namespace_id);
-                    let result = self
-                        .refresh_namespace_head(namespace_id, cached.as_deref().cloned())
+                    let cached = head_state.get_head(namespace_id);
+                    self.refresh_namespace_head(namespace_id, cached.as_deref().cloned())
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
-                        .await;
-                    match result {
-                        Ok(candidate) => Ok(self
-                            .inner
-                            .head_state
-                            .replace_head(&record, started, candidate)),
-                        Err(error) => {
-                            self.inner.head_state.invalidate_head(namespace_id);
-                            Err(error)
-                        }
-                    }
+                        .await
+                        .inspect_err(|_| head_state.invalidate_head(namespace_id))
                 },
             )
             .await
@@ -127,16 +117,23 @@ impl RuntimeCore {
     /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head).
     ///
     /// A read that finds a segment of its basis missing reloads this way,
-    /// because the newer manifest that replaced its basis is what it needs,
-    /// and a refresh from the cached head would read the same basis again.
+    /// after it drops the cached head, because the newer manifest that
+    /// replaced its basis is what it needs, and a refresh from the cached
+    /// head would read the same basis again. The reload shares the refresh
+    /// of the head in flight the way a strong read does, because a refresh
+    /// that starts after the drop finds that newer manifest too.
     pub(crate) async fn reload_namespace_head(
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        let record = self.inner.head_state.record(namespace_id);
-        let started = record.generation();
-        let loaded = self.refresh_namespace_head(namespace_id, None).await?;
-        Ok(self.inner.head_state.replace_head(&record, started, loaded))
+        self.inner
+            .head_state
+            .check_or_join_head(
+                namespace_id,
+                || None,
+                || self.refresh_namespace_head(namespace_id, None),
+            )
+            .await
     }
 
     async fn refresh_namespace_head(

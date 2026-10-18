@@ -860,10 +860,7 @@ enum SubmissionAdmission {
 impl NamespacePublisher {
     fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
         let session = SharedWriterSessionStatus::default();
-        let read_position = Arc::new(ReadPositionSlot::new(
-            &namespace_id,
-            registry.runtime_core.head_state(),
-        ));
+        let read_position = Arc::new(ReadPositionSlot::new(registry.runtime_core.head_state()));
         Self {
             namespace_id,
             runtime_core: registry.runtime_core.clone(),

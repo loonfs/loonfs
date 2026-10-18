@@ -473,13 +473,13 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
     fixture.shutdown().await;
 }
 
-/// Creates a read-only runtime over `store` whose head-state cache has
-/// `max_head_state_bytes`, with a manual clock and a one-second manifest
-/// check interval.
+/// Creates a read-only runtime over `store` whose head cache has
+/// `max_head_bytes`, with a manual clock and a one-second manifest check
+/// interval.
 async fn budgeted_reader(
     store: &SharedObjectStore,
     clock: Arc<ManualClock>,
-    max_head_state_bytes: usize,
+    max_head_bytes: usize,
 ) -> LoonFs<ReadOnly> {
     LoonFs::builder_with_store(store.clone())
         .read_only()
@@ -487,7 +487,7 @@ async fn budgeted_reader(
         .manifest_revalidation_interval_ms(INTERVAL_MS)
         .metadata_cache(
             MetadataCache::builder()
-                .max_head_state_bytes(max_head_state_bytes)
+                .max_head_bytes(max_head_bytes)
                 .build(),
         )
         .build()
@@ -495,20 +495,16 @@ async fn budgeted_reader(
         .expect("reader")
 }
 
-/// Returns whether a runtime whose head-state cache has
-/// `max_head_state_bytes` keeps the namespace's head after a strong read,
-/// so an eventual read takes it without loading the namespace.
+/// Returns whether a runtime whose head cache has `max_head_bytes` keeps
+/// the namespace's head after a strong read, so an eventual read takes it
+/// without loading the namespace.
 async fn keeps_the_head(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-    max_head_state_bytes: usize,
+    max_head_bytes: usize,
 ) -> bool {
-    let reader = budgeted_reader(
-        store,
-        Arc::new(ManualClock::new(1_000_000)),
-        max_head_state_bytes,
-    )
-    .await;
+    let reader =
+        budgeted_reader(store, Arc::new(ManualClock::new(1_000_000)), max_head_bytes).await;
     let namespace = reader.namespace(namespace_id);
     namespace
         .stat_with_options("/file.txt", &strong())
@@ -529,17 +525,17 @@ async fn keeps_the_head(
 }
 
 /// Checks that an eventual read after a strong read never reads an older
-/// head when the newer head is too large for the head-state cache.
+/// head when the newer head is too large for the head cache.
 ///
 /// A commit can't change a namespace's root grants, so the head grows here
 /// the one way it can: a writer with a 128-byte writer ID takes the
 /// namespace over, and the head includes its writer's ID. The reader's
-/// head-state budget is the smallest that keeps the head from before the
-/// takeover, so the newer head is too large to cache. The takeover's commit
-/// has 8 KiB of inline content, so its WAL-tail projection is too large as
-/// well and doesn't evict the older head. A cache that kept the older head
-/// after refusing the newer one would return the sequence from before the
-/// takeover to the eventual read at the end.
+/// head budget is the smallest that keeps the head from before the
+/// takeover, so the newer head is too large to cache. The takeover's
+/// WAL-tail projection goes to the tail cache, which has a budget of its
+/// own, so it doesn't evict the older head. A cache that kept the older
+/// head after refusing the newer one would return the sequence from before
+/// the takeover to the eventual read at the end.
 #[tokio::test]
 async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads_it() {
     let namespace_id = namespace_id("eventual-oversized");
