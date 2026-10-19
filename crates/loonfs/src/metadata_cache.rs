@@ -21,7 +21,7 @@ pub const DEFAULT_MAX_HEAD_BYTES: usize = 16 * 1024 * 1024;
 /// Default limit for WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 32 MiB (enough for about
-/// 150,000 sessions).
+/// 125,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
 /// Default limit for decoded WAL objects and small content objects: 128 MiB.
 pub const DEFAULT_MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 pub trait DecodedBlock: Clone {
     /// The decoded bytes this value holds, charged against the cache budget.
@@ -94,16 +94,18 @@ impl KindCounters {
 ///
 /// Each entry takes one table bucket for its key's `Arc` and its slot, with
 /// the bucket's control byte, at eight buckets for every seven entries. It
-/// also takes the `Arc` allocation of its key, which the table and the
-/// recency queue share, and two recency positions of that `Arc` and a
-/// stamp, one live and one ghost, because compaction keeps no more ghost
-/// positions than live entries in a queue long enough to compact. Spare
-/// table and queue capacity stay outside the budget, as allocator rounding
-/// does, so a table that doubles doesn't change any entry's charge or evict
-/// an entry.
+/// also takes the `Arc` allocation of its key, and two recency positions of
+/// a `Weak` to that `Arc` and a stamp, one live and one ghost, because
+/// compaction keeps no more ghost positions than live entries in a queue
+/// long enough to compact. The ghost is charged a second `Arc` allocation,
+/// because a ghost whose entry has left keeps that entry's `Arc` allocation
+/// (the reference counts and the key's inline bytes, but not the key's
+/// heap) until compaction drops the ghost. Spare table and queue capacity
+/// stay outside the budget, as allocator rounding does, so a table that
+/// doubles doesn't change any entry's charge or evict an entry.
 const fn entry_bytes<K, V>() -> usize {
     let bucket_bytes = size_of::<(Arc<K>, CacheSlot<V>)>() + 1;
-    (bucket_bytes * 8).div_ceil(7) + arc_bytes::<K>() + 2 * size_of::<(Arc<K>, u64)>()
+    (bucket_bytes * 8).div_ceil(7) + 2 * arc_bytes::<K>() + 2 * size_of::<(Weak<K>, u64)>()
 }
 
 /// Returns the bytes the cache charges an entry of `block` under `key`.
@@ -187,10 +189,11 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 
 #[derive(Debug)]
 struct Inner<K, V> {
-    /// The entries, under keys that the recency queue shares, so a ghost
-    /// position doesn't copy its key.
+    /// The entries, under keys that the recency queue refers to with a
+    /// `Weak`, so a ghost position neither copies its key nor keeps the key
+    /// alive after its entry leaves.
     entries: HashMap<Arc<K>, CacheSlot<V>>,
-    order: Recency<Arc<K>>,
+    order: Recency<Weak<K>>,
     /// The charges of the entries, in total.
     charged_bytes: usize,
     /// The keys with a load or a check in flight. The engine's lock covers
@@ -528,8 +531,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// least recently used entries until the cache is within its budget
     /// again, and returns whether the cache kept the new entry.
     fn put(&self, inner: &mut Inner<K, V>, key: K, block: V, entry_charge: usize) -> bool {
-        // A replaced entry's ghost positions share its key, so the new entry
-        // keeps that key instead of a copy.
+        // A replaced entry's ghost positions point to its key, so the new
+        // entry keeps that key instead of allocating another.
         let key = match inner.entries.remove_entry(&key) {
             Some((stored_key, previous)) => {
                 inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
@@ -572,6 +575,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             else {
                 break;
             };
+            let candidate = candidate
+                .upgrade()
+                .expect("the table keeps the key of a live position");
             let slot = inner.drop_key(&candidate).expect("live entry");
             self.record_eviction(slot.charged_bytes);
         }
@@ -627,7 +633,7 @@ impl<K: DecodedBlockKey, V> Inner<K, V> {
     }
 
     fn touch(&mut self, key: &Arc<K>) {
-        let stamp = self.order.touch(Arc::clone(key));
+        let stamp = self.order.touch(Arc::downgrade(key));
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
@@ -638,10 +644,21 @@ impl<K: DecodedBlockKey, V> Inner<K, V> {
     }
 }
 
-fn slot_is_live<K: Eq + Hash, V>(entries: &HashMap<K, CacheSlot<V>>, key: &K, stamp: u64) -> bool {
-    entries
-        .get(key)
-        .is_some_and(|slot| slot.last_touch == stamp)
+/// Returns whether the position of `key` stamped `stamp` is its entry's
+/// live position.
+///
+/// A key that no longer upgrades belongs to an entry that left the table,
+/// so its position is a ghost.
+fn slot_is_live<K: Eq + Hash, V>(
+    entries: &HashMap<Arc<K>, CacheSlot<V>>,
+    key: &Weak<K>,
+    stamp: u64,
+) -> bool {
+    key.upgrade().is_some_and(|key| {
+        entries
+            .get(&key)
+            .is_some_and(|slot| slot.last_touch == stamp)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -795,6 +812,7 @@ mod tests {
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[derive(Clone)]
     struct Block(usize);
@@ -1048,5 +1066,50 @@ mod tests {
         }
         let inner = cache.inner.lock().expect("cache lock");
         assert_eq!((inner.entries.capacity(), inner.order.positions()), (0, 0));
+    }
+
+    /// Checks that the ghost positions of an invalidated key don't keep the
+    /// key alive, and that compaction on the next touch drops them.
+    #[test]
+    fn ghost_positions_of_an_invalidated_key_keep_nothing_alive() {
+        let others: Vec<String> = (0..16).map(|index| format!("key {index:02}")).collect();
+        let key = "invalidated".to_owned();
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(1024 * 1024));
+        for other in &others {
+            assert!(cache.insert(other.clone(), Block(1)));
+        }
+        assert!(cache.insert(key.clone(), Block(1)));
+        // The 15 ghost positions that the hits leave don't outnumber the 17
+        // live entries, so the queue doesn't compact.
+        for _ in 0..15 {
+            assert!(cache.get(&key).is_some());
+        }
+        let stored = Arc::downgrade(
+            cache
+                .inner
+                .lock()
+                .expect("cache lock")
+                .entries
+                .get_key_value(&key)
+                .expect("the key's entry")
+                .0,
+        );
+
+        cache.invalidate(&key);
+        assert!(stored.upgrade().is_none(), "a ghost position keeps the key");
+        assert_eq!(
+            cache.inner.lock().expect("cache lock").order.positions(),
+            others.len() + 16,
+            "the key's 16 positions stay in the queue as ghosts"
+        );
+
+        // The touch leaves a 17th ghost, which outnumbers the 16 live
+        // entries.
+        assert!(cache.get(&others[0]).is_some());
+        assert_eq!(
+            cache.inner.lock().expect("cache lock").order.positions(),
+            others.len(),
+            "compaction drops every ghost"
+        );
     }
 }

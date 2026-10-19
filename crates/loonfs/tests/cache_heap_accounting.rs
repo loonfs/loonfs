@@ -418,14 +418,17 @@ impl DecodedBlock for Empty {
     }
 }
 
-// The cache charges each entry its key's heap once, the `Arc` that the
-// table and the recency queue share for the key, one table bucket, and two
-// recency positions. It doesn't charge the spare buckets of a table that
-// grew ahead of its entries or the queue's spare capacity, so a cache of
-// small entries allocates more than it's charged (1.14 times at this
-// commit, with keys of one length and with hits on one long key). The
-// bound makes a test fail if a later change lets a cache of small entries
-// allocate far past its budget.
+// The cache charges each entry its key's heap once, the key's `Arc`, one
+// table bucket, two recency positions (each a `Weak` to the key and a
+// stamp), and a second `Arc` allocation for the one that a ghost position
+// keeps after its entry leaves. It doesn't charge the spare buckets of a
+// table that grew ahead of its entries or the queue's spare capacity, so a
+// cache of small entries allocates more than it's charged (1.02 times at
+// this commit with keys of one length and with hits on one long key, and
+// 1.11 times while one long key is invalidated and inserted again, the
+// only case whose ghosts keep `Arc` allocations after their entries leave).
+// The bound makes a test fail if a later change lets a cache of small
+// entries allocate far past its budget.
 const SMALL_ENTRY_BOUND: f64 = 1.25;
 
 /// Creates 10,000 distinct keys of 97 bytes each.
@@ -498,6 +501,44 @@ fn hits_on_one_long_key_stay_within_the_small_entry_bound() {
     );
 }
 
+/// Checks that invalidating and inserting one long key again and again, in
+/// a cache filled with small entries, keeps the cache's allocation within
+/// the small-entry bound.
+///
+/// Each cycle inserts the key, hits it, and invalidates it, so the cycle
+/// leaves two ghost positions of the key in the queue until compaction. A
+/// ghost position that kept its key alive would keep one copy of the long
+/// key for each cycle.
+fn invalidating_and_inserting_one_long_key_stays_within_the_small_entry_bound() {
+    let keys = small_entry_keys();
+    let long_key = "x".repeat(4096);
+    let budget = 1024 * 1024;
+    let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+    let baseline = LIVE.load(Ordering::Relaxed);
+    for key in &keys {
+        assert!(cache.insert(key.clone(), Empty));
+    }
+    // The cycles leave more ghost positions than the cache has live
+    // entries, so the queue grows to its longest at least once before it
+    // compacts.
+    let mut heap = 0;
+    for _ in 0..4_000 {
+        assert!(cache.insert(long_key.clone(), Empty));
+        assert!(cache.get(&long_key).is_some());
+        cache.invalidate(&long_key);
+        heap = heap.max(LIVE.load(Ordering::Relaxed).saturating_sub(baseline));
+    }
+    let accounted = cache.stats().cached_decoded_bytes;
+    println!(
+        "long key churn | {budget} | {accounted} accounted | {heap} heap | {:.2}",
+        ratio(heap, accounted)
+    );
+    assert!(
+        ratio(heap, accounted) <= SMALL_ENTRY_BOUND,
+        "invalidating and inserting a long key: {heap} allocated, {accounted} accounted"
+    );
+}
+
 /// Checks that a namespace head heavier than the whole head budget isn't
 /// kept by the cache once the read that loaded it is done, and that
 /// the next read of the namespace loads it again. The head of a namespace
@@ -559,6 +600,7 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
 async fn cache_budgets_charge_the_heap_their_contents_hold() {
     small_entries_charge_cache_bookkeeping();
     hits_on_one_long_key_stay_within_the_small_entry_bound();
+    invalidating_and_inserting_one_long_key_stays_within_the_small_entry_bound();
     let shapes = [
         Shape {
             label: "directories",
