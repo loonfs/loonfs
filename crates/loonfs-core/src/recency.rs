@@ -49,17 +49,12 @@ impl<K> Recency<K> {
     /// `None` means the queue holds no live position at all, so an eviction
     /// loop must stop: popping again cannot make progress.
     pub fn pop_oldest(&mut self, mut is_live: impl FnMut(&K, u64) -> bool) -> Option<K> {
-        while let Some((key, stamp)) = self.pop_front() {
+        while let Some((key, stamp)) = self.order.pop_front() {
             if is_live(&key, stamp) {
                 return Some(key);
             }
         }
         None
-    }
-
-    /// Removes the oldest position, including a stale one.
-    pub(crate) fn pop_front(&mut self) -> Option<(K, u64)> {
-        self.order.pop_front()
     }
 
     /// Drops ghost positions in place once they outnumber the `live_len`
@@ -75,18 +70,6 @@ impl<K> Recency<K> {
     /// Queue positions held, live and ghost alike.
     pub fn positions(&self) -> usize {
         self.order.len()
-    }
-
-    /// Returns the allocation for queue positions, including unused capacity.
-    pub(crate) fn allocation_bytes(&self) -> usize {
-        self.order.capacity() * std::mem::size_of::<(K, u64)>()
-    }
-
-    /// Releases unused capacity after the queue loses most of its positions.
-    pub(crate) fn shrink_if_sparse(&mut self) {
-        if self.order.len() < self.order.capacity() / 4 {
-            self.order.shrink_to_fit();
-        }
     }
 }
 

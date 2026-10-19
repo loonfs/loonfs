@@ -84,7 +84,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Group optional response fields that go together** with `#[serde(flatten)] Option<Group>`, which doesn't change the JSON.
 
-- **Share a type whose size grows with the namespace through `Arc`**, and don't derive `Clone` on it, because a stray `.clone()` would copy a large amount of memory.
+- **Share a type whose size grows with the namespace through `Arc`**, and don't derive `Clone` on it, because a stray `.clone()` would copy a large amount of memory. Keep a `Weak` or an ID in a structure that refers to a value another structure owns (a back-pointer, an index, a memo, or an ordering), because an `Arc` there would keep the value alive after its owner drops it, and use an `Arc` in such a structure only with a comment that says why.
 
 - **Return a named struct, not a tuple, from a function that's visible outside its module**, because a tuple's fields have no names.
 
