@@ -1,7 +1,7 @@
 //! Shared cache for decoded immutable objects.
 
 use crate::error::CoreError;
-use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
+use crate::heap_bytes::HeapBytes;
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use crate::shared_check::SharedCheck;
@@ -41,8 +41,9 @@ impl DecodedBlockCacheConfig {
 
 /// Counters and occupancy of a [`DecodedBlockCache`].
 ///
-/// Retained bytes include the values, keys, table, and recency queue.
-/// Evicted bytes count the key and value released with an entry.
+/// The byte fields report what the cache charges its entries. An entry's
+/// charge includes its value's weight, its key's heap, and the cache's own
+/// allocation for the entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodedBlockCacheStats {
     pub hits: usize,
@@ -54,7 +55,7 @@ pub struct DecodedBlockCacheStats {
     /// than the whole budget.
     pub rejections: usize,
     pub rejected_decoded_bytes: usize,
-    /// Retained allocations, including unused table and queue capacity.
+    /// The bytes that every entry in the cache is charged, in total.
     pub cached_decoded_bytes: usize,
 }
 
@@ -88,23 +89,29 @@ impl KindCounters {
     }
 }
 
-/// Returns the initial table, queue, and queued key allocations.
-fn initial_overhead<K: DecodedBlockKey, V>(key: &K) -> usize {
+/// Returns the bytes the cache allocates for one entry, apart from the
+/// key's heap and the value's weight.
+///
+/// Each entry takes one table bucket for its key and slot, with the bucket's
+/// control byte, at eight buckets for every seven entries. It also takes one
+/// recency position for its key and stamp. Spare table and queue capacity,
+/// and ghost recency positions, stay outside the budget, as allocator
+/// rounding does, so a table that doubles doesn't change any entry's charge
+/// or evict an entry.
+const fn entry_bytes<K, V>() -> usize {
     let bucket_bytes = size_of::<(K, CacheSlot<V>)>() + 1;
-    key.heap_bytes()
-        .saturating_add(4 * bucket_bytes + 16 + 4 * size_of::<(K, u64)>())
+    (bucket_bytes * 8).div_ceil(7) + size_of::<(K, u64)>()
 }
 
-/// Returns the bytes needed to cache an entry on its own.
+/// Returns the bytes the cache charges an entry of `block` under `key`.
 ///
 /// The table and the entry's recency position each store a copy of the key,
 /// so the key's heap is charged twice.
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn charged_bytes<K: DecodedBlockKey, V: DecodedBlock>(key: &K, block: &V) -> usize {
     block
         .weight()
-        .saturating_add(key.heap_bytes())
-        .saturating_add(initial_overhead::<K, V>(key))
+        .saturating_add(key.heap_bytes().saturating_mul(2))
+        .saturating_add(entry_bytes::<K, V>())
 }
 
 pub struct DecodedBlockCache<K, V> {
@@ -182,12 +189,8 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 struct Inner<K, V> {
     entries: HashMap<K, CacheSlot<V>>,
     order: Recency<K>,
-    /// Key and value allocations owned by live entries.
+    /// The charges of the entries, in total.
     charged_bytes: usize,
-    order_key_bytes: usize,
-    /// Deletion can reduce `HashMap::capacity` without releasing its table.
-    /// Keep the largest allocation until the table is explicitly shrunk.
-    table_bytes: usize,
     /// The keys with a load or a check in flight. The engine's lock covers
     /// these with the entries, so an insert can compare a key's drops and
     /// insert in one step.
@@ -197,7 +200,7 @@ struct Inner<K, V> {
 #[derive(Debug)]
 struct CacheSlot<V> {
     block: V,
-    /// The key and value allocations released when the entry leaves.
+    /// The bytes that the entry was charged when it was inserted.
     charged_bytes: usize,
     last_touch: u64,
 }
@@ -221,8 +224,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 entries: HashMap::new(),
                 order: Recency::default(),
                 charged_bytes: 0,
-                order_key_bytes: 0,
-                table_bytes: 0,
                 in_flight: HashMap::new(),
             }),
             stats: StatsInner::default(),
@@ -344,7 +345,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::Relaxed),
             rejections: self.stats.rejections.load(Ordering::Relaxed),
             rejected_decoded_bytes: self.stats.rejected_decoded_bytes.load(Ordering::Relaxed),
-            cached_decoded_bytes: inner.retained_bytes(),
+            cached_decoded_bytes: inner.charged_bytes,
         }
     }
 
@@ -396,7 +397,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             return None;
         };
         inner.touch(key);
-        self.evict_over_budget(&mut inner);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         Some(block)
     }
@@ -511,10 +511,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// that the entry would have been charged if that's more than the whole
     /// budget.
     fn entry_charge(&self, key: &K, block: &V) -> Result<usize, usize> {
-        let entry_charge = block.weight().saturating_add(key.heap_bytes());
-        let charged_bytes = entry_charge.saturating_add(initial_overhead::<K, V>(key));
-        if charged_bytes > self.config.max_decoded_bytes {
-            return Err(charged_bytes);
+        let entry_charge = charged_bytes(key, block);
+        if entry_charge > self.config.max_decoded_bytes {
+            return Err(entry_charge);
         }
         Ok(entry_charge)
     }
@@ -535,7 +534,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 last_touch: 0,
             },
         );
-        inner.table_bytes = inner.table_bytes.max(hash_map_table_bytes(&inner.entries));
         inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
@@ -557,18 +555,16 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
-        while inner.retained_bytes() > self.config.max_decoded_bytes {
-            let Some((candidate, stamp)) = inner.order.pop_front() else {
+        while inner.charged_bytes > self.config.max_decoded_bytes {
+            let Inner { entries, order, .. } = &mut *inner;
+            let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
+            else {
                 break;
             };
-            inner.order_key_bytes -= candidate.heap_bytes();
-            if slot_is_live(&inner.entries, &candidate, stamp) {
-                let slot = inner.entries.remove(&candidate).expect("live entry");
-                inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
-                inner.count_drop(&candidate);
-                self.record_eviction(slot.charged_bytes);
-            }
-            inner.shrink_if_sparse();
+            let slot = entries.remove(&candidate).expect("live entry");
+            inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
+            inner.count_drop(&candidate);
+            self.record_eviction(slot.charged_bytes);
         }
     }
 
@@ -610,49 +606,18 @@ impl<K: DecodedBlockKey, V> Inner<K, V> {
         self.count_drop(key);
         if let Some(slot) = self.entries.remove(key) {
             self.charged_bytes = self.charged_bytes.saturating_sub(slot.charged_bytes);
-            self.shrink_if_sparse();
         }
     }
 
-    fn retained_bytes(&self) -> usize {
-        self.charged_bytes
-            .saturating_add(self.order_key_bytes)
-            .saturating_add(self.table_bytes)
-            .saturating_add(self.order.allocation_bytes())
-    }
-
     fn touch(&mut self, key: &K) {
-        let queued_key = key.clone();
-        self.order_key_bytes += queued_key.heap_bytes();
-        let stamp = self.order.touch(queued_key);
+        let stamp = self.order.touch(key.clone());
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
         let entries = &self.entries;
         self.order.compact(entries.len(), |key, stamp| {
-            let live = slot_is_live(entries, key, stamp);
-            if !live {
-                self.order_key_bytes -= key.heap_bytes();
-            }
-            live
+            slot_is_live(entries, key, stamp)
         });
-    }
-
-    fn shrink_if_sparse(&mut self) {
-        if self.entries.is_empty() {
-            self.entries = HashMap::new();
-            self.order = Recency::default();
-            self.table_bytes = 0;
-            self.order_key_bytes = 0;
-            return;
-        }
-        // Shrink only after most entries have left, so eviction doesn't
-        // rebuild the table on every removal.
-        if self.entries.len() * size_of::<(K, CacheSlot<V>)>() < self.table_bytes / 4 {
-            self.entries.shrink_to_fit();
-            self.table_bytes = hash_map_table_bytes(&self.entries);
-        }
-        self.order.shrink_if_sparse();
     }
 }
 
@@ -974,21 +939,22 @@ mod tests {
 
     /// Checks that entries whose values weigh nothing are charged their keys
     /// and the cache's own allocation, so a budget that fits a few of them
-    /// keeps a bounded number and evicts the rest.
+    /// keeps that many and evicts the rest.
     #[test]
     fn entries_with_weightless_values_are_charged_and_evicted() {
         let keys: Vec<String> = (0..32).map(|index| format!("key {index:02}")).collect();
+        let charge = charged_bytes(&keys[0], &Block(0));
         let budget = 1_024;
         let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
         let key_count = keys.len();
         for key in keys {
             assert!(cache.insert(key, Block(0)));
         }
-        let live_entries = cache.inner.lock().expect("cache lock").entries.len();
+        let live_entries = cache.len();
         let stats = cache.stats();
-        assert!(live_entries > 0 && live_entries < key_count);
+        assert_eq!(live_entries, budget / charge);
         assert_eq!(stats.evictions, key_count - live_entries);
-        assert!(stats.cached_decoded_bytes > 0 && stats.cached_decoded_bytes <= budget);
+        assert_eq!(stats.cached_decoded_bytes, live_entries * charge);
     }
 
     /// Checks that an entry whose charge is more than the whole budget isn't
@@ -1016,5 +982,37 @@ mod tests {
             stats.cached_decoded_bytes,
             charged_bytes(&kept, &Block(100))
         );
+    }
+
+    /// Checks that a cache of small entries, whose table grows through
+    /// several resizes, evicts nothing until its entries' charges reach the
+    /// budget, and then evicts one entry for each insert.
+    #[test]
+    fn small_entries_are_evicted_one_per_insert_from_the_budget_on() {
+        const ENTRIES: usize = 1_000;
+        let keys: Vec<_> = (0..4 * ENTRIES)
+            .map(|index| MetadataSegmentId::parse(format!("seg_{index:032x}")).expect("segment id"))
+            .collect();
+        // Every key is 36 characters long, so every entry is charged the same.
+        let budget = ENTRIES * charged_bytes(&keys[0], &Block(32));
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+        let (mut capacity, mut resizes) = (0, 0);
+        for (inserted, key) in (1..).zip(keys) {
+            let evictions = cache.stats().evictions;
+            assert!(cache.insert(key, Block(32)));
+            let evicted = cache.stats().evictions - evictions;
+            assert!(
+                evicted <= usize::from(inserted > ENTRIES),
+                "insert {inserted} evicted {evicted} entries"
+            );
+            let grown = cache.inner.lock().expect("cache lock").entries.capacity();
+            if grown > capacity {
+                capacity = grown;
+                resizes += 1;
+            }
+        }
+        assert!(resizes >= 8, "the table grew {resizes} times");
+        assert_eq!(cache.stats().evictions, 3 * ENTRIES);
+        assert_eq!(cache.len(), ENTRIES);
     }
 }

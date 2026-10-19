@@ -291,12 +291,10 @@ mod tests {
         let entry = content_charge("a", 400);
         assert!(entry > 400);
         // The budget fits two entries but not three.
-        let budget = entry + 500;
-        let cache = ObjectCache::unshared(budget, 600);
+        let cache = ObjectCache::unshared(2 * entry + entry / 2, 600);
         cache.insert_content("a", &[1; 400]);
         cache.insert_content("b", &[2; 400]);
-        assert!(cache.stats().cached_decoded_bytes > 800);
-        assert!(cache.stats().cached_decoded_bytes <= budget);
+        assert_eq!(cache.stats().cached_decoded_bytes, 2 * entry);
 
         cache.insert_content("large", &[3; 700]);
         assert!(
@@ -308,8 +306,10 @@ mod tests {
         assert!(cache.get_content("a", 400).is_some());
         cache.insert_content("c", &[4; 400]);
         let stats = cache.stats();
-        assert_eq!(stats.evictions, 1);
-        assert!(stats.cached_decoded_bytes > 800 && stats.cached_decoded_bytes <= budget);
+        assert_eq!(
+            (stats.evictions, stats.cached_decoded_bytes),
+            (1, 2 * entry)
+        );
         assert!(
             cache.get_content("b", 1).is_none(),
             "the least recently used object is evicted first"
@@ -351,8 +351,10 @@ mod tests {
         ] {
             assert_eq!(view.get_content("key", 5).as_deref(), Some(&bytes[..]));
         }
-        assert!(shared.stats().cached_decoded_bytes > 10);
-        assert!(shared.stats().cached_decoded_bytes <= 1_000);
+        assert_eq!(
+            shared.stats().cached_decoded_bytes,
+            2 * content_charge("key", 5)
+        );
     }
 
     /// Checks that an empty content object isn't kept, because a read of no
