@@ -15,7 +15,10 @@ mod tests;
 
 /// Default limit for decoded segment blocks and manifests: 256 MiB.
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
-/// Default limit for namespace head anchors and WAL-tail projections: 64 MiB.
+/// Default limit for namespace head anchors: 16 MiB (enough for about 18,000
+/// namespaces).
+pub const DEFAULT_MAX_HEAD_BYTES: usize = 16 * 1024 * 1024;
+/// Default limit for WAL-tail projections: 64 MiB.
 pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 32 MiB (enough for about
 /// 110,000 sessions).
@@ -88,6 +91,7 @@ impl MetadataCache {
     pub fn builder() -> MetadataCacheBuilder {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+            max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
             max_head_state_bytes: DEFAULT_MAX_HEAD_STATE_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
@@ -99,7 +103,8 @@ impl MetadataCache {
     /// runtime that reads through it.
     pub fn stats(&self) -> MetadataCacheStats {
         let segments = self.inner.segment_blocks.stats();
-        let head_state = self.inner.head_state.stats();
+        let heads = self.inner.head_state.head_stats();
+        let tails = self.inner.head_state.tail_stats();
         let objects = self.inner.objects.stats();
         let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
@@ -112,14 +117,19 @@ impl MetadataCache {
             segment_bytes: segments.cached_decoded_bytes,
             head_anchor_hits: self.inner.head_anchor_hits.load(Ordering::Relaxed),
             head_anchor_misses: self.inner.head_anchor_misses.load(Ordering::Relaxed),
-            wal_tail_hits: head_state.tail_hits,
-            wal_tail_misses: head_state.tail_misses,
-            wal_tail_inserts: head_state.tail_inserts,
-            head_state_evictions: head_state.evictions,
-            head_state_evicted_bytes: head_state.evicted_decoded_bytes,
-            head_state_rejections: head_state.rejections,
-            head_state_rejected_bytes: head_state.rejected_decoded_bytes,
-            head_state_bytes: head_state.cached_decoded_bytes,
+            head_evictions: heads.evictions,
+            head_evicted_bytes: heads.evicted_decoded_bytes,
+            head_rejections: heads.rejections,
+            head_rejected_bytes: heads.rejected_decoded_bytes,
+            head_bytes: heads.cached_decoded_bytes,
+            wal_tail_hits: tails.hits,
+            wal_tail_misses: tails.misses,
+            wal_tail_inserts: tails.inserts,
+            head_state_evictions: tails.evictions,
+            head_state_evicted_bytes: tails.evicted_decoded_bytes,
+            head_state_rejections: tails.rejections,
+            head_state_rejected_bytes: tails.rejected_decoded_bytes,
+            head_state_bytes: tails.cached_decoded_bytes,
             wal_object_hits: objects.wal_hits,
             wal_object_misses: objects.wal_misses,
             wal_object_inserts: objects.wal_inserts,
@@ -228,6 +238,7 @@ impl ObjectStoreScopes {
 #[must_use]
 pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
+    max_head_bytes: usize,
     max_head_state_bytes: usize,
     max_completed_upload_session_bytes: usize,
     max_object_bytes: usize,
@@ -242,11 +253,26 @@ impl MetadataCacheBuilder {
         self
     }
 
-    /// Sets the decoded bytes of namespace head anchors and WAL-tail
-    /// projections that the cache keeps for reads. Defaults to
-    /// [`DEFAULT_MAX_HEAD_STATE_BYTES`]. Zero keeps none, so reads cache no
-    /// heads or tails. (A writer session keeps its own WAL tail whatever the
-    /// limit is.) An entry heavier than the whole limit isn't kept.
+    /// Sets the decoded bytes of namespace head anchors that the cache keeps
+    /// for reads. Defaults to [`DEFAULT_MAX_HEAD_BYTES`]. Zero keeps none, so
+    /// every read that doesn't start from a writer session's position
+    /// confirms or loads its head. A head heavier than the whole limit isn't
+    /// kept.
+    ///
+    /// Heads have a limit of their own, so a large WAL tail can't evict them.
+    /// A head is charged about 0.6 to 0.9 KB, or about 116 KB with the
+    /// largest access control list.
+    pub fn max_head_bytes(mut self, max_head_bytes: usize) -> Self {
+        self.max_head_bytes = max_head_bytes;
+        self
+    }
+
+    /// Sets the decoded bytes of WAL-tail projections that the cache keeps
+    /// for reads. Defaults to [`DEFAULT_MAX_HEAD_STATE_BYTES`]. Zero keeps
+    /// none, so reads cache no tails. (A writer session keeps its own WAL
+    /// tail whatever the limit is, and namespace heads have their own limit,
+    /// [`Self::max_head_bytes`].) A tail heavier than the whole limit isn't
+    /// kept.
     pub fn max_head_state_bytes(mut self, max_head_state_bytes: usize) -> Self {
         self.max_head_state_bytes = max_head_state_bytes;
         self
@@ -291,7 +317,10 @@ impl MetadataCacheBuilder {
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
                 segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
-                head_state: Arc::new(SharedHeadState::new(self.max_head_state_bytes)),
+                head_state: Arc::new(SharedHeadState::new(
+                    self.max_head_bytes,
+                    self.max_head_state_bytes,
+                )),
                 completed_upload_sessions: Arc::new(SharedCompletedUploadSessions::new(
                     self.max_completed_upload_session_bytes,
                 )),
@@ -332,27 +361,37 @@ pub struct MetadataCacheStats {
     pub head_anchor_hits: usize,
     /// Head anchor lookups that sent a read to the store.
     pub head_anchor_misses: usize,
+    /// Head anchors evicted to stay within the head limit.
+    pub head_evictions: usize,
+    /// Bytes charged to the evicted head anchors, including their keys.
+    pub head_evicted_bytes: usize,
+    /// Head anchors heavier than the whole head limit, which are never kept.
+    pub head_rejections: usize,
+    /// Bytes that the rejected head anchors would have been charged,
+    /// including their keys and the cache's own allocation for each entry.
+    pub head_rejected_bytes: usize,
+    /// Bytes charged to head anchors now, including their keys and the
+    /// cache's own allocation for each entry.
+    pub head_bytes: usize,
     /// WAL-tail projection lookups the cache answered.
     pub wal_tail_hits: usize,
     /// WAL-tail projection lookups the cache could not answer.
     pub wal_tail_misses: usize,
     /// WAL-tail projections inserted.
     pub wal_tail_inserts: usize,
-    /// Head anchors and WAL-tail projections evicted to stay within the
-    /// head-state limit.
+    /// WAL-tail projections evicted to stay within the head-state limit.
     pub head_state_evictions: usize,
-    /// Bytes charged to the evicted head anchors and WAL-tail projections,
-    /// including their keys.
+    /// Bytes charged to the evicted WAL-tail projections, including their
+    /// keys.
     pub head_state_evicted_bytes: usize,
-    /// Head anchors and WAL-tail projections heavier than the whole
-    /// head-state limit, which are never kept.
+    /// WAL-tail projections heavier than the whole head-state limit, which
+    /// are never kept.
     pub head_state_rejections: usize,
-    /// Bytes that the rejected head anchors and WAL-tail projections would
-    /// have been charged, including their keys and the cache's own
-    /// allocation for each entry.
+    /// Bytes that the rejected WAL-tail projections would have been charged,
+    /// including their keys and the cache's own allocation for each entry.
     pub head_state_rejected_bytes: usize,
-    /// Bytes charged to head anchors and WAL-tail projections now, including
-    /// their keys and the cache's own allocation for each entry.
+    /// Bytes charged to WAL-tail projections now, including their keys and
+    /// the cache's own allocation for each entry.
     pub head_state_bytes: usize,
     /// WAL object lookups that found the object in the cache.
     pub wal_object_hits: usize,

@@ -17,7 +17,7 @@ use loonfs::publish::{
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
     MaintainMetadataOptions, MetadataCache, NamespaceId, PageRequest, ReadOnly, SharedObjectStore,
-    StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
+    StatOptions, DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{
@@ -443,8 +443,8 @@ fn small_entries_charge_cache_bookkeeping() {
     assert_eq!(cache.stats().cached_decoded_bytes, 0);
 }
 
-/// Checks that a namespace head heavier than the whole head-state budget
-/// isn't kept by the cache once the read that loaded it is done, and that
+/// Checks that a namespace head heavier than the whole head budget isn't
+/// kept by the cache once the read that loaded it is done, and that
 /// the next read of the namespace loads it again. The head of a namespace
 /// with access control includes its root grants, so a namespace whose root
 /// grants are at the entry limit has a head of tens of KiB.
@@ -462,20 +462,21 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root.path()).expect("local store"));
     seed(&store, &shape).await;
     drop(store);
-    let head_state = |max_head_state_bytes| {
+    let heads = |max_head_bytes| {
         MetadataCache::builder()
             .max_segment_bytes(0)
-            .max_head_state_bytes(max_head_state_bytes)
+            .max_head_bytes(max_head_bytes)
+            .max_head_state_bytes(0)
             .max_object_bytes(0)
             .build()
     };
 
-    let (with_budget, reader) = retained_heap(root.path(), head_state(BUDGET), |reader| {
+    let (with_budget, reader) = retained_heap(root.path(), heads(BUDGET), |reader| {
         stat_one_path_per_namespace(&shape, reader)
     })
     .await;
     let first = reader.metadata_cache().stats();
-    let (without_budget, unbudgeted) = retained_heap(root.path(), head_state(0), |reader| {
+    let (without_budget, unbudgeted) = retained_heap(root.path(), heads(0), |reader| {
         stat_one_path_per_namespace(&shape, reader)
     })
     .await;
@@ -483,20 +484,20 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
     let retained = with_budget.saturating_sub(without_budget);
     println!(
         "oversized head | {BUDGET} | {} accounted | {retained} retained",
-        first.head_state_bytes
+        first.head_bytes
     );
-    assert!(first.head_state_rejections >= 1, "{first:?}");
-    assert!(first.head_state_bytes <= BUDGET, "{first:?}");
+    assert!(first.head_rejections >= 1, "{first:?}");
+    assert!(first.head_bytes <= BUDGET, "{first:?}");
     assert!(
         retained <= BUDGET,
-        "the head-state cache retains {retained} bytes under a {BUDGET} byte budget"
+        "the head cache retains {retained} bytes under a {BUDGET} byte budget"
     );
 
     stat_one_path_per_namespace(&shape, reader.clone()).await;
     let second = reader.metadata_cache().stats();
     assert_eq!(second.head_anchor_misses, first.head_anchor_misses + 1);
     assert_eq!(second.head_anchor_hits, first.head_anchor_hits);
-    assert!(second.head_state_rejections > first.head_state_rejections);
+    assert!(second.head_rejections > first.head_rejections);
 }
 
 #[tokio::test]
@@ -544,6 +545,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             root.path(),
             MetadataCache::builder()
                 .max_segment_bytes(SEGMENT_BUDGET_BYTES)
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .max_object_bytes(0)
                 .build(),
@@ -557,22 +559,26 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         );
         drop(reader);
 
-        let head_state = |max_head_state_bytes| {
+        // The head state is the heads and the tails, each under its own
+        // budget.
+        let head_state = |max_head_bytes, max_head_state_bytes| {
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_head_bytes(max_head_bytes)
                 .max_head_state_bytes(max_head_state_bytes)
                 .max_object_bytes(0)
                 .build()
         };
         let (with_head_state, reader) = retained_heap(
             root.path(),
-            head_state(DEFAULT_MAX_HEAD_STATE_BYTES),
+            head_state(DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_HEAD_STATE_BYTES),
             |reader| stat_one_path_per_namespace(shape, reader),
         )
         .await;
-        let accounted = reader.metadata_cache().stats().head_state_bytes;
+        let stats = reader.metadata_cache().stats();
+        let accounted = stats.head_bytes + stats.head_state_bytes;
         drop(reader);
-        let (without_head_state, reader) = retained_heap(root.path(), head_state(0), |reader| {
+        let (without_head_state, reader) = retained_heap(root.path(), head_state(0, 0), |reader| {
             stat_one_path_per_namespace(shape, reader)
         })
         .await;

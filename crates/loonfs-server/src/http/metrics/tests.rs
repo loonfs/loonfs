@@ -207,6 +207,11 @@ fn each_cache_stats_field_renders_into_its_own_series() {
             content_object_inserts: 23,
             object_evictions: 24,
             object_bytes: 25,
+            head_evictions: 30,
+            head_evicted_bytes: 31,
+            head_rejections: 32,
+            head_rejected_bytes: 33,
+            head_bytes: 34,
             ..MetadataCacheStats::default()
         },
     );
@@ -251,6 +256,11 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         "loonfs_grep_block_cache_gets_total{result=\"miss\"} 27",
         "loonfs_grep_block_cache_inserts_total 28",
         "loonfs_grep_block_cache_evictions_total 29",
+        "loonfs_head_cache_evictions_total 30",
+        "loonfs_head_cache_evicted_decoded_bytes_total 31",
+        "loonfs_head_cache_rejections_total 32",
+        "loonfs_head_cache_rejected_decoded_bytes_total 33",
+        "loonfs_head_cache_retained_decoded_bytes 34",
     ];
     for series in expected {
         assert!(

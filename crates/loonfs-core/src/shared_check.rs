@@ -1,4 +1,5 @@
-//! A check of a cached view that the reads which need one share.
+//! A check of a cached view, or a load of a cached value, that the callers
+//! which need one share.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +57,34 @@ impl<T: Clone> SharedCheck<T> {
         let outcome = check().await;
         *finished = Some((number, outcome.clone()));
         outcome
+    }
+}
+
+impl<V: Clone, E: Clone> SharedCheck<Result<V, E>> {
+    /// Waits for the load in flight, if any, and then returns the value of a
+    /// load that succeeded, or else `current()` when it's `Some`, or else the
+    /// value that `load` returns, which this call runs.
+    ///
+    /// Unlike a check, a load serves the callers that arrived while it ran,
+    /// because the value under the key of an immutable object can't change.
+    /// A load that fails shares nothing, so the next caller to stop waiting
+    /// runs its own.
+    pub(crate) async fn load<L, F: Future<Output = Result<V, L>>>(
+        &self,
+        current: impl FnOnce() -> Option<V>,
+        load: impl FnOnce() -> F,
+    ) -> Result<V, L> {
+        let mut finished = self.finished.lock().await;
+        if let Some((_, Ok(value))) = finished.as_ref() {
+            return Ok(value.clone());
+        }
+        if let Some(value) = current() {
+            return Ok(value);
+        }
+        let number = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+        let value = load().await?;
+        *finished = Some((number, Ok(value.clone())));
+        Ok(value)
     }
 }
 

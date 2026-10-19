@@ -1486,8 +1486,8 @@ mod tests {
         let (first, second) = (first.expect("first load"), second.expect("second load"));
         assert!(Arc::ptr_eq(&first.wal_tail, &second.wal_tail));
         assert_eq!(store.counts().gets, one_replay, "one set of WAL GETs");
-        let stats = shared.stats();
-        assert_eq!((stats.tail_misses, stats.tail_inserts), (1, 1));
+        let stats = shared.tail_stats();
+        assert_eq!((stats.misses, stats.inserts), (1, 1));
     }
 
     #[tokio::test]

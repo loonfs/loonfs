@@ -237,6 +237,11 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         segment_bytes,
         head_anchor_hits,
         head_anchor_misses,
+        head_evictions,
+        head_evicted_bytes,
+        head_rejections,
+        head_rejected_bytes,
+        head_bytes,
         wal_tail_hits,
         wal_tail_misses,
         wal_tail_inserts,
@@ -263,6 +268,36 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         "loonfs_namespace_head_cache_gets",
         "Namespace head cache lookups, by outcome",
         &lookups(head_anchor_hits, head_anchor_misses),
+    );
+    for (name, description, value) in [
+        (
+            "loonfs_head_cache_evictions",
+            "Namespace heads evicted to stay within the head budget",
+            head_evictions,
+        ),
+        (
+            "loonfs_head_cache_evicted_decoded_bytes",
+            "Bytes charged to evicted namespace heads, including keys and per-entry bookkeeping",
+            head_evicted_bytes,
+        ),
+        (
+            "loonfs_head_cache_rejections",
+            "Namespace heads heavier than the whole head budget",
+            head_rejections,
+        ),
+        (
+            "loonfs_head_cache_rejected_decoded_bytes",
+            "Bytes charged to rejected namespace heads, including keys and per-entry bookkeeping",
+            head_rejected_bytes,
+        ),
+    ] {
+        write_counter(rendered, name, description, &[(NO_LABELS, value)]);
+    }
+    write_gauge(
+        rendered,
+        "loonfs_head_cache_retained_decoded_bytes",
+        "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",
+        head_bytes,
     );
 
     write_counter(
@@ -318,22 +353,22 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     for (name, description, value) in [
         (
             "loonfs_head_state_cache_evictions",
-            "Head anchors and WAL-tail projections evicted to stay within the head-state budget",
+            "WAL-tail projections evicted to stay within the head-state budget",
             head_state_evictions,
         ),
         (
             "loonfs_head_state_cache_evicted_decoded_bytes",
-            "Bytes charged to evicted head state entries, including keys and per-entry bookkeeping",
+            "Bytes charged to evicted WAL-tail projections, including keys and per-entry bookkeeping",
             head_state_evicted_bytes,
         ),
         (
             "loonfs_head_state_cache_rejections",
-            "Head anchors and WAL-tail projections heavier than the whole head-state budget",
+            "WAL-tail projections heavier than the whole head-state budget",
             head_state_rejections,
         ),
         (
             "loonfs_head_state_cache_rejected_decoded_bytes",
-            "Bytes charged to rejected head state entries, including keys and per-entry bookkeeping",
+            "Bytes charged to rejected WAL-tail projections, including keys and per-entry bookkeeping",
             head_state_rejected_bytes,
         ),
     ] {
@@ -342,7 +377,7 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     write_gauge(
         rendered,
         "loonfs_head_state_cache_retained_decoded_bytes",
-        "Bytes currently charged to head anchors and WAL-tail projections, including keys and per-entry bookkeeping",
+        "Bytes currently charged to WAL-tail projections, including keys and per-entry bookkeeping",
         head_state_bytes,
     );
 

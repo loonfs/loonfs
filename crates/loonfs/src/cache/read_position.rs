@@ -4,9 +4,7 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
-use loonfs_core::cache::{
-    CachedHead, HeadRecord, HeadStateCache, SharedCheck, WalTailProjectionCacheKey,
-};
+use loonfs_core::cache::{CachedHead, HeadStateCache, SharedCheck, WalTailProjectionCacheKey};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -52,9 +50,6 @@ pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head, with the position's tail.
     head_state: Arc<HeadStateCache>,
-    /// The namespace's head record, which [`Self::clear`] installs the
-    /// position through, kept while the session lasts.
-    record: Arc<HeadRecord>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// The session's checks of the position, which the reads that need a
     /// check share.
@@ -62,11 +57,10 @@ pub(crate) struct ReadPositionSlot {
 }
 
 impl ReadPositionSlot {
-    /// Returns an empty slot for the writer session of `namespace_id`, in the
-    /// runtime whose read cache is `head_state`.
-    pub(crate) fn new(namespace_id: &NamespaceId, head_state: Arc<HeadStateCache>) -> Self {
+    /// Returns an empty slot for a writer session in the runtime whose read
+    /// cache is `head_state`.
+    pub(crate) fn new(head_state: Arc<HeadStateCache>) -> Self {
         Self {
-            record: head_state.record(namespace_id),
             head_state,
             position: Mutex::default(),
             check: SharedCheck::default(),
@@ -141,16 +135,12 @@ impl ReadPositionSlot {
             },
             Arc::clone(&position.tail),
         );
-        self.head_state.replace_head(
-            &self.record,
-            self.record.generation(),
-            CachedHead {
-                head: position.head.clone(),
-                basis: position.basis.clone(),
-                basis_checked: position.basis_checked.clone(),
-                head_confirmed: position.basis_checked.clone(),
-            },
-        );
+        self.head_state.replace_head(CachedHead {
+            head: position.head.clone(),
+            basis: position.basis.clone(),
+            basis_checked: position.basis_checked.clone(),
+            head_confirmed: position.basis_checked.clone(),
+        });
         *self.lock() = None;
         true
     }

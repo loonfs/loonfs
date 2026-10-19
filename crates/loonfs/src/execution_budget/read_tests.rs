@@ -95,6 +95,7 @@ impl Fixture {
         let fixture = Self::with_cache(
             KeyPredicate::any(),
             crate::MetadataCache::builder()
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .build(),
         )

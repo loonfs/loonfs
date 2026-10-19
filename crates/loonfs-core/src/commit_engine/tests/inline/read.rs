@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cache::{
-    HeadStateCache, HeadStateCacheStats, MetadataSegmentCache, WalTailProjectionCacheKey,
+    DecodedBlockCacheStats, HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheKey,
 };
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
@@ -245,8 +245,8 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .starts_with(&wal_prefix(&publisher.namespace_id))));
     assert_no_content_requests(&store);
     assert_eq!(
-        context.head_state.stats(),
-        HeadStateCacheStats::default(),
+        context.head_state.tail_stats(),
+        DecodedBlockCacheStats::default(),
         "reads from the position's tail neither look up nor insert a tail"
     );
 

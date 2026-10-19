@@ -2134,6 +2134,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_head_bytes(0)
                 .max_head_state_bytes(0)
                 .build(),
         )
@@ -3210,9 +3211,9 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
         .expect("drain settles every publisher");
 }
 
-/// Checks that with a zero head-state limit the read cache keeps nothing,
-/// and that each writer session keeps its own tail, so a session's second
-/// commit reads no tail from the store.
+/// Checks that with zero head and head-state limits the read cache keeps
+/// nothing, and that each writer session keeps its own tail, so a session's
+/// second commit reads no tail from the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3222,6 +3223,7 @@ async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() 
         store,
         MetadataCache::builder()
             .max_segment_bytes(0)
+            .max_head_bytes(0)
             .max_head_state_bytes(0)
             .build(),
         recorder.clone(),
@@ -3238,7 +3240,8 @@ async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() 
         .await
         .expect("commit");
 
-    assert_eq!(writer.metadata_cache().stats().head_state_bytes, 0);
+    let stats = writer.metadata_cache().stats();
+    assert_eq!((stats.head_bytes, stats.head_state_bytes), (0, 0));
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         u64::try_from(namespaces.len()).expect("small count"),

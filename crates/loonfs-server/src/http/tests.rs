@@ -104,6 +104,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
 
     for name in [
         "loonfs_namespace_head_cache_gets_total",
+        "loonfs_head_cache_evictions_total",
+        "loonfs_head_cache_evicted_decoded_bytes_total",
+        "loonfs_head_cache_rejections_total",
+        "loonfs_head_cache_rejected_decoded_bytes_total",
         "loonfs_metadata_segment_cache_gets_total",
         "loonfs_metadata_segment_cache_inserts_total",
         "loonfs_metadata_segment_cache_evictions_total",
@@ -132,6 +136,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     }
     for name in [
         "loonfs_metadata_segment_cache_retained_decoded_bytes",
+        "loonfs_head_cache_retained_decoded_bytes",
         "loonfs_head_state_cache_retained_decoded_bytes",
         "loonfs_object_cache_retained_decoded_bytes",
     ] {
