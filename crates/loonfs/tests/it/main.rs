@@ -21,6 +21,7 @@ mod checkpoint_requests;
 mod cold_stat_requests;
 mod commit_retry;
 mod common;
+mod concurrent_folds;
 mod content_ref_import_access;
 mod content_request_accounting;
 mod derived_paths;
