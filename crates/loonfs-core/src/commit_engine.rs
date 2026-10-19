@@ -6,7 +6,7 @@ use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{MetadataSegmentCache, PublishedManifest};
+use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -927,12 +927,13 @@ impl NamespaceCommitEngine {
     /// Deletion publishes a new manifest with the same writer-session checks as
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a takeover detected during manifest publication permanently fences the
-    /// session.
+    /// session. A deletion first folds the WAL tail with `fold_policy`.
     pub async fn delete_namespace<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         options: DeleteNamespaceOptions,
         context: &MutationContext,
+        fold_policy: MetadataRunPolicy,
     ) -> Result<DeleteNamespaceResponse> {
         let deadline = Deadline::start(Arc::clone(&self.timer));
         let acquired_writer = self.session_writer_epoch(store, context).await?;
@@ -943,6 +944,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
             context,
             &deadline,
+            fold_policy,
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -1201,12 +1203,13 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
     context: &MutationContext,
+    fold_policy: MetadataRunPolicy,
     content_writes: Arc<tokio::sync::Semaphore>,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<DeleteNamespaceResponse> {
     NamespaceCommitEngine::new(namespace_id.clone(), content_writes)
         .monotonic_timer(timer)
-        .delete_namespace(store, options, context)
+        .delete_namespace(store, options, context, fold_policy)
         .await
 }
 

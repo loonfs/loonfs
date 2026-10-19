@@ -1165,7 +1165,12 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         namespace_id.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
-    .delete_namespace(store.as_ref(), Default::default(), &context)
+    .delete_namespace(
+        store.as_ref(),
+        Default::default(),
+        &context,
+        loonfs_core::MetadataRunPolicy::default(),
+    )
     .await
     .expect("delete");
     context.now_ms += crate::GcOptions::default()

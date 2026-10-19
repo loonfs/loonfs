@@ -525,6 +525,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             options,
             &self.mutation_context(),
+            self.effective_run_policy(),
             Arc::clone(&self.content_writes),
             Arc::clone(&self.timer),
         )

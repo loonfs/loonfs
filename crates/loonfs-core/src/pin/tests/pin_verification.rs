@@ -216,6 +216,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 writer,
                 &context,
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+                MetadataRunPolicy::default(),
                 None,
                 &tokio::sync::Semaphore::new(32),
             )

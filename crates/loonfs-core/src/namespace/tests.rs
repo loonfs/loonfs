@@ -382,7 +382,12 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         target.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
-    .delete_namespace(&store, Default::default(), &context)
+    .delete_namespace(
+        &store,
+        Default::default(),
+        &context,
+        crate::manifest::MetadataRunPolicy::default(),
+    )
     .await
     .expect("delete target");
     store.reset();
@@ -451,6 +456,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
                     &target,
                     Default::default(),
                     &setup,
+                    crate::manifest::MetadataRunPolicy::default(),
                     std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
                     crate::test_support::std_timer(),
                 )

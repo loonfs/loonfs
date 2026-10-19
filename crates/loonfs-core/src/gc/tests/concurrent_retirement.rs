@@ -81,6 +81,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             namespace,
             Default::default(),
             &setup,
+            crate::manifest::MetadataRunPolicy::default(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             crate::test_support::std_timer(),
         )

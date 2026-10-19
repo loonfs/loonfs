@@ -977,6 +977,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         acquired,
         &context,
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        MetadataRunPolicy::default(),
         None,
         &tokio::sync::Semaphore::new(32),
     )

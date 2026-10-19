@@ -87,6 +87,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         &target,
         Default::default(),
         &setup,
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
@@ -237,6 +238,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         Default::default(),
         &context(clock.now_ms()),
+        crate::manifest::MetadataRunPolicy::default(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         crate::test_support::std_timer(),
     )
