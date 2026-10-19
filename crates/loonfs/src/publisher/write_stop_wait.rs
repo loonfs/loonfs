@@ -2,6 +2,7 @@
 //! session's fold, for at most the write-stop wait.
 
 use super::*;
+use loonfs_test_support::clock::ManualClock;
 
 /// The inline bytes of each waiting commit, which fill a WAL object's inline
 /// budget, so that each commit publishes in a WAL object of its own.
@@ -60,6 +61,34 @@ fn short_write_stop_wait() -> crate::PublicationPolicy {
         write_stop_wait_deadline_ms: 500,
         ..crate::PublicationPolicy::default()
     }
+}
+
+/// The write-stop wait of a writer whose clock the test moves. The worker
+/// sleeps this long before the wait expires, so the test moves the clock past
+/// the wait well before then.
+const MANUAL_WRITE_STOP_WAIT_MS: u64 = 2_000;
+
+/// Creates a fixture whose writer reads `clock`, with a write-stop wait of
+/// [`MANUAL_WRITE_STOP_WAIT_MS`].
+async fn fixture_with_clock(clock: &Arc<ManualClock>) -> Fixture {
+    let clock = Arc::clone(clock);
+    fixture(|builder| {
+        builder
+            .monotonic_timer(clock)
+            .publication_policy(crate::PublicationPolicy {
+                write_stop_wait_deadline_ms: MANUAL_WRITE_STOP_WAIT_MS,
+                ..crate::PublicationPolicy::default()
+            })
+    })
+    .await
+}
+
+fn spawn_commit(
+    namespace: &crate::Namespace<crate::Writable>,
+    candidate: CommitCandidate,
+) -> JoinHandle<crate::Result<Commit>> {
+    let namespace = namespace.clone();
+    tokio::spawn(async move { namespace.commit_candidate(candidate).await })
 }
 
 /// Yields until `ready` returns true, and fails the test after ten seconds.
@@ -123,17 +152,10 @@ async fn start_commit_at_the_write_stop(fixture: &Fixture) -> JoinHandle<crate::
     )
     .await;
     fixture.store.block_next();
-    let commit = tokio::spawn({
-        let namespace = fixture.namespace.clone();
-        async move {
-            namespace
-                .commit_candidate(CommitCandidate::new(create_directory_request(
-                    "at-the-stop",
-                    "at-the-stop",
-                )))
-                .await
-        }
-    });
+    let commit = spawn_commit(
+        &fixture.namespace,
+        CommitCandidate::new(create_directory_request("at-the-stop", "at-the-stop")),
+    );
     // The publish that the engine refuses starts the session's fold, after
     // the worker took the commit from the queue, so a queued commit beside a
     // fold task is a commit that waits.
@@ -483,4 +505,106 @@ async fn an_unknown_outcome_before_the_write_stop_keeps_commit_outcome_unknown()
         .await
         .expect("a retry with the same commit ID is committed after the fold");
     writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a retry of a committed request, queued behind a commit that
+/// waits at the write stop, returns its original commit when that wait
+/// expires, instead of `maintenance_required`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_queued_behind_an_expired_wait_returns_its_original_commit() {
+    let clock = Arc::new(ManualClock::new(0));
+    let fixture = fixture_with_clock(&clock).await;
+    // The session's epoch fence and the committed request fill the tail to
+    // the write stop, and the fold that the request starts parks at its
+    // manifest put.
+    seed_wal_tail(
+        fixture.store.inner(),
+        &fixture.namespace_id,
+        MAX_UNFOLDED_WAL_OBJECTS - 2,
+    )
+    .await;
+    fixture.store.block_next();
+    let committed = || CommitCandidate::new(create_directory_request("committed", "committed"));
+    let original = fixture
+        .namespace
+        .commit_candidate(committed())
+        .await
+        .expect("commit below the write stop");
+    let commit = spawn_commit(
+        &fixture.namespace,
+        CommitCandidate::new(create_directory_request("at-the-stop", "at-the-stop")),
+    );
+    let publisher = fixture.namespace.session().publisher.clone();
+    // The worker took the new commit's batch, the second batch here, and put
+    // the refused commit back in the queue.
+    wait_until(
+        || {
+            counter(&fixture.recorder, "loonfs.publisher.batches") == 2
+                && queued_candidates(&publisher_state(&publisher)) == 1
+        },
+        "the new commit waits at the write stop",
+    )
+    .await;
+    let retry = spawn_commit(&fixture.namespace, committed());
+    wait_until(
+        || queued_candidates(&publisher_state(&publisher)) == 2,
+        "the retry is queued behind the waiting commit",
+    )
+    .await;
+
+    // Both commits entered the queue at the clock's start, so both have
+    // waited out the write-stop wait when it expires.
+    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_MS);
+    let error = settle_commit(commit)
+        .await
+        .expect_err("the waiting commit reaches the write-stop wait");
+    assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+    let replay = settle_commit(retry)
+        .await
+        .expect("the engine answers the retry from its receipt");
+    assert_eq!(replay, original);
+    fixture.store.release();
+    fixture.writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a new commit queued behind a commit that waits at the write
+/// stop, and past the write-stop wait when that wait expires, returns
+/// `maintenance_required` only after the engine examines it at the next
+/// publish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_queued_behind_an_expired_wait_is_refused_after_the_engine_examines_it() {
+    let clock = Arc::new(ManualClock::new(0));
+    let fixture = fixture_with_clock(&clock).await;
+    let commit = start_commit_at_the_write_stop(&fixture).await;
+    let behind = spawn_commit(
+        &fixture.namespace,
+        CommitCandidate::new(create_directory_request("behind", "behind")),
+    );
+    let publisher = fixture.namespace.session().publisher.clone();
+    wait_until(
+        || queued_candidates(&publisher_state(&publisher)) == 2,
+        "the new commit is queued behind the waiting commit",
+    )
+    .await;
+
+    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_MS);
+    for commit in [commit, behind] {
+        let error = settle_commit(commit)
+            .await
+            .expect_err("the commit waits out the write-stop wait");
+        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+    }
+    let recorder = &fixture.recorder;
+    assert_eq!(
+        counter(recorder, "loonfs.publisher.batches"),
+        2,
+        "the commit behind is published once before it is refused"
+    );
+    assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 2);
+    assert_eq!(
+        histogram_count(recorder, "loonfs.publisher.write_stop_wait_seconds"),
+        2
+    );
+    fixture.store.release();
+    fixture.writer.shutdown().await.expect("shut down writer");
 }

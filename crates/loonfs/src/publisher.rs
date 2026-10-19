@@ -843,6 +843,11 @@ struct BatchCandidate {
     /// Whether this commit was queued when a wait at the write stop ended, so
     /// `write_stop_waits` records it once.
     waited_at_write_stop: bool,
+    /// Whether the engine refused this commit at the write stop when the
+    /// worker last published it. Only such a commit can reach the end of the
+    /// write-stop wait without another publish, because the engine returns a
+    /// retry's result from its receipt.
+    refused_at_write_stop: bool,
 }
 
 struct InFlightRequest {
@@ -1165,6 +1170,7 @@ impl NamespacePublisher {
             candidate: candidate.candidate,
             enqueued_at,
             waited_at_write_stop: false,
+            refused_at_write_stop: false,
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the
@@ -1390,9 +1396,11 @@ impl NamespacePublisher {
     }
 
     /// Records each queued commit that waited at the write stop for the first
-    /// time, and returns `maintenance_required` to each queued commit that
-    /// has waited out the write-stop wait, counted from when it entered the
-    /// queue.
+    /// time, and returns `maintenance_required` to each commit that the
+    /// engine refused at the write stop and that has waited out the
+    /// write-stop wait, counted from when it entered the queue. A commit
+    /// queued behind those publishes next, so the engine examines it before
+    /// it can be refused.
     fn end_write_stop_wait(&self) {
         let deadline_ms = self.admission.write_stop_wait_deadline_ms();
         let now_ms = self.timer.monotonic_now_ms();
@@ -1407,7 +1415,8 @@ impl NamespacePublisher {
                             candidate.waited_at_write_stop = true;
                             first_waits += 1;
                         }
-                        let past = elapsed_ms_from(candidate.enqueued_at, now_ms) >= deadline_ms;
+                        let past = candidate.refused_at_write_stop
+                            && elapsed_ms_from(candidate.enqueued_at, now_ms) >= deadline_ms;
                         if past {
                             refused.push(candidate.commit_id.clone());
                         }
@@ -1601,6 +1610,7 @@ impl NamespacePublisher {
                         candidate,
                         enqueued_at,
                         waited_at_write_stop,
+                        refused_at_write_stop: true,
                     });
                 }
                 _ => {
