@@ -1,7 +1,7 @@
 //! Shared cache for decoded immutable objects.
 
 use crate::error::CoreError;
-use crate::heap_bytes::HeapBytes;
+use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use crate::shared_check::SharedCheck;
@@ -92,25 +92,25 @@ impl KindCounters {
 /// Returns the bytes the cache allocates for one entry, apart from the
 /// key's heap and the value's weight.
 ///
-/// Each entry takes one table bucket for its key and slot, with the bucket's
-/// control byte, at eight buckets for every seven entries. It also takes one
-/// recency position for its key and stamp. Spare table and queue capacity,
-/// and ghost recency positions, stay outside the budget, as allocator
-/// rounding does, so a table that doubles doesn't change any entry's charge
-/// or evict an entry.
+/// Each entry takes one table bucket for its key's `Arc` and its slot, with
+/// the bucket's control byte, at eight buckets for every seven entries. It
+/// also takes the `Arc` allocation of its key, which the table and the
+/// recency queue share, and two recency positions of that `Arc` and a
+/// stamp, one live and one ghost, because compaction keeps no more ghost
+/// positions than live entries in a queue long enough to compact. Spare
+/// table and queue capacity stay outside the budget, as allocator rounding
+/// does, so a table that doubles doesn't change any entry's charge or evict
+/// an entry.
 const fn entry_bytes<K, V>() -> usize {
-    let bucket_bytes = size_of::<(K, CacheSlot<V>)>() + 1;
-    (bucket_bytes * 8).div_ceil(7) + size_of::<(K, u64)>()
+    let bucket_bytes = size_of::<(Arc<K>, CacheSlot<V>)>() + 1;
+    (bucket_bytes * 8).div_ceil(7) + arc_bytes::<K>() + 2 * size_of::<(Arc<K>, u64)>()
 }
 
 /// Returns the bytes the cache charges an entry of `block` under `key`.
-///
-/// The table and the entry's recency position each store a copy of the key,
-/// so the key's heap is charged twice.
 pub(crate) fn charged_bytes<K: DecodedBlockKey, V: DecodedBlock>(key: &K, block: &V) -> usize {
     block
         .weight()
-        .saturating_add(key.heap_bytes().saturating_mul(2))
+        .saturating_add(key.heap_bytes())
         .saturating_add(entry_bytes::<K, V>())
 }
 
@@ -187,8 +187,10 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 
 #[derive(Debug)]
 struct Inner<K, V> {
-    entries: HashMap<K, CacheSlot<V>>,
-    order: Recency<K>,
+    /// The entries, under keys that the recency queue shares, so a ghost
+    /// position doesn't copy its key.
+    entries: HashMap<Arc<K>, CacheSlot<V>>,
+    order: Recency<Arc<K>>,
     /// The charges of the entries, in total.
     charged_bytes: usize,
     /// The keys with a load or a check in flight. The engine's lock covers
@@ -392,11 +394,15 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// hit or a miss.
     fn touch_entry(&self, key: &K) -> Option<V> {
         let mut inner = self.lock();
-        let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
+        let Some((key, block)) = inner
+            .entries
+            .get_key_value(key)
+            .map(|(key, slot)| (Arc::clone(key), slot.block.clone()))
+        else {
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        inner.touch(key);
+        inner.touch(&key);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         Some(block)
     }
@@ -522,12 +528,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// least recently used entries until the cache is within its budget
     /// again, and returns whether the cache kept the new entry.
     fn put(&self, inner: &mut Inner<K, V>, key: K, block: V, entry_charge: usize) -> bool {
-        let stored_key = key.clone();
-        if let Some(previous) = inner.entries.remove(&key) {
-            inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
-        }
+        // A replaced entry's ghost positions share its key, so the new entry
+        // keeps that key instead of a copy.
+        let key = match inner.entries.remove_entry(&key) {
+            Some((stored_key, previous)) => {
+                inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
+                stored_key
+            }
+            None => Arc::new(key),
+        };
         inner.entries.insert(
-            stored_key,
+            Arc::clone(&key),
             CacheSlot {
                 block,
                 charged_bytes: entry_charge,
@@ -561,9 +572,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             else {
                 break;
             };
-            let slot = entries.remove(&candidate).expect("live entry");
-            inner.charged_bytes = inner.charged_bytes.saturating_sub(slot.charged_bytes);
-            inner.count_drop(&candidate);
+            let slot = inner.drop_key(&candidate).expect("live entry");
             self.record_eviction(slot.charged_bytes);
         }
     }
@@ -600,17 +609,25 @@ impl<K: DecodedBlockKey, V> Inner<K, V> {
         }
     }
 
-    /// Removes the key's entry, if it has one, and records the drop for the
-    /// loads and checks of the key in flight.
-    fn drop_key(&mut self, key: &K) {
+    /// Removes and returns the key's entry, if it has one, and records the
+    /// drop for the loads and checks of the key in flight.
+    ///
+    /// The table keeps its buckets and the queue keeps its ghost positions
+    /// when entries leave, so removing the last entry replaces both with
+    /// empty ones, and an emptied cache allocates nothing.
+    fn drop_key(&mut self, key: &K) -> Option<CacheSlot<V>> {
         self.count_drop(key);
-        if let Some(slot) = self.entries.remove(key) {
-            self.charged_bytes = self.charged_bytes.saturating_sub(slot.charged_bytes);
+        let slot = self.entries.remove(key)?;
+        self.charged_bytes = self.charged_bytes.saturating_sub(slot.charged_bytes);
+        if self.entries.is_empty() {
+            self.entries = HashMap::new();
+            self.order = Recency::default();
         }
+        Some(slot)
     }
 
-    fn touch(&mut self, key: &K) {
-        let stamp = self.order.touch(key.clone());
+    fn touch(&mut self, key: &Arc<K>) {
+        let stamp = self.order.touch(Arc::clone(key));
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
@@ -1014,5 +1031,22 @@ mod tests {
         assert!(resizes >= 8, "the table grew {resizes} times");
         assert_eq!(cache.stats().evictions, 3 * ENTRIES);
         assert_eq!(cache.len(), ENTRIES);
+    }
+
+    /// Checks that invalidating every entry replaces the cache's table and
+    /// recency queue with empty ones, so an emptied cache allocates nothing.
+    #[test]
+    fn invalidating_every_entry_releases_the_table_and_the_queue() {
+        let keys: Vec<String> = (0..1_000).map(|index| format!("key {index:03}")).collect();
+        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(1024 * 1024));
+        for key in &keys {
+            assert!(cache.insert(key.clone(), Block(1)));
+            assert!(cache.get(key).is_some(), "the hit leaves a ghost position");
+        }
+        for key in &keys {
+            cache.invalidate(key);
+        }
+        let inner = cache.inner.lock().expect("cache lock");
+        assert_eq!((inner.entries.capacity(), inner.order.positions()), (0, 0));
     }
 }

@@ -407,26 +407,36 @@ fn ratio(heap: usize, accounted: usize) -> f64 {
     heap as f64 / accounted.max(1) as f64
 }
 
-fn small_entries_charge_cache_bookkeeping() {
-    #[derive(Clone)]
-    struct Empty;
-    impl DecodedBlock for Empty {
-        fn weight(&self) -> usize {
-            0
-        }
-    }
+/// A cached value that weighs nothing, so an entry's charge is its key's
+/// heap and the cache's own allocation for the entry.
+#[derive(Clone)]
+struct Empty;
 
-    // The cache charges each entry two copies of its key, one table bucket,
-    // and one recency position. It doesn't charge the spare buckets of a
-    // table that grew ahead of its entries, the ghost recency positions and
-    // their key copies, or the queue's spare capacity, so a cache of small
-    // entries allocates more than it's charged (1.64 times at this commit).
-    // The bound makes a test fail if a later change lets a cache of small
-    // entries allocate far past its budget.
-    const SMALL_ENTRY_BOUND: f64 = 2.0;
-    let keys: Vec<_> = (0..10_000)
+impl DecodedBlock for Empty {
+    fn weight(&self) -> usize {
+        0
+    }
+}
+
+// The cache charges each entry its key's heap once, the `Arc` that the
+// table and the recency queue share for the key, one table bucket, and two
+// recency positions. It doesn't charge the spare buckets of a table that
+// grew ahead of its entries or the queue's spare capacity, so a cache of
+// small entries allocates more than it's charged (1.14 times at this
+// commit, with keys of one length and with hits on one long key). The
+// bound makes a test fail if a later change lets a cache of small entries
+// allocate far past its budget.
+const SMALL_ENTRY_BOUND: f64 = 1.25;
+
+/// Creates 10,000 distinct keys of 97 bytes each.
+fn small_entry_keys() -> Vec<String> {
+    (0..10_000)
         .map(|index| format!("namespaces/demo/content/{index:032}/{}", "x".repeat(40)))
-        .collect();
+        .collect()
+}
+
+fn small_entries_charge_cache_bookkeeping() {
+    let keys = small_entry_keys();
     let budget = 1024 * 1024;
     let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
     let baseline = LIVE.load(Ordering::Relaxed);
@@ -453,6 +463,39 @@ fn small_entries_charge_cache_bookkeeping() {
         cache.invalidate(key);
     }
     assert_eq!(cache.stats().cached_decoded_bytes, 0);
+}
+
+/// Checks that repeated hits on one long key, in a cache filled with small
+/// entries, keep the cache's allocation within the small-entry bound.
+///
+/// Every hit adds a recency position for the key, and the queue keeps up to
+/// one ghost position for each live entry. A position that copied its key
+/// would allocate the long key once for each ghost.
+fn hits_on_one_long_key_stay_within_the_small_entry_bound() {
+    let keys = small_entry_keys();
+    let long_key = "x".repeat(4096);
+    let budget = 1024 * 1024;
+    let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
+    let baseline = LIVE.load(Ordering::Relaxed);
+    for key in keys.iter().chain([&long_key]) {
+        assert!(cache.insert(key.clone(), Empty));
+    }
+    // The hits outnumber the live entries, so the queue grows to its
+    // longest at least once before it compacts.
+    let mut heap = 0;
+    for _ in 0..keys.len() {
+        assert!(cache.get(&long_key).is_some());
+        heap = heap.max(LIVE.load(Ordering::Relaxed).saturating_sub(baseline));
+    }
+    let accounted = cache.stats().cached_decoded_bytes;
+    println!(
+        "long key | {budget} | {accounted} accounted | {heap} heap | {:.2}",
+        ratio(heap, accounted)
+    );
+    assert!(
+        ratio(heap, accounted) <= SMALL_ENTRY_BOUND,
+        "hits on a long key: {heap} allocated, {accounted} accounted"
+    );
 }
 
 /// Checks that a namespace head heavier than the whole head budget isn't
@@ -515,6 +558,7 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
 #[tokio::test]
 async fn cache_budgets_charge_the_heap_their_contents_hold() {
     small_entries_charge_cache_bookkeeping();
+    hits_on_one_long_key_stay_within_the_small_entry_bound();
     let shapes = [
         Shape {
             label: "directories",
