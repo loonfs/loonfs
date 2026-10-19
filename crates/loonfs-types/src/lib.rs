@@ -143,10 +143,11 @@ pub use name_policy::{name_key_for_display_name, NamespaceNaming};
 pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
-    encode_token_bytes, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
-    GrepPageCursor, LimitError, OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest,
-    PagedResponse, Pager, PaginationPolicy, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT,
-    DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
+    EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError, ListPageCursor,
+    OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager,
+    PaginationPolicy, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,

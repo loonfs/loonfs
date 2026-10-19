@@ -1097,6 +1097,52 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     );
 }
 
+/// Checks that a recursive listing returns a child directory that the
+/// subject can't read without its attributes and doesn't descend into that
+/// directory, while a subject that can read the directory sees its files.
+#[tokio::test]
+async fn a_recursive_listing_lists_an_unreadable_directory_without_descending_into_it() {
+    let (_temp_dir, store, namespace_id, _, _) = read_fixture().await;
+    let context = read_context(&store, &namespace_id).await;
+    let options = ListOptions {
+        include_attributes: AttributeInclusion::Include,
+        recursive: true,
+        ..Default::default()
+    };
+    for (principal, expected) in [
+        ("viewer", &["/team/file", "/team/kept", "/team/secret"][..]),
+        (
+            "prn_root",
+            &[
+                "/team/file",
+                "/team/kept",
+                "/team/secret",
+                "/team/secret/file",
+            ][..],
+        ),
+    ] {
+        let listing = read_engine(&store, &namespace_id, principal)
+            .list_path_page("/team", read_page(10), options.clone(), &context)
+            .await
+            .expect("recursive listing");
+        assert_eq!(
+            listing
+                .items
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{principal}"
+        );
+        let secret = listing
+            .items
+            .iter()
+            .find(|entry| entry.path.as_str() == "/team/secret")
+            .expect("the secret directory is listed");
+        assert_eq!(secret.attributes.is_some(), principal == "prn_root");
+    }
+}
+
 #[tokio::test]
 async fn history_needs_the_history_right() {
     let (_temp_dir, store, namespace_id, mutation, content) = read_fixture().await;

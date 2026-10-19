@@ -2,7 +2,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, start_server};
-use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{ClientError, ListOptions, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use loonfs_types::PageRequest;
@@ -340,6 +340,156 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
     assert_eq!(error.code, "invalid_request");
     assert!(error.message.contains("invalid limit"));
+
+    harness.server.abort();
+}
+
+/// Returns the `param` of an `invalid_request` error.
+fn error_param<T: std::fmt::Debug>(result: Result<T, ClientError>) -> Option<String> {
+    match result.expect_err("request should fail") {
+        ClientError::Api {
+            status,
+            code,
+            param,
+            ..
+        } => {
+            assert_eq!((status, code.as_str()), (400, "invalid_request"));
+            param
+        }
+        other => panic!("expected API error, got {other:?}"),
+    }
+}
+
+/// Checks that both list routes take `recursive`, that the client sends
+/// the parameter and pages a recursive listing by path and by inode, and
+/// that each kind of listing accepts only its own kind of cursor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-recursive-listing",
+    ))
+    .await;
+    let demo = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&demo, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
+    for directory in ["/docs", "/docs/a"] {
+        harness
+            .client
+            .create_directory(
+                &NamespacePath::parse("demo", directory).expect("directory path"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("create directory");
+    }
+    for file in ["/docs/a/x.txt", "/docs/b.txt"] {
+        harness
+            .client
+            .put_file_with_options(
+                &NamespacePath::parse("demo", file).expect("file path"),
+                b"body",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
+            .await
+            .expect("write file");
+    }
+    let recursive = ListOptions {
+        recursive: true,
+        ..Default::default()
+    };
+    let expected = ["/docs/a", "/docs/a/x.txt", "/docs/b.txt"];
+
+    let mut by_path = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = harness
+            .client
+            .list_with_options(&docs, &recursive)
+            .page(PageRequest {
+                limit: page_limit(1),
+                cursor,
+            })
+            .await
+            .expect("recursive page by path");
+        by_path.extend(page.entries.into_iter().map(|entry| entry.path.to_string()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(by_path, expected);
+    let docs_inode = harness
+        .client
+        .stat(&docs)
+        .await
+        .expect("stat docs")
+        .inode_id;
+    let by_inode = harness
+        .client
+        .list_by_inode_with_options(&demo, docs_inode, &recursive)
+        .collect_up_to(10)
+        .await
+        .expect("recursive listing by inode");
+    assert_eq!(
+        by_inode
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    for (issuing, resuming) in [
+        (ListOptions::default(), recursive.clone()),
+        (recursive.clone(), ListOptions::default()),
+    ] {
+        let cursor = harness
+            .client
+            .list_with_options(&docs, &issuing)
+            .page(PageRequest {
+                limit: page_limit(1),
+                cursor: None,
+            })
+            .await
+            .expect("first page")
+            .next_cursor;
+        let resumed = harness
+            .client
+            .list_with_options(&docs, &resuming)
+            .page(PageRequest {
+                limit: page_limit(1),
+                cursor,
+            })
+            .await;
+        assert_eq!(error_param(resumed).as_deref(), Some("cursor"));
+    }
+
+    let raw: ListPathEntriesResponse = get_json(
+        &format!(
+            "{}/v0/namespaces/demo/filesystem/entries?path=/docs&recursive=true",
+            harness.server_url
+        ),
+        "test-token",
+    )
+    .expect("raw recursive listing");
+    assert_eq!(raw.entries.len(), expected.len());
+    let invalid: Result<ListPathEntriesResponse, Box<ErrorResponse>> = get_json(
+        &format!(
+            "{}/v0/namespaces/demo/filesystem/entries?path=/docs&recursive=yes",
+            harness.server_url
+        ),
+        "test-token",
+    );
+    let error = invalid.expect_err("a recursive value that isn't a boolean");
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("recursive"));
 
     harness.server.abort();
 }

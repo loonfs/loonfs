@@ -7,8 +7,8 @@ use super::handlers_filesystem::{
     parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, PageQuery,
 };
 use super::query_params::{
-    checked_cursor, effective_page_limit, invalid_path_id_error, parse_consistency,
-    parse_include_attributes, parse_revision_no,
+    checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
+    parse_boolean_query_param, parse_consistency, parse_include_attributes, parse_revision_no,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
@@ -18,8 +18,7 @@ use loonfs::{ListOptions, ReadFileStreamOptions, StatOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    public_inode_id, DirectoryPageCursor, FileRevisionsPageCursor, InodeId,
-    ListFileRevisionsResponse, PageRequest,
+    public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PageRequest,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -122,6 +121,7 @@ pub(super) struct ListInodeChildrenQuery {
     limit: Option<String>,
     cursor: Option<String>,
     include_attributes: Option<String>,
+    recursive: Option<String>,
     snapshot_id: Option<String>,
     consistency: Option<String>,
     max_staleness_ms: Option<String>,
@@ -150,13 +150,14 @@ pub(super) struct ListInodeChildrenQuery {
             ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
+            ("recursive" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only. A cursor from one kind of listing can't resume the other."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
             ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 409, description = "Inode isn't a directory", body = ErrorResponse),
@@ -179,6 +180,9 @@ pub(super) async fn list_inode_children(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
+    if let Some(value) = query.recursive.as_deref() {
+        options.recursive = parse_boolean_query_param(value, "recursive")?;
+    }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     options.consistency = parse_consistency(
         query.consistency.as_deref(),
@@ -190,7 +194,7 @@ pub(super) async fn list_inode_children(
         .list_by_inode_with_options(inode_id, &options)
         .page(PageRequest {
             limit: effective_page_limit(query.limit)?,
-            cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
+            cursor: checked_list_cursor(query.cursor, &options)?,
         })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;

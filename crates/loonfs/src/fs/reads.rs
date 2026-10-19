@@ -1,6 +1,9 @@
 //! Namespace and filesystem reads on a [`Namespace`] handle in any mode.
 
-use super::core::{decode_page_request, encode_next_cursor, file_revisions_page_response};
+use super::core::{
+    decode_list_page_request, decode_page_request, encode_next_cursor, encode_next_list_cursor,
+    file_revisions_page_response,
+};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::execution_budget::BudgetPermit;
 use crate::options::{check_consistency, check_pinned_consistency, check_snapshot_consistency};
@@ -15,7 +18,7 @@ use crate::{
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::{
-    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageRequest,
+    AbsolutePath, EffectiveLimit, FileRevisionsPageCursor, ListPageCursor, PageRequest,
     TrashPageCursor,
 };
 use std::sync::Arc;
@@ -27,21 +30,21 @@ mod tests;
 /// snapshot implies its head, so the head test does work only for a view of
 /// the live head.
 fn validate_view_directory_cursor(
-    cursor: Option<&DirectoryPageCursor>,
+    cursor: Option<&ListPageCursor>,
     captured_seq: ChangeSeq,
     pin_id: Option<&PinId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
-    if cursor.head_seq != captured_seq {
+    if cursor.head_seq() != captured_seq {
         return Err(CoreError::InvalidCursor(format!(
             "directory cursor head `{}` does not match the read view head `{captured_seq}`",
-            cursor.head_seq
+            cursor.head_seq()
         ))
         .into());
     }
-    match (&cursor.pin_id, pin_id) {
+    match (cursor.pin_id(), pin_id) {
         (Some(actual), Some(expected)) if actual == expected => Ok(()),
         (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
             "directory cursor pin `{actual}` does not match requested pin `{expected}`"
@@ -80,8 +83,8 @@ async fn change_feed_page(
         })
 }
 
-fn reject_pinned_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Result<()> {
-    let Some(pin_id) = cursor.and_then(|cursor| cursor.pin_id.as_ref()) else {
+fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
+    let Some(pin_id) = cursor.and_then(ListPageCursor::pin_id) else {
         return Ok(());
     };
     Err(CoreError::InvalidCursor(format!(
@@ -245,13 +248,9 @@ impl ReadView {
             let options = options.clone();
             async move {
                 let permit = view.core.inner.config.execution_budget.read_permit().await;
-                view.path_entries_page(
-                    &absolute_path,
-                    decode_page_request(request)?,
-                    options,
-                    &permit,
-                )
-                .await
+                let request = decode_list_page_request(request, &options)?;
+                view.path_entries_page(&absolute_path, request, options, &permit)
+                    .await
             }
         })
     }
@@ -259,7 +258,7 @@ impl ReadView {
     async fn path_entries_page(
         &self,
         absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
@@ -276,14 +275,14 @@ impl ReadView {
                 .list_path_page(listed_path.as_str(), request, options, &self.context)
                 .await?;
             if let Some(cursor) = page.next_cursor.as_mut() {
-                cursor.pin_id = self.pin_id().cloned();
+                *cursor.pin_id_mut() = self.pin_id().cloned();
             }
             Ok(ListPathEntriesResponse {
                 namespace_id: self.namespace_id().clone(),
                 path: listed_path,
                 head_seq: self.head_seq(),
                 entries: page.items,
-                next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+                next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
             })
         })
         .await
@@ -342,7 +341,8 @@ impl ReadView {
             let options = options.clone();
             async move {
                 let permit = view.core.inner.config.execution_budget.read_permit().await;
-                view.inode_children_page(inode_id, decode_page_request(request)?, options, &permit)
+                let request = decode_list_page_request(request, &options)?;
+                view.inode_children_page(inode_id, request, options, &permit)
                     .await
             }
         })
@@ -351,7 +351,7 @@ impl ReadView {
     async fn inode_children_page(
         &self,
         inode_id: InodeId,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
@@ -367,14 +367,14 @@ impl ReadView {
                 .list_inode_children_page(inode_id, request, options, &self.context)
                 .await?;
             if let Some(cursor) = page.next_cursor.as_mut() {
-                cursor.pin_id = self.pin_id().cloned();
+                *cursor.pin_id_mut() = self.pin_id().cloned();
             }
             Ok(ListInodeChildrenResponse {
                 namespace_id: self.namespace_id().clone(),
                 parent_inode_id: inode_id,
                 head_seq: self.head_seq(),
                 entries: page.items,
-                next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+                next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
             })
         })
         .await
@@ -872,8 +872,9 @@ impl<M: crate::Mode> Namespace<M> {
             let absolute_path = absolute_path.clone();
             let options = options.clone();
             async move {
+                let request = decode_list_page_request(request, &options)?;
                 reader
-                    .path_entries_page(&absolute_path, decode_page_request(request)?, options)
+                    .path_entries_page(&absolute_path, request, options)
                     .await
             }
         })
@@ -894,7 +895,7 @@ impl<M: crate::Mode> Namespace<M> {
     async fn path_entries_page(
         &self,
         absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
         check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
@@ -929,7 +930,7 @@ impl<M: crate::Mode> Namespace<M> {
                             path: listed_path,
                             head_seq: read_context.head.seq,
                             entries: page.items,
-                            next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+                            next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
                         })
                     }
                 },
@@ -960,9 +961,8 @@ impl<M: crate::Mode> Namespace<M> {
             let reader = reader.clone();
             let options = options.clone();
             async move {
-                reader
-                    .inode_children_page(inode_id, decode_page_request(request)?, options)
-                    .await
+                let request = decode_list_page_request(request, &options)?;
+                reader.inode_children_page(inode_id, request, options).await
             }
         })
     }
@@ -982,7 +982,7 @@ impl<M: crate::Mode> Namespace<M> {
     async fn inode_children_page(
         &self,
         inode_id: InodeId,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
         check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
@@ -1011,7 +1011,7 @@ impl<M: crate::Mode> Namespace<M> {
                             .list_inode_children_page(inode_id, request, options, &read_context)
                             .await?;
                         let head_seq = read_context.head.seq;
-                        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+                        let next_cursor = encode_next_list_cursor(page.next_cursor.as_ref())?;
                         Ok(ListInodeChildrenResponse {
                             namespace_id: self.namespace_id.clone(),
                             parent_inode_id: inode_id,

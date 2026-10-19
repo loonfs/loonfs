@@ -393,6 +393,99 @@ impl PageCursor for DirectoryPageCursor {
     const KIND: &'static str = "directory";
 }
 
+/// A cursor that resumes a recursive directory listing after the last
+/// returned entry.
+///
+/// A cursor from a read pinned at a checkpoint or a snapshot resumes only
+/// against the same pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryTreePageCursor {
+    /// Head sequence the issuing page was evaluated at.
+    pub head_seq: ChangeSeq,
+    /// The checkpoint or snapshot pin that issued this cursor, or `None` for
+    /// a live read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_id: Option<crate::PinId>,
+    /// The walk's position in each directory from the listed directory down,
+    /// one frame per level.
+    pub frames: Vec<DirectoryTreeFrame>,
+}
+
+impl PageCursor for DirectoryTreePageCursor {
+    const KIND: &'static str = "directory_tree";
+}
+
+/// One level of a recursive listing's position: a directory, and the last
+/// name key the walk returned from that directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryTreeFrame {
+    /// Directory inode at this level, a child of the level above.
+    pub directory_inode_id: InodeId,
+    /// Last canonical name key returned from this directory, or `None` when
+    /// the walk entered the directory without returning any of its children
+    /// yet. Only the last frame can omit the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name_key: Option<NameKey>,
+}
+
+/// A cursor that resumes a directory listing, of one directory's children
+/// or of its whole subtree.
+///
+/// Each kind of listing accepts only its own kind of cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListPageCursor {
+    /// Resumes a listing of one directory's children.
+    Children(DirectoryPageCursor),
+    /// Resumes a recursive listing of a directory's subtree.
+    Tree(DirectoryTreePageCursor),
+}
+
+impl ListPageCursor {
+    /// Decodes a cursor of the kind that a listing with `options` issues.
+    pub fn decode(
+        value: &str,
+        options: &crate::options::ListOptions,
+    ) -> Result<Self, OpaqueTokenError> {
+        match options.recursive {
+            false => decode_cursor(value).map(Self::Children),
+            true => decode_cursor(value).map(Self::Tree),
+        }
+    }
+
+    /// Encodes the cursor as the opaque string clients round-trip.
+    pub fn encode(&self) -> Result<String, OpaqueTokenError> {
+        match self {
+            Self::Children(cursor) => encode_cursor(cursor),
+            Self::Tree(cursor) => encode_cursor(cursor),
+        }
+    }
+
+    /// Returns the head sequence the issuing page was evaluated at.
+    pub fn head_seq(&self) -> ChangeSeq {
+        match self {
+            Self::Children(cursor) => cursor.head_seq,
+            Self::Tree(cursor) => cursor.head_seq,
+        }
+    }
+
+    /// Returns the checkpoint or snapshot pin that issued the cursor, or
+    /// `None` for a live read.
+    pub fn pin_id(&self) -> Option<&crate::PinId> {
+        match self {
+            Self::Children(cursor) => cursor.pin_id.as_ref(),
+            Self::Tree(cursor) => cursor.pin_id.as_ref(),
+        }
+    }
+
+    /// Returns the pin field, for the read that issues the cursor to set.
+    pub fn pin_id_mut(&mut self) -> &mut Option<crate::PinId> {
+        match self {
+            Self::Children(cursor) => &mut cursor.pin_id,
+            Self::Tree(cursor) => &mut cursor.pin_id,
+        }
+    }
+}
+
 /// A cursor that resumes a newest-first revision listing for one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRevisionsPageCursor {
@@ -727,6 +820,20 @@ mod tests {
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
+        assert_cursor_round_trips(DirectoryTreePageCursor {
+            head_seq: ChangeSeq(11),
+            pin_id: None,
+            frames: vec![
+                DirectoryTreeFrame {
+                    directory_inode_id: InodeId(1),
+                    last_name_key: Some(NameKey::parse("src").expect("name key")),
+                },
+                DirectoryTreeFrame {
+                    directory_inode_id: InodeId(7),
+                    last_name_key: None,
+                },
+            ],
+        });
         assert_cursor_round_trips(FileRevisionsPageCursor {
             head_seq: ChangeSeq(11),
             inode_id: InodeId(7),
@@ -785,6 +892,49 @@ mod tests {
                 actual: "file_revisions".to_owned(),
             })
         );
+    }
+
+    /// Checks that a listing accepts only the cursor kind that its own
+    /// shape issues, so a cursor from a flat listing can't resume a
+    /// recursive one, or the reverse.
+    #[test]
+    fn a_list_cursor_decodes_only_for_the_listing_shape_that_issued_it() {
+        let flat = ListPageCursor::Children(DirectoryPageCursor {
+            head_seq: ChangeSeq(11),
+            pin_id: None,
+            directory_inode_id: InodeId(7),
+            last_name_key: NameKey::parse("plan.md").expect("name key"),
+        });
+        let tree = ListPageCursor::Tree(DirectoryTreePageCursor {
+            head_seq: ChangeSeq(11),
+            pin_id: None,
+            frames: vec![DirectoryTreeFrame {
+                directory_inode_id: InodeId(7),
+                last_name_key: Some(NameKey::parse("plan.md").expect("name key")),
+            }],
+        });
+        let options = |recursive| crate::options::ListOptions {
+            recursive,
+            ..Default::default()
+        };
+
+        for (cursor, recursive, kind, other_kind) in [
+            (&flat, false, "directory", "directory_tree"),
+            (&tree, true, "directory_tree", "directory"),
+        ] {
+            let encoded = cursor.encode().expect("encode cursor");
+            assert_eq!(
+                ListPageCursor::decode(&encoded, &options(recursive)).as_ref(),
+                Ok(cursor)
+            );
+            assert_eq!(
+                ListPageCursor::decode(&encoded, &options(!recursive)),
+                Err(OpaqueTokenError::WrongKind {
+                    expected: other_kind,
+                    actual: kind.to_owned(),
+                })
+            );
+        }
     }
 
     #[test]

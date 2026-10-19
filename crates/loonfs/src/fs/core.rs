@@ -7,7 +7,7 @@ use crate::metadata_cache::MetadataCacheBinding;
 use crate::metrics::RuntimeInstruments;
 use crate::{
     ChangeSeq, CoreError, ErrorCode, ExecutionBudget, InodeId, ListFileRevisionsResponse,
-    MetadataCache, NamespaceId, ObjectStore,
+    ListOptions, MetadataCache, NamespaceId, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{
@@ -16,10 +16,10 @@ use loonfs_core::cache::{
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
-    FileRevisionsPageCursor, Page, PageCursor, PageRequest, PaginationPolicy, Subject, WriterId,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    FileRevisionsPageCursor, ListPageCursor, Page, PageCursor, PageRequest, PaginationPolicy,
+    Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
@@ -326,6 +326,33 @@ pub(super) fn decode_page_request<C: PageCursor>(
         limit: request.limit,
         cursor,
     })
+}
+
+/// Decodes a directory listing's wire cursor as the kind of cursor that a
+/// listing with `options` issues.
+pub(super) fn decode_list_page_request(
+    request: PageRequest<String>,
+    options: &ListOptions,
+) -> std::result::Result<PageRequest<ListPageCursor>, CoreError> {
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(|cursor| ListPageCursor::decode(cursor, options))
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    Ok(PageRequest {
+        limit: request.limit,
+        cursor,
+    })
+}
+
+pub(super) fn encode_next_list_cursor(
+    cursor: Option<&ListPageCursor>,
+) -> std::result::Result<Option<String>, CoreError> {
+    cursor
+        .map(ListPageCursor::encode)
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))
 }
 
 pub(super) fn encode_next_cursor<C: PageCursor>(
