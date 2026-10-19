@@ -1082,15 +1082,21 @@ async fn a_commit_after_a_dropped_position_is_admitted_against_the_wal_object_bu
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a session's fold that finishes with the tail over the fold
+/// trigger folds again, so the commit published while the fold was parked
+/// is folded without another commit, and the next commit finds an empty
+/// tail.
 #[tokio::test]
-async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
+async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("inline-fold-race").expect("namespace");
     let store = Arc::new(blocking_fold_store(
         LocalFsStore::new(directory.path()).expect("store"),
         metadata_manifest_prefix(&namespace),
     ));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = crate::LoonFs::builder_with_store(store.clone())
+        .metrics_recorder(recorder.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
@@ -1132,16 +1138,24 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
             &put_options("during"),
         )
         .await
-        .expect("publish during fold");
+        .expect("publish over the trigger during the fold");
     store.release();
-    namespace_writer.wait_for_fold().await.expect("finish fold");
+    namespace_writer.wait_for_fold().await.expect("fold twice");
+    assert_eq!(counter(&recorder, "loonfs.publisher.wal_folds"), 2);
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("tail usage after the second fold");
+    assert_eq!(
+        (usage.wal_tail_objects, usage.wal_tail_inline_bytes),
+        (0, 0)
+    );
     assert_eq!(
         writer
             .mode
             .publisher
             .wal_tail_inline_bytes(&namespace)
             .await,
-        Some(4)
+        Some(0)
     );
 
     let fold_permits = hold_every_fold_permit(&writer).await;
