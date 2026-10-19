@@ -57,7 +57,8 @@ impl NamespacePublisher {
         }
         let kept = {
             let slot = self.lock_engine().await;
-            // Until a publish observes the tail, admit at most one WAL object budget.
+            // Without a position the tail is unknown, so admit at most one WAL
+            // object budget until the next publish reads the tail.
             let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
                 self.inline_content
                     .inline_content_tail_limit_bytes

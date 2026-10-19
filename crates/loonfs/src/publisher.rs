@@ -616,9 +616,6 @@ struct EngineSlot {
     engine: Option<NamespaceCommitEngine>,
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionStatus,
-    /// Only a publish that observed the tail replaces it. A fold leaves it
-    /// as an overestimate, so admission stays conservative until then.
-    last_known_wal_tail_inline_bytes: Option<usize>,
 }
 
 impl EngineSlot {
@@ -626,7 +623,6 @@ impl EngineSlot {
         self.engine
             .as_ref()
             .and_then(NamespaceCommitEngine::wal_tail_inline_bytes)
-            .or(self.last_known_wal_tail_inline_bytes)
     }
 
     fn record_fold_outcome(
@@ -880,7 +876,6 @@ impl NamespacePublisher {
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
                 session: Arc::clone(&session),
-                last_known_wal_tail_inline_bytes: None,
             })),
             read_position,
             session,
@@ -1501,9 +1496,6 @@ impl NamespacePublisher {
         } else {
             None
         };
-        if let Some(tail) = publish.wal_tail {
-            slot.last_known_wal_tail_inline_bytes = Some(tail.inline_bytes);
-        }
         let committed_seq = publish
             .results
             .iter()

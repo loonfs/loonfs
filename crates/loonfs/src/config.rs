@@ -71,11 +71,10 @@ pub struct InlineContentPolicy {
     /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
     /// Limit on unfolded and admitted inline bytes; defaults to 32 MiB.
-    /// Projection invalidation keeps the last count this session observed, and
-    /// that count includes a put whose outcome is unknown. A session that has
-    /// not observed the tail admits at most the WAL object budget. The tail can
-    /// exceed the limit by at most the WAL object budget: for a new session's
-    /// first inline commit, and after a put whose outcome is unknown.
+    /// A session without a position (before its first publish, or after its
+    /// position is dropped) admits at most the WAL object budget until its
+    /// next publish reads the tail, so the tail can exceed the limit by the
+    /// WAL object budget each time the position is dropped before a fold.
     /// `MAX_UNFOLDED_WAL_OBJECTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }
