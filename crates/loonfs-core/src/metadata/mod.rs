@@ -34,7 +34,7 @@ pub(crate) use self::rows::{
 };
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;
-pub(crate) use self::view::{AttributesProjection, MetadataView};
+pub(crate) use self::view::{AttributesProjection, MetadataView, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
 pub(crate) use self::view_session::{
     LeafRevisionPreload, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,

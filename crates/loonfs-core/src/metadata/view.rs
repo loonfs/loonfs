@@ -32,7 +32,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
+/// Binding rows one directory scan reads per manifest round-trip, at the
+/// least.
+pub(crate) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
 /// listed rows; undelete markers share the range until compaction removes

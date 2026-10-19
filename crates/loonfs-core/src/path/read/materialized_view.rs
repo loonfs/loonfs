@@ -1084,8 +1084,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 last_name_key: last.binding.name_key.clone(),
             });
         let children = self
-            .listed_children(session, resolved, children, access)
-            .await?;
+            .readable_children(session, children, access)
+            .await?
+            .into_iter()
+            .map(|child| ListedChild::new(resolved, child))
+            .collect();
         let entries = self
             .build_listed_entries(session, children, attributes)
             .await?;
@@ -1125,15 +1128,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(children)
     }
 
-    /// Resolves each child's path below `directory`, and whether the subject
-    /// can read the child.
-    pub(super) async fn listed_children(
+    /// Finds whether the subject can read each scanned child.
+    pub(super) async fn readable_children(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
-        directory: &ResolvedVisiblePath,
         children: Vec<VisibleChildEntry>,
         access: &ReadAccess<'_, S>,
-    ) -> Result<Vec<ListedChild>> {
+    ) -> Result<Vec<ScannedChild>> {
         let mut readable = vec![true; children.len()];
         async {
             if !access.is_unrestricted() {
@@ -1153,11 +1154,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(children
             .into_iter()
             .zip(readable)
-            .map(|(child, readable)| ListedChild {
-                resolved: resolved_visible_child(directory, &child.binding),
-                name_key: child.binding.name_key,
-                readable,
-            })
+            .map(|(child, readable)| ScannedChild { child, readable })
             .collect())
     }
 
@@ -1326,12 +1323,27 @@ pub(crate) fn ensure_within_read_limit(
     }
 }
 
+/// A scanned child of one directory, and whether the subject can read it.
+pub(super) struct ScannedChild {
+    pub(super) child: VisibleChildEntry,
+    pub(super) readable: bool,
+}
+
 /// A child that a listing page returns, resolved to its path, and whether
 /// the subject can read the child.
 pub(super) struct ListedChild {
     pub(super) resolved: ResolvedVisiblePath,
-    pub(super) name_key: NameKey,
     pub(super) readable: bool,
+}
+
+impl ListedChild {
+    /// Resolves a scanned child of `directory` to its path.
+    pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
+        Self {
+            resolved: resolved_visible_child(directory, &scanned.child.binding),
+            readable: scanned.readable,
+        }
+    }
 }
 
 /// Resolves the path of `binding`'s child, a visible child of `directory`.
