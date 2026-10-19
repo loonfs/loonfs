@@ -1487,10 +1487,10 @@ impl NamespacePublisher {
                 .instruments()
                 .publisher_write_stop_refusal();
         }
-        let fold_start = if publish.wal_tail.is_some_and(|tail| {
-            tail.objects >= FOLD_AT_WAL_OBJECTS
-                || tail.inline_bytes >= self.inline_content.inline_content_fold_at_bytes
-        }) || write_stopped
+        let fold_start = if publish
+            .wal_tail
+            .is_some_and(|tail| self.fold_is_due(tail.objects, tail.inline_bytes))
+            || write_stopped
         {
             self.start_fold()
         } else {
@@ -1543,7 +1543,8 @@ impl NamespacePublisher {
     /// Starts a fold task after its triggering publication releases the engine.
     /// A panicked fold is retried by the next publish over the threshold. The
     /// drain reports the contained panic. A fold that publishes starts the
-    /// session's compaction after it releases its fold permit.
+    /// session's compaction after it releases its fold permit, and the task
+    /// folds again while the tail that the fold left is over the trigger.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         let _session = self.unfenced_session().ok()?;
@@ -1560,14 +1561,46 @@ impl NamespacePublisher {
             if started.await.is_err() {
                 return;
             }
-            match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
-                Ok(true) => publisher.start_compaction(),
-                Ok(false) => {}
-                Err(_) => publisher.record_panic(),
+            // A fold frees the tail up to where it began, and a publish while
+            // it runs starts no fold, so the task checks the trigger again
+            // after each fold that published. Each pass after the first folds
+            // commits published during the pass before it.
+            loop {
+                match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
+                    Ok(true) => publisher.start_compaction(),
+                    Ok(false) => return,
+                    Err(_) => {
+                        publisher.record_panic();
+                        return;
+                    }
+                }
+                if !publisher.position_fold_is_due().await {
+                    return;
+                }
             }
         });
         state.fold = Some(fold);
         Some(start)
+    }
+
+    /// Whether a tail of `objects` WAL objects with `inline_bytes` of inline
+    /// content is over the fold trigger.
+    fn fold_is_due(&self, objects: u64, inline_bytes: usize) -> bool {
+        objects >= FOLD_AT_WAL_OBJECTS
+            || inline_bytes >= self.inline_content.inline_content_fold_at_bytes
+    }
+
+    /// Whether the engine's position shows its tail over the fold trigger.
+    /// Without a position the tail is unknown, and the next publish reads
+    /// the tail and starts the fold.
+    async fn position_fold_is_due(&self) -> bool {
+        let slot = self.lock_engine().await;
+        slot.engine.as_ref().is_some_and(|engine| {
+            engine
+                .wal_tail_objects()
+                .zip(engine.wal_tail_inline_bytes())
+                .is_some_and(|(objects, inline_bytes)| self.fold_is_due(objects, inline_bytes))
+        })
     }
 
     /// Starts the session's metadata compaction unless one is running or the
@@ -1711,14 +1744,11 @@ impl NamespacePublisher {
         let _permit = writer.execution_budget.fold_permit().await;
         let input = {
             let mut slot = self.lock_engine().await;
-            let fold_at_bytes = self.inline_content.inline_content_fold_at_bytes;
             if slot.engine.as_ref().is_some_and(|engine| {
                 engine
                     .wal_tail_objects()
-                    .is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS)
-                    && engine
-                        .wal_tail_inline_bytes()
-                        .is_some_and(|bytes| bytes < fold_at_bytes)
+                    .zip(engine.wal_tail_inline_bytes())
+                    .is_some_and(|(objects, inline_bytes)| !self.fold_is_due(objects, inline_bytes))
             }) {
                 return false;
             }
