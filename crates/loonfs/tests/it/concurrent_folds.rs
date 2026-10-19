@@ -96,20 +96,15 @@ impl MonotonicTimer for PausedClock {
     }
 }
 
-/// Retries a write that the publisher refused to shed load, as a client
-/// does. A write stop waits for the fold, and a full queue yields.
-async fn retry_refusals<T, Fut>(
-    namespace: &Namespace<Writable>,
-    mut call: impl FnMut() -> Fut,
-) -> loonfs::Result<T>
+/// Retries a write that the publisher refused because its queue was full,
+/// as a client does. A write at the write stop waits in the queue for the
+/// writer's fold, so the publisher doesn't refuse it.
+async fn retry_refusals<T, Fut>(mut call: impl FnMut() -> Fut) -> loonfs::Result<T>
 where
     Fut: std::future::Future<Output = loonfs::Result<T>>,
 {
     for _ in 0..1_000 {
         match call().await {
-            Err(error) if error.code() == ErrorCode::MaintenanceRequired => {
-                namespace.wait_for_fold().await?;
-            }
             Err(error) if error.code() == ErrorCode::CommitQueueFull => {
                 tokio::task::yield_now().await;
             }
@@ -132,25 +127,19 @@ async fn session_turns(
         behavior: DestinationBehavior::Replace,
         ..PutFileOptions::default()
     };
-    retry_refusals(namespace, || {
-        namespace.put_file(&transcript, b"{}\n", actor)
-    })
-    .await
-    .expect("create the transcript");
+    retry_refusals(|| namespace.put_file(&transcript, b"{}\n", actor))
+        .await
+        .expect("create the transcript");
     for turn in 0..turns {
         let fill = b'a' + u8::try_from(turn % 26).expect("a letter");
         let line = vec![fill; APPEND_BYTES];
-        retry_refusals(namespace, || {
-            namespace.append_file(&transcript, &line, actor)
-        })
-        .await
-        .expect("append to the transcript");
+        retry_refusals(|| namespace.append_file(&transcript, &line, actor))
+            .await
+            .expect("append to the transcript");
         let body = vec![fill; STATE_BYTES];
-        retry_refusals(namespace, || {
-            namespace.put_file_with_options(&state, &body, actor, &replace)
-        })
-        .await
-        .expect("replace the state file");
+        retry_refusals(|| namespace.put_file_with_options(&state, &body, actor, &replace))
+            .await
+            .expect("replace the state file");
     }
 }
 

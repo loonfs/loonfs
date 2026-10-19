@@ -3358,6 +3358,7 @@ mod head_positions;
 mod inline_writer;
 mod pin_folds;
 mod session_compaction;
+mod write_stop_wait;
 
 impl loonfs_core::time::WallClock for ManualMonotonicTimer {
     fn now_ms(&self) -> u64 {

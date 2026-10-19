@@ -436,8 +436,12 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
     });
 }
 
+/// Checks that a new session's replay of a retained commit returns the
+/// original commit at a preexisting write-stopped tail and starts a fold,
+/// and that a new commit at that tail waits for the fold and is committed without a
+/// retry.
 #[test]
-fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
+fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_lands() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -486,16 +490,6 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .open_namespace(&namespace_id)
             .expect("open namespace");
         blocking.block_next();
-        let refused = namespace
-            .put_file(
-                "/write-stop/recovered.txt",
-                b"body",
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect_err("the write-stopped tail refuses the first publish");
-        assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
-        blocking.wait_until_blocked().await;
         let replay = namespace
             .create_directory_with_options(
                 "/before-write-stop",
@@ -505,19 +499,26 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("replay succeeds while the tail remains at the bound");
         assert_eq!(replay, original);
+        blocking.wait_until_blocked().await;
+        let mut put = tokio::spawn({
+            let namespace = namespace.clone();
+            async move {
+                namespace
+                    .put_file(
+                        "/write-stop/recovered.txt",
+                        b"body",
+                        &loonfs_test_support::test_actor(),
+                    )
+                    .await
+            }
+        });
+        loonfs_test_support::clock::bounded(Duration::from_millis(200), &mut put)
+            .await
+            .expect_err("the commit waits for the parked fold");
         blocking.release();
-        namespace
-            .wait_for_fold()
-            .await
-            .expect("settle the fold started by the refusal");
-        namespace
-            .put_file(
-                "/write-stop/recovered.txt",
-                b"body",
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("the retry lands after the fold");
+        put.await
+            .expect("join the commit")
+            .expect("the commit lands after the fold, without a retry");
         let maintenance = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
@@ -541,6 +542,10 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
     });
 }
 
+/// Checks that while every fold fails, a commit at the write stop waits out
+/// the write-stop wait and returns `maintenance_required`, and that once the
+/// store recovers, a commit at the write stop waits for a fold that succeeds
+/// and is committed.
 #[test]
 fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
     let temp_dir = tempdir().expect("tempdir");
@@ -556,6 +561,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .writer_id(loonfs_test_support::ids::writer_id("fold-failure-writer"))
             .inline_content(loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
+                ..Default::default()
+            })
+            .publication_policy(loonfs::PublicationPolicy {
+                write_stop_wait_deadline_ms: 2_000,
                 ..Default::default()
             })
             .build()
@@ -599,14 +608,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect_err("the write-stop invariant still refuses the full tail");
+            .expect_err("the commit at the write stop waits out the write-stop wait");
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
 
         failing.clear();
-        namespace
-            .wait_for_fold()
-            .await
-            .expect("settle the fold after the manifest store recovers");
         namespace
             .put_file(
                 "/failed-fold/recovered.txt",
@@ -614,7 +619,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect("the recovered manifest store lets the retry land");
+            .expect("the commit at the write stop lands after the recovered fold");
         let maintenance = LoonFs::builder_with_store(failing as SharedObjectStore)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",

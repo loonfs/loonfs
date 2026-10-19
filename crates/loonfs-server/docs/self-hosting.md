@@ -340,7 +340,7 @@ Segment sizes, merge thresholds, and reorganization step sizes use the engine's 
 
 This section describes the limits on the server's requests, connections, memory, and concurrent work.
 
-`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt.
+`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt. The server sets the write-stop wait to half of this deadline. A commit that reaches the write stop (128 unfolded WAL objects) waits up to that long for the namespace's fold. If the fold doesn't free room in time, the commit returns `maintenance_required` and isn't committed, before the request deadline would return `deadline_exceeded`.
 
 `max_in_flight_requests` defaults to 256, and `max_connections` defaults to 1,024. Both must be positive. The sizing formula uses the configured connection count. Keep the pod's open-file limit above that count.
 
@@ -446,6 +446,8 @@ An embedded host sets this limit with `ExecutionBudgetBuilder::max_concurrent_re
 
 Publication admission counts queued and active callers, including duplicate commits, conflicts, and namespace deletes. A caller that disconnects is still counted until its admitted work settles. A request over a count limit or an estimated byte limit receives `commit_queue_full`, and admitted work waits for a shared publication slot. Each namespace has its own allowance, so one busy tenant can't use up the default host budget. The `loonfs.execution_budget.admission_rejections` counter counts the requests refused because the `max_requests` or `max_estimated_bytes` total was full. If the `loonfs.execution_budget.publications_waiting` gauge stays above zero, namespaces are waiting for a publication slot.
 
+A commit at the write stop waits in its namespace's queue for the fold, for at most the write-stop wait, and it keeps its request slot while it waits. The namespace releases its publication slot during the wait, so other namespaces keep publishing. One namespace's waiting commits can take every `max_in_flight_requests` slot, so other requests receive `server_busy` until the fold finishes, unless you set `max_requests_per_namespace` below `max_in_flight_requests`. The `loonfs.publisher.write_stop_waits` counter records the commits that waited, and `loonfs.publisher.write_stop_refusals` records the commits that waited out the write-stop wait.
+
 ```toml
 [publication]
 max_requests = 8192
@@ -457,7 +459,7 @@ max_concurrent_publications = 8
 
 These are the defaults without a memory limit. With sizing, `max_estimated_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
 
-An embedded host sets the per-namespace limits with `LoonFsBuilder::publication_policy`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
+An embedded host sets the per-namespace limits, and the write-stop wait (`write_stop_wait_deadline_ms`, 30000 ms by default), with `LoonFsBuilder::publication_policy`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
 
 A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
 
@@ -472,7 +474,7 @@ An embedded host configures inline writes with `LoonFsBuilder::inline_content` a
 
 The threshold can't exceed 256 KiB, and the WAL object budget can't exceed 4 MiB. The WAL object budget, the fold trigger, and the tail limit must be positive, and the fold trigger can't exceed the tail limit. Inline payloads count toward the existing publication byte limits.
 
-The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. The `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the inline tail limit.
+The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. At the `MAX_UNFOLDED_WAL_OBJECTS` write stop, new commits wait for a fold regardless of the inline tail limit.
 
 Explicit metadata maintenance uses `MaintainMetadataOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
