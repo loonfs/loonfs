@@ -129,12 +129,16 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .await
             .expect("raw durable tail");
     assert_eq!(durable.wal_tail_inline_bytes, 4);
-    assert!(writer
-        .mode
-        .publisher
-        .wal_tail_inline_bytes(&namespace)
-        .await
-        .is_some_and(|bytes| bytes >= durable.wal_tail_inline_bytes));
+    // The unknown outcome dropped the position, so the tail stays unknown
+    // until the replay's publish reads it.
+    assert_eq!(
+        writer
+            .mode
+            .publisher
+            .wal_tail_inline_bytes(&namespace)
+            .await,
+        None
+    );
     assert_eq!(writer.mode.publisher.shared.admission.used_requests(), 0);
     assert_eq!(first_error.code(), ErrorCode::CommitOutcomeUnknown);
 
@@ -1039,9 +1043,12 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
     }
 }
 
+/// Checks that a commit after a dropped position is admitted against the
+/// WAL object budget alone, and that its publish restores the inline count,
+/// so the tail limit stages the next commit's content again.
 #[tokio::test]
-async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_overshoot() {
-    let (_directory, _store, writer, namespace, namespace_writer) =
+async fn a_commit_after_a_dropped_position_is_admitted_against_the_wal_object_budget_alone() {
+    let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 4,
@@ -1050,23 +1057,27 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
         .await;
     let folds = hold_every_fold_permit(&writer).await;
     let registry = writer.mode.publisher.clone();
-    for index in 0..4 {
-        writer
-            .mode
-            .publisher
-            .invalidate_namespace(&namespace, NamespaceChange::Unknown)
-            .await;
-        namespace_writer
-            .put_file_with_options(
-                &format!("/file-{index}"),
-                b"full",
-                &loonfs_test_support::test_actor(),
-                &put_options(&format!("write-{index}")),
-            )
-            .await
-            .expect("publish");
-    }
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(4));
+    let actor = loonfs_test_support::test_actor();
+    namespace_writer
+        .put_file_with_options("/full", b"full", &actor, &put_options("full"))
+        .await
+        .expect("fill the tail to its limit");
+    registry
+        .invalidate_namespace(&namespace, NamespaceChange::Unknown)
+        .await;
+    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, None);
+    namespace_writer
+        .put_file_with_options("/over", b"over", &actor, &put_options("over"))
+        .await
+        .expect("publish after the dropped position");
+    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
+    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(8));
+    namespace_writer
+        .put_file_with_options("/staged", b"next", &actor, &put_options("staged"))
+        .await
+        .expect("publish over the tail limit");
+    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 1);
+    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(8));
     drop(folds);
     writer.shutdown().await.expect("shutdown");
 }
@@ -1255,8 +1266,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 .await
                 .expect("explicit fold");
             assert_matches!(step.wal_fold, crate::WalFoldStepOutcome::Folded { .. });
-            // The fold does not lower the writer's count; with nothing left
-            // unfolded, the next pass does not consult it.
+            // The fold moved the session's position to its manifest, so the
+            // next pass finds nothing left to fold.
             let again = maintenance
                 .maintain_metadata_with_options(&namespace, &options)
                 .await

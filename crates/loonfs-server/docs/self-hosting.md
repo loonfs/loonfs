@@ -472,9 +472,7 @@ An embedded host configures inline writes with `LoonFsBuilder::inline_content` a
 
 The threshold can't exceed 256 KiB, and the WAL object budget can't exceed 4 MiB. The WAL object budget, the fold trigger, and the tail limit must be positive, and the fold trigger can't exceed the tail limit. Inline payloads count toward the existing publication byte limits.
 
-The tail limit uses the tail size that the session recorded at its last publish. After the session's tail position is invalidated, the limit uses the last tail size that this session observed, and that size counts a WAL put whose outcome is unknown as if it succeeded. A session that hasn't observed the tail admits at most the WAL object budget, and its first publish observes the tail.
-
-The tail can exceed the limit by at most the WAL object budget, in two cases: a new session's first inline commit, and after a put whose outcome is unknown. Another writer can make the remembered size stale until this session's next publish. The `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the inline tail limit.
+The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. The `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the inline tail limit.
 
 Explicit metadata maintenance uses `MaintainMetadataOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
