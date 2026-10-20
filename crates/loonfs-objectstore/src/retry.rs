@@ -159,8 +159,11 @@ fn next_retry_backoff(
 /// transport error, under [`DEFAULT`]'s retry count and operation deadline.
 ///
 /// An error of any other kind (a refused request, a failed precondition, or
-/// a permission failure) returns at once. A provider client error is
-/// retryable only from the client that sends each request once (see
+/// a permission failure) returns at once. When the count or the deadline runs
+/// out, the last error returns as a non-retryable transport failure, so an
+/// outer loop (a verified write around its parts) doesn't spend a second
+/// budget on the same request. A provider client error is retryable only
+/// from the client that sends each request once (see
 /// [`crate::provider_object_store::map_provider_error`]), so a request that
 /// the retrying client already retried isn't retried here again.
 pub(crate) async fn with_transport_retry<T, F, Fut>(
@@ -192,7 +195,7 @@ where
             &mut retries,
             &deadline,
         ) else {
-            return Err(error);
+            return Err(error.exhausted());
         };
         transport_retry_pause(backoff).await;
     }

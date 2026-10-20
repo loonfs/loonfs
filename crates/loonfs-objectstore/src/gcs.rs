@@ -552,12 +552,17 @@ mod tests {
 
     /// Checks that a resumable chunk that fails is sent again at most once
     /// more than the retry count, within one operation deadline and one
-    /// attempt bound, and that a refused chunk fails at once.
+    /// attempt bound, that a refused chunk fails at once, and that a chunk
+    /// that spends its budget fails the verified write around it without
+    /// starting another resumable session.
     #[tokio::test(start_paused = true)]
     async fn a_failing_chunk_is_attempted_under_one_retry_budget() {
         use super::*;
         use futures::{stream, StreamExt};
         let (_directory, path) = gcs_fixture_service_account_key_file("gcs-chunk-retry");
+        let store_directory = tempfile::tempdir().expect("store directory");
+        let store = crate::local_fs_store::LocalFsStore::new(store_directory.path())
+            .expect("store for the verified write's occupied-key check");
         let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
         // Four 30 s attempts and their backoffs pass the 120 s deadline.
         for (fault, attempts) in [
@@ -571,22 +576,46 @@ mod tests {
                 attempts: Arc::default(),
             };
             let signer = test_signer(&path, HttpClient::new(service.clone()));
-            let mut parts = PartReader::new(
-                stream::iter(vec![Ok(Bytes::from_static(b"hello"))]).boxed(),
-                3,
-            );
-            let head = parts.next_part().await.expect("head").expect("bytes");
+            let bytes = Bytes::from_static(b"hello");
             let clock = TokioTimer::start();
-            signer
-                .put_if_absent("key", head, parts, 1)
-                .await
-                .expect_err("every first chunk fails");
+            let error = crate::immutable_write::put_with(
+                &store,
+                &signer.retry_warnings,
+                "key",
+                &bytes,
+                || {
+                    let mut parts =
+                        PartReader::new(stream::iter(vec![Ok(bytes.clone())]).boxed(), 3);
+                    let signer = &signer;
+                    async move {
+                        let head = parts.next_part().await?.unwrap_or_default();
+                        signer.put_if_absent("key", head, parts, 1).await
+                    }
+                },
+            )
+            .await
+            .expect_err("every first chunk fails");
             let elapsed_ms = clock.monotonic_now_ms();
+            assert_matches!(
+                error,
+                crate::ImmutableWriteError::Transport { source, .. }
+                    if source.kind() == crate::ObjectStoreErrorKind::Other,
+                "{fault:?} is reported as non-retryable"
+            );
             assert_eq!(
                 service.attempts.load(Ordering::SeqCst),
                 attempts,
                 "{fault:?} attempts"
             );
+            let sessions = service
+                .inner
+                .0
+                .lock()
+                .expect("requests")
+                .iter()
+                .filter(|(url, _, _)| url.contains("uploadType=resumable"))
+                .count();
+            assert_eq!(sessions, 1, "{fault:?} resumable sessions");
             assert!(
                 elapsed_ms
                     <= loonfs_types::saturating_duration_ms(

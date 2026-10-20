@@ -319,7 +319,7 @@ impl ProviderObjectStore {
     }
 
     #[cfg(test)]
-    fn multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
+    pub(crate) fn multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
         self.multipart_geometry = MultipartGeometry {
             threshold_bytes,
             part_bytes,

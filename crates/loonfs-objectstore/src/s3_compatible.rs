@@ -788,7 +788,7 @@ mod tests {
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
     use crate::provider_object_store::{
-        provider_retry_config, MultipartController, PartReader, PROVIDER_ATTEMPT_TIMEOUT,
+        provider_retry_config, MultipartController, PROVIDER_ATTEMPT_TIMEOUT,
         PROVIDER_OPERATION_DEADLINE,
     };
     use crate::retry::{RetryWarnings, DEFAULT};
@@ -805,7 +805,6 @@ mod tests {
     };
     use async_trait::async_trait;
     use bytes::Bytes;
-    use futures::StreamExt;
     use loonfs_types::{saturating_duration_ms, Checksum, SecretString};
     use object_store::client::{
         HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
@@ -1143,14 +1142,16 @@ mod tests {
 
     /// Checks that each failing request is attempted at most once more than
     /// the retry count, within one operation deadline and one attempt
-    /// bound, and that a refused request fails at once wherever its status
-    /// can be read.
+    /// bound, that a refused request fails at once wherever its status can
+    /// be read, and that every failure is reported as non-retryable.
     ///
     /// The retrying client retries a delete and LoonFS doesn't. LoonFS
     /// retries a verified immutable write, a signed HEAD and a signed part.
+    /// A part that spends its budget fails the verified write around it, so
+    /// the multipart upload is created once.
     #[tokio::test(start_paused = true)]
     async fn a_failing_request_is_attempted_under_one_retry_budget() {
-        use crate::ObjectStore;
+        use crate::{ImmutableWriteError, ObjectStore};
         let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
         // Four 30 s attempts and their backoffs pass the 120 s deadline.
         let timed_out = 4;
@@ -1180,32 +1181,44 @@ mod tests {
                 attempts: Arc::default(),
             };
             let store = scripted_store(kind, &provider);
-            let signer = scripted_signer(kind, &provider);
             let clock = TokioTimer::start();
-            let failed = match operation {
-                "delete" => store.delete(KEY).await.is_err(),
-                "put" => store
-                    .put_immutable_verified(KEY, Bytes::from_static(b"payload"))
-                    .await
-                    .is_err(),
-                "head" => store.head(KEY).await.is_err(),
+            let reported = match operation {
+                "delete" => store.delete(KEY).await.expect_err("delete").kind(),
+                "head" => store.head(KEY).await.expect_err("head").kind(),
                 _ => {
-                    let rest = PartReader::new(
-                        futures::stream::once(async { Ok(Bytes::from_static(b"two")) }).boxed(),
-                        3,
-                    );
-                    signer
-                        .put_if_absent(KEY, Bytes::from_static(b"one"), rest, 1)
-                        .await
-                        .is_err()
+                    // A one-part upload, so the part's attempts are the only
+                    // faulted requests.
+                    let (store, payload) = match operation {
+                        "put" => (store, Bytes::from_static(b"payload")),
+                        _ => (store.multipart_geometry(3, 3), Bytes::from_static(b"one")),
+                    };
+                    match store.put_immutable_verified(KEY, payload).await {
+                        Err(ImmutableWriteError::Transport { source, .. }) => source.kind(),
+                        other => panic!("{operation} {fault:?} returned {other:?}"),
+                    }
                 }
             };
             let elapsed_ms = clock.monotonic_now_ms();
-            assert!(failed, "{operation} {fault:?} failed");
+            assert_eq!(
+                reported,
+                ObjectStoreErrorKind::Other,
+                "{operation} {fault:?} is reported as non-retryable"
+            );
             assert_eq!(
                 provider.attempts.load(Ordering::SeqCst),
                 attempts,
                 "{operation} {fault:?} attempts"
+            );
+            let creates = provider
+                .inner
+                .operations()
+                .iter()
+                .filter(|recorded| **recorded == "create")
+                .count();
+            assert_eq!(
+                creates,
+                usize::from(operation == "upload"),
+                "{operation} {fault:?} multipart creates"
             );
             assert!(
                 elapsed_ms
