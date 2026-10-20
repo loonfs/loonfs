@@ -1,6 +1,6 @@
 # LoonFS API Specification
 
-This document is the normative specification of the LoonFS client-facing API. It covers API groups, capability discovery, the standard error contract, operation statefulness, and the representative v0 HTTP binding.
+This document is the normative specification of the LoonFS client-facing API. It covers API groups, capability discovery, the standard error contract, and the representative v0 HTTP binding.
 
 The specification is normative for the parts of the API that a deployment implements. A deployment chooses which optional API groups to expose, but every operation it does expose MUST have the shape specified here.
 
@@ -2000,6 +2000,8 @@ When a subject is supplied, change feed reads, bare content reference reads, and
 
 The upload routes stage a file's content in an upload session, so that a commit can reference it. This section defines what each upload step means, not one specific path for the bytes. In v0, every upload is a whole-file upload. The staged body is the file's complete content, not a separate metadata document or a multipart strategy.
 
+An upload is the only operation that spans more than one request. Its upload session is the server-side state that connects the steps, and every other operation completes in one request. (A paged listing or a change-feed read resumes from a cursor that the client stores, and the server stores nothing between pages.) A recursive command is a sequence of these requests that the client drives. For example, the CLI's `put -r` uploads each file and publishes it in its own commit, `cp -r` copies each file in its own commit, and `get -r` lists the tree and reads each file. The server stores no state for the recursive command as a whole.
+
 In an ACL namespace, an upload session belongs to the subject that opened it. Every upload operation requires the namespace's scope and principals (see [Subject and principals](#subject-and-principals)), and a request from any other subject returns `upload_not_found`. An unrestricted namespace doesn't record which subject owns a session.
 
 Each upload step has a defined effect:
@@ -2507,7 +2509,7 @@ A conforming server MUST:
 6. Implement tombstone-first delete.
 7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Checkpoints pin manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys by each namespace's naming mode, and apply each mode's rule exactly (see [Names and paths](format.md#14-names-and-paths)).
-9. Keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed.
+9. Keep upload sessions out of namespace history and the change feed.
 10. Preserve per-commit idempotency, ordering, and change-feed identity, even when it physically batches logical commits in one WAL object.
 11. Advertise its API groups and features truthfully in the capability document, and never advertise an API group whose required operations aren't implemented.
 12. Respond to unimplemented or disabled parts of the API with `not_supported` (and its `feature` name), never with undefined behavior.
@@ -2526,150 +2528,7 @@ A conforming writer or client MUST:
 
 A sync client MUST also maintain durable local state for its cursor and reconciliation logic.
 
-## 8. Client patterns
-
-This section describes common client patterns. A pattern is defined by the part of the API a client uses, not by whether the client is a CLI, desktop app, web app, SDK, or service, and a single client can follow more than one pattern. (These are usage patterns, not the conformance groups defined in [API groups](#1-api-groups).)
-
-### 8.1 Path-oriented client
-
-A path-oriented client addresses files and directories by path.
-
-Typical behavior:
-
-- `ls`, `stat`, `get`, `put`, `mkdir`, `mv`, and `cp` use user-visible paths.
-- The server stays authoritative for path resolution, canonical inode identity, and commit validation.
-- Small commands are often sessionless.
-- Large or recursive commands can be implemented as sequences of ordinary logical commits.
-
-This client doesn't need a sync database or a full local mirror. An implementation can still keep durable local state when that improves usability, restart safety, or resumability. Examples include auth and session state, retry journals, pinned snapshot IDs, and inode context learned from earlier responses.
-
-### 8.2 Sync client
-
-A sync client maintains durable local state, and it reads the change feed over time.
-
-Typical behavior:
-
-- It maintains a durable cursor.
-- It projects remote state into local state.
-- It can upload content and publish commits of its own.
-- It preserves conflicts according to the client's conflict policy.
-
-### 8.3 Operator or admin tool
-
-An operator or admin tool uses low-level recovery or inspection APIs that are specific to an implementation or a deployment.
-
-## 9. Operation statefulness
-
-This section defines when an operation is a single request, when it uses a control object, and how responsibility is split between the client and the server for the common filesystem commands.
-
-A one-shot operation is fully described by a single request, and it normally doesn't require durable control-plane state. A long-running operation can span multiple requests, can require a stable snapshot or destination binding, and might need to resume after a client or server restart.
-
-For the operations in this section, v0 defines upload sessions but not read sessions.
-
-### 9.1 Definitions
-
-| Term | Meaning |
-| --- | --- |
-| Single-request operation | An operation that's fully described by a single request, and that doesn't require a server-side control object after the request completes. |
-| Control object | Server-side state for an operation that spans multiple requests. A large or resumable `put <file>` can use one upload session. |
-| Implementation-specific coordinator | A helper resource or service that correlates multiple logical commits for one higher-level workflow. Coordinators are outside the core interoperable model, and they don't define namespace history. |
-| Authoritative operation state | The state that determines the correctness, visibility, and resumability of an operation. |
-| Transfer progress | Non-authoritative progress information, such as completed bytes, completed files, local temporary outputs, or user-interface counters. |
-
-### 9.2 Normative rules
-
-1. A LoonFS operation MAY be a single-request operation only when all of the following are true:
-   - The operation is fully described by one request.
-   - The operation completes synchronously.
-   - No retained read view is required after the request returns.
-   - No stable destination binding is required after the request returns.
-   - The request can be retried by replaying the full request.
-
-2. A LoonFS operation MAY use a server-side control object when any of the following are true:
-   - The client will continue the operation across multiple requests.
-   - The operation requires a pinned snapshot for consistent reads.
-   - The operation requires a stable destination binding across time.
-   - The operation requires resumable multi-part upload.
-   - Losing the server's state on a restart would change correctness, retention safety, or promised resumability guarantees.
-
-   A large or resumable `put <file>` that needs server-side state typically uses one upload session.
-
-3. The core specification doesn't require a server-side job object for recursive `put` or recursive `cp`. Those workflows can be implemented as one or more logical commits, optionally coordinated by implementation-specific helpers outside the core model.
-
-4. When a server-side control-plane object is used, the authoritative identity of the in-flight interaction MUST become the server-issued object identifier. After that point, the original path string is only the input that started the interaction, and it MUST NOT remain the sole identifier of the in-flight interaction.
-
-5. Server-side control-plane objects MUST NOT advance the namespace `seq`, MUST NOT appear as filesystem-visible resources, and MUST NOT appear in the namespace change feed.
-
-6. Implementation-specific coordinators MAY exist, but they MUST NOT redefine logical commit boundaries or change-feed semantics.
-
-### 9.3 Statefulness by operation
-
-| Operation | Typical execution shape | Typical server-side control-plane object | Long-lived server state required? | Server is authoritative for | Client is authoritative for |
-| --- | --- | --- | --- | --- | --- |
-| `get <file>` | Single-request read | none | No | path resolution, access check, selected file revision, content serving or delegated download | local download progress, temporary file, client retries |
-| `get -r <dir>` | Client-driven multi-request read | none in v0 | No | each request's path resolution, access check, and selected file revision | traversal progress, local outputs, client retries |
-| `put <file>` (small, one-shot convenience) | Single request | none | No | destination resolution, validation, metadata commit | request payload, client retries |
-| `put <file>` (large or resumable) | Begin, upload, commit | upload session, if used | Only if server-side resumability or a stable binding is promised | stable destination binding, expected slot or revision, upload session validity, final publish | file reading, hashing, content upload progress, retry tokens |
-| `put -r <dir>` | Client- or coordinator-driven uploads plus one or more logical commits | none required by the core model | No | each commit's validation and publication | orchestration across files, progress, retries |
-| `cp <file>` (same server) | Single-request server-side copy | none | No | source resolution, destination resolution, metadata publication, content reference reuse | request retry |
-| `cp -r <dir>` (same server) | Client- or coordinator-driven sequence of logical commits | none required by the core model | No | each commit's validation and publication | orchestration across entries, retries |
-| `cp remote -> local` | Alias for `get` or `get -r` | same as `get` | same as `get` | same as `get` | same as `get` |
-| `cp local -> remote` | Alias for `put` or `put -r` | same as `put` | same as `put` | same as `put` | same as `put` |
-
-### 9.4 Client and server split for common commands
-
-This table defines the normative split of responsibility for the primary filesystem commands:
-
-| Command | Server responsibilities | Client responsibilities |
-| --- | --- | --- |
-| `get <file>` | Resolve the requested path or handle, authorize the read, select the file revision to read, and serve bytes or delegated download targets. | Receive bytes, write local output, and maintain local retry and resume state. |
-| `put <file>` (one-shot) | Resolve the destination, validate preconditions, and publish the metadata change. | Supply bytes or a content reference, and retry the request if needed. |
-| `put <file>` (resumable) | If an upload session is used, create or validate it. Bind the destination, validate durable content, and commit the final publish. | Read the local file, hash it, upload content, track upload progress, and submit the final commit request. |
-| `cp <file>` (same server) | Resolve the source and destination, authorize both sides, create the copied resource, and publish the metadata change. | Submit the request, and retry if appropriate. |
-
-### 9.5 When raw paths cease to identify the operation
-
-LoonFS accepts path-oriented input because users naturally express what they want as paths. However, a long-running operation requires a more stable identity than a raw path string.
-
-| Operation | Raw path is used for | Stable in-flight identity after start |
-| --- | --- | --- |
-| `get <file>` | the request itself | none required |
-| `put <file>` (resumable) | `create_upload` only | server-issued upload session, if used |
-
-### 9.6 Control-plane durability guidance
-
-1. A control object MUST be durably recorded if losing it on restart would change correctness, visibility, retention safety, or promised resumability.
-
-2. An upload session MUST be durable when it provides a stable destination across requests, or when it has to survive a server restart.
-
-3. Implementation-specific coordinators MAY also be stored durably, but this specification doesn't require it.
-
-4. Control objects and any implementation-specific coordinators MUST remain outside namespace-visible metadata. Their existence is authoritative for orchestration, not for filesystem history.
-
-### 9.7 Recommended defaults
-
-A conforming implementation SHOULD use the following defaults, unless a stronger mode is explicitly requested:
-
-- `get <file>` is a single-request operation.
-- `cp <file>` on the same service is a single-request operation.
-- If a large or resumable `put <file>` uses a control object, it uses a single upload session.
-
-These defaults keep a simple model for single-request commands, and still allow multi-request correctness and resumability where they matter.
-
-## 10. Client and server responsibilities
-
-This section summarizes which concerns the server is responsible for and which the client is responsible for.
-
-| Concern | Server | Client |
-| --- | --- | --- |
-| Path resolution | Authoritative | Supplies user intent by path when it uses the filesystem surface. |
-| Content hashing and upload | Can accept inline bytes, proxy uploads, or issue upload capabilities. MUST verify that uploaded content referenced by a commit is durable before it publishes the commit. Can issue short-lived content admission tokens after validation, to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when it creates new data. Can forward admission tokens when they're provided, but MUST tolerate slow-path validation. |
-| Commit validation | Authoritative | Supplies preconditions and commit IDs where needed. |
-| Namespace visibility | Authoritative | Observes committed sequence receipts and change-feed deltas. |
-| Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |
-| Capability truthfulness | Advertises only implemented API groups and features. | Gates on the capability document, and reconciles through `not_supported`. |
-
-## 11. Extension points
+## 8. Extension points
 
 This section describes where LoonFS can be extended.
 
