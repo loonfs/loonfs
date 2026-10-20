@@ -1032,7 +1032,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
     ));
     for stray in ["namespaces/Not-An-Id/hint.json", "namespaces/stray/orphan"] {
         store
-            .put_overwrite(stray, bytes::Bytes::from_static(b"stray"))
+            .put_if_absent(stray, bytes::Bytes::from_static(b"stray"))
             .await
             .expect("write a stray key");
     }

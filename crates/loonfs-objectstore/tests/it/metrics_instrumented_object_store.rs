@@ -144,13 +144,6 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
-        .put_overwrite(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
-            bytes(b"overwrite"),
-        )
-        .await
-        .expect("put overwrite");
-    store
         .put_if_absent(
             &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"create"),
@@ -168,15 +161,14 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
 
     let inner = store.into_inner();
     // The sugar methods are trait defaults now: every write funnels through
-    // the one instrumented `put`, so the inner store sees `put` three
-    // times while the samples still carry the distinct modes below.
-    assert_eq!(inner.calls(), vec!["put", "put", "put"]);
+    // the one instrumented `put`, so the inner store sees `put` twice while
+    // the samples still record the distinct modes below.
+    assert_eq!(inner.calls(), vec!["put", "put"]);
 
     let samples = recorder.samples();
-    assert_eq!(samples.len(), 3);
-    assert_eq!(samples[0].put_mode, Some(PutModeKind::Overwrite));
-    assert_eq!(samples[1].put_mode, Some(PutModeKind::CreateIfAbsent));
-    assert_eq!(samples[2].put_mode, Some(PutModeKind::CompareAndSwap));
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].put_mode, Some(PutModeKind::CreateIfAbsent));
+    assert_eq!(samples[1].put_mode, Some(PutModeKind::CompareAndSwap));
 }
 
 #[tokio::test]
@@ -211,7 +203,7 @@ async fn records_get_success_bytes_out() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite(
+        .put_if_absent(
             "namespaces/demo/content/con_abcdef0123456789abcdef0123456789",
             bytes(b"abcdef"),
         )
@@ -268,7 +260,7 @@ async fn records_invalid_key_without_error_text() {
     let raw_key = "../escape";
 
     store
-        .put_overwrite(raw_key, bytes(b"bad"))
+        .put_if_absent(raw_key, bytes(b"bad"))
         .await
         .expect_err("invalid key should fail");
 
@@ -287,11 +279,11 @@ async fn records_list_count() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite("namespaces/ns-1/object", bytes(b"content"))
+        .put_if_absent("namespaces/ns-1/object", bytes(b"content"))
         .await
         .expect("put object");
     store
-        .put_overwrite(
+        .put_if_absent(
             &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
@@ -330,7 +322,7 @@ async fn instrumented_store_forwards_start_after_listing() {
     let second = format!("{prefix}pin_00000000000000000001-0000000000000002.json");
     for key in [&first, &second] {
         store
-            .put_overwrite(key, bytes(b"pin"))
+            .put_if_absent(key, bytes(b"pin"))
             .await
             .expect("put pin");
     }
@@ -354,7 +346,7 @@ async fn classifies_durable_key_families() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite(
+        .put_if_absent(
             &wal_object(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &loonfs_types::WalNo(1),
@@ -364,7 +356,7 @@ async fn classifies_durable_key_families() {
         .await
         .expect("put wal");
     store
-        .put_overwrite(
+        .put_if_absent(
             &metadata_manifest_object(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &ManifestNo(2),
@@ -374,7 +366,7 @@ async fn classifies_durable_key_families() {
         .await
         .expect("put manifest");
     store
-        .put_overwrite(
+        .put_if_absent(
             &metadata_segment(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
@@ -385,7 +377,7 @@ async fn classifies_durable_key_families() {
         .await
         .expect("put segment");
     store
-        .put_overwrite(
+        .put_if_absent(
             &pin(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &loonfs_types::PinId::parse("pin_00000000000000000001-0000000000000001")
@@ -413,7 +405,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let raw_key = secret_key();
 
     store
-        .put_overwrite(
+        .put_if_absent(
             &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
@@ -511,14 +503,6 @@ impl ObjectStore for DelegatingWriteStore {
         _mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put"))
-    }
-
-    async fn put_overwrite(
-        &self,
-        _key: &str,
-        _bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Ok(self.record_call("put_overwrite"))
     }
 
     async fn put_if_absent(

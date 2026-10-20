@@ -45,8 +45,8 @@ use bytes::Bytes;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
-    OperationContext, OperationKind, OperationSelector, RecordingStore,
+    replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
+    MetadataMapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::AttributeInclusion;
 use std::assert_matches;
@@ -2556,8 +2556,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     assert!(pin_exists(store.inner(), &source, &fork_record.pin_id).await);
 
     store.clear();
-    store
-        .put_overwrite(&hint(&clone), Bytes::from_static(b"not json"))
+    replace_object(&store, &hint(&clone), Bytes::from_static(b"not json"))
         .await
         .expect("corrupt target manifest");
     let before = namespace_keys(store.inner(), &source).await;
@@ -2807,8 +2806,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
     );
 
     store.clear();
-    store
-        .put_overwrite(&record_key, Bytes::from_static(b"not json"))
+    replace_object(&store, &record_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt record");
     let aged = context(setup.now_ms);
@@ -2887,8 +2885,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
 
     store.clear();
     for key in &manifest_keys {
-        store
-            .put_overwrite(key, Bytes::from_static(b"not json"))
+        replace_object(&store, key, Bytes::from_static(b"not json"))
             .await
             .expect("corrupt manifest");
     }
@@ -3226,13 +3223,13 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         },
     )
     .expect("hint");
-    store
-        .put_overwrite(
-            &loonfs_objectstore::keys::hint(&namespace_id),
-            Bytes::from(bytes),
-        )
-        .await
-        .expect("rewind hint");
+    replace_object(
+        &store,
+        &loonfs_objectstore::keys::hint(&namespace_id),
+        Bytes::from(bytes),
+    )
+    .await
+    .expect("rewind hint");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(
         &store,

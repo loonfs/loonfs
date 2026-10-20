@@ -2,7 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::{self, pin_prefix};
-use loonfs_test_support::stores::MetadataMapStore;
+use loonfs_test_support::stores::{replace_object, MetadataMapStore};
 use loonfs_types::format::control::PinOwner;
 
 #[tokio::test]
@@ -291,8 +291,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     assert_eq!(error.code(), ErrorCode::ServerError);
     store.clear();
     let key = keys::pin(&namespace_id, &ids[0]);
-    store
-        .put_overwrite(&key, Bytes::from_static(b"not json"))
+    replace_object(&store, &key, Bytes::from_static(b"not json"))
         .await
         .expect("malformed pin");
     let error = crate::gc::gc_namespace(

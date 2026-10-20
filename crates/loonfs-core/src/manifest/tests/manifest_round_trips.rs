@@ -1,6 +1,7 @@
 //! Checkpoint manifest construction, round trips, and strict consumption.
 
 use super::*;
+use loonfs_test_support::stores::replace_object;
 
 #[tokio::test]
 async fn overflowing_section_handles_are_rejected_before_segment_reads() {
@@ -27,8 +28,7 @@ async fn overflowing_section_handles_are_rejected_before_segment_reads() {
                 u64::MAX - u64::from(descriptor.filter_block.stored_bytes);
         }
         let encoded = encode_namespace_manifest_json(payload).expect("encode hostile manifest");
-        store
-            .put_overwrite(&manifest_key, Bytes::from(encoded.into_bytes()))
+        replace_object(&store, &manifest_key, Bytes::from(encoded.into_bytes()))
             .await
             .expect("store fixture");
         store.reset();
@@ -349,10 +349,13 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         .expect("create checkpoint");
 
     let manifest_key = current_manifest_key(&store, &namespace_id).await;
-    store
-        .put_overwrite(&manifest_key, Bytes::from_static(br#"{"bad":"json"}"#))
-        .await
-        .expect("corrupt manifest");
+    replace_object(
+        &store,
+        &manifest_key,
+        Bytes::from_static(br#"{"bad":"json"}"#),
+    )
+    .await
+    .expect("corrupt manifest");
 
     match load_current_projection(&store, &namespace_id).await {
         Err(CoreError::ControlObjectLoad(

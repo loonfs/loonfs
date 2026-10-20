@@ -13,7 +13,8 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
+    replace_object, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_types::format::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
 use loonfs_types::{
@@ -259,8 +260,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .to_vec();
     manifest_bytes.extend_from_slice(b" \n\t");
     let stored_length = manifest_bytes.len() as u64;
-    store
-        .put_overwrite(&current.object_key, manifest_bytes.into())
+    replace_object(&store, &current.object_key, manifest_bytes.into())
         .await
         .expect("manifest with trailing whitespace");
     let layout = load_namespace_statistics(&store, &parent)

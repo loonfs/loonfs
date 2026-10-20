@@ -2,6 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::ListedObject;
+use loonfs_test_support::stores::replace_object;
 use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
 use std::assert_matches;
 
@@ -397,8 +398,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
             },
         )
         .expect("hint");
-        store
-            .put_overwrite(&hint(&namespace_id), Bytes::from(bytes))
+        replace_object(&store, &hint(&namespace_id), Bytes::from(bytes))
             .await
             .expect("rewind hint");
         store.reset();
@@ -459,7 +459,6 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     .expect("advance")
     .response;
     assert_eq!(store.counts().create_if_absent_puts, 1);
-    assert_eq!(store.counts().overwrite_puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 1);
     let after = load_current_manifest(&store, &namespace_id)
         .await

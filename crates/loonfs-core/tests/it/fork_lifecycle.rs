@@ -15,8 +15,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore, MetadataMapStore,
-    OperationSelector, RecordedOperation, RecordingStore,
+    replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore,
+    MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
     format::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
@@ -1078,8 +1078,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let corrupted = encode_namespace_manifest_json(manifest.payload().clone())
         .expect("encode corrupt manifest")
         .into_bytes();
-    store
-        .put_overwrite(&manifest_key, Bytes::from(corrupted))
+    replace_object(&store, &manifest_key, Bytes::from(corrupted))
         .await
         .expect("overwrite source manifest");
 

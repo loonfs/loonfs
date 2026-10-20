@@ -107,7 +107,7 @@ The server doesn't keep a proxied upload's whole body in memory. It hashes the p
 | AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
 | Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
 | Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
-| Google Cloud Storage | Yes, a resumable upload for a create, and provider multipart otherwise | One part, whatever the object's size |
+| Google Cloud Storage | Yes, a resumable upload | One part, whatever the object's size |
 | Azure Blob Storage | Not yet supported | n/a |
 | Local filesystem | Yes, a staging file for uploads and assemblies | One chunk, and assembly reads are at most 8 MiB |
 

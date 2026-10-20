@@ -16,9 +16,9 @@ use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
 use crate::presign::{
-    base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
-    PresignedGetRequest, PresignedPartRequest, PresignedUrl, S3CompatiblePresigner,
-    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
+    base64_crc64nvme, CompletionCondition, DirectGetIssuer, DirectMultipartIssuer,
+    DirectTransferIssuers, PresignedGetRequest, PresignedPartRequest, PresignedUrl,
+    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };
 use crate::provider_object_store::{
@@ -31,7 +31,7 @@ use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
-    ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
+    ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -227,7 +227,6 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
-        Arc::clone(&provider) as Arc<dyn object_store::multipart::MultipartStore>,
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
@@ -335,7 +334,7 @@ impl MultipartController for S3RequestSigner {
             provider_upload_id,
             &parts,
             Some(checksum),
-            &PutMode::Overwrite,
+            CompletionCondition::Unconditional,
         )
         .await
         .map(|_| ())
@@ -414,7 +413,7 @@ impl MultipartController for S3RequestSigner {
                 &upload_id,
                 &parts,
                 Some(&crc),
-                &PutMode::CreateIfAbsent,
+                CompletionCondition::CreateOnly,
             )
             .await?;
         abort_on_drop.disarm();
@@ -582,15 +581,15 @@ impl S3RequestSigner {
         }
     }
 
-    /// Sends `CompleteMultipartUpload` under `mode`'s condition, answering
-    /// `None` when the provider no longer knows the upload.
+    /// Sends `CompleteMultipartUpload` under `condition`, answering `None`
+    /// when the provider no longer knows the upload.
     async fn complete_upload(
         &self,
         key: &str,
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        mode: &PutMode,
+        condition: CompletionCondition,
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
@@ -598,7 +597,7 @@ impl S3RequestSigner {
                 key,
                 upload_id,
                 checksum,
-                mode,
+                condition,
                 MULTIPART_CONTROL_TTL,
                 signing_time(),
             )
@@ -627,10 +626,10 @@ impl S3RequestSigner {
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        mode: &PutMode,
+        condition: CompletionCondition,
     ) -> Result<String> {
         let response = self
-            .complete_upload(key, upload_id, parts, checksum, mode)
+            .complete_upload(key, upload_id, parts, checksum, condition)
             .await?
             .ok_or_else(|| {
                 ObjectStoreError::retryable_transport(
@@ -1049,7 +1048,6 @@ mod tests {
         );
         let signer = Arc::new(scripted_signer(kind, provider));
         crate::ProviderObjectStore::new(
-            client.clone(),
             client.clone(),
             client.clone(),
             client,

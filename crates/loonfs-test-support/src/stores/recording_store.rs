@@ -22,8 +22,6 @@ pub struct StoreCounts {
     pub gets_with_metadata: usize,
     /// All put calls, including CAS-mode puts and assemblies.
     pub puts: usize,
-    /// Overwrite puts.
-    pub overwrite_puts: usize,
     /// Create-if-absent puts.
     pub create_if_absent_puts: usize,
     /// Compare-and-swap calls and CAS-mode puts.
@@ -196,7 +194,6 @@ fn fold_count(mut counts: StoreCounts, operation: &RecordedOperation) -> StoreCo
 
 fn fold_put_mode(counts: &mut StoreCounts, mode: &PutMode) {
     match mode {
-        PutMode::Overwrite => counts.overwrite_puts += 1,
         PutMode::CreateIfAbsent => counts.create_if_absent_puts += 1,
         PutMode::CompareAndSwap { .. } => counts.compare_and_swaps += 1,
     }

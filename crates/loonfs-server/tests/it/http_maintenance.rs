@@ -8,6 +8,7 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
     ChangeSeq, Checkpoint, CheckpointOwner, DeleteCheckpointResponse, ErrorResponse, ManifestNo,
     PinId,
@@ -640,13 +641,13 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let root = loonfs::control::load_namespace_current_manifest(&store, &namespace)
         .await
         .expect("metadata root");
-    store
-        .put_overwrite(
-            &metadata_manifest_object(&namespace, &root.state.manifest().manifest_no),
-            Bytes::from_static(br#"{"bad":"json"}"#),
-        )
-        .await
-        .expect("corrupt manifest");
+    replace_object(
+        &store,
+        &metadata_manifest_object(&namespace, &root.state.manifest().manifest_no),
+        Bytes::from_static(br#"{"bad":"json"}"#),
+    )
+    .await
+    .expect("corrupt manifest");
 
     match cold_client.stat(&target).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),

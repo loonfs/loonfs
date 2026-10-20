@@ -224,8 +224,11 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             ));
         }
 
+        // A direct completion sends no precondition, so it replaces whatever
+        // the key contains.
+        self.inner.delete(key).await?;
         self.inner
-            .put(key, Bytes::from(assembled), PutMode::Overwrite)
+            .put(key, Bytes::from(assembled), PutMode::CreateIfAbsent)
             .await?;
         self.stored_checksums
             .lock()
