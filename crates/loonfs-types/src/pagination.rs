@@ -373,14 +373,14 @@ pub struct Page<T, C> {
 
 /// A cursor that resumes one directory listing after `last_name_key`.
 ///
-/// A cursor from a read pinned at a checkpoint or a snapshot resumes only
-/// against the same pin.
+/// A cursor from a read of a snapshot resumes only against the same
+/// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// The checkpoint or snapshot pin that issued this cursor, or `None` for
-    /// a live read.
+    /// The snapshot whose read issued this cursor, or `None` for a live
+    /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_id: Option<crate::PinId>,
     /// Directory inode resolved at `head_seq`.
@@ -396,14 +396,14 @@ impl PageCursor for DirectoryPageCursor {
 /// A cursor that resumes a recursive directory listing after the last
 /// returned entry.
 ///
-/// A cursor from a read pinned at a checkpoint or a snapshot resumes only
-/// against the same pin.
+/// A cursor from a read of a snapshot resumes only against the same
+/// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryTreePageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// The checkpoint or snapshot pin that issued this cursor, or `None` for
-    /// a live read.
+    /// The snapshot whose read issued this cursor, or `None` for a live
+    /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_id: Option<crate::PinId>,
     /// The walk's position in each directory from the listed directory down,
@@ -471,8 +471,8 @@ impl ListPageCursor {
         }
     }
 
-    /// Returns the checkpoint or snapshot pin that issued the cursor, or
-    /// `None` for a live read.
+    /// Returns the snapshot whose read issued the cursor, or `None` for a
+    /// live read.
     pub fn pin_id(&self) -> Option<&crate::PinId> {
         match self {
             Self::Directory(cursor) => cursor.pin_id.as_ref(),

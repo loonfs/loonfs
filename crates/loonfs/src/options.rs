@@ -99,11 +99,11 @@ impl AdvanceRetentionFloorOptions {
     }
 }
 
-/// Options for creating a durable checkpoint pin.
+/// Options for creating a snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CreateCheckpointOptions {
-    /// Optional lifetime; the record's expiry is computed from the runtime's
-    /// clock. Absent means the pin holds until deleted.
+pub struct CreateSnapshotOptions {
+    /// The snapshot's lifetime in milliseconds, counted from the runtime's
+    /// clock. Without it, the snapshot doesn't expire.
     pub ttl_ms: Option<u64>,
 }
 
@@ -176,7 +176,7 @@ pub(crate) fn check_consistency(consistency: Option<Consistency>) -> Result<()> 
     Ok(())
 }
 
-/// Rejects a read of a pinned view (a snapshot, a checkpoint, or a
+/// Rejects a read of a pinned view (a snapshot or a
 /// [`ReadView`](crate::ReadView)) that sets a consistency. The pin selects
 /// the state such a read sees, so the read has no consistency setting.
 pub(crate) fn check_pinned_consistency(consistency: Option<Consistency>) -> Result<()> {

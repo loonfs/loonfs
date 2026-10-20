@@ -144,7 +144,7 @@ impl MetricLabel for ReadHeadSource {
 type GcKind = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcKind; 10] = [
+const GC_CATEGORIES: [GcKind; 9] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -158,9 +158,6 @@ const GC_CATEGORIES: [GcKind; 10] = [
     }),
     ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
-    ("deleted_snapshot_checkpoints", |gc| {
-        gc.deleted_checkpoints_by_owner.snapshot
-    }),
     ("deleted_temporary_objects", |gc| {
         gc.deleted.temporary_objects
     }),
@@ -1248,7 +1245,6 @@ mod tests {
             deleted_checkpoints_by_owner: loonfs_types::DeletedCheckpointsByOwner {
                 fork: 2,
                 user: 3,
-                snapshot: 7,
             },
             retained: loonfs_types::RetainedCandidates {
                 referenced: 2,
@@ -1282,11 +1278,10 @@ mod tests {
         assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
         // Every family registers at construction, so a scrape names the
         // whole reclaimable vocabulary rather than only what has happened.
-        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
+        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
         for (category, expected) in [
             ("deleted_fork_checkpoints", 4),
             ("deleted_expired_checkpoints", 6),
-            ("deleted_snapshot_checkpoints", 14),
             ("deleted_temporary_objects", 22),
             ("deleted_retired_content_objects", 26),
         ] {

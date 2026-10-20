@@ -23,7 +23,6 @@ const TAIL: &str = "/tail.txt";
 #[derive(Clone, Copy, Debug)]
 enum PinCreation {
     Fold,
-    Checkpoint,
     Snapshot,
     Fork,
 }
@@ -97,19 +96,9 @@ async fn pin_fold_reads(
             PinCreation::Fold => {
                 maintenance.fold_wal(&demo()).await.expect("fold tail");
             }
-            PinCreation::Checkpoint => {
-                maintenance
-                    .create_checkpoint(&demo(), "checkpoint")
-                    .await
-                    .expect("create checkpoint");
-            }
             PinCreation::Snapshot => {
                 namespace
-                    .create_snapshot(
-                        "snapshot",
-                        runtime.now_ms() + 60_000,
-                        &crate::SnapshotPolicy::default(),
-                    )
+                    .create_snapshot("snapshot", &crate::CreateSnapshotOptions::default())
                     .await
                     .expect("create snapshot");
             }
@@ -166,12 +155,7 @@ async fn pin_fold_reads(
 
 #[tokio::test]
 async fn folds_and_pin_folds_use_the_shared_pool_and_segment_cache() {
-    for creation in [
-        PinCreation::Fold,
-        PinCreation::Checkpoint,
-        PinCreation::Snapshot,
-        PinCreation::Fork,
-    ] {
+    for creation in [PinCreation::Fold, PinCreation::Snapshot, PinCreation::Fork] {
         let small_memo_reads = pin_fold_reads(creation, 1, 0).await;
         let default_memo_reads =
             pin_fold_reads(creation, crate::DEFAULT_MAX_READ_WORKING_BYTES, 0).await;

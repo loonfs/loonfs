@@ -156,22 +156,10 @@ pub enum CoreError {
     CheckpointUnavailable(String),
     #[error("content `{content_id}` requires content writes that this deployment cannot perform; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },
-    #[error("invalid checkpoint request: {0}")]
-    InvalidCheckpointRequest(String),
-    #[error("checkpoint `{checkpoint_id}` was not found")]
-    CheckpointNotFound { checkpoint_id: loonfs_types::PinId },
+    #[error("invalid snapshot request: {0}")]
+    InvalidSnapshotRequest(String),
     #[error("snapshot `{snapshot_id}` was not found")]
     SnapshotNotFound { snapshot_id: loonfs_types::PinId },
-    #[error("snapshot `{snapshot_id}` has expired")]
-    SnapshotGone { snapshot_id: loonfs_types::PinId },
-    #[error(
-        "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
-         delete one or wait for a snapshot to expire"
-    )]
-    SnapshotQuotaExceeded {
-        namespace_id: loonfs_types::NamespaceId,
-        max_live: usize,
-    },
     #[error(
         "metadata publication ran out of its {budget_ms}ms budget after {elapsed_ms}ms \
          and stopped before its next write"
@@ -410,7 +398,7 @@ impl CoreError {
             | CoreError::SubjectRequired { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
-            | CoreError::InvalidCheckpointRequest(_)
+            | CoreError::InvalidSnapshotRequest(_)
             | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
@@ -419,10 +407,7 @@ impl CoreError {
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
-            CoreError::CheckpointNotFound { .. } => ErrorCode::CheckpointNotFound,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
-            CoreError::SnapshotGone { .. } => ErrorCode::SnapshotGone,
-            CoreError::SnapshotQuotaExceeded { .. } => ErrorCode::SnapshotQuotaExceeded,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
@@ -535,11 +520,8 @@ impl CoreError {
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }
             | CoreError::CheckpointUnavailable(_)
-            | CoreError::InvalidCheckpointRequest(_)
-            | CoreError::CheckpointNotFound { .. }
+            | CoreError::InvalidSnapshotRequest(_)
             | CoreError::SnapshotNotFound { .. }
-            | CoreError::SnapshotGone { .. }
-            | CoreError::SnapshotQuotaExceeded { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
             | CoreError::InvalidGcOptions(_)
             | CoreError::UploadNotFound { .. }

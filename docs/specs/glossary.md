@@ -208,15 +208,12 @@ The verified set of metadata runs, from the current manifest, that a read starts
 
 ### Pin
 
-A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published. Checkpoints, snapshots, and forks are all pins, with different owners and rules. See [Pins](format.md#8-pins).
+A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. A pin has one of two owners:
 
-### Checkpoint
+- A "user pin" is a pin that a caller creates and deletes. The API calls it a "snapshot", and its ID is the `snapshot_id` that the read routes and forks accept. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits.
+- A "fork pin" keeps the source manifest that a fork reads through, until the fork is retired.
 
-A pin that an operator manages through the maintenance API to keep one version of a namespace. A checkpoint can have an expiry time, or none, and it stays readable for as long as it exists, even after its expiry time. Snapshots, by contrast, are for applications, and they always expire. The API also calls any pin's ID a `checkpoint_id`.
-
-### Snapshot
-
-A pin that applications use to read a namespace as it was at one point in time. The regular read endpoints accept a `snapshot_id`, and a snapshot can be read until it expires. Every snapshot has a required expiry time and a maximum lifetime (its expiry can be extended up to that maximum), and each namespace has a limit on live snapshots, so applications can't keep old data around indefinitely. Checkpoints, by contrast, are managed by operators through the maintenance API, and they can be kept without an expiry time.
+The maintenance API's "checkpoint" inventory lists every pin of a namespace, so an operator can see what keeps old manifests, and the API calls any pin's ID a `checkpoint_id`. See [Pins](format.md#8-pins).
 
 ### Fork
 

@@ -5,7 +5,7 @@ use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
     ChangeSeq, CloseNamespaceReport, LoonFs, Maintenance, Namespace, NamespaceSessionStatus,
-    SharedObjectStore, SnapshotPolicy, Writable,
+    SharedObjectStore, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -72,7 +72,6 @@ pub struct BindingConfig {
     /// Whether this binding serves the maintenance API group. The host runs
     /// any background maintenance itself.
     pub serves_maintenance: bool,
-    pub snapshot_policy: SnapshotPolicy,
     /// Largest content a service-proxied read returns, or `None` for no limit.
     pub max_download_bytes: Option<u64>,
     /// Largest body a service-proxied upload accepts, or `None` for no limit.

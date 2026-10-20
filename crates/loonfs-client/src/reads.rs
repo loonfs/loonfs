@@ -85,18 +85,20 @@ pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Cli
 pub type TrashPager = loonfs_types::Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, ClientError>;
-/// A pager over live snapshots.
+/// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
-    /// Saves the namespace's current state for a limited time.
+    /// Saves the namespace's current state as a snapshot. With `ttl_ms`, the
+    /// snapshot expires that many milliseconds from the server's current
+    /// time, and without it, the snapshot doesn't expire.
     ///
     /// Retrying this request starts a distinct attempt.
     pub async fn create_snapshot(
         &self,
         namespace_id: &NamespaceId,
         name: &str,
-        ttl_ms: u64,
+        ttl_ms: Option<u64>,
     ) -> Result<Snapshot> {
         let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
         self.request_json(
@@ -110,7 +112,8 @@ impl Client {
         .await
     }
 
-    /// Lists available snapshots.
+    /// Lists snapshots, including expired snapshots that garbage collection
+    /// hasn't deleted.
     pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
@@ -140,10 +143,9 @@ impl Client {
         .await
     }
 
-    /// Returns one live snapshot.
+    /// Returns one snapshot, as the listing returns it.
     ///
-    /// A missing id returns `snapshot_not_found`, and an expired snapshot
-    /// returns `snapshot_gone`.
+    /// A missing id returns `snapshot_not_found`.
     pub async fn get_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -157,7 +159,8 @@ impl Client {
             .await
     }
 
-    /// Extends a snapshot's lifetime.
+    /// Extends an unexpired snapshot's lifetime to `ttl_ms` from the
+    /// server's current time. The expiry never moves earlier.
     ///
     /// Repeating the same request is safe.
     pub async fn extend_snapshot(
@@ -180,7 +183,8 @@ impl Client {
 
     /// Deletes the snapshot record.
     ///
-    /// A missing id returns `snapshot_not_found`.
+    /// Deleting a missing snapshot succeeds, so repeating the request is
+    /// safe.
     pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -282,7 +286,7 @@ impl Client {
         .await
     }
 
-    /// Creates a new namespace from the selected current head or live snapshot and
+    /// Creates a new namespace from the selected current head or unexpired snapshot and
     /// returns the target's state at the fork point.
     pub async fn fork_namespace_with_options(
         &self,

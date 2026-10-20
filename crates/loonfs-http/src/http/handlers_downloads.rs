@@ -107,7 +107,7 @@ pub(super) async fn create_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")

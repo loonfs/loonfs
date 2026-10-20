@@ -88,12 +88,6 @@ limit_keys! {
     /// streams at once. The cap is shared by all callers and is not a per-caller
     /// allowance; requests past it answer `server_busy`.
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS = "download.service_proxied.max_concurrent_requests";
-    /// Advisory limit: the largest snapshot TTL one request may ask for.
-    LIMIT_SNAPSHOT_MAX_TTL_MS = "snapshot.max_ttl_ms";
-    /// Advisory limit: the largest snapshot expiry measured from record creation.
-    LIMIT_SNAPSHOT_MAX_AGE_MS = "snapshot.max_age_ms";
-    /// Advisory limit: the most live snapshots one namespace may hold.
-    LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE = "snapshot.max_live_per_namespace";
     /// Advisory limit: the most path operations one commit may carry; a longer
     /// list answers `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";

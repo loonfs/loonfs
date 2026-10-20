@@ -763,7 +763,7 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
         )
         .await
         .expect("put revision");
-        fs.create_checkpoint(&namespace_id)
+        fs.create_snapshot(&namespace_id)
             .await
             .expect("fold the revision");
     }
@@ -777,7 +777,7 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
         .delete_path("/docs/report.txt", &actor)
         .await
         .expect("delete file");
-    fs.create_checkpoint(&namespace_id)
+    fs.create_snapshot(&namespace_id)
         .await
         .expect("fold the deletion");
     let advanced = fs

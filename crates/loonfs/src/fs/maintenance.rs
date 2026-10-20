@@ -1,20 +1,20 @@
-//! [`Maintenance`]'s explicit maintenance: steps, GC, checkpoints, WAL
-//! folds, and retention.
+//! [`Maintenance`]'s explicit maintenance: steps, GC, the checkpoint
+//! inventory, WAL folds, and retention.
 //!
 //! Derived indexes are not here and not in this crate: `loonfs-grep`
-//! builds and collects its own state through this handle's public
-//! checkpoint calls, and its hosts drive it.
+//! builds and collects its own state through the runtime's public snapshot
+//! calls, and its hosts drive it.
 
 use crate::publisher::NamespaceChange;
 use crate::trace::phase_span;
 use crate::Maintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, CreateCheckpointOptions,
-    DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse, ListCheckpointsResponse,
-    MaintainMetadataOptions, MaintenanceCancellation, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOutcome, MetadataMaintenanceResponse,
-    MetadataPassReport, NamespaceId, PinId, SharedObjectStore, Snapshot, WalFoldStepOutcome,
+    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, ErrorCode, FoldWalOutcome,
+    FoldWalResponse, ListCheckpointsResponse, MaintainMetadataOptions, MaintenanceCancellation,
+    MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOutcome,
+    MetadataMaintenanceResponse, MetadataPassReport, NamespaceId, PinId, SharedObjectStore,
+    WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -141,40 +141,32 @@ impl Maintenance {
             Arc::clone(&self.core.inner.timer),
         )
         .await?;
-        let (live_checkpoints, live_snapshots) = self.count_live_checkpoints(namespace_id).await?;
-        Ok(Self::namespace_diagnostics(
-            diagnostics,
-            live_checkpoints,
-            live_snapshots,
-        ))
+        let live_snapshots = self.count_live_snapshots(namespace_id).await?;
+        Ok(Self::namespace_diagnostics(diagnostics, live_snapshots))
     }
 
-    async fn count_live_checkpoints(&self, namespace_id: &NamespaceId) -> Result<(u64, u64)> {
+    async fn count_live_snapshots(&self, namespace_id: &NamespaceId) -> Result<u64> {
         let now_ms = self.core.now_ms();
         let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let mut cursor = None;
-        let mut live_checkpoints = 0_u64;
         let mut live_snapshots = 0_u64;
         loop {
             let page = self
                 .engine(namespace_id)
-                .list_checkpoints_page(PageRequest {
+                .list_snapshots_page(PageRequest {
                     limit: loonfs_types::EffectiveLimit::new(page_limit),
                     cursor,
                 })
                 .await
                 .map_err(Error::from)?;
-            for checkpoint in page.items {
-                if let loonfs_types::CheckpointOwner::User { .. } = checkpoint.owner {
-                    live_checkpoints = live_checkpoints.saturating_add(1);
-                } else if Snapshot::from_checkpoint(checkpoint)
-                    .is_some_and(|snapshot| snapshot.is_live(now_ms))
-                {
-                    live_snapshots = live_snapshots.saturating_add(1);
-                }
-            }
+            let live = page
+                .items
+                .iter()
+                .filter(|snapshot| snapshot.is_live(now_ms))
+                .count();
+            live_snapshots = live_snapshots.saturating_add(live as u64);
             let Some(next_cursor) = page.next_cursor else {
-                return Ok((live_checkpoints, live_snapshots));
+                return Ok(live_snapshots);
             };
             cursor = Some(next_cursor);
         }
@@ -182,7 +174,6 @@ impl Maintenance {
 
     fn namespace_diagnostics(
         diagnostics: NamespaceStorageDiagnostics,
-        live_checkpoints: u64,
         live_snapshots: u64,
     ) -> NamespaceDiagnostics {
         NamespaceDiagnostics {
@@ -195,7 +186,6 @@ impl Maintenance {
             current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_objects: diagnostics.wal_tail_objects,
             live_snapshots,
-            live_checkpoints,
         }
     }
 
@@ -769,64 +759,10 @@ impl Maintenance {
         Ok(report)
     }
 
-    /// Creates a new user checkpoint for the current namespace head that
-    /// lasts until it is deleted.
-    pub async fn create_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-    ) -> Result<Checkpoint> {
-        self.create_checkpoint_with_options(namespace_id, name, &CreateCheckpointOptions::default())
-            .await
-    }
-
-    /// Creates a new user checkpoint for the current namespace head.
-    ///
-    /// A checkpoint pins a manifest for retention and provenance. Every call
-    /// creates its own pin under a fresh id; the name is a label, not a key.
-    /// When WAL objects follow the current manifest, they are first folded
-    /// into a new manifest; this is not a request to compact metadata. The
-    /// call waits for a fold permit from the runtime's execution budget, even
-    /// when the tail turns out to be folded already. The pin lasts until it
-    /// is deleted, either explicitly or by garbage collection after its
-    /// expiry plus grace
-    /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.create_checkpoint",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "create_checkpoint",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn create_checkpoint_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-        options: &CreateCheckpointOptions,
-    ) -> Result<Checkpoint> {
-        let span = tracing::Span::current();
-        self.core.record_trace_context(&span);
-        let result = {
-            let _permit = self.writer.execution_budget.fold_permit().await;
-            self.engine(namespace_id)
-                .create_checkpoint(name.to_owned(), options.ttl_ms)
-                .await
-        }
-        .map_err(Error::from);
-        self.publisher
-            .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
-            .await
-            .map(|report| report.response)
-    }
-
-    /// Lists existing checkpoints in ascending id order, including expired
-    /// checkpoints that garbage collection has not yet deleted. The cursor
-    /// resumes a live listing and does not create a snapshot.
+    /// Lists every pin as a checkpoint, in ascending id order, including
+    /// fork pins and expired snapshots that garbage collection has not yet
+    /// deleted. This is the inventory of what keeps manifests from
+    /// collection. The cursor resumes a live listing.
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let maintenance = self.clone();
         let namespace_id = namespace_id.clone();
@@ -872,9 +808,9 @@ impl Maintenance {
         })
     }
 
-    /// Returns one existing checkpoint, as the listing returns it, including
-    /// an expired checkpoint that garbage collection has not yet deleted. A
-    /// missing id returns `checkpoint_not_found`.
+    /// Returns one existing pin of any owner, as the checkpoint listing
+    /// returns it, including an expired snapshot that garbage collection has
+    /// not yet deleted. A missing id returns `snapshot_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.get_checkpoint",
@@ -898,35 +834,6 @@ impl Maintenance {
             .get_checkpoint(checkpoint_id)
             .await
             .map_err(Error::from)
-    }
-
-    /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.delete_checkpoint",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "delete_checkpoint",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn delete_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) -> Result<DeleteCheckpointResponse> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let result = self
-            .engine(namespace_id)
-            .delete_checkpoint(checkpoint_id)
-            .await
-            .map_err(Error::from);
-        self.publisher
-            .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await
     }
 
     /// Folds the visible WAL tail into a new manifest.

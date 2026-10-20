@@ -33,7 +33,6 @@ pub(crate) fn client(
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
         serves_maintenance: true,
-        snapshot_policy: loonfs::SnapshotPolicy::default(),
         max_download_bytes: None,
         max_upload_bytes: None,
         max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,

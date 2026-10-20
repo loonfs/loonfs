@@ -194,7 +194,7 @@ pub async fn app(
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
+            runtime.clone(),
             loonfs_grep::GrepStepBudget::new(
                 std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
                     .expect("validated grep step limit should be nonzero"),
@@ -245,11 +245,6 @@ pub async fn app(
         .transpose()?;
     let options = Arc::new(BindingConfig {
         serves_maintenance: config.maintenance.serves(),
-        snapshot_policy: loonfs::SnapshotPolicy {
-            max_ttl_ms: config.snapshot_max_ttl_ms,
-            max_age_ms: config.snapshot_max_age_ms,
-            max_live_per_namespace: config.snapshot_max_live_per_namespace.get(),
-        },
         max_download_bytes: Some(config.max_download_bytes),
         max_upload_bytes: Some(config.max_upload_bytes),
         max_concurrent_uploads: config.max_concurrent_uploads.get(),

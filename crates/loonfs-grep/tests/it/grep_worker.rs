@@ -560,7 +560,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
     let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
-        host.maintenance.clone(),
+        host.writer.clone(),
         GrepStepBudget::default(),
     );
 
@@ -625,7 +625,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
-        host.maintenance.clone(),
+        host.writer.clone(),
         GrepStepBudget::default(),
     );
 
@@ -664,8 +664,10 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .await
         .expect("enable grep");
     let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    host.maintenance
-        .delete_checkpoint(&namespace_id, &previous_checkpoint_id)
+    host.writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .delete_snapshot(&previous_checkpoint_id)
         .await
         .expect("make the current backfill restart");
 
@@ -691,7 +693,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
-        host.maintenance.clone(),
+        host.writer.clone(),
         GrepStepBudget::default(),
     );
 
@@ -759,8 +761,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     // The second trigger: the pinned checkpoint stops pinning its basis
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
-    maintenance
-        .delete_checkpoint(&namespace_id, &gap_checkpoint_id)
+    namespace
+        .delete_snapshot(&gap_checkpoint_id)
         .await
         .expect("remove checkpoint mid-backfill");
     let vanished = worker
@@ -909,8 +911,11 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a backfill whose snapshot expired restarts from a fresh
+/// snapshot, deletes the expired one, and builds an index that serves the
+/// namespace's files.
 #[tokio::test]
-async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
+async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -940,7 +945,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     worker.enable(&namespace_id).await.expect("enable");
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
-    // Age the pin out from under the backfill without releasing it.
+    // Expire the pin under the backfill without deleting it.
     let key = pin(&namespace_id, &checkpoint_id);
     let mut record = control::pin(&store, &namespace_id, &checkpoint_id)
         .await

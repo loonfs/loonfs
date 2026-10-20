@@ -115,38 +115,18 @@ pub(crate) async fn load_pin<S: ObjectStore + ?Sized>(
     }
 }
 
-/// The owner kind an operation serves: checkpoint operations serve user pins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinOwnerKind {
-    User,
-    Snapshot,
-}
-
-/// Loads the pin `pin_id` if `owner_kind` owns it. Otherwise returns
-/// the not-found error of that kind, so an id of another kind does not reveal
-/// its pin.
-pub(crate) async fn load_owned_pin<S: ObjectStore + ?Sized>(
+/// Loads the user pin `pin_id`. A missing pin, or a fork pin, returns
+/// `snapshot_not_found`, because only a user pin is a snapshot.
+pub(crate) async fn load_user_pin<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     pin_id: &PinId,
-    owner_kind: PinOwnerKind,
 ) -> Result<LoadedPin> {
     load_pin(store, namespace_id, pin_id)
         .await?
-        .filter(|loaded| {
-            matches!(
-                (owner_kind, &loaded.state.owner),
-                (PinOwnerKind::User, PinOwner::User { .. })
-                    | (PinOwnerKind::Snapshot, PinOwner::Snapshot { .. })
-            )
-        })
-        .ok_or_else(|| match owner_kind {
-            PinOwnerKind::User => CoreError::CheckpointNotFound {
-                checkpoint_id: pin_id.clone(),
-            },
-            PinOwnerKind::Snapshot => CoreError::SnapshotNotFound {
-                snapshot_id: pin_id.clone(),
-            },
+        .filter(|loaded| matches!(loaded.state.owner, PinOwner::User { .. }))
+        .ok_or_else(|| CoreError::SnapshotNotFound {
+            snapshot_id: pin_id.clone(),
         })
 }
 

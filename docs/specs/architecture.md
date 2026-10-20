@@ -17,7 +17,7 @@ Each namespace is stored as six main kinds of objects:
 | Manifest | The namespace's identity and status, the current writer, the metadata runs that make up its files and directories, and its retention floor. Manifests are numbered. |
 | WAL object | Commits made after the most recent manifest, or a writer fence. WAL objects are numbered. |
 | Hint | The number of a recent manifest, where readers start looking for the current one. |
-| Pin | A reference to one manifest that keeps it, and everything it lists, from being deleted. Checkpoints, snapshots, and forks use pins. |
+| Pin | A reference to one manifest that keeps it, and everything it lists, from being deleted. Snapshots and forks use pins. |
 | Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
 | Content object | File bytes. Content objects are immutable, and a file's bytes can span several of them. |
 
@@ -101,15 +101,14 @@ A "fork" is a new namespace that starts as a copy of another namespace at one po
 
 A fork can keep reading objects owned by its source and the source's ancestors. When the fork publishes its own manifests, those objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
-User checkpoints and snapshots are pins too, with different rules for reading and removal. Snapshots are for applications. The read endpoints accept a `snapshot_id`, and every snapshot has a required expiry time and counts against a per-namespace limit, so applications can't keep old data around indefinitely. Checkpoints, by contrast, are for operators. They're managed through the maintenance API, and a checkpoint can be kept without an expiry time. Each create call writes a new pin with a new ID, so a checkpoint's name is a label, not a key (two checkpoints can have the same name).
+A snapshot is a pin too. A caller creates a snapshot to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new pin with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's checkpoint inventory lists every pin, snapshots and fork pins, so an operator can see what keeps old manifests.
 
 | Pin | Readable | Removed |
 | --- | --- | --- |
-| Checkpoint | While the pin exists, even after its expiry time | When it's deleted, or by garbage collection after its expiry time (if it has one) |
-| Snapshot | Only before it expires | When it's deleted, or by garbage collection after it expires |
+| Snapshot | Before it expires, or while it exists if it has no expiry time | When it's deleted, or by garbage collection after it expires |
 | Fork | Not read directly | By garbage collection, after the fork no longer depends on it |
 
-An expired pin still protects its manifest until garbage collection deletes the pin (see [Pins](format.md#8-pins)).
+An expired snapshot still protects its manifest until garbage collection deletes the pin (see [Pins](format.md#8-pins)).
 
 ## Maintenance and deletion
 

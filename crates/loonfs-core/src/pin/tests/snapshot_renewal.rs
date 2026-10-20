@@ -1,7 +1,7 @@
 //! Snapshot expiry must include time spent loading and retrying its pin.
 
 use super::*;
-use crate::pin::snapshot::{classify_live_snapshot, extend_snapshot_expiry};
+use crate::pin::snapshot::{ensure_unexpired, extend_snapshot_expiry};
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::format::control::PinOwner;
@@ -19,9 +19,9 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         let pin = create::create_pin(
             &inner,
             &namespace_id,
-            PinOwner::Snapshot {
+            PinOwner::User {
                 name: "short lease".to_owned(),
-                expires_at_ms: 1_001,
+                expires_at_ms: Some(1_001),
             },
             &context,
             Default::default(),
@@ -55,7 +55,6 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             &namespace_id,
             &pin.pin_id,
             1_002,
-            20_000,
             &context,
             clock.clone(),
         );
@@ -65,7 +64,10 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             store.release();
         };
         let (result, ()) = futures::join!(renew, expire);
-        assert_eq!(result.expect("the extension landed").expires_at_ms, 1_002);
+        assert_eq!(
+            result.expect("the extension landed").expires_at_ms,
+            Some(1_002)
+        );
         let stored = load_pin(&inner, &namespace_id, &pin.pin_id)
             .await
             .expect("load");
@@ -74,10 +76,10 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             Some(1_002)
         );
         assert_eq!(
-            classify_live_snapshot(stored.expect("pin"), clock.now_ms())
-                .expect_err("subsequent reads see expiry")
+            ensure_unexpired(stored.expect("pin"), clock.now_ms())
+                .expect_err("later reads see expiry")
                 .code(),
-            ErrorCode::SnapshotGone
+            ErrorCode::SnapshotNotFound
         );
     }
 }
@@ -95,9 +97,9 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         let pin = create::create_pin(
             &inner,
             &namespace_id,
-            PinOwner::Snapshot {
+            PinOwner::User {
                 name: "short lease".to_owned(),
-                expires_at_ms: 1_001,
+                expires_at_ms: Some(1_001),
             },
             &context,
             Default::default(),
@@ -120,14 +122,13 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             &namespace_id,
             &pin.pin_id,
             requested_expiry,
-            20_000,
             &context,
             clock.clone(),
         );
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(2);
-            let error = classify_live_snapshot(
+            let error = ensure_unexpired(
                 load_pin(&inner, &namespace_id, &pin.pin_id)
                     .await
                     .expect("load")
@@ -135,13 +136,13 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
                 clock.now_ms(),
             )
             .expect_err("an independent reader observes expiry");
-            assert_eq!(error.code(), ErrorCode::SnapshotGone);
+            assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
             store.release();
         };
         let (result, ()) = futures::join!(renew, expire);
         assert_eq!(
             result.expect_err("expired snapshot must not renew").code(),
-            ErrorCode::SnapshotGone
+            ErrorCode::SnapshotNotFound
         );
         let stored = load_pin(&inner, &namespace_id, &pin.pin_id)
             .await
@@ -163,9 +164,9 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     let pin = create::create_pin(
         &inner,
         &namespace_id,
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "short lease".to_owned(),
-            expires_at_ms: 1_001,
+            expires_at_ms: Some(1_001),
         },
         &context,
         Default::default(),
@@ -188,7 +189,6 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         &namespace_id,
         &pin.pin_id,
         10_000,
-        20_000,
         &context,
         clock.clone(),
     );
@@ -199,7 +199,6 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             &namespace_id,
             &pin.pin_id,
             1_002,
-            20_000,
             &context,
             clock.clone(),
         )
@@ -211,7 +210,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     let (result, ()) = futures::join!(renew, contender);
     assert_eq!(
         result.expect_err("expiry survives a CAS retry").code(),
-        ErrorCode::SnapshotGone
+        ErrorCode::SnapshotNotFound
     );
     let stored = load_pin(&inner, &namespace_id, &pin.pin_id)
         .await

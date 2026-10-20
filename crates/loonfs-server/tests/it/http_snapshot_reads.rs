@@ -8,9 +8,7 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::api::v0::ListChangesResponse;
 use loonfs_types::PageRequest;
-use loonfs_types::{
-    ChangeSeq, CreateCheckpointRequest, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot,
-};
+use loonfs_types::{ChangeSeq, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::io::Read as _;
@@ -654,25 +652,19 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         );
     }
 
-    let checkpoint = harness
+    let unexpiring = harness
         .client
-        .create_checkpoint(
-            &namespace,
-            &CreateCheckpointRequest {
-                name: "operator".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_snapshot(&namespace, "operator", None)
         .await
-        .expect("create user checkpoint");
-    let (status, error) = get_json::<PathEntry>(&stat_url(
+        .expect("create a snapshot without an expiry");
+    assert_eq!(unexpiring.expires_at_ms, None);
+    let entry = get_json::<PathEntry>(&stat_url(
         &harness.server_url,
         namespace.as_str(),
-        Some(checkpoint.checkpoint_id.as_str()),
+        Some(unexpiring.snapshot_id.as_str()),
     ))
-    .expect_err("user checkpoint is not a snapshot");
-    assert_eq!(status, 404);
-    assert_eq!(error.code, "snapshot_not_found");
+    .expect("a snapshot without an expiry is readable");
+    assert_eq!(entry.path.as_str(), "/keep.txt");
 
     let unknown = "pin_00000000000000000001-ffffffffffffffff";
     let (status, error) = get_json::<PathEntry>(&stat_url(

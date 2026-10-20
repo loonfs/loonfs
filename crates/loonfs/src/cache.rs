@@ -15,9 +15,9 @@ use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailProjectionCacheKey};
 use loonfs_core::control::{
-    load_checkpoint_read_basis, load_read_anchor_cached, load_snapshot_read_basis,
-    manifest_has_successor, project_anchor_tail, CheckpointReadBasis, MetadataBasis,
-    NamespaceReadAnchor, NamespaceReadState, VerifiedNamespaceCatalogEntry,
+    load_read_anchor_cached, load_snapshot_read_basis, manifest_has_successor, project_anchor_tail,
+    MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -339,30 +339,7 @@ impl RuntimeCore {
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
-    /// Pins the metadata view captured by a checkpoint.
-    pub(crate) async fn pinned_read_at_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) -> Result<(
-        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
-        RuntimeReadContext,
-    )> {
-        let live = self
-            .current_read_context(namespace_id, Consistency::Strong)
-            .await?;
-        let pinned = load_checkpoint_read_basis(
-            self.store(),
-            Some(self.inner.metadata_segment_cache.as_ref()),
-            &live.head,
-            checkpoint_id,
-        )
-        .await
-        .map_err(Error::from)?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
-    }
-
-    /// Pins a snapshot-owned checkpoint while enforcing its live lease.
+    /// Pins the metadata view an unexpired snapshot captured.
     pub(crate) async fn pinned_read_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -389,7 +366,7 @@ impl RuntimeCore {
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
-        pinned: CheckpointReadBasis,
+        pinned: SnapshotReadBasis,
         live: RuntimeReadContext,
     ) -> (
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,

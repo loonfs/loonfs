@@ -1,11 +1,11 @@
-//! Namespace status, maintenance passes, checkpointing, and retention hooks.
+//! Namespace status, maintenance passes, snapshots, and retention hooks.
 
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
-    MaintainMetadataOptions, ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy,
-    NamespaceId, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
+    ChangeSeq, CommitId, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, MaintainMetadataOptions,
+    ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, NamespaceId,
+    SharedObjectStore, WalFoldStepOutcome,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -57,36 +57,54 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(store.count(OperationSelector::List), 1);
 }
 
-#[test]
-fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
+/// Checks that namespace diagnostics count the snapshots that haven't
+/// expired, with or without an expiry, and leave out expired snapshots and
+/// fork pins.
+#[tokio::test]
+async fn namespace_diagnostics_count_unexpired_snapshots_only() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "diagnostic-checkpoint-count-test");
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
+        1_750_000_000_000,
+    ));
+    let writer = loonfs::LoonFs::builder_with_store(store(temp_dir.path()))
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "diagnostic-snapshot-count",
+        ))
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
     let source = namespace_id("source");
-    let target = namespace_id("target");
-
-    fs.create_namespace_blocking(&source, &loonfs_test_support::test_actor())
+    writer
+        .create_namespace(&source, &loonfs_test_support::test_actor())
+        .await
         .expect("create namespace");
-    let namespace = fs.writer.open_namespace(&source).expect("open namespace");
-    block_on(fs.maintenance.create_checkpoint(&source, "durable"))
-        .expect("create durable checkpoint");
-    block_on(fs.maintenance.create_checkpoint_with_options(
-        &source,
-        "expired",
-        &CreateCheckpointOptions { ttl_ms: Some(0) },
-    ))
-    .expect("create expired checkpoint");
-    block_on(namespace.create_snapshot("expired", 1, &SnapshotPolicy::default()))
-        .expect("create expired snapshot record");
-    block_on(namespace.create_snapshot("live", u64::MAX, &SnapshotPolicy::default()))
-        .expect("create live snapshot");
-    fs.fork_namespace_blocking(&source, &target)
+    let namespace = writer.open_namespace(&source).expect("open namespace");
+    for ttl_ms in [None, Some(1_000), Some(60_000)] {
+        namespace
+            .create_snapshot("counted", &CreateSnapshotOptions { ttl_ms })
+            .await
+            .expect("create snapshot");
+    }
+    writer
+        .fork_namespace(
+            &source,
+            &namespace_id("target"),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
         .expect("fork namespace");
+    clock.advance_ms(1_000);
 
-    let diagnostics = fs
-        .namespace_diagnostics_blocking(&source)
+    let diagnostics = writer
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "diagnostic-snapshot-count",
+        ))
+        .diagnostics(&source)
+        .await
         .expect("read diagnostics");
-    assert_eq!(diagnostics.live_snapshots, 1);
-    assert_eq!(diagnostics.live_checkpoints, 2);
+    assert_eq!(diagnostics.live_snapshots, 2);
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[test]
@@ -312,7 +330,7 @@ fn the_typed_wrappers_are_single_action_steps() {
     );
 
     let checkpoint = fs
-        .create_checkpoint_blocking(&namespace_id)
+        .create_snapshot_blocking(&namespace_id)
         .expect("create checkpoint");
     let advanced = fs
         .advance_retention_floor_blocking(&namespace_id)

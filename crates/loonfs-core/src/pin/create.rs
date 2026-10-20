@@ -13,9 +13,9 @@ use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, PinId};
 use std::sync::Arc;
 
-/// Longest accepted user checkpoint name. A label bound, not a durable
-/// format limit.
-const MAX_CHECKPOINT_NAME_CHARS: usize = 128;
+/// Longest accepted snapshot name. A label bound, not a durable format
+/// limit.
+const MAX_SNAPSHOT_NAME_CHARS: usize = 128;
 
 #[allow(
     clippy::too_many_arguments,
@@ -107,14 +107,13 @@ pub(crate) async fn create_pin_at_basis<S: ObjectStore + ?Sized>(
 
 fn validate_pin_owner(owner: &PinOwner) -> Result<()> {
     match owner {
-        PinOwner::User { name, .. } => validate_checkpoint_name(name),
-        PinOwner::Snapshot {
+        PinOwner::User {
             name,
             expires_at_ms,
         } => {
-            validate_checkpoint_name(name)?;
-            if *expires_at_ms == 0 {
-                return Err(CoreError::InvalidCheckpointRequest(
+            validate_snapshot_name(name)?;
+            if *expires_at_ms == Some(0) {
+                return Err(CoreError::InvalidSnapshotRequest(
                     "snapshot expiry must not be zero".to_owned(),
                 ));
             }
@@ -124,15 +123,15 @@ fn validate_pin_owner(owner: &PinOwner) -> Result<()> {
     }
 }
 
-fn validate_checkpoint_name(name: &str) -> Result<()> {
+fn validate_snapshot_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(CoreError::InvalidCheckpointRequest(
-            "checkpoint name must not be empty".to_owned(),
+        return Err(CoreError::InvalidSnapshotRequest(
+            "snapshot name must not be empty".to_owned(),
         ));
     }
-    if name.chars().count() > MAX_CHECKPOINT_NAME_CHARS {
-        return Err(CoreError::InvalidCheckpointRequest(format!(
-            "checkpoint name exceeds {MAX_CHECKPOINT_NAME_CHARS} characters"
+    if name.chars().count() > MAX_SNAPSHOT_NAME_CHARS {
+        return Err(CoreError::InvalidSnapshotRequest(format!(
+            "snapshot name exceeds {MAX_SNAPSHOT_NAME_CHARS} characters"
         )));
     }
     Ok(())

@@ -13,8 +13,8 @@ use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{
     api::v0::{
-        CompleteUploadBody, CreateCheckpointRequest, ObjectTransferAccess, UploadContentClaim,
-        UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
+        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
     FilesystemOperation, NamespaceId,
@@ -707,13 +707,7 @@ async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
 
     harness
         .client
-        .create_checkpoint(
-            &namespace_id,
-            &CreateCheckpointRequest {
-                name: "appended".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_snapshot(&namespace_id, "appended", None)
         .await
         .expect("checkpoint append");
     let folded = harness

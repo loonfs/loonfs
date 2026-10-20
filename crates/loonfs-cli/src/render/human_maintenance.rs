@@ -7,8 +7,8 @@ use loonfs_types::api::v0::{
     StoreProbeResponse,
 };
 use loonfs_types::{
-    ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
-    ListCheckpointsResponse, MetadataMaintenanceOutcome, NamespaceMetadata, RunMaintenanceResponse,
+    ChangeSeq, DeleteNamespaceResponse, ListCheckpointsResponse, MetadataMaintenanceOutcome,
+    NamespaceMetadata, RunMaintenanceResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -46,6 +46,13 @@ pub(super) fn human_namespace_deleted(response: &DeleteNamespaceResponse) -> Str
     )
 }
 
+/// Formats a snapshot's expiry, or `never` for a snapshot without one.
+fn snapshot_expiry(snapshot: &Snapshot) -> String {
+    snapshot
+        .expires_at_ms
+        .map_or_else(|| "never".to_owned(), format_utc_ms)
+}
+
 pub(super) fn human_snapshot_created(snapshot: &Snapshot) -> String {
     format!(
         "snapshot {} created for {} at sequence {} (name: {}, expires: {})",
@@ -53,13 +60,13 @@ pub(super) fn human_snapshot_created(snapshot: &Snapshot) -> String {
         snapshot.namespace_id,
         snapshot.captured_seq.0,
         snapshot.name,
-        format_utc_ms(snapshot.expires_at_ms)
+        snapshot_expiry(snapshot)
     )
 }
 
 pub(super) fn human_snapshots_listed(response: &ListSnapshotsResponse) -> String {
     let mut lines = vec![
-        format!("live snapshots for {}", response.namespace_id),
+        format!("snapshots for {}", response.namespace_id),
         "SNAPSHOT\tNAME\tSEQ\tCREATED\tEXPIRES".to_owned(),
     ];
     for snapshot in &response.snapshots {
@@ -69,7 +76,7 @@ pub(super) fn human_snapshots_listed(response: &ListSnapshotsResponse) -> String
             snapshot.name,
             snapshot.captured_seq.0,
             format_utc_ms(snapshot.created_at_ms),
-            format_utc_ms(snapshot.expires_at_ms),
+            snapshot_expiry(snapshot),
         ));
     }
     if response.snapshots.is_empty() {
@@ -86,7 +93,7 @@ pub(super) fn human_snapshot_extended(snapshot: &Snapshot) -> String {
         "snapshot {} in {} extended to {}",
         snapshot.snapshot_id,
         snapshot.namespace_id,
-        format_utc_ms(snapshot.expires_at_ms)
+        snapshot_expiry(snapshot)
     )
 }
 
@@ -94,20 +101,6 @@ pub(super) fn human_snapshot_deleted(response: &DeleteSnapshotResponse) -> Strin
     format!(
         "snapshot {} in {} deleted",
         response.snapshot_id, response.namespace_id
-    )
-}
-
-pub(super) fn human_checkpoint_created(checkpoint: &Checkpoint) -> String {
-    let expiry = match checkpoint.expires_at_ms {
-        Some(expires_at_ms) => format!(", expires at {}", format_utc_ms(expires_at_ms)),
-        None => String::new(),
-    };
-    format!(
-        "checkpointed {} @ seq {} (checkpoint {}, manifest {}{expiry})",
-        checkpoint.namespace_id,
-        checkpoint.captured_seq.0,
-        checkpoint.checkpoint_id,
-        checkpoint.manifest_no
     )
 }
 
@@ -135,13 +128,6 @@ pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> St
         lines.push(format!("next_cursor: {cursor}"));
     }
     lines.join("\n")
-}
-
-pub(super) fn human_checkpoint_deleted(response: &DeleteCheckpointResponse) -> String {
-    format!(
-        "checkpoint {} in {} deleted",
-        response.checkpoint_id, response.namespace_id
-    )
 }
 
 pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {

@@ -38,7 +38,7 @@ Why two epochs and not one? The two roles have different lifetimes and can belon
 
 ## Folding as the maintainer
 
-A [fold](../specs/glossary.md#fold) moves the WAL objects after the current manifest's folded boundary into metadata segments, and publishes the next manifest as the maintainer's publication, with both epochs copied from its predecessor. The writer's host folds its own sessions' tails as the maintainer, after a commit that reaches the fold thresholds and when a tail reaches the idle fold age. A maintenance runtime folds a tail that no host is maintaining, such as a crashed writer's, with no claim on the writer role and no fence on a writer. A checkpoint or a snapshot from any process folds the tail the same way, and then pins the resulting manifest.
+A [fold](../specs/glossary.md#fold) moves the WAL objects after the current manifest's folded boundary into metadata segments, and publishes the next manifest as the maintainer's publication, with both epochs copied from its predecessor. The writer's host folds its own sessions' tails as the maintainer, after a commit that reaches the fold thresholds and when a tail reaches the idle fold age. A maintenance runtime folds a tail that no host is maintaining, such as a crashed writer's, with no claim on the writer role and no fence on a writer. A snapshot from any process folds the tail the same way, and then pins the resulting manifest.
 
 A writer session runs one fold at a time. A maintenance call's fold can run beside the session's fold, in the same process or in another one, and the numbered create resolves the two. A fold whose create loses reloads the current manifest and rebuilds against it, and the rebuild has four outcomes:
 
@@ -51,7 +51,7 @@ A fold resolves a put whose outcome is unknown the same way every publication do
 
 A writer session's [position](../specs/glossary.md#writer-position) moves onto a fold's manifest as it moves onto any manifest under the session's writer epoch, whether this process or another published it, and never moves onto a manifest with a newer writer epoch. So a fold needs no binding to the writer epoch to keep the old writer's reads off a new writer's log, because the position's epoch rule already keeps them off, and the session finds that it's fenced at its next commit.
 
-Why doesn't a fold claim the compactor epoch? A fold is short and frequent (every 32 WAL objects, and every checkpoint), and a compaction is long and rare. If each fold claimed the epoch, each fold would fence any compaction running in another runtime. Without a claim, folds and compactions coexist. A compaction's finalization that loses its create to a fold retries over the fold's manifest, and a fold that loses its create to a compaction rebuilds and keeps its tail.
+Why doesn't a fold claim the compactor epoch? A fold is short and frequent (every 32 WAL objects, and every snapshot), and a compaction is long and rare. If each fold claimed the epoch, each fold would fence any compaction running in another runtime. Without a claim, folds and compactions coexist. A compaction's finalization that loses its create to a fold retries over the fold's manifest, and a fold that loses its create to a compaction rebuilds and keeps its tail.
 
 Why isn't a fold the writer's, under the writer epoch? A tail left by a crashed writer, or by a host that stopped maintaining it, could then be folded only by a process that claims the writer role. That claim fences a session that might be idle rather than dead, and costs an application a failed commit when the application returns. A maintainer's fold leaves the writer alone, and the format lets any process fold.
 
@@ -85,7 +85,7 @@ Bind a writer session's fold to the writer epoch, and leave the explicit fold an
 
 Put folds on the writer, under the writer epoch, with a maintenance pass claiming the writer role to fold a crashed writer's tail. This keeps each fold with its log, but either a pass fences an idle session, which costs the application a failed commit when it returns, or the tail stays unfolded until a writer opens the namespace again.
 
-Publish folds under the compactor epoch, with a claim per fold. Every fold then fences any compaction that runs in another runtime, so routine folds and checkpoints can keep a long compaction from finishing.
+Publish folds under the compactor epoch, with a claim per fold. Every fold then fences any compaction that runs in another runtime, so routine folds and snapshots can keep a long compaction from finishing.
 
 Add a third epoch for folds, claimed by whichever process folds. It needs a claim, a fence, and a rule for a compaction that runs while another process has the fold epoch, and folds don't need a fence, because the numbered create and the rebuild already resolve two folds of one tail.
 

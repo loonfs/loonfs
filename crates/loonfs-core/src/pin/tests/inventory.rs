@@ -9,6 +9,7 @@ use super::*;
 use crate::pin::list::list_checkpoints_page;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
+use loonfs_test_support::stores::replace_object;
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{CheckpointOwner, ErrorCode, ListCheckpointsResponse, PageRequest};
 
@@ -98,7 +99,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
 
     // Delete is what takes a record out of the answer, and it takes out
     // exactly the one named.
-    super::super::delete::delete_checkpoint(&store, &namespace_id, &first)
+    crate::pin::delete_snapshot(&store, &namespace_id, &first)
         .await
         .expect("delete checkpoint");
     let after_delete = list_all_checkpoints(&store, &namespace_id)
@@ -228,7 +229,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
     }
     ids.sort();
     for checkpoint_id in &ids[1..6] {
-        super::super::delete::delete_checkpoint(&store, &namespace_id, checkpoint_id)
+        crate::pin::delete_snapshot(&store, &namespace_id, checkpoint_id)
             .await
             .expect("delete checkpoint in filtered run");
     }
@@ -472,8 +473,11 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
+/// Checks that the snapshot listing returns user pins, expired ones
+/// included, and leaves out fork pins, while the checkpoint listing returns
+/// every pin.
 #[tokio::test]
-async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
+async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -481,37 +485,151 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
+    let fork_owner = PinOwner::Fork {
+        target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
+    };
+    let mut snapshots = BTreeSet::new();
+    for index in 0..3 {
+        snapshots.insert(
+            pin_named(
+                &store,
+                &namespace_id,
+                &format!("pin-{index}"),
+                Some(context.now_ms - 1),
+                &context,
+            )
+            .await,
+        );
+        create::create_pin(
+            &store,
+            &namespace_id,
+            fork_owner.clone(),
+            &context,
+            Default::default(),
+            None,
+            &tokio::sync::Semaphore::new(32),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("create fork pin");
+    }
 
-    let expires_at_ms = context.now_ms + 60_000;
-    let snapshot = create::create_pin(
-        &store,
-        &namespace_id,
-        PinOwner::Snapshot {
-            name: "report-run".to_owned(),
-            expires_at_ms,
-        },
-        &context,
-        Default::default(),
-        None,
-        &tokio::sync::Semaphore::new(32),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .map(|report| crate::pin::checkpoint_summary(report.response))
-    .expect("create snapshot");
-
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let mut listed = BTreeSet::new();
+    let mut cursor = None;
+    loop {
+        let page = crate::pin::list_snapshots_page(
+            &store,
+            &namespace_id,
+            PageRequest {
+                limit: page_limit(2),
+                cursor,
+            },
+        )
+        .await
+        .expect("list snapshots");
+        for snapshot in page.items {
+            assert_eq!(snapshot.expires_at_ms, Some(context.now_ms - 1));
+            listed.insert(snapshot.snapshot_id);
+        }
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(listed, snapshots);
+    let checkpoints = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
-    assert_eq!(listed.checkpoints.len(), 1);
-    assert_eq!(listed.checkpoints[0].checkpoint_id, snapshot.checkpoint_id);
+    assert_eq!(checkpoints.checkpoints.len(), 6);
+}
+
+/// Checks that a stored record whose owner kind is `snapshot` loads as a
+/// user pin: it lists in both listings, reads by ID, and deletes.
+#[tokio::test]
+async fn a_snapshot_owned_record_lists_reads_and_deletes_as_a_user_pin() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let expires_at_ms = context.now_ms + 60_000;
+    let pin_id = pin_named(
+        &store,
+        &namespace_id,
+        "report-run",
+        Some(expires_at_ms),
+        &context,
+    )
+    .await;
+    let mut stored = serde_json::to_value(
+        load_pin(&store, &namespace_id, &pin_id)
+            .await
+            .expect("load pin")
+            .expect("pin")
+            .state,
+    )
+    .expect("encode pin payload");
+    stored["owner"] = serde_json::json!({
+        "kind": "snapshot",
+        "name": "report-run",
+        "expires_at_ms": expires_at_ms,
+    });
+    let encoded = loonfs_types::format::control::encode_control_state(
+        loonfs_types::format::control::ControlObjectKind::Pin,
+        &stored,
+    )
+    .expect("encode a snapshot-owned record");
+    replace_object(
+        &store,
+        &loonfs_objectstore::keys::pin(&namespace_id, &pin_id),
+        Bytes::from(encoded),
+    )
+    .await
+    .expect("write a snapshot-owned record");
+
+    let snapshots = crate::pin::list_snapshots_page(
+        &store,
+        &namespace_id,
+        PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("list snapshots");
+    assert_eq!(snapshots.items.len(), 1);
+    let snapshot = &snapshots.items[0];
+    assert_eq!(snapshot.snapshot_id, pin_id);
+    assert_eq!(snapshot.name, "report-run");
+    assert_eq!(snapshot.expires_at_ms, Some(expires_at_ms));
     assert_eq!(
-        listed.checkpoints[0].owner,
-        CheckpointOwner::Snapshot {
+        &crate::pin::get_snapshot(&store, &namespace_id, &pin_id)
+            .await
+            .expect("read the snapshot"),
+        snapshot
+    );
+    let checkpoints = list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert_eq!(
+        checkpoints.checkpoints[0].owner,
+        CheckpointOwner::User {
             name: "report-run".to_owned(),
         }
     );
-    assert_eq!(listed.checkpoints[0].expires_at_ms, Some(expires_at_ms));
+    crate::pin::load_unexpired_snapshot(&store, &namespace_id, &pin_id, context.now_ms)
+        .await
+        .expect("an unexpired record is readable");
+
+    crate::pin::delete_snapshot(&store, &namespace_id, &pin_id)
+        .await
+        .expect("delete the snapshot");
+    assert!(load_pin(&store, &namespace_id, &pin_id)
+        .await
+        .expect("load pin")
+        .is_none());
 }
 
 #[tokio::test]
@@ -529,13 +647,13 @@ async fn a_refused_owner_writes_no_record_to_find() {
             name: String::new(),
             expires_at_ms: None,
         },
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: String::new(),
-            expires_at_ms: context.now_ms + 60_000,
+            expires_at_ms: Some(context.now_ms + 60_000),
         },
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "report-run".to_owned(),
-            expires_at_ms: 0,
+            expires_at_ms: Some(0),
         },
     ];
     for owner in refused {
@@ -561,8 +679,11 @@ async fn a_refused_owner_writes_no_record_to_find() {
     assert!(listed.checkpoints.is_empty());
 }
 
+/// Checks that a pin read by ID matches its listed row, that a snapshot
+/// read by ID returns an expired snapshot, and that a read through an
+/// expired snapshot or a fork pin returns `snapshot_not_found`.
 #[tokio::test]
-async fn a_pin_read_by_id_matches_its_listed_row_and_a_snapshot_read_checks_liveness() {
+async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_expiry() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -570,14 +691,14 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_snapshot_read_checks_live
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
-    let checkpoint_id = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let unexpiring = pin_named(&store, &namespace_id, "nightly", None, &context).await;
     let expires_at_ms = context.now_ms + 10;
-    let snapshot = create::create_pin(
+    let expiring = pin_named(&store, &namespace_id, "view", Some(expires_at_ms), &context).await;
+    let fork = create::create_pin(
         &store,
         &namespace_id,
-        PinOwner::Snapshot {
-            name: "view".to_owned(),
-            expires_at_ms,
+        PinOwner::Fork {
+            target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
         },
         &context,
         Default::default(),
@@ -586,41 +707,107 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_snapshot_read_checks_live
         crate::test_support::std_timer(),
     )
     .await
-    .expect("create snapshot")
-    .response;
+    .expect("create fork pin")
+    .response
+    .pin_id;
 
     let listed = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
-    assert_eq!(listed.checkpoints.len(), 2);
+    assert_eq!(listed.checkpoints.len(), 3);
     for row in &listed.checkpoints {
         let read = crate::pin::get_checkpoint(&store, &namespace_id, &row.checkpoint_id)
             .await
             .expect("read checkpoint");
         assert_eq!(&read, row);
     }
-    let live = crate::pin::get_snapshot(&store, &namespace_id, &snapshot.pin_id, context.now_ms)
+    let expired = crate::pin::get_snapshot(&store, &namespace_id, &expiring)
         .await
-        .expect("read live snapshot");
-    assert_eq!(live.snapshot_id, snapshot.pin_id);
-    assert_eq!(live.expires_at_ms, expires_at_ms);
+        .expect("read an expired snapshot by its ID");
+    assert_eq!(expired.expires_at_ms, Some(expires_at_ms));
 
     fn code<T: std::fmt::Debug>(result: crate::error::Result<T>) -> ErrorCode {
         result.expect_err("refused").code()
     }
+    let read_at =
+        |pin_id, now_ms| crate::pin::load_unexpired_snapshot(&store, &namespace_id, pin_id, now_ms);
+    read_at(&expiring, expires_at_ms - 1)
+        .await
+        .expect("an unexpired snapshot is readable");
+    read_at(&unexpiring, u64::MAX)
+        .await
+        .expect("a snapshot without an expiry is readable");
     assert_eq!(
-        code(
-            crate::pin::get_snapshot(&store, &namespace_id, &snapshot.pin_id, expires_at_ms).await
-        ),
-        ErrorCode::SnapshotGone
+        code(read_at(&expiring, expires_at_ms).await),
+        ErrorCode::SnapshotNotFound
     );
     assert_eq!(
-        code(crate::pin::get_snapshot(&store, &namespace_id, &checkpoint_id, context.now_ms).await),
+        code(read_at(&fork, context.now_ms).await),
+        ErrorCode::SnapshotNotFound
+    );
+    assert_eq!(
+        code(crate::pin::get_snapshot(&store, &namespace_id, &fork).await),
         ErrorCode::SnapshotNotFound
     );
     let missing = PinId::parse("pin_00000000000000000009-0000000000000009").expect("pin id");
     assert_eq!(
         code(crate::pin::get_checkpoint(&store, &namespace_id, &missing).await),
-        ErrorCode::CheckpointNotFound
+        ErrorCode::SnapshotNotFound
     );
+}
+
+/// Checks that deleting a missing snapshot succeeds without a write, and
+/// that deleting a fork pin returns `snapshot_not_found` and keeps it.
+#[tokio::test]
+async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let snapshot = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let fork = create::create_pin(
+        &store,
+        &namespace_id,
+        PinOwner::Fork {
+            target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
+        },
+        &context,
+        Default::default(),
+        None,
+        &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("create fork pin")
+    .response
+    .pin_id;
+
+    for attempt in 0..2 {
+        store.reset();
+        let deleted = crate::pin::delete_snapshot(&store, &namespace_id, &snapshot)
+            .await
+            .expect("delete succeeds whether or not the snapshot exists");
+        assert_eq!(deleted.snapshot_id, snapshot);
+        assert_eq!(
+            store.counts().deletes,
+            usize::from(attempt == 0),
+            "attempt {attempt}"
+        );
+    }
+    store.reset();
+    let error = crate::pin::delete_snapshot(&store, &namespace_id, &fork)
+        .await
+        .expect_err("a fork pin isn't a snapshot");
+    assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
+    assert_eq!(store.counts().deletes, 0);
+    assert!(load_pin(&store, &namespace_id, &fork)
+        .await
+        .expect("load")
+        .is_some());
 }

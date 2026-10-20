@@ -181,7 +181,8 @@ Namespace management
     Fork a namespace into a new one. The fork shares the source's existing
     content and metadata objects without copying the filesystem. Forking
     the current head might first fold the source's outstanding WAL tail.
-    Use --snapshot to fork from a live snapshot instead of the current head.
+    Use --snapshot to fork from an unexpired snapshot instead of the current
+    head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
     Delete a namespace and retire its ID. The deletion can't be undone. To
@@ -198,18 +199,24 @@ Namespace management
     Show the selected profile and namespace
 
 Snapshot management
-  loonfs snapshot create <namespace> --name <label> --ttl-ms <ms>
-    Save the namespace's current state for the requested time
+  loonfs snapshot create <namespace> --name <label> [--ttl-ms <ms>]
+    Save the namespace's current state as a new snapshot. Every call
+    creates a new snapshot. The name is a label, not a key. --ttl-ms sets
+    an expiry. Without it, the snapshot lasts until it's deleted. An
+    expired snapshot can't be read or forked
 
   loonfs snapshot list <namespace> [--limit <n>] [--page-size <n>]
                                    [--cursor <cursor>] [--all] [--jsonl]
-    List snapshots that are still available
+    List snapshots in snapshot ID order. Expired snapshots remain listed
+    until garbage collection deletes them
 
   loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
-    Keep a snapshot available for longer
+    Keep an unexpired snapshot available for longer. The expiry never
+    moves earlier
 
   loonfs snapshot delete <namespace> <snapshot-id>
-    Delete the snapshot record. A second call returns snapshot_not_found.
+    Delete the snapshot record. Deleting a missing snapshot succeeds, so
+    the command can be repeated
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance
@@ -408,18 +415,12 @@ Maintenance
     deleted.temporary_objects counts store temporary objects older than the
     window.
 
-  loonfs maintenance checkpoint create --name <label> [--ttl-ms <ms>]
-    Pin the namespace's current state in a new checkpoint. Every call
-    creates a new checkpoint. The name is a label, not a key. --ttl-ms
-    sets an expiry. Without it, the checkpoint lasts until it's deleted.
-
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
-    List existing checkpoint pins in checkpoint ID order. Expired pins
-    remain listed until garbage collection deletes them.
-
-  loonfs maintenance checkpoint delete <checkpoint-id>
-    Delete the checkpoint record. A second call returns checkpoint_not_found.
+    List every pin in checkpoint ID order: snapshots and the pins that
+    forks keep on their source. This is the inventory of what keeps old
+    manifests from garbage collection. Expired snapshots remain listed
+    until garbage collection deletes them.
 
   loonfs maintenance index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
     Enable the gram content index and wait for its backfill to reach the

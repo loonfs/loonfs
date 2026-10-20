@@ -1,6 +1,6 @@
-//! Lists files from the manifest pinned by a checkpoint.
+//! Lists files from the manifest pinned by a snapshot.
 
-use super::read_basis::{load_user_pin_basis, PinBasis};
+use super::read_basis::{load_pin_basis, PinBasis};
 use crate::error::{CoreError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
@@ -21,13 +21,13 @@ pub struct CheckpointFilesPageCursor {
     pub after_inode_id: InodeId,
 }
 
-/// One file in the checkpointed state, with the content the checkpoint
+/// One file in the state a snapshot pins, with the content the snapshot
 /// pinned for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFile {
     /// The file's inode id.
     pub inode_id: InodeId,
-    /// The file revision at the checkpointed sequence.
+    /// The file revision at the snapshot's captured sequence.
     pub revision_no: RevisionNo,
     /// The revision's content reference.
     pub content_ref: ContentRef,
@@ -35,7 +35,7 @@ pub struct CheckpointFile {
     pub size_bytes: u64,
 }
 
-/// Options for listing the files a checkpoint pins.
+/// Options for listing the files a snapshot pins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ListCheckpointFilesOptions {
     /// Whether to include deleted files and files under a deleted directory,
@@ -43,10 +43,10 @@ pub struct ListCheckpointFilesOptions {
     pub include_deleted: bool,
 }
 
-/// One page of the files a checkpoint pins.
+/// One page of the files a snapshot pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFilesPage {
-    /// The sequence captured by the checkpoint.
+    /// The sequence captured by the snapshot.
     pub captured_seq: ChangeSeq,
     /// Files in ascending inode-id order.
     pub files: Vec<CheckpointFile>,
@@ -76,12 +76,13 @@ impl PagedResponse for CheckpointFilesPage {
     }
 }
 
-/// Lists files visible in the state pinned by `checkpoint_id`, or every file
-/// it retains with `include_deleted`.
+/// Lists files visible in the state pinned by the snapshot `checkpoint_id`,
+/// or every file it retains with `include_deleted`.
 ///
-/// Later WAL entries are not replayed. Directories are omitted. An id that
-/// names no user pin returns `checkpoint_not_found`, and a pin whose manifest
-/// is gone returns `checkpoint_unavailable`.
+/// Later WAL entries are not replayed. Directories are omitted. An ID that
+/// doesn't identify a snapshot, or a snapshot that expired at or before
+/// `now_ms`, returns `snapshot_not_found`, and a snapshot whose manifest is
+/// gone returns `checkpoint_unavailable`.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -89,10 +90,13 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     checkpoint_id: &PinId,
     request: PageRequest<CheckpointFilesPageCursor>,
     options: ListCheckpointFilesOptions,
+    now_ms: u64,
 ) -> Result<CheckpointFilesPage> {
     let namespace_id = &head.namespace_id;
-    let PinBasis { manifest, segments } =
-        load_user_pin_basis(store, segment_cache, namespace_id, checkpoint_id).await?;
+    let record = super::load_unexpired_snapshot(store, namespace_id, checkpoint_id, now_ms)
+        .await?
+        .state;
+    let PinBasis { manifest, segments } = load_pin_basis(store, segment_cache, record).await?;
 
     let captured_seq = manifest.head_seq;
     let view = MetadataView::over_manifest_segments(&segments, captured_seq);

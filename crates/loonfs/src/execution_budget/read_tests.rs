@@ -5,8 +5,8 @@ use crate::metrics::{
     CounterHandle, DefaultMetricsRecorder, GaugeHandle, HistogramHandle, MetricsRecorder,
 };
 use crate::{
-    InlineContentPolicy, ListOptions, LoonFs, Namespace, PageRequest, ReadFileStreamOptions,
-    SnapshotPolicy, StatOptions, Writable,
+    CreateSnapshotOptions, InlineContentPolicy, ListOptions, LoonFs, Namespace, PageRequest,
+    ReadFileStreamOptions, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -269,16 +269,6 @@ async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot()
     finish(
         fixture
             .namespace
-            .create_directory("/checkpoint", &test_actor()),
-    )
-    .await
-    .expect("commit before pin");
-    finish(maintenance.create_checkpoint(fixture.namespace.id(), "pin"))
-        .await
-        .expect("pin fold");
-    finish(
-        fixture
-            .namespace
             .create_directory("/snapshot", &test_actor()),
     )
     .await
@@ -286,7 +276,7 @@ async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot()
     finish(
         fixture
             .namespace
-            .create_snapshot("snapshot", u64::MAX, &SnapshotPolicy::default()),
+            .create_snapshot("snapshot", &CreateSnapshotOptions::default()),
     )
     .await
     .expect("snapshot fold");
@@ -402,7 +392,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
     let fixture = Fixture::new(KeyPredicate::any()).await;
     let snapshot = fixture
         .namespace
-        .create_snapshot("snapshot", u64::MAX, &SnapshotPolicy::default())
+        .create_snapshot("snapshot", &CreateSnapshotOptions::default())
         .await
         .expect("snapshot");
     let stat = StatOptions {

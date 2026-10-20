@@ -3,7 +3,7 @@
 use crate::{
     AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, JobMode, Namespaces,
 };
-use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
+use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
@@ -44,11 +44,6 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
         binding: BindingConfig {
             serves_maintenance: true,
-            snapshot_policy: SnapshotPolicy {
-                max_ttl_ms: 86_400_000,
-                max_age_ms: 604_800_000,
-                max_live_per_namespace: 16,
-            },
             max_upload_bytes: Some(256 * 1024 * 1024),
             max_download_bytes: Some(256 * 1024 * 1024),
             max_concurrent_uploads: 8,
@@ -112,7 +107,7 @@ pub(super) async fn test_app(
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
+            runtime.clone(),
             loonfs_grep::GrepStepBudget::default(),
         )
     };

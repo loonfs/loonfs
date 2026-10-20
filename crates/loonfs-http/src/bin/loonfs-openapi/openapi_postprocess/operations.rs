@@ -23,14 +23,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "create_checkpoint",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "create",
-            request: None,
-        },
-    ),
-    (
         "create_commit",
         SdkName {
             group: &["commits"],
@@ -84,14 +76,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["uploads"],
             method: "create",
             request: Some("CreateUploadRequest"),
-        },
-    ),
-    (
-        "delete_checkpoint",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "delete",
-            request: Some("DeleteCheckpointRequest"),
         },
     ),
     (

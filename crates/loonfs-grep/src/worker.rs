@@ -24,7 +24,7 @@ use loonfs::engine::{
     SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs::{
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
+    CheckpointFilesPageCursor, CoreError, CreateSnapshotOptions, LoonFs, ReadOnly, Writable,
 };
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -34,18 +34,18 @@ use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_types::{
-    ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
-    RevisionNo, RunNo,
+    ChangeSeq, ContentRef, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RevisionNo,
+    RunNo,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-/// Lifetime of the checkpoint used by one grep backfill attempt.
+/// Lifetime of the snapshot used by one grep backfill attempt.
 ///
-/// If the checkpoint expires before backfill finishes, garbage collection
-/// eventually deletes it and the worker restarts from a fresh checkpoint.
-/// The worker does not extend an old pin.
+/// If the snapshot expires before backfill finishes, reads through it
+/// return `snapshot_not_found` and the worker restarts from a fresh
+/// snapshot. The worker does not extend an old pin.
 pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
@@ -158,8 +158,8 @@ pub enum GrepReorganizeOutcome {
 /// Bounded writer for grep-owned durable state.
 ///
 /// The worker writes only grep keys. It reads namespace state through a
-/// read-only `LoonFs` and creates or deletes backfill checkpoints through
-/// `Maintenance`, preserving the writer id maintenance acts as. Scheduling is
+/// read-only `LoonFs` and creates or deletes backfill snapshots through a
+/// writable `LoonFs`, whose writer id the snapshot folds record. Scheduling is
 /// external to this type. A build or reorganize step that finds work waits
 /// for a permit of the worker's [`GrepStepBudget`] before it reads file
 /// content or index segments.
@@ -167,14 +167,13 @@ pub enum GrepReorganizeOutcome {
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
-    pub(crate) maintenance: Maintenance,
+    writer: LoonFs<Writable>,
     step_budget: GrepStepBudget,
     timer: Arc<dyn MonotonicTimer>,
 }
 
-/// The runtime and its maintenance carry no debug representation — they are
-/// clones of a shared runtime, not state — so a worker prints what identifies
-/// its work.
+/// The runtime handles have no debug representation (they are clones of a
+/// shared runtime, not state), so a worker prints what identifies its work.
 impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -186,20 +185,20 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and checkpoints through. Its steps share
+    /// handles it reads and creates snapshots through. Its steps share
     /// `step_budget` with every other worker given a clone of it, and its
     /// deadlines run on `reader`'s monotonic timer.
     pub fn new(
         store: S,
         reader: LoonFs<ReadOnly>,
-        maintenance: Maintenance,
+        writer: LoonFs<Writable>,
         step_budget: GrepStepBudget,
     ) -> Self {
         let timer = reader.monotonic_timer();
         Self {
             store,
             reader,
-            maintenance,
+            writer,
             step_budget,
             timer,
         }
@@ -251,7 +250,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             namespace_id,
             manifest_no,
             checkpoint.captured_seq,
-            checkpoint.checkpoint_id.clone(),
+            checkpoint.snapshot_id.clone(),
             next_run_no,
         );
         let published =
@@ -261,7 +260,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: published.manifest_state().status().clone(),
             }),
             Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.snapshot_id)
                     .await;
                 Ok(GrepEnableOutcome::Superseded)
             }
@@ -435,29 +434,29 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn create_backfill_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<loonfs_types::Checkpoint> {
+    ) -> Result<loonfs_types::Snapshot> {
         Ok(self
-            .maintenance
-            .create_checkpoint_with_options(
-                namespace_id,
+            .writer
+            .open_namespace(namespace_id)?
+            .create_snapshot(
                 GREP_BACKFILL_CHECKPOINT_NAME,
-                &CreateCheckpointOptions {
+                &CreateSnapshotOptions {
                     ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
                 },
             )
             .await?)
     }
 
-    /// Deletes a backfill pin. A failed delete is only logged, and
-    /// collection removes the pin after it expires.
+    /// Deletes a backfill pin. Deleting a missing pin succeeds. A failed
+    /// delete is only logged, and collection removes the pin after it
+    /// expires.
     async fn delete_pin_if_present(&self, namespace_id: &NamespaceId, pin_id: &PinId) {
-        match self
-            .maintenance
-            .delete_checkpoint(namespace_id, pin_id)
-            .await
-        {
-            Ok(_) => {}
-            Err(error) if error.code() == ErrorCode::CheckpointNotFound => {}
+        let deleted = match self.writer.open_namespace(namespace_id) {
+            Ok(namespace) => namespace.delete_snapshot(pin_id).await.map(drop),
+            Err(error) => Err(error),
+        };
+        match deleted {
+            Ok(()) => {}
             Err(error) => tracing::warn!(
                 %namespace_id,
                 %pin_id,
@@ -483,7 +482,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             namespace_id,
             manifest_no,
             checkpoint.captured_seq,
-            checkpoint.checkpoint_id.clone(),
+            checkpoint.snapshot_id.clone(),
             current.manifest_state().index().next_run_no,
         );
         match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
@@ -497,7 +496,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 })
             }
             Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.snapshot_id)
                     .await;
                 Ok(GrepBuildOutcome::Superseded)
             }
@@ -633,16 +632,16 @@ fn backfilling_manifest(
     .expect("a backfilling grep manifest state should be valid")
 }
 
-/// The answers that mean "the state this projection was built from is
+/// The errors that mean "the state this projection was built from is
 /// gone": the change feed's cursor fell below the retention floor, the
-/// checkpoint enumeration's pin is gone, or it no longer pins its manifest.
-/// Every other failure is a failure.
+/// backfill snapshot was deleted or expired, or it no longer pins its
+/// manifest. Every other failure is a failure.
 fn rebootstrap_required(error: &GrepError) -> bool {
     matches!(
         error,
         GrepError::Runtime(loonfs::Error::Core(
             CoreError::RebootstrapRequired { .. }
-                | CoreError::CheckpointNotFound { .. }
+                | CoreError::SnapshotNotFound { .. }
                 | CoreError::CheckpointUnavailable(_)
         ))
     )

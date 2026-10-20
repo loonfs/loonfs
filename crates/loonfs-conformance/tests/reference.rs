@@ -1912,6 +1912,7 @@ struct SnapshotsRequest {
     directory: String,
     actor_id: ActorId,
     snapshot_name: String,
+    unexpiring_snapshot_name: String,
     replaced_file_name: String,
     deleted_file_name: String,
     added_file_name: String,
@@ -1998,7 +1999,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
             .bearer_auth(AUTH_TOKEN)
             .json(&CreateSnapshotRequest {
                 name: request.snapshot_name.clone(),
-                ttl_ms: request.create_ttl_ms,
+                ttl_ms: Some(request.create_ttl_ms),
             }),
         "create snapshot",
     )
@@ -2006,7 +2007,9 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     assert_eq!(snapshot.namespace_id, namespace);
     assert_eq!(snapshot.name, request.snapshot_name);
     assert_eq!(snapshot.captured_seq.0, expected.snapshot_head_seq);
-    assert!(snapshot.expires_at_ms > snapshot.created_at_ms);
+    assert!(snapshot
+        .expires_at_ms
+        .is_some_and(|expires_at_ms| expires_at_ms > snapshot.created_at_ms));
 
     let mut replace_options = put_options("conf-snapshots-replace-file");
     replace_options.behavior = DestinationBehavior::Replace;
@@ -2218,14 +2221,15 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     .await;
     assert_eq!(deleted.namespace_id, namespace);
     assert_eq!(deleted.snapshot_id, snapshot.snapshot_id);
-    let deleted_again = harness
-        .raw_client
-        .delete(&delete_url)
-        .bearer_auth(AUTH_TOKEN)
-        .send()
-        .await
-        .expect("send second snapshot delete");
-    assert_raw_status_error(deleted_again, &expected.snapshot_not_found).await;
+    let deleted_again: DeleteSnapshotResponse = raw_success_json(
+        harness
+            .raw_client
+            .delete(&delete_url)
+            .bearer_auth(AUTH_TOKEN),
+        "delete snapshot again",
+    )
+    .await;
+    assert_eq!(deleted_again, deleted);
 
     let deleted_read = harness
         .raw_client
@@ -2282,12 +2286,49 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .bearer_auth(AUTH_TOKEN)
         .json(&CreateSnapshotRequest {
             name: request.snapshot_name,
-            ttl_ms: 0,
+            ttl_ms: Some(0),
         })
         .send()
         .await
         .expect("send zero-ttl snapshot create");
     assert_raw_status_error(zero_ttl, &expected.zero_ttl).await;
+
+    let unexpiring: Snapshot = raw_success_json(
+        harness
+            .raw_client
+            .post(&snapshots_url)
+            .bearer_auth(AUTH_TOKEN)
+            .json(&CreateSnapshotRequest {
+                name: request.unexpiring_snapshot_name.clone(),
+                ttl_ms: None,
+            }),
+        "create snapshot without a ttl",
+    )
+    .await;
+    assert_eq!(unexpiring.name, request.unexpiring_snapshot_name);
+    assert_eq!(unexpiring.expires_at_ms, None);
+    let unexpiring_id = unexpiring.snapshot_id.as_str();
+    let unexpiring_extended: Snapshot = raw_success_json(
+        harness
+            .raw_client
+            .post(format!("{snapshots_url}/{unexpiring_id}/extend"))
+            .bearer_auth(AUTH_TOKEN)
+            .json(&ExtendSnapshotRequest {
+                ttl_ms: request.extend_ttl_ms,
+            }),
+        "extend snapshot without an expiry",
+    )
+    .await;
+    assert_eq!(unexpiring_extended, unexpiring);
+    let unexpiring_deleted: DeleteSnapshotResponse = raw_success_json(
+        harness
+            .raw_client
+            .delete(format!("{snapshots_url}/{unexpiring_id}"))
+            .bearer_auth(AUTH_TOKEN),
+        "delete snapshot without an expiry",
+    )
+    .await;
+    assert_eq!(unexpiring_deleted.snapshot_id, unexpiring.snapshot_id);
 }
 
 fn listed_entry_names(entries: &[PathEntry]) -> Vec<String> {

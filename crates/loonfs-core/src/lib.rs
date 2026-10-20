@@ -163,9 +163,7 @@ pub mod control {
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
-    pub use crate::pin::{
-        load_checkpoint_read_basis, load_snapshot_read_basis, CheckpointReadBasis,
-    };
+    pub use crate::pin::{load_snapshot_read_basis, SnapshotReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }
 

@@ -1,5 +1,5 @@
-//! Checkpoint, snapshot, and fork creation fold the WAL tail under the
-//! fold permits of the runtime's execution budget.
+//! Snapshot and fork creation fold the WAL tail under the fold permits of
+//! the runtime's execution budget.
 
 use super::*;
 
@@ -48,29 +48,20 @@ async fn writer_over(
     writer
 }
 
-/// Starts a checkpoint, a snapshot, and a fork of the current head of
-/// `namespace_id`, each on its own task, in that order.
+/// Starts a snapshot and a fork of the current head of `namespace_id`, each
+/// on its own task, in that order.
 fn start_creations(
     writer: &crate::LoonFs<crate::Writable>,
     namespace_id: &NamespaceId,
 ) -> Vec<JoinHandle<crate::Result<()>>> {
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("pin-maintenance"));
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-    let expires_at_ms = writer.now_ms() + 60_000;
     let fork_writer = writer.clone();
     let source = namespace_id.clone();
     let target = NamespaceId::parse(format!("{namespace_id}-fork")).expect("fork namespace id");
-    let checkpoint_namespace = namespace_id.clone();
     vec![
         tokio::spawn(async move {
-            maintenance
-                .create_checkpoint(&checkpoint_namespace, "checkpoint")
-                .await
-                .map(|_| ())
-        }),
-        tokio::spawn(async move {
             namespace
-                .create_snapshot("snapshot", expires_at_ms, &crate::SnapshotPolicy::default())
+                .create_snapshot("snapshot", &crate::CreateSnapshotOptions::default())
                 .await
                 .map(|_| ())
         }),
@@ -111,8 +102,9 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
         .expect("open namespace")
         .create_snapshot(
             "fork-basis",
-            writer.now_ms() + 60_000,
-            &crate::SnapshotPolicy::default(),
+            &crate::CreateSnapshotOptions {
+                ttl_ms: Some(60_000),
+            },
         )
         .await
         .expect("create the snapshot a fork starts from");
@@ -197,12 +189,12 @@ async fn dropped_creations_return_their_fold_permits() {
     let writer = writer_over(store.clone(), one_fold_at_a_time(), &[&namespace_id]).await;
     seed_unfolded_tail(store.as_ref(), &namespace_id).await;
 
-    // The checkpoint takes the permit and parks at its manifest put; the
-    // snapshot and the fork wait for that permit.
+    // The snapshot takes the permit and parks at its manifest put, and the
+    // fork waits for that permit.
     store.block_next();
     let creations = start_creations(&writer, &namespace_id);
     store.wait_until_blocked().await;
-    wait_for_fold_waiters(&writer, 2).await;
+    wait_for_fold_waiters(&writer, 1).await;
     assert_eq!(writer.execution_budget().stats().folds_running, 1);
 
     for creation in &creations {

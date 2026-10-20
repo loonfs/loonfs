@@ -87,7 +87,7 @@ async fn compact_receipt_past_horizon(
             .expect("filler put");
         last_seq = filler.committed_seq;
         runtime
-            .create_checkpoint(namespace_id)
+            .create_snapshot(namespace_id)
             .await
             .expect("create checkpoint");
     }
@@ -732,7 +732,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     // conflict still names where the commit landed — but the change feed no
     // longer answers for that sequence.
     runtime
-        .create_checkpoint(&namespace_id)
+        .create_snapshot(&namespace_id)
         .await
         .expect("create checkpoint");
     let advanced = runtime

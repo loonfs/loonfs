@@ -20,4 +20,4 @@ Key each change by `(namespace_id, committed_seq)`. Identify files and directori
 
 For a `deleted` event, the enclosing change's `committed_seq` is the `deletion_seq` that trash and undelete use with the event's `inode_id`. The event doesn't repeat that sequence number in its payload.
 
-If LoonFS returns `rebootstrap_required`, you can rebuild the current filesystem state from a checkpoint, but you can't recover activity history that was already discarded.
+If LoonFS returns `rebootstrap_required`, you can rebuild the current filesystem state from a snapshot, but you can't recover activity history that was already discarded.

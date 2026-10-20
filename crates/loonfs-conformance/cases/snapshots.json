@@ -1,11 +1,12 @@
 {
   "name": "snapshots",
-  "intent": "Checks snapshot creation, extension, deletion, captured reads, bounded change feeds, and not-found errors after deletion.",
+  "intent": "Checks snapshot creation with and without a TTL, extension, idempotent deletion, captured reads, bounded change feeds, and not-found errors after deletion.",
   "request": {
     "namespace_id": "conf-snapshots",
     "directory": "/tree",
     "actor_id": "conformance-snapshots",
     "snapshot_name": "captured-tree",
+    "unexpiring_snapshot_name": "kept-tree",
     "replaced_file_name": "kept.txt",
     "deleted_file_name": "removed.txt",
     "added_file_name": "added.txt",

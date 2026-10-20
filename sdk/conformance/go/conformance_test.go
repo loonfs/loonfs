@@ -1988,6 +1988,7 @@ type snapshotsRequest struct {
 	Directory           string         `json:"directory"`
 	ActorID             loonfs.ActorID `json:"actor_id"`
 	SnapshotName        string         `json:"snapshot_name"`
+	UnexpiringName      string         `json:"unexpiring_snapshot_name"`
 	ReplacedFileName    string         `json:"replaced_file_name"`
 	DeletedFileName     string         `json:"deleted_file_name"`
 	AddedFileName       string         `json:"added_file_name"`
@@ -2047,7 +2048,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	snapshot, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		Name:        request.SnapshotName,
-		TTLMs:       request.CreateTTLMs,
+		TTLMs:       &request.CreateTTLMs,
 	})
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
@@ -2061,8 +2062,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if int64(snapshot.CapturedSeq) != expected.SnapshotHeadSeq {
 		t.Errorf("snapshot captured_seq = %d, want %d", snapshot.CapturedSeq, expected.SnapshotHeadSeq)
 	}
-	if snapshot.ExpiresAtMs <= snapshot.CreatedAtMs {
-		t.Errorf("snapshot expires_at_ms = %d, want greater than created_at_ms %d", snapshot.ExpiresAtMs, snapshot.CreatedAtMs)
+	if snapshot.ExpiresAtMs == nil || *snapshot.ExpiresAtMs <= snapshot.CreatedAtMs {
+		t.Errorf("snapshot expires_at_ms = %v, want greater than created_at_ms %d", snapshot.ExpiresAtMs, snapshot.CreatedAtMs)
 	}
 
 	replace := loonfs.DestinationBehaviorReplace
@@ -2189,8 +2190,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if extended.SnapshotID != snapshotID || int64(extended.CapturedSeq) != expected.SnapshotHeadSeq || extended.Name != request.SnapshotName {
 		t.Errorf("extended snapshot = %#v, want the created snapshot", extended)
 	}
-	if extended.ExpiresAtMs <= snapshot.ExpiresAtMs {
-		t.Errorf("extended expires_at_ms = %d, want greater than %d", extended.ExpiresAtMs, snapshot.ExpiresAtMs)
+	if extended.ExpiresAtMs == nil || *extended.ExpiresAtMs <= *snapshot.ExpiresAtMs {
+		t.Errorf("extended expires_at_ms = %v, want greater than %d", extended.ExpiresAtMs, *snapshot.ExpiresAtMs)
 	}
 
 	retrieved, err := h.client.Snapshots.Retrieve(ctx, &loonfs.GetSnapshotRequest{
@@ -2200,7 +2201,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("retrieve snapshot: %v", err)
 	}
-	if retrieved.SnapshotID != snapshotID || retrieved.ExpiresAtMs != extended.ExpiresAtMs {
+	if retrieved.SnapshotID != snapshotID || retrieved.ExpiresAtMs == nil || *retrieved.ExpiresAtMs != *extended.ExpiresAtMs {
 		t.Errorf("retrieved snapshot = %#v, want the extended snapshot %#v", retrieved, extended)
 	}
 	checkpoint, err := h.client.Maintenance.Checkpoints.Retrieve(ctx, &maintenance.GetCheckpointRequest{
@@ -2211,7 +2212,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("retrieve the snapshot's checkpoint: %v", err)
 	}
 	if checkpoint.CheckpointID != snapshotID || int64(checkpoint.CapturedSeq) != expected.SnapshotHeadSeq ||
-		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != extended.ExpiresAtMs {
+		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != *extended.ExpiresAtMs {
 		t.Errorf("retrieved checkpoint = %#v, want the snapshot's pin", checkpoint)
 	}
 
@@ -2242,8 +2243,13 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if string(deleted.NamespaceID) != request.NamespaceID || deleted.SnapshotID != snapshotID {
 		t.Errorf("delete snapshot response = %#v", deleted)
 	}
-	_, err = h.client.Snapshots.Delete(ctx, deleteRequest)
-	assertNotFoundError(t, err, expected.SnapshotNotFound)
+	deletedAgain, err := h.client.Snapshots.Delete(ctx, deleteRequest)
+	if err != nil {
+		t.Fatalf("delete snapshot again: %v", err)
+	}
+	if deletedAgain.SnapshotID != deleted.SnapshotID || deletedAgain.NamespaceID != deleted.NamespaceID {
+		t.Errorf("repeated delete response = %#v, want %#v", deletedAgain, deleted)
+	}
 
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
@@ -2280,12 +2286,41 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		SnapshotID:  &snapshotID,
 	})
 	assertBadRequestError(t, err, expected.RevisionWithSnapshot)
+	zeroTTL := int64(0)
 	_, err = h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		Name:        request.SnapshotName,
-		TTLMs:       0,
+		TTLMs:       &zeroTTL,
 	})
 	assertBadRequestError(t, err, expected.ZeroTtl)
+
+	unexpiring, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		Name:        request.UnexpiringName,
+	})
+	if err != nil {
+		t.Fatalf("create snapshot without a ttl: %v", err)
+	}
+	if unexpiring.Name != request.UnexpiringName || unexpiring.ExpiresAtMs != nil {
+		t.Errorf("snapshot without a ttl = %#v, want no expiry", unexpiring)
+	}
+	unexpiringExtended, err := h.client.Snapshots.Extend(ctx, &loonfs.ExtendSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  unexpiring.SnapshotID,
+		TTLMs:       request.ExtendTTLMs,
+	})
+	if err != nil {
+		t.Fatalf("extend snapshot without an expiry: %v", err)
+	}
+	if unexpiringExtended.SnapshotID != unexpiring.SnapshotID || unexpiringExtended.ExpiresAtMs != nil {
+		t.Errorf("extended snapshot without an expiry = %#v, want it unchanged", unexpiringExtended)
+	}
+	if _, err := h.client.Snapshots.Delete(ctx, &loonfs.DeleteSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  unexpiring.SnapshotID,
+	}); err != nil {
+		t.Fatalf("delete snapshot without an expiry: %v", err)
+	}
 }
 
 func readSDKFileBytes(

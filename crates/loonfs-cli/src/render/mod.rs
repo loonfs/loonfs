@@ -715,9 +715,6 @@ mod tests {
             "{empty}"
         );
         assert!(!empty.contains("namespace is retired"), "{empty}");
-        assert!(
-            empty.contains("0 fork checkpoints, 0 user checkpoints, 0 snapshot checkpoints"),
-            "{empty}"
-        );
+        assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
     }
 }

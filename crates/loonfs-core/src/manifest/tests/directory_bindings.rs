@@ -153,6 +153,8 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
             limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
         },
         crate::pin::ListCheckpointFilesOptions::default(),
+        // The pin has no expiry, so the read clock doesn't matter.
+        0,
     )
     .await
     .expect("checkpoint files page");

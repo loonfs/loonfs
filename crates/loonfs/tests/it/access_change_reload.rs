@@ -4,9 +4,9 @@
 use crate::common::wait_for_operation;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, LoonFs, Maintenance,
-    MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadOnly, SharedObjectStore,
-    SnapshotPolicy, StatOptions, Writable,
+    AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, CreateSnapshotOptions,
+    LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::keys::{
@@ -73,6 +73,8 @@ struct Fixture {
     namespace_id: NamespaceId,
     actor: ActorId,
     admin: Namespace<Writable>,
+    /// The writer session with no subject, which acts as the token holder.
+    service: Namespace<Writable>,
     user: Namespace<ReadOnly>,
     maintenance: Maintenance,
 }
@@ -125,6 +127,9 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
             .open_namespace(&namespace_id)
             .expect("open namespace")
             .with_subject(subject("prn_admin")),
+        service: writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace"),
         user: writer
             .read_only()
             .with_subject(subject("prn_user"))
@@ -420,57 +425,47 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     }
 }
 
-/// The maintenance calls that a test runs on the writer's runtime, in an
-/// order where each delete finds the pin an earlier call created.
-const MAINTENANCE_CALLS: [&str; 7] = [
+/// The maintenance and snapshot calls that a test runs on the writer's
+/// runtime, in an order where the delete finds the snapshot an earlier call
+/// created.
+const MAINTENANCE_CALLS: [&str; 5] = [
     "fold_wal",
-    "create_checkpoint",
-    "delete_checkpoint",
-    "advance_retention_floor",
-    "gc",
     "create_snapshot",
     "delete_snapshot",
+    "advance_retention_floor",
+    "gc",
 ];
 
 /// Checks that a write after a maintenance call on the same runtime replays
 /// no WAL tail and reloads nothing, and that the read after the write reloads
 /// nothing either.
 ///
-/// Each call follows a commit, so the folds, checkpoints, and snapshots have
-/// a WAL tail to fold.
+/// Each call follows a commit, so the folds and snapshots have a WAL tail to
+/// fold.
 #[tokio::test]
 async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
     let fixture = fixture("own-maintenance", false).await;
     let (maintenance, namespace_id) = (&fixture.maintenance, &fixture.namespace_id);
-    let (mut checkpoint, mut snapshot) = (None, None);
+    let mut snapshot = None;
     for (round, call) in MAINTENANCE_CALLS.into_iter().enumerate() {
         fixture.commit("put_file", 2 * round).await;
         match call {
             "fold_wal" => drop(maintenance.fold_wal(namespace_id).await.expect(call)),
-            "create_checkpoint" => {
-                let created = maintenance.create_checkpoint(namespace_id, "keep").await;
-                checkpoint = Some(created.expect(call).checkpoint_id);
+            "create_snapshot" => {
+                let options = CreateSnapshotOptions::default();
+                let created = fixture.admin.create_snapshot("keep", &options);
+                snapshot = Some(created.await.expect(call).snapshot_id);
             }
-            "delete_checkpoint" => {
-                let checkpoint_id = checkpoint.take().expect("a checkpoint to delete");
-                let deleted = maintenance.delete_checkpoint(namespace_id, &checkpoint_id);
+            "delete_snapshot" => {
+                let snapshot_id = snapshot.take().expect("a snapshot to delete");
+                let deleted = fixture.admin.delete_snapshot(&snapshot_id);
                 drop(deleted.await.expect(call));
             }
             "advance_retention_floor" => {
                 let advanced = maintenance.advance_retention_floor(namespace_id).await;
                 assert!(advanced.expect(call).retention_floor_seq.0 > 0, "{call}");
             }
-            "gc" => drop(maintenance.gc(namespace_id).await.expect(call)),
-            "create_snapshot" => {
-                let policy = SnapshotPolicy::default();
-                let created = fixture.admin.create_snapshot("keep", u64::MAX / 2, &policy);
-                snapshot = Some(created.await.expect(call).snapshot_id);
-            }
-            _ => {
-                let snapshot_id = snapshot.take().expect("a snapshot to delete");
-                let deleted = fixture.admin.delete_snapshot(&snapshot_id);
-                drop(deleted.await.expect(call));
-            }
+            _ => drop(maintenance.gc(namespace_id).await.expect(call)),
         }
         fixture
             .assert_write_reloads_nothing(2 * round + 1, call)
@@ -485,29 +480,27 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
     }
 }
 
-/// Checks that a checkpoint that folds the WAL tail while a publish is in
-/// flight moves the position onto the checkpoint's manifest once the publish
-/// releases the engine, so reads start from the checkpoint's manifest.
+/// Checks that a snapshot that folds the WAL tail while a publish is in
+/// flight moves the position onto the snapshot's manifest once the publish
+/// releases the engine, so reads start from the snapshot's manifest.
 ///
-/// The publish's WAL put waits until the checkpoint has folded the commits
-/// before it and raised the hint, so the checkpoint's manifest misses the
+/// The publish's WAL put waits until the snapshot has folded the commits
+/// before it and raised the hint, so the snapshot's manifest misses the
 /// publish's own commit. The next read finds no newer manifest, and the next
 /// write replays no WAL tail.
 #[tokio::test]
-async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest() {
-    let fixture = fixture("checkpoint-during-publish", false).await;
+async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
+    let fixture = fixture("snapshot-during-publish", false).await;
     fixture.commit("put_file", 0).await;
     let gate = fixture.recording.inner();
+    let options = CreateSnapshotOptions::default();
     gate.block_next();
-    let (_, checkpoint) = futures::join!(fixture.commit("put_file", 1), async {
+    let (_, snapshot) = futures::join!(fixture.commit("put_file", 1), async {
         gate.wait_until_blocked().await;
         fixture.recording.reset();
-        let (checkpoint, ()) = futures::join!(
-            fixture
-                .maintenance
-                .create_checkpoint(&fixture.namespace_id, "during"),
-            async {
-                // The checkpoint's last request raises the hint, and then
+        let (snapshot, ()) =
+            futures::join!(fixture.service.create_snapshot("during", &options), async {
+                // The snapshot's last request raises the hint, and then
                 // its move of the position waits for the publish's engine.
                 wait_for_operation(&fixture.recording, |operation| {
                     operation.key() == hint(&fixture.namespace_id)
@@ -515,24 +508,24 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
                 })
                 .await;
                 gate.release();
-            }
-        );
-        checkpoint
+            });
+        snapshot
     });
-    let checkpoint = checkpoint.expect("checkpoint");
+    let snapshot = snapshot.expect("snapshot");
     fixture.recording.reset();
     fixture
         .user
         .stat_with_options("/m/doc", &strong())
         .await
         .expect("read");
-    // A position left on the replaced manifest would find the checkpoint's
-    // manifest as its successor and reload. A position on the checkpoint's
+    // A position left on the replaced manifest would find the snapshot's
+    // manifest as its successor and reload. A position on the snapshot's
     // manifest checks the manifest after it, and reads no other manifest or
     // hint.
     let operations = fixture.recording.take();
     let manifest = |manifest_no| metadata_manifest_object(&fixture.namespace_id, &manifest_no);
-    let successor = manifest(checkpoint.manifest_no.successor().expect("next manifest"));
+    let snapshot_manifest_no = snapshot.snapshot_id.manifest_no();
+    let successor = manifest(snapshot_manifest_no.successor().expect("next manifest"));
     let checks_successor = |operation: &RecordedOperation| matches!(operation, RecordedOperation::Head { key } if *key == successor);
     let unexpected = operations
         .iter()
@@ -541,15 +534,15 @@ async fn a_publish_in_flight_while_a_checkpoint_publishes_ends_on_its_manifest()
             (key == hint(&fixture.namespace_id)
                 || key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id)))
                 && !checks_successor(operation)
-                && key != manifest(checkpoint.manifest_no)
+                && key != manifest(snapshot_manifest_no)
         })
         .count();
     assert!(
         unexpected == 0 && operations.iter().any(checks_successor),
-        "the read starts from the checkpoint's manifest: {operations:?}"
+        "the read starts from the snapshot's manifest: {operations:?}"
     );
     fixture
-        .assert_write_reloads_nothing(2, "a publish during a checkpoint")
+        .assert_write_reloads_nothing(2, "a publish during a snapshot")
         .await;
     for path in ["/put-0", "/put-1", "/put-2"] {
         fixture.admin.stat(path).await.expect(path);

@@ -229,7 +229,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `resolve` | Turn a reference into the referenced object |
   | `effective_*` | Merge defaults |
 
-- **Order the parts of a handle method's name** as the verb, the object, the form (`_stream` or `_prepared`), the address (`_by_inode`), the time (`_at_snapshot` or `_at_checkpoint`), and `_with_options`, and leave out any part that doesn't apply, as in `read_file_stream_by_inode_with_options`. A method doesn't repeat its receiver's noun, and an accessor doesn't start with `get_`.
+- **Order the parts of a handle method's name** as the verb, the object, the form (`_stream` or `_prepared`), the address (`_by_inode`), the time (`_at_snapshot`), and `_with_options`, and leave out any part that doesn't apply, as in `read_file_stream_by_inode_with_options`. A method doesn't repeat its receiver's noun, and an accessor doesn't start with `get_`.
 
 - **Write each method in a plain form and a `_with_options` form.** Required inputs are positional, and optional inputs go in one flat `*Options` struct with public fields and `Default`, which every form of the operation shares. Don't add a third shape, such as `foo_with_limit`.
 

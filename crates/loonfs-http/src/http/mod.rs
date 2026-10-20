@@ -45,9 +45,9 @@ use self::handlers_inodes::{
     list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
-    create_checkpoint, create_namespace, create_snapshot, delete_checkpoint, delete_namespace,
-    delete_snapshot, extend_snapshot, fork_namespace, get_checkpoint, get_namespace,
-    get_namespace_diagnostics, get_snapshot, list_checkpoints, list_snapshots, run_maintenance,
+    create_namespace, create_snapshot, delete_namespace, delete_snapshot, extend_snapshot,
+    fork_namespace, get_checkpoint, get_namespace, get_namespace_diagnostics, get_snapshot,
+    list_checkpoints, list_snapshots, run_maintenance,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
@@ -461,11 +461,11 @@ pub fn router(state: BindingState) -> Router {
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-                post(create_checkpoint).get(list_checkpoints),
+                get(list_checkpoints),
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
-                get(get_checkpoint).delete(delete_checkpoint),
+                get(get_checkpoint),
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/runs",

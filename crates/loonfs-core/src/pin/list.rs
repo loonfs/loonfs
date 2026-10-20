@@ -1,4 +1,5 @@
-//! Lists existing pins as checkpoints.
+//! Lists existing pins: every pin as a checkpoint, or the user pins as
+//! snapshots.
 
 use super::record::{load_pin, load_pin_at_key};
 use crate::control_object::ControlObjectLoadError;
@@ -7,7 +8,8 @@ use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, PinId};
+use loonfs_types::format::control::PinPayload;
+use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, PinId, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// Resume position for a checkpoint listing.
@@ -54,13 +56,6 @@ impl From<SnapshotPageCursor> for CheckpointPageCursor {
 }
 
 impl CheckpointPageCursor {
-    fn after(namespace_id: &NamespaceId, last_key: String) -> Self {
-        Self {
-            namespace_id: namespace_id.clone(),
-            last_key,
-        }
-    }
-
     fn validate_for(&self, namespace_id: &NamespaceId) -> Result<()> {
         if &self.namespace_id != namespace_id {
             return Err(CoreError::InvalidCursor(
@@ -69,15 +64,15 @@ impl CheckpointPageCursor {
         }
         if !self.last_key.starts_with(&pin_prefix(namespace_id)) {
             return Err(CoreError::InvalidCursor(
-                "cursor names a key outside the checkpoint inventory".to_owned(),
+                "cursor refers to a key outside the pin listing".to_owned(),
             ));
         }
         Ok(())
     }
 }
 
-/// Loads one existing pin as the checkpoint row a listing returns for it.
-/// A missing pin returns `checkpoint_not_found`.
+/// Loads one existing pin of any owner as the checkpoint row a listing
+/// returns for it. A missing pin returns `snapshot_not_found`.
 pub(crate) async fn get_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -88,17 +83,51 @@ pub(crate) async fn get_checkpoint<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let loaded = load_pin(store, namespace_id, checkpoint_id)
         .await?
-        .ok_or_else(|| CoreError::CheckpointNotFound {
-            checkpoint_id: checkpoint_id.clone(),
+        .ok_or_else(|| CoreError::SnapshotNotFound {
+            snapshot_id: checkpoint_id.clone(),
         })?;
     Ok(super::checkpoint_summary(loaded.state))
 }
 
+/// Lists one page of every pin, fork pins included, in ascending ID order.
 pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
+    list_pins_page(store, namespace_id, request, |record| {
+        Some(super::checkpoint_summary(record))
+    })
+    .await
+}
+
+/// Lists one page of snapshots (the user pins) in ascending ID order,
+/// including expired snapshots that garbage collection hasn't deleted.
+pub(crate) async fn list_snapshots_page<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: PageRequest<SnapshotPageCursor>,
+) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+    let request = PageRequest {
+        limit: request.limit,
+        cursor: request.cursor.map(CheckpointPageCursor::from),
+    };
+    let page = list_pins_page(store, namespace_id, request, super::user_pin_snapshot).await?;
+    Ok(Page {
+        items: page.items,
+        next_cursor: page.next_cursor.map(SnapshotPageCursor::from),
+    })
+}
+
+/// Lists the pins after the request's cursor and returns up to its limit of
+/// the rows that `row` returns for them. A pin for which `row` returns
+/// `None` doesn't count toward the limit.
+async fn list_pins_page<S: ObjectStore + ?Sized, T>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: PageRequest<CheckpointPageCursor>,
+    row: impl Fn(PinPayload) -> Option<T>,
+) -> Result<Page<T, CheckpointPageCursor>> {
     load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
@@ -107,6 +136,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
         cursor.validate_for(namespace_id)?;
     }
 
+    let limit = request.limit;
     let prefix = pin_prefix(namespace_id);
     let start_after = request
         .cursor
@@ -116,9 +146,9 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
         .list_prefix_from_stream(&prefix, start_after)
         .peekable();
     futures::pin_mut!(keys);
-    let mut checkpoints = Vec::with_capacity(request.limit.as_usize());
+    let mut rows = Vec::with_capacity(limit.as_usize());
     let mut last_inspected_key = None;
-    while checkpoints.len() < request.limit.as_usize() {
+    while rows.len() < limit.as_usize() {
         let Some(item) = keys.next().await else {
             break;
         };
@@ -130,10 +160,9 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
             Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
-        let record = loaded.state;
-        checkpoints.push(super::checkpoint_summary(record));
+        rows.extend(row(loaded.state));
     }
-    let has_more = if checkpoints.len() == request.limit.as_usize() {
+    let has_more = if rows.len() == limit.as_usize() {
         match keys.as_mut().peek().await {
             Some(Ok(_)) => true,
             Some(Err(_)) => {
@@ -149,15 +178,12 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     } else {
         false
     };
-    let next_cursor = has_more.then(|| {
-        CheckpointPageCursor::after(
-            namespace_id,
-            last_inspected_key.expect("a full page should inspect at least one key"),
-        )
+    let next_cursor = has_more.then(|| CheckpointPageCursor {
+        namespace_id: namespace_id.clone(),
+        last_key: last_inspected_key.expect("a full page should inspect at least one key"),
     });
-
     Ok(Page {
-        items: checkpoints,
+        items: rows,
         next_cursor,
     })
 }
@@ -196,10 +222,11 @@ mod cursor_tests {
             TrashPageCursor,
         };
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let checkpoint = CheckpointPageCursor::after(
-            &namespace_id,
-            "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json".to_owned(),
-        );
+        let checkpoint = CheckpointPageCursor {
+            namespace_id: namespace_id.clone(),
+            last_key: "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
+                .to_owned(),
+        };
         let cursors = [
             (
                 "directory.txt",

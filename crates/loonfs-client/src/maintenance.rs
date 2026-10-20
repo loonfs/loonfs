@@ -1,4 +1,4 @@
-//! Checkpoints, maintenance, store probes, and grep maintenance.
+//! The checkpoint inventory, maintenance, store probes, and grep maintenance.
 
 use super::*;
 use crate::operations;
@@ -26,33 +26,9 @@ impl Client {
         .await
     }
 
-    /// Creates a user-owned checkpoint pinning the namespace's current view
-    /// (maintenance API group).
-    ///
-    /// Every call creates a new checkpoint; the name is a label, not a key.
-    /// This is a maintenance operation, not a file mutation. The record keeps
-    /// its manifest retained until it is deleted, either explicitly or by
-    /// garbage collection after expiry plus grace. Retrying this request
-    /// starts a distinct attempt.
-    pub async fn create_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &CreateCheckpointRequest,
-    ) -> Result<Checkpoint> {
-        let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-            self.base_url
-        );
-        self.request_json(
-            self.post(&url),
-            Some(request),
-            operations::CREATE_CHECKPOINT,
-        )
-        .await
-    }
-
-    /// Lists existing checkpoints, including expired checkpoints that garbage
-    /// collection has not yet deleted (maintenance API group).
+    /// Lists every pin as a checkpoint, including fork pins and expired
+    /// snapshots that garbage collection has not yet deleted (maintenance API
+    /// group).
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
@@ -82,8 +58,9 @@ impl Client {
         .await
     }
 
-    /// Returns one existing checkpoint, as the listing returns it, through
-    /// the maintenance API. A missing id returns `checkpoint_not_found`.
+    /// Returns one existing pin, as the checkpoint listing returns it,
+    /// through the maintenance API. A missing id returns
+    /// `snapshot_not_found`.
     pub async fn get_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -95,25 +72,6 @@ impl Client {
         );
         self.request_json::<(), Checkpoint>(self.get(&url), None, operations::GET_CHECKPOINT)
             .await
-    }
-
-    /// Deletes a user-owned checkpoint pin through the maintenance API.
-    /// A missing id returns `checkpoint_not_found`.
-    pub async fn delete_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) -> Result<DeleteCheckpointResponse> {
-        let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
-            self.base_url
-        );
-        self.request_json::<(), DeleteCheckpointResponse>(
-            self.delete(&url),
-            None,
-            operations::DELETE_CHECKPOINT,
-        )
-        .await
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).

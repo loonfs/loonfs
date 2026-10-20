@@ -91,7 +91,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
-        .create_snapshot("basis".to_owned(), u64::MAX / 2)
+        .create_snapshot("basis".to_owned(), Some(u64::MAX / 2))
         .await
         .expect("snapshot")
         .response;
@@ -209,24 +209,18 @@ async fn invalid_snapshot_forks_write_nothing() {
     seed_source_namespace_for_fork(&store, &other, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let expired = engine
-        .create_snapshot("expired".to_owned(), 1)
+        .create_snapshot("expired".to_owned(), Some(1))
         .await
         .expect("expired snapshot")
         .response;
     let foreign = namespace_engine(&store, &other, &context)
-        .create_snapshot("foreign".to_owned(), u64::MAX / 2)
+        .create_snapshot("foreign".to_owned(), Some(u64::MAX / 2))
         .await
         .expect("foreign snapshot")
         .response;
-    let checkpoint = engine
-        .create_checkpoint("user".to_owned(), None)
-        .await
-        .expect("user checkpoint")
-        .response;
     for (snapshot_id, expected_code) in [
-        (expired.snapshot_id, ErrorCode::SnapshotGone),
+        (expired.snapshot_id, ErrorCode::SnapshotNotFound),
         (foreign.snapshot_id, ErrorCode::SnapshotNotFound),
-        (checkpoint.checkpoint_id, ErrorCode::SnapshotNotFound),
     ] {
         store.take();
         let error = engine
@@ -254,7 +248,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
-        .create_snapshot("basis".to_owned(), u64::MAX / 2)
+        .create_snapshot("basis".to_owned(), Some(u64::MAX / 2))
         .await
         .expect("snapshot")
         .response;
@@ -551,7 +545,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .await
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
-        .create_checkpoint("test-pin".to_owned(), None)
+        .create_snapshot("test-pin".to_owned(), None)
         .await
         .expect("create source checkpoint before fork");
 
@@ -1058,12 +1052,12 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
 
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
-        .create_checkpoint("test-pin".to_owned(), None)
+        .create_snapshot("test-pin".to_owned(), None)
         .await
         .expect("create source checkpoint")
         .response;
 
-    let source_record = load_pin(&store, &source_namespace_id, &checkpoint.checkpoint_id).await;
+    let source_record = load_pin(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
     let manifest_key =
         metadata_manifest_object(&source_namespace_id, &source_record.pin_id.manifest_no());
     let manifest_bytes = store

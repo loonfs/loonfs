@@ -9,7 +9,7 @@ use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::api::v0::{
-    AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
+    AdvanceRetentionRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
 use loonfs_types::{
     api::v0::{Commit, FilesystemChange},
@@ -366,13 +366,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     // Pin the head, then give up incremental replay below it.
     harness
         .client
-        .create_checkpoint(
-            &namespace,
-            &CreateCheckpointRequest {
-                name: "retired".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_snapshot(&namespace, "retired", None)
         .await
         .expect("create checkpoint");
     let advanced = harness

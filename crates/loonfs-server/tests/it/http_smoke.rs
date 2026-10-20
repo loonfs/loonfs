@@ -15,8 +15,7 @@ use loonfs_types::{
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT,
-    LIMIT_PAGINATION_MAX, LIMIT_SNAPSHOT_MAX_AGE_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+    LIMIT_PAGINATION_MAX, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
@@ -197,12 +196,6 @@ async fn capabilities_endpoint_advertises_capabilities() {
         (
             LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
             config.max_download_bytes,
-        ),
-        (LIMIT_SNAPSHOT_MAX_TTL_MS, config.snapshot_max_ttl_ms),
-        (LIMIT_SNAPSHOT_MAX_AGE_MS, config.snapshot_max_age_ms),
-        (
-            LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-            config.snapshot_max_live_per_namespace.get() as u64,
         ),
         (
             LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -498,7 +491,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .expect("first write");
     let snapshot = harness
         .client
-        .create_snapshot(&source, "basis", 60_000)
+        .create_snapshot(&source, "basis", Some(60_000))
         .await
         .expect("snapshot");
     harness

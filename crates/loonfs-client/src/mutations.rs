@@ -926,24 +926,27 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_snapshot(&namespace_id, "backup", 10_000)
+                .create_snapshot(&namespace_id, "backup", Some(10_000))
                 .await,
             &transport,
         );
 
-        let (transport, client) = single_attempt_probe();
-        assert_single_attempt(
-            client
-                .create_checkpoint(
-                    &namespace_id,
-                    &CreateCheckpointRequest {
-                        name: "backup".to_owned(),
-                        ttl_ms: None,
-                    },
-                )
-                .await,
-            &transport,
+        let snapshot_id =
+            PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id");
+        let deleted = DeleteSnapshotResponse {
+            namespace_id: namespace_id.clone(),
+            snapshot_id: snapshot_id.clone(),
+        };
+        let transport = crate::scripted_transport::failure_then_success(
+            serde_json::to_vec(&deleted).expect("serialize response"),
         );
+        let client = retry_policy_client(&transport);
+        let actual = client
+            .delete_snapshot(&namespace_id, &snapshot_id)
+            .await
+            .expect("an idempotent snapshot delete should retry");
+        assert_eq!(actual, deleted);
+        assert_eq!(transport.attempts(), 2);
 
         let response = NamespaceDiagnostics {
             created_at_ms: 1_000,
@@ -955,7 +958,6 @@ mod tests {
             current_manifest_no: None,
             wal_tail_objects: 2,
             live_snapshots: 3,
-            live_checkpoints: 4,
         };
         let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

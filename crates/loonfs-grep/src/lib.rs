@@ -1,11 +1,11 @@
 //! LoonFS full-text grep subsystem and reference derived projection.
 //!
-//! Grep uses only public runtime APIs. Enabling it pins a checkpoint and
+//! Grep uses only public runtime APIs. Enabling it creates a snapshot and
 //! backfills files in bounded pages. Once active, it consumes the semantic
-//! change feed from the checkpoint sequence.
+//! change feed from the snapshot's sequence.
 //!
 //! Each step publishes the segment list and watermark under the next manifest number. Failed publications leave unreferenced derived data for
-//! grep garbage collection. A retention gap causes a new checkpoint and
+//! grep garbage collection. A retention gap causes a new snapshot and
 //! backfill.
 //!
 //! Queries combine indexed postings with the unindexed tail, then verify each

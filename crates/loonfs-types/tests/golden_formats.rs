@@ -778,21 +778,6 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_pin_snapshot.v1.json",
-        ControlObjectKind::Pin,
-        PinPayload {
-            pin_id: pin_id("pin_00000000000000000006-0000000000000006"),
-            namespace_id: namespace_id(),
-            head_seq: (sample_manifest_ref(6)).head_seq,
-            payload_checksum: (sample_manifest_ref(6)).payload_checksum.clone(),
-            created_at_ms: 3_000,
-            owner: PinOwner::Snapshot {
-                name: "report-run".to_owned(),
-                expires_at_ms: 9_000,
-            },
-        },
-    );
-    check_control_golden(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
@@ -1016,24 +1001,30 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     );
 }
 
+/// Checks that a stored record whose owner kind is `snapshot` decodes as a
+/// user pin with the same name and expiry.
+///
+/// The fixture is an existing record, so no golden check rewrites it.
 #[test]
-fn snapshot_pins_reject_a_missing_expiry() {
-    let fixture = "control_pin_snapshot.v1.json";
-    let message = assert_control_payload_edit_is_corrupt::<PinPayload>(
-        fixture,
+fn a_snapshot_owned_record_decodes_as_a_user_pin_with_its_expiry() {
+    let decoded: ControlObjectEnvelope<PinPayload> = decode_control_object(
+        &read_golden("control_pin_snapshot.v1.json"),
         ControlObjectKind::Pin,
-        |payload| {
-            payload
-                .get_mut("owner")
-                .expect("owner")
-                .as_object_mut()
-                .expect("owner object")
-                .remove("expires_at_ms");
-        },
-    );
-    assert!(
-        message.contains("missing field `expires_at_ms`"),
-        "unexpected refusal for `{fixture}`: {message}"
+    )
+    .expect("decode a snapshot-owned pin");
+    assert_eq!(
+        decoded.into_payload(),
+        PinPayload {
+            pin_id: pin_id("pin_00000000000000000006-0000000000000006"),
+            namespace_id: namespace_id(),
+            head_seq: (sample_manifest_ref(6)).head_seq,
+            payload_checksum: (sample_manifest_ref(6)).payload_checksum.clone(),
+            created_at_ms: 3_000,
+            owner: PinOwner::User {
+                name: "report-run".to_owned(),
+                expires_at_ms: Some(9_000),
+            },
+        }
     );
 }
 

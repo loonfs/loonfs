@@ -271,7 +271,7 @@ impl ReadTarget {
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
-        description = "Lists a directory from the current state or a live snapshot.",
+        description = "Lists a directory from the current state or an unexpired snapshot.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path of the directory to list."),
@@ -342,7 +342,7 @@ pub(super) async fn list_path_entries(
         path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
-        description = "Returns path metadata from the current state or a live snapshot.",
+        description = "Returns path metadata from the current state or an unexpired snapshot.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path to read."),
@@ -400,7 +400,7 @@ pub(super) async fn get_path_entry(
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
-        description = "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
+        description = "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path of the file to read."),

@@ -289,22 +289,16 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
     assert_success(&changes);
     assert_eq!(stdout_string(&changes).lines().count(), 2);
 
-    assert_success(&harness.run(&["maintenance", "checkpoint", "create", "--name", "first"]));
+    assert_success(&harness.run(&["snapshot", "create", "demo", "--name", "first"]));
     let dated = harness.run(&[
-        "maintenance",
-        "checkpoint",
-        "create",
-        "--name",
-        "second",
-        "--ttl-ms",
-        "600000",
+        "snapshot", "create", "demo", "--name", "second", "--ttl-ms", "600000",
     ]);
     assert_success(&dated);
     let created_line = stdout_string(&dated);
     let expiry = created_line
-        .split("expires at ")
+        .split("expires: ")
         .nth(1)
-        .expect("a checkpoint with a ttl prints when it expires")
+        .expect("a snapshot with a ttl prints when it expires")
         .trim_end()
         .trim_end_matches(')')
         .to_owned();
@@ -714,9 +708,9 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let checkpoint = harness.run(&[
             "--json",
-            "maintenance",
-            "checkpoint",
+            "snapshot",
             "create",
+            "demo",
             "--name",
             "nightly",
             "--profile",
@@ -724,34 +718,32 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         ]);
         assert_success(&checkpoint);
         let checkpoint_data = json_data(&checkpoint);
-        assert_eq!(checkpoint_data["kind"], "checkpoint_created");
+        assert_eq!(checkpoint_data["kind"], "snapshot_created");
         assert_eq!(checkpoint_data["namespace_id"], "demo");
-        assert_eq!(
-            checkpoint_data["owner"],
-            serde_json::json!({"kind": "user", "name": "nightly"})
-        );
+        assert_eq!(checkpoint_data["name"], "nightly");
+        assert!(checkpoint_data.get("expires_at_ms").is_none());
         assert!(checkpoint_data["created_at_ms"].is_u64());
         assert_eq!(checkpoint_data["captured_seq"], 2);
-        let checkpoint_id = checkpoint_data["checkpoint_id"]
+        let checkpoint_id = checkpoint_data["snapshot_id"]
             .as_str()
             .expect("json string")
             .to_owned();
         assert!(checkpoint_id.starts_with("pin_"));
 
         // Names are labels rather than unique keys. Reusing one creates a
-        // second checkpoint with a different id.
+        // second snapshot with a different id.
         let second_checkpoint = harness.run(&[
             "--json",
-            "maintenance",
-            "checkpoint",
+            "snapshot",
             "create",
+            "demo",
             "--name",
             "nightly",
             "--profile",
             profile,
         ]);
         assert_success(&second_checkpoint);
-        let second_checkpoint_id = json_data(&second_checkpoint)["checkpoint_id"]
+        let second_checkpoint_id = json_data(&second_checkpoint)["snapshot_id"]
             .as_str()
             .expect("json string")
             .to_owned();
@@ -847,8 +839,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&first_page_human);
         assert!(stdout_string(&first_page_human).contains("next_cursor:"));
 
-        // The human rendering is the same table in both modes, and it names
-        // the id the delete command takes.
+        // The human rendering is the same table in both modes, and it lists
+        // the id the snapshot delete command takes.
         let listed_human =
             harness.run(&["maintenance", "checkpoint", "list", "--profile", profile]);
         assert_success(&listed_human);
@@ -861,9 +853,9 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // never per label.
         assert_success(&harness.run(&[
             "--json",
-            "maintenance",
-            "checkpoint",
+            "snapshot",
             "delete",
+            "demo",
             &second_checkpoint_id,
             "--profile",
             profile,
@@ -891,35 +883,22 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(fold_data["outcome"], "caught_up");
         assert_eq!(fold_data["compaction_units"], 0);
 
-        let delete = harness.run(&[
-            "--json",
-            "maintenance",
-            "checkpoint",
-            "delete",
-            &checkpoint_id,
-            "--profile",
-            profile,
-        ]);
-        assert_success(&delete);
-        let delete_data = json_data(&delete);
-        assert_eq!(delete_data["kind"], "checkpoint_deleted");
-        assert_eq!(delete_data["checkpoint_id"], checkpoint_id.as_str());
-        assert!(delete_data.get("was_active").is_none());
-
-        let delete_again = harness.run(&[
-            "--json",
-            "maintenance",
-            "checkpoint",
-            "delete",
-            &checkpoint_id,
-            "--profile",
-            profile,
-        ]);
-        assert_failure(&delete_again);
-        assert_eq!(
-            parse_json(&delete_again.stderr)["error"]["code"],
-            "checkpoint_not_found"
-        );
+        // A delete of a deleted snapshot succeeds with the same response.
+        for _ in 0..2 {
+            let delete = harness.run(&[
+                "--json",
+                "snapshot",
+                "delete",
+                "demo",
+                &checkpoint_id,
+                "--profile",
+                profile,
+            ]);
+            assert_success(&delete);
+            let delete_data = json_data(&delete);
+            assert_eq!(delete_data["kind"], "snapshot_deleted");
+            assert_eq!(delete_data["snapshot_id"], checkpoint_id.as_str());
+        }
 
         // Every commit is stamped after the epoch, so this cutoff passes none.
         let early_cutoff = harness.run(&[
@@ -1033,9 +1012,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--json",
             "maintenance",
             "checkpoint",
-            "create",
-            "--name",
-            "nightly",
+            "list",
             "--profile",
             profile,
             "--namespace",

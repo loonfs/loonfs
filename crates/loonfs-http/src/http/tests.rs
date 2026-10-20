@@ -674,7 +674,6 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     );
     assert_eq!(diagnostics.wal_tail_objects, 2);
     assert_eq!(diagnostics.live_snapshots, 0);
-    assert_eq!(diagnostics.live_checkpoints, 0);
 
     state.runtime.shutdown().await.expect("shutdown writer");
 }
@@ -2605,7 +2604,7 @@ async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObject
 }
 
 /// A worker composed the way the server composes its own: grep's keyspace
-/// on the given store, its filesystem reads and checkpoints on handles over
+/// on the given store, its filesystem reads and snapshots on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
     let reader = LoonFs::builder_with_store(store.clone())
@@ -2613,16 +2612,15 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build reader");
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(actor));
+        .expect("build writer");
     GrepWorker::new(
         store.clone(),
         reader,
-        maintenance,
+        writer,
         loonfs_grep::GrepStepBudget::default(),
     )
 }
@@ -3148,16 +3146,10 @@ mod direct_download {
             .expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
         let checkpoint_id = client
-            .create_checkpoint(
-                &namespace,
-                &loonfs_types::CreateCheckpointRequest {
-                    name: "not-a-snapshot".to_owned(),
-                    ttl_ms: None,
-                },
-            )
+            .create_snapshot(&namespace, "pinned", None)
             .await
-            .expect("checkpoint")
-            .checkpoint_id;
+            .expect("snapshot")
+            .snapshot_id;
         let past_end = DownloadOptions {
             start_offset: 99,
             ..DownloadOptions::default()

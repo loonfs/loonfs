@@ -33,8 +33,8 @@ impl std::fmt::Display for AttributeInclusion {
 ///
 /// A read option that leaves its consistency unset (`None`) takes the
 /// runtime's default, which is eventual unless the host sets `strong`. A
-/// pinned read (a snapshot or a checkpoint) has no consistency setting,
-/// because the pin selects the state it reads.
+/// read of a snapshot has no consistency setting, because the snapshot
+/// selects the state it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
     /// Confirm the head before the read, so the read sees every commit
@@ -290,7 +290,7 @@ pub struct DirectMultipartUploadOptions {
 /// Selects the source state for a namespace fork.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
-    /// Fork from this live snapshot instead of the current head.
+    /// Fork from this unexpired snapshot instead of the current head.
     pub snapshot_id: Option<crate::PinId>,
 }
 

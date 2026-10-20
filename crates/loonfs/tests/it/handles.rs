@@ -917,21 +917,23 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
-        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+        let maintenance_runtime = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
-        let checkpoint = maintenance
-            .create_checkpoint(&namespace_id, "handle-pin")
+            .expect("build maintenance");
+        let maintenance = maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id(
+            "handle-test-maintenance",
+        ));
+        let checkpoint = maintenance_runtime
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .create_snapshot("handle-pin", &loonfs::CreateSnapshotOptions::default())
             .await
-            .expect("create checkpoint");
-        assert!(checkpoint.manifest_no > ManifestNo(0));
+            .expect("create snapshot");
+        assert!(checkpoint.snapshot_id.manifest_no() > ManifestNo(0));
         let retention = maintenance
             .advance_retention_floor(&namespace_id)
             .await
