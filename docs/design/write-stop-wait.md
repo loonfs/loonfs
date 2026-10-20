@@ -2,15 +2,13 @@
 
 This note describes what a [writer session](../specs/glossary.md#writer-session) does with a new commit when its [WAL tail](../specs/glossary.md#wal-tail) is full. The commit waits in the session's queue for a [fold](../specs/glossary.md#fold) to free room, and LoonFS refuses it with `maintenance_required` if a bounded wait passes first.
 
-## The problem
+## Why the session waits
 
-A writer session keeps its WAL tail in its [writer position](../specs/glossary.md#writer-position) until a fold moves the tail into metadata segments. The "write stop" is the longest tail that a session lets grow: 128 unfolded WAL objects (`MAX_UNFOLDED_WAL_OBJECTS`). The session starts a fold at 32 WAL objects or 2 MiB of inline bytes, and it keeps publishing while the fold runs. (Past 32 MiB of unfolded inline bytes, LoonFS stages new inline content instead of refusing commits.)
+A writer session keeps its WAL tail in its [writer position](../specs/glossary.md#writer-position) until a fold moves the tail into metadata segments. The session starts a fold once the tail reaches the "fold trigger" (32 WAL objects or 2 MiB of inline bytes), and it keeps publishing while the fold runs. The "write stop" is the longest tail that a session lets grow: 128 unfolded WAL objects (`MAX_UNFOLDED_WAL_OBJECTS`). (Inline bytes have no stop of their own. Past 32 MiB of unfolded inline bytes, LoonFS stages new inline content as content objects instead.)
 
-When a batch reaches the write stop, the session refuses each new commit in it with `maintenance_required` and starts a fold. The commit engine returns the refusal while it prepares the batch, after the commit was admitted to the namespace's queue. The server returns it as a 503 without `Retry-After`, so neither the Rust client nor the generated SDKs retry it, and each application has to. An embedded caller can wait with `Namespace::wait_for_fold` and resubmit, but an HTTP client has no route for that and has to guess at a backoff.
+A new commit at the write stop waits in the namespace's queue for the session's fold. The fold that frees the tail runs in the writer's own process, so refusing the commit would ask the client to wait for work that the runtime is already doing. Each client would then need its own wait-and-resubmit loop, and an HTTP client, which has no route that waits for a fold, would have to guess at a backoff.
 
-The lab's 100k agent-sessions phase shows the cost under an append storm. Its clients wait for the writer's fold and resubmit, and they were refused between 64 and 3,999 times per run, depending on the store's latency. Their waiting, summed over the phase's clients, came to between 7.5 minutes and almost 6 hours per run.
-
-The fold that frees the tail runs in the process that refused the commit, so the refusal asks the client to wait for work that the runtime is already doing.
+That loop has a measured cost. In the lab's 100k agent-sessions phase (an append storm), clients that wait for the writer's fold and resubmit were refused between 64 and 3,999 times per run, depending on the store's latency, and their waiting, summed over the phase's clients, came to between 7.5 minutes and almost 6 hours per run. A commit that waits in the queue still waits for the fold, but it waits once, without those refusals, round trips, or guessed backoffs.
 
 ## The rule
 
@@ -24,9 +22,9 @@ What waits is the commit's place in the namespace's queue, where the commit is a
 4. Returns `maintenance_required` to each queued commit that has reached the write-stop wait.
 5. Takes a publication slot again, and publishes the queue in arrival order.
 
-The fold's completion wakes the worker. The publisher already signals it, because the fold runs as a session task, and `Namespace::wait_for_fold` waits for that task to end. A fold also ends when another process already folded the tail (the position moves onto that process's manifest), and when it fails (the next publish starts another fold).
+Each fold that publishes a manifest wakes the worker. The fold runs as a session task, and that task folds again while the tail that its last fold left is still over the fold trigger, so the worker doesn't wait for the task to end. A fold that publishes nothing ends the task, and the task's end also wakes the worker. That happens when another process already folded the tail (the position moves onto that process's manifest), and when the fold fails (the next publish starts another fold).
 
-A fold frees the tail up to where it started, and commits published while it ran stay in the tail, so a fold can free less room than the queue needs. For example, if a fold starts at 32 WAL objects and 96 more are published while it runs, the next batch waits at the stop. The fold leaves 96 objects, so 32 more batches publish in arrival order (the first of them starts the next fold), and the commits behind them keep waiting.
+A fold frees the tail up to where it started, and commits published while it ran stay in the tail, so a fold can free less room than the queue needs. For example, if a fold starts at 32 WAL objects and 96 more are published while it runs, the next batch waits at the stop. The fold leaves 96 objects, so 32 more batches publish in arrival order, and the commits behind them keep waiting. The tail still has more than 32 WAL objects, so the fold task folds again.
 
 The write stop itself doesn't move. It bounds the memory of the tail in the session's position, and waiting commits don't add to that tail.
 
@@ -36,7 +34,7 @@ Why keep waiting commits in the queue and not in a list of their own? The queue 
 
 `CommitOptions` has no deadline, and the HTTP binding's `request_deadline_ms` (60 s by default) cancels the request handler, but the cancellation doesn't remove the queued commit, which can still publish after the server returns `deadline_exceeded`. So the runtime needs one setting, the write-stop wait, in its publication policy.
 
-The reference server sets the write-stop wait to half its `request_deadline_ms`, and gains no setting. A commit that waits out the bound then receives `maintenance_required` (the commit didn't happen) before the server's deadline would return `deadline_exceeded` (the outcome is unknown).
+The reference server sets the write-stop wait to half its `request_deadline_ms`, and gains no setting. A commit that waits for the whole write-stop wait then receives `maintenance_required` (the commit didn't happen) before the server's deadline would return `deadline_exceeded` (the outcome is unknown).
 
 ## Costs
 
@@ -56,7 +54,7 @@ The [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md#resourc
 
 ## Alternatives considered
 
-Keep refusing. Each client then runs the wait that the runtime could run, and every SDK repeats it. A `Retry-After` hint or a route that waits for the fold still leaves a retry loop in every client.
+Refuse commits at the stop. Each client then runs the wait that the runtime could run, and every SDK repeats it. A `Retry-After` hint or a route that waits for the fold still leaves a retry loop in every client.
 
 Throttle commits before the stop, with a delay that grows as the tail goes from a low watermark to a high one. That adds a second threshold and a rate controller, and it delays commits even when the fold would finish before the stop. The wait delays a commit when the tail is at the stop, for as long as the fold runs.
 
