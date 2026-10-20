@@ -334,6 +334,9 @@ pub(crate) async fn run_put_tree(
 }
 
 /// Downloads files as discovered, creating each parent before entering it.
+///
+/// The listing returns each directory before the entries below it, so the
+/// walk creates a local directory before it writes any file into it.
 pub(crate) async fn run_get_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -425,6 +428,10 @@ pub(crate) async fn run_get_tree(
 }
 
 /// Copies a directory tree without downloading file contents to the CLI.
+///
+/// The listing returns each directory before the entries below it, so each
+/// destination directory exists before anything is copied into it, and only
+/// the destination root is created with its missing parents.
 pub(crate) async fn run_copy_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -606,8 +613,11 @@ mod tests {
     use loonfs::SharedObjectStore;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
-    use loonfs_test_support::stores::BufferWatchStore;
-    use loonfs_types::NamespaceId;
+    use loonfs_test_support::stores::{BufferWatchStore, MemoryStore};
+    use loonfs_types::{
+        ChecksumAlgorithm, CommitId, CommitRequest, FilesystemOperation, NamespaceId,
+        DEFAULT_PAGE_LIMIT,
+    };
 
     /// A file of two transfer parts and a bit: enough that holding it whole
     /// would show up plainly against holding one part of it, and enough that
@@ -642,15 +652,27 @@ mod tests {
         let watched = Arc::new(BufferWatchStore::watching_content(
             LocalFsStore::new(store_dir).expect("create local-fs store"),
         ));
-        let store: SharedObjectStore = watched.clone();
-        let target = ResolvedTarget::over_store(
-            store,
-            Some("put-tree-test"),
-            loonfs_objectstore::ConfiguredObjectStoreKind::LocalFs,
+        let context = context_over(
+            watched.clone(),
             loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             },
+        )
+        .await;
+        (context, watched)
+    }
+
+    /// Creates an embedded context over `store`, and the namespace it targets.
+    async fn context_over(
+        store: SharedObjectStore,
+        inline_content: loonfs::InlineContentPolicy,
+    ) -> CommandContext {
+        let target = ResolvedTarget::over_store(
+            store,
+            Some("put-tree-test"),
+            loonfs_objectstore::ConfiguredObjectStoreKind::LocalFs,
+            inline_content,
             false,
         )
         .await
@@ -669,7 +691,56 @@ mod tests {
             .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
-        (context, watched)
+        context
+    }
+
+    /// Creates `/up` on an in-memory store, with an empty `broken` directory,
+    /// `a-first`, `good/child`, and enough `z-` files that the listing of `/up`
+    /// takes one full page and one more entry.
+    async fn context_with_two_page_tree() -> CommandContext {
+        let context = context_over(
+            Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme)),
+            loonfs::InlineContentPolicy::default(),
+        )
+        .await;
+        // The listing returns `a-first`, `broken`, `good`, and `good/child`
+        // before the `z-` files.
+        let z_files = usize::try_from(DEFAULT_PAGE_LIMIT).expect("a page limit fits a usize") - 3;
+        let file = |path: String| FilesystemOperation::PutFile {
+            path: remote(&path),
+            content_ref: None,
+            inline_content: Some(b"file".to_vec()),
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        };
+        let mut operations = vec![FilesystemOperation::CreateDirectory {
+            path: remote("/up/broken"),
+            parents: true,
+        }];
+        operations.extend(
+            ["/up/a-first".to_owned(), "/up/good/child".to_owned()]
+                .into_iter()
+                .chain((0..z_files).map(|index| format!("/up/z-{index:04}")))
+                .map(file),
+        );
+        context
+            .target
+            .client
+            .commit(
+                context.namespace(),
+                context.actor(),
+                &CommitRequest {
+                    commit_id: CommitId::generate(),
+                    message: None,
+                    content_tokens: Vec::new(),
+                    preconditions: Vec::new(),
+                    operations,
+                },
+            )
+            .await
+            .expect("commit the tree");
+        context
     }
 
     #[tokio::test]
@@ -825,30 +896,11 @@ mod tests {
 
     #[tokio::test]
     async fn recursive_remote_discovery_resumes_parent_pages_after_a_child_listing_fails() {
-        let store_dir = tempfile::tempdir().expect("tempdir");
-        let (context, _) = watched_context(store_dir.path()).await;
-        let tree = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(tree.path().join("broken")).expect("empty directory");
-        std::fs::create_dir(tree.path().join("good")).expect("good directory");
-        std::fs::write(tree.path().join("a-first"), b"first").expect("first file");
-        std::fs::write(tree.path().join("good/child"), b"child").expect("nested file");
-        for index in 0..130 {
-            std::fs::write(tree.path().join(format!("z-{index:03}")), b"file").expect("root file");
-        }
-        run_put_tree(
-            CommandKind::FilesystemPut,
-            &context,
-            tree.path(),
-            &AbsolutePath::parse("/up").expect("remote root"),
-            DestinationBehavior::NoReplace,
-            None,
-            unwatched(),
-        )
-        .await
-        .unwrap_or_else(|failure| panic!("populate tree: {:?}", failure.error));
-        // Only the first root page has been read. Removing a child after that
-        // must be observed when descent reaches it, and must not lose later
-        // siblings or the remaining root pages.
+        let context = context_with_two_page_tree().await;
+        // Only the first page of the listing has been read, and it returned
+        // the empty `broken` directory. Removing `broken` after that must be
+        // observed when the walk lists it on its own, and must not lose later
+        // siblings or the remaining pages.
         let up = AbsolutePath::parse("/up").expect("remote root");
         let entries = remote_tree(&context, &up, "remote_path", None, PathBuf::new())
             .await
@@ -881,8 +933,9 @@ mod tests {
         .await
         .expect("transfer report");
         assert_eq!(
-            tally.files, 132,
-            "every root page and the surviving child was visited"
+            tally.files,
+            u64::from(DEFAULT_PAGE_LIMIT) - 1,
+            "every page and the surviving child was visited"
         );
         assert_eq!(tally.failures.len(), 1);
         assert_eq!(

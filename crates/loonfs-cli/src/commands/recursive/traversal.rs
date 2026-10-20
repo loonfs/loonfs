@@ -1,19 +1,22 @@
-//! Incremental depth-first discovery. Local frames retain one directory handle;
-//! remote frames retain at most one small listing page. Neither retains a list
-//! of every sibling directory or every file in the tree.
+//! Incremental depth-first discovery of the trees that recursive transfers walk.
+//!
+//! A local walk keeps one directory handle for each level it has open. A
+//! remote walk reads the tree with one recursive listing, and keeps one page
+//! of that listing, plus one page for each directory that the listing returned
+//! without the entries below it. Neither walk keeps a list of every sibling
+//! directory or every file in the tree.
 
 use super::{remote_spec, CommandContext, FileJob};
 use crate::commands::pagination::page_request;
 use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use futures::Stream;
-use loonfs_types::{AbsolutePath, DisplayName, PinId};
+use loonfs_types::{AbsolutePath, DisplayName, InodeId, PinId};
 use loonfs_types::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::ffi::OsStr;
 use std::fs::ReadDir;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
-
-const TREE_LIST_PAGE_SIZE: u32 = 64;
 
 pub(super) enum TreeEntry<Source, Destination> {
     File(FileJob<Source, Destination>),
@@ -142,50 +145,86 @@ impl Iterator for LocalTree {
     }
 }
 
-struct RemoteFrame<Destination> {
+/// One recursive listing in a remote walk, of the walk's root or of a
+/// directory that an enclosing listing returned without the entries below it.
+struct RemoteListing<Destination> {
     source: AbsolutePath,
     destination: Destination,
-    entries: std::vec::IntoIter<PathEntry>,
-    next_page: NextPage,
+    entries: Peekable<std::vec::IntoIter<PathEntry>>,
+    next_cursor: Option<String>,
 }
 
-/// Which page of a directory listing a frame reads next.
-enum NextPage {
-    /// The first page.
-    Start,
-    /// The page after this cursor.
-    After(String),
-    /// None: the listing is complete.
-    Exhausted,
-}
-
-impl<Destination> RemoteFrame<Destination> {
-    fn new(source: AbsolutePath, destination: Destination) -> Self {
+impl<Destination> RemoteListing<Destination> {
+    fn new(source: AbsolutePath, destination: Destination, page: ListPathEntriesResponse) -> Self {
         Self {
             source,
             destination,
-            entries: Vec::new().into_iter(),
-            next_page: NextPage::Start,
+            entries: page.entries.into_iter().peekable(),
+            next_cursor: page.next_cursor,
         }
     }
 
     fn set_page(&mut self, page: ListPathEntriesResponse) -> ChangeSeq {
-        self.entries = page.entries.into_iter();
-        self.next_page = page
-            .next_cursor
-            .map_or(NextPage::Exhausted, NextPage::After);
+        self.entries = page.entries.into_iter().peekable();
+        self.next_cursor = page.next_cursor;
         page.head_seq
     }
+}
+
+/// Returns the walk's source and destination paths for an entry of a listing
+/// of `source`, or `None` when the entry's path isn't below `source`.
+///
+/// The entry's path starts with the listed directory's stored path, which can
+/// differ from the spelling on the command line in a case-insensitive
+/// namespace, so only the components below the listed directory are joined to
+/// the walk's own paths.
+fn entry_paths<Destination: TreePath>(
+    source: &AbsolutePath,
+    destination: &Destination,
+    entry: &PathEntry,
+) -> Option<(AbsolutePath, Destination)> {
+    let below = entry
+        .path
+        .components()
+        .get(source.components().len()..)
+        .filter(|below| !below.is_empty())?;
+    let mut source = source.clone();
+    let mut destination = destination.clone();
+    for component in below {
+        let name = component.to_display_name();
+        source = source.join(&name);
+        destination = destination.child(&name);
+    }
+    Some((source, destination))
+}
+
+/// A directory that a listing returned, kept until the next entry shows
+/// whether the listing descended into it.
+struct ListedDirectory<Destination> {
+    inode_id: InodeId,
+    source: AbsolutePath,
+    destination: Destination,
 }
 
 struct RemoteTree<'a, Destination> {
     context: &'a CommandContext,
     param: &'a str,
     snapshot_id: Option<&'a PinId>,
-    stack: Vec<RemoteFrame<Destination>>,
+    /// The root's listing, then a listing of each directory that the listing
+    /// before it returned without the entries below it.
+    ///
+    /// Each listing is of a deeper directory than the one before it, and a
+    /// directory deeper than a request path can't be listed, so a walk keeps
+    /// at most `MAX_PATH_DEPTH + 1` listings, with one page each.
+    listings: Vec<RemoteListing<Destination>>,
+    last_directory: Option<ListedDirectory<Destination>>,
     first_head: Option<ChangeSeq>,
 }
 
+/// Discovers the tree below `root` with one recursive listing, and lists each
+/// directory that the listing returns with nothing below it on its own, which
+/// reports an unreadable directory with the error of its own listing and costs
+/// one request for each empty directory.
 pub(super) async fn remote_tree<'a, Destination: TreePath + 'a>(
     context: &'a CommandContext,
     root: &AbsolutePath,
@@ -193,21 +232,19 @@ pub(super) async fn remote_tree<'a, Destination: TreePath + 'a>(
     snapshot_id: Option<&'a PinId>,
     destination: Destination,
 ) -> Result<impl Stream<Item = TreeEntry<AbsolutePath, Destination>> + 'a, CliError> {
-    let spec = remote_spec(context, root, param)?;
-    let page = context
-        .target
-        .list_at_snapshot(&spec, snapshot_id)
-        .page(page_request(None, Some(TREE_LIST_PAGE_SIZE))?)
-        .await?;
-    let mut frame = RemoteFrame::new(root.clone(), destination);
-    let first_head = Some(frame.set_page(page));
-    let state = RemoteTree {
+    let mut state = RemoteTree {
         context,
         param,
         snapshot_id,
-        stack: vec![frame],
-        first_head,
+        listings: Vec::new(),
+        last_directory: None,
+        first_head: None,
     };
+    let page = state.list_page(root, None).await?;
+    state.first_head = Some(page.head_seq);
+    state
+        .listings
+        .push(RemoteListing::new(root.clone(), destination, page));
     Ok(futures::stream::unfold(state, |mut state| async move {
         let entry = state.next().await?;
         Some((entry, state))
@@ -220,63 +257,127 @@ impl<Destination: TreePath> RemoteTree<'_, Destination> {
             return Some(TreeEntry::Head(head));
         }
         loop {
-            let frame = self.stack.last_mut()?;
-            if let Some(entry) = frame.entries.next() {
-                let Some(name) = entry.display_name else {
-                    continue;
-                };
-                let source = frame.source.join(&name);
-                match entry.kind {
-                    PathEntryKind::Directory {} => {
-                        let destination = frame.destination.child(&name);
-                        self.stack
-                            .push(RemoteFrame::new(source, destination.clone()));
-                        return Some(TreeEntry::Directory(destination));
-                    }
-                    PathEntryKind::File { size_bytes, .. } => {
-                        return Some(TreeEntry::File(FileJob {
-                            destination: frame.destination.child(&name),
-                            source,
-                            size_bytes: Some(size_bytes),
-                        }))
-                    }
-                    PathEntryKind::Unknown => {
-                        write_stderr_warning(format_args!(
-                            "skipping `{source}`: this client does not know its inode kind"
-                        ));
-                        continue;
-                    }
+            let listing = self.listings.last_mut()?;
+            let Some(entry) = listing.entries.peek() else {
+                if let Some(cursor) = listing.next_cursor.take() {
+                    let source = listing.source.clone();
+                    return Some(self.list_next_page(source, cursor).await);
                 }
-            }
-            let cursor = match &frame.next_page {
-                NextPage::Start => None,
-                NextPage::After(cursor) => Some(cursor.clone()),
-                NextPage::Exhausted => {
-                    self.stack.pop();
-                    continue;
+                if let Some(directory) = self.last_directory.take() {
+                    return Some(self.list_directory(directory).await);
                 }
+                self.listings.pop();
+                continue;
             };
-            let page = async {
-                let spec = remote_spec(self.context, &frame.source, self.param)?;
-                Ok(self
-                    .context
-                    .target
-                    .list_at_snapshot(&spec, self.snapshot_id)
-                    .page(page_request(cursor, Some(TREE_LIST_PAGE_SIZE))?)
-                    .await?)
+            let Some((source, destination)) =
+                entry_paths(&listing.source, &listing.destination, entry)
+            else {
+                let message = format!(
+                    "the listing of `{}` returned `{}`, which is outside the listed directory",
+                    listing.source, entry.path
+                );
+                let path = entry.path.to_string();
+                listing.entries.next();
+                return Some(TreeEntry::Failure(path, CliError::client_error(message)));
+            };
+            // A directory too long to list by path is reported when the walk
+            // tries to list it on its own, so the entries below it are skipped.
+            if source
+                .parent()
+                .is_some_and(|parent| parent.validate_request_bounds().is_err())
+            {
+                listing.entries.next();
+                continue;
             }
-            .await;
-            match page {
-                Ok(page) => return Some(TreeEntry::Head(frame.set_page(page))),
-                Err(error) => {
-                    // Earlier files may have committed already. Keep their
-                    // results and continue siblings after a listing failure.
-                    let remote = frame.source.to_string();
-                    self.stack.pop();
-                    return Some(TreeEntry::Failure(remote, error));
+            if let Some(directory) = self.last_directory.take() {
+                if entry.parent_inode_id != Some(directory.inode_id) {
+                    return Some(self.list_directory(directory).await);
+                }
+            }
+            let entry = listing.entries.next().expect("the entry was peeked");
+            match entry.kind {
+                PathEntryKind::Directory {} => {
+                    self.last_directory = Some(ListedDirectory {
+                        inode_id: entry.inode_id,
+                        source,
+                        destination: destination.clone(),
+                    });
+                    return Some(TreeEntry::Directory(destination));
+                }
+                PathEntryKind::File { size_bytes, .. } => {
+                    return Some(TreeEntry::File(FileJob {
+                        destination,
+                        source,
+                        size_bytes: Some(size_bytes),
+                    }))
+                }
+                PathEntryKind::Unknown => {
+                    write_stderr_warning(format_args!(
+                        "skipping `{source}`: this client does not know its inode kind"
+                    ));
                 }
             }
         }
+    }
+
+    async fn list_next_page(
+        &mut self,
+        source: AbsolutePath,
+        cursor: String,
+    ) -> TreeEntry<AbsolutePath, Destination> {
+        match self.list_page(&source, Some(cursor)).await {
+            Ok(page) => {
+                let listing = self
+                    .listings
+                    .last_mut()
+                    .expect("the listing that returned the cursor should be open");
+                TreeEntry::Head(listing.set_page(page))
+            }
+            // A failed page ends its own listing. Earlier files may have
+            // committed already, so the walk keeps their results and continues
+            // with the enclosing listing, if there is one.
+            Err(error) => TreeEntry::Failure(source.to_string(), error),
+        }
+    }
+
+    /// Lists a directory on its own after a listing returned it without the
+    /// entries below it.
+    ///
+    /// A listing doesn't descend into a directory that the subject can't
+    /// read, so listing that directory on its own returns the error that the
+    /// walk reports for it. A directory that has entries after all (because
+    /// it's deeper than a listing descends, or because the entries were added
+    /// after the page was read) is walked with a listing of its own.
+    async fn list_directory(
+        &mut self,
+        directory: ListedDirectory<Destination>,
+    ) -> TreeEntry<AbsolutePath, Destination> {
+        match self.list_page(&directory.source, None).await {
+            Ok(page) => {
+                let head = page.head_seq;
+                self.listings.push(RemoteListing::new(
+                    directory.source,
+                    directory.destination,
+                    page,
+                ));
+                TreeEntry::Head(head)
+            }
+            Err(error) => TreeEntry::Failure(directory.source.to_string(), error),
+        }
+    }
+
+    async fn list_page(
+        &self,
+        source: &AbsolutePath,
+        cursor: Option<String>,
+    ) -> Result<ListPathEntriesResponse, CliError> {
+        let spec = remote_spec(self.context, source, self.param)?;
+        Ok(self
+            .context
+            .target
+            .list_tree_at_snapshot(&spec, self.snapshot_id)
+            .page(page_request(cursor, None)?)
+            .await?)
     }
 }
 
