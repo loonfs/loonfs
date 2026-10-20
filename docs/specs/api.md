@@ -600,7 +600,7 @@ With prepared content, a client prepares the content once, keeps the result, and
 | Rust HTTP and embedded runtime | `prepare_content()` / `prepare_content_stream()` | `put_file_prepared()` |
 | Python synchronous client | `files.prepare()` | `files.upload_prepared()` |
 | Go | `Files.Prepare()` | `Files.UploadPrepared()` |
-| TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
+| TypeScript | `files.prepare()` | `files.uploadPrepared()` |
 
 In the embedded runtime, preparing content at or below the enabled inline threshold makes no storage request. The HTTP clients prepare inline content when the server advertises `filesystem.commits.inline_content` and the actual file bytes fit within `commit.max_inline_content_bytes_per_operation`. The Go, Python, and TypeScript helpers keep at most 64 KiB inline, even if the server advertises a larger limit. Streams use bounded lookahead (the effective limit plus one byte), and larger sources continue through the existing upload path with that prefix preserved.
 
@@ -2685,7 +2685,7 @@ The handwritten transfer helpers provide verified download streams in every SDK:
 | --- | --- | --- |
 | Go | `client.Files.DownloadStream(ctx, input)` | Close `Content` or cancel `ctx` |
 | Python (`LoonFS` and `AsyncLoonFS`) | `client.files.download_stream(namespace_id, path=path, request_options=options)` (await it with `AsyncLoonFS`) | Use a `with` block or call `close()`. With async, use `async with` or `await aclose()`. |
-| TypeScript server/browser | `client.files.downloadStream(input, requestOptions)` | Cancel the `content` reader or abort `requestOptions.abortSignal` |
+| TypeScript | `client.files.downloadStream(input, requestOptions)` | Cancel the `content` reader or abort `requestOptions.abortSignal` |
 
 The existing buffered download helpers collect these streams. Streams verify the size and checksum incrementally, and they report a verification error on the same iterator, reader, or stream that delivers the bytes. Only a stream that's successfully read to the end verifies the file. Cancelling a stream or closing it early doesn't verify the file. Consumers MUST handle late errors, even after some bytes have been delivered. A failed body is never automatically replayed.
 
@@ -2712,7 +2712,7 @@ It returns the same prepared content that the byte helpers use, without publishi
 | --- | --- | --- |
 | Go | `Files.PrepareStream(ctx, namespaceID, reader, sizeBytes)` | `Files.UploadStream(ctx, files.StreamUploadInput{...})` |
 | Python (`LoonFS` and `AsyncLoonFS`) | `files.prepare_stream(namespace_id, content=reader, size_bytes=size)` (await it with `AsyncLoonFS`) | `files.upload_stream(namespace_id, content=reader, ...)` (await it with `AsyncLoonFS`) |
-| TypeScript server/browser | `files.prepareStream({ ...namespace, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
+| TypeScript | `files.prepareStream({ namespace_id, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
 
 The optional size is checked against the bytes consumed, and TypeScript infers it for a `Blob`. Small streams, including streams of unknown size, become inline prepared content when the server supports it. After the inline lookahead, a larger source of unknown size uses multipart when the deployment advertises it, and a service-proxied upload otherwise.
 
@@ -2732,6 +2732,6 @@ The handwritten helpers add bytes to the end of an existing file with one `creat
 | --- | --- |
 | Go | `client.Files.Append(ctx, files.AppendInput{...})` |
 | Python (`LoonFS` and `AsyncLoonFS`) | `client.files.append(namespace_id, path=path, content=data, ...)` (await it with `AsyncLoonFS`) |
-| TypeScript server/browser | `client.files.append(input, requestOptions)` |
+| TypeScript | `client.files.append(input, requestOptions)` |
 
 The request includes the bytes as `inline_content`, so an append needs no upload. Before it sends anything, each helper refuses empty content and content larger than 256 KiB. It raises the same error that its upload helpers raise for a size no transport can handle: an `error` in Go, a `ValueError` in Python, and an `Error` in TypeScript. The other inputs are optional: the commit ID, the commit message, `expected_inode_id`, and `expected_revision_no`. A caller that might retry passes the commit ID explicitly, because a retry with the same bytes and commit ID replays the original commit. No helper sends `append_file_by_inode`, so a caller sends that operation with `commits.create`.

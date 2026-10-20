@@ -9,7 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GENERATED_ROOT = REPO_ROOT / "sdk" / "generated"
-SUPPORTED_GROUPS = {"go", "python", "typescript", "typescript-client"}
+SUPPORTED_GROUPS = {"go", "python", "typescript"}
 
 
 def count_non_idempotent_operations(spec_path: Path) -> int:
@@ -63,12 +63,10 @@ def verify_group(group: str) -> None:
         choices = "|".join(sorted(SUPPORTED_GROUPS))
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{choices}>")
 
-    proxy = group == "typescript-client"
-    spec_name = "openapi-proxy.json" if proxy else "openapi.json"
-    expected = count_non_idempotent_operations(REPO_ROOT / "docs" / "specs" / spec_name)
+    expected = count_non_idempotent_operations(REPO_ROOT / "docs" / "specs" / "openapi.json")
     generated = GENERATED_ROOT / group
 
-    if group in {"typescript", "typescript-client"}:
+    if group == "typescript":
         verify_retry_predicate(
             generated / "core" / "fetcher" / "requestWithRetries.ts",
             'response.headers.has("retry-after")',

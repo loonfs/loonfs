@@ -2,7 +2,6 @@
 """Removes the streaming and deprecated options from a generated TypeScript SDK, applies the LoonFS retry and timeout rules, and exports the transfer helpers."""
 
 import pathlib
-import sys
 
 
 def replace_once(source, old, new):
@@ -10,7 +9,7 @@ def replace_once(source, old, new):
     assert actual_count == 1, f"expected exactly one match for {old!r}, found {actual_count}"
     return source.replace(old, new)
 
-package_root = pathlib.Path("generated") / sys.argv[1]
+package_root = pathlib.Path("generated/typescript")
 
 signals_path = package_root / "core/fetcher/signals.ts"
 source = signals_path.read_text()

@@ -48,13 +48,11 @@ try {
 }
 `;
 
-for (const sdk of ["typescript", "typescript-client"]) {
-    for (const mode of ["success", "pre-abort", "cancel", "timeout", "transport"]) {
-        test(`${sdk} ${mode} preserves errors and releases request timers`, async () => {
-            const entry = pathToFileURL(resolve(__dirname, `../../../generated/${sdk}/index.js`));
-            await run(process.execPath, ["--input-type=module", "--eval", script, entry.href, mode], {
-                timeout: 5_000,
-            });
+for (const mode of ["success", "pre-abort", "cancel", "timeout", "transport"]) {
+    test(`${mode} preserves errors and releases request timers`, async () => {
+        const entry = pathToFileURL(resolve(__dirname, "../../../generated/typescript/index.js"));
+        await run(process.execPath, ["--input-type=module", "--eval", script, entry.href, mode], {
+            timeout: 5_000,
         });
-    }
+    });
 }

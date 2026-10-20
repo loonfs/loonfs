@@ -1,7 +1,7 @@
 # LoonFS TypeScript SDK
 
-Install with `npm install @loonfs/sdk`. Use `@loonfs/sdk/server` in a backend
-and `@loonfs/sdk/client` in a browser. Both export `LoonFSClient`.
+Install with `npm install @loonfs/sdk`, and import `LoonFSClient` from
+`@loonfs/sdk/server`. The same client works in a backend and in a browser.
 
 ```ts
 import { LoonFSClient } from "@loonfs/sdk/server";
@@ -18,13 +18,14 @@ await client.files.upload({
 });
 ```
 
-Server clients accept an optional `actorId`. Browser clients use the application
-proxy's `baseUrl` and address `namespace_alias` instead of `namespace_id`.
-Keep the server token in the backend.
+Server clients accept an optional `actorId`. In a browser, set `baseUrl` to the
+application's proxy (see [Proxy](#proxy)) and `token` to the credential that the
+proxy's `authorize` hook checks. The proxy replaces that credential with the
+server token, so the server token stays in the backend.
 
 ## Transfer helpers
 
-Both clients expose the same `files` helpers:
+The client exposes these `files` helpers:
 
 | Helper | Behavior |
 | --- | --- |
@@ -103,10 +104,16 @@ reads use API authorization and are pinned to the selected revision.
 ## Proxy
 
 Import `createProxyHandler` from `@loonfs/sdk/proxy`. Configure `serverBaseUrl`,
-`token`, `namespaceAliases`, and the required `authorize` hook. The hook receives
-the request and the resolved namespace context. Return a `Response` to refuse
-access, or an authorization object to forward as the approved identity.
-Returning `{}` forwards as the token holder.
+`token`, and the required `authorize` hook. The proxy forwards
+`/v0/capabilities` and the namespace routes for files, uploads, snapshots,
+changes, and grep with the path unchanged, and returns 404 for every other
+route.
+
+The hook receives the request and the route context, which includes the decoded
+`namespaceId`. Any namespace ID in the path reaches LoonFS, so the hook checks
+that the caller may use that namespace. Return a `Response` to refuse access, or
+an authorization object to forward as the approved identity. Returning `{}`
+forwards as the token holder.
 
 The proxy forwards bodies without rewriting JSON. It strips browser credentials,
 cookies, `Host`, actor and subject headers, and hop-by-hop headers. It supplies
@@ -120,7 +127,7 @@ Payload requests are never retried. Set `maxRetries` to control generated retrie
 
 ## Generated API
 
-Clients are generated from the LoonFS OpenAPI documents. Report issues in the
+The client is generated from the LoonFS OpenAPI document. Report issues in the
 [LoonFS repository](https://github.com/loonfs/loonfs).
 
 Apache-2.0.

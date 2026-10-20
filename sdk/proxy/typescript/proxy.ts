@@ -1,7 +1,7 @@
 export interface ProxyRouteContext {
     method: string;
     template: string;
-    namespaceAlias?: string;
+    /** The decoded namespace ID from the path. Absent for `/v0/capabilities`. */
     namespaceId?: string;
 }
 
@@ -16,10 +16,11 @@ export interface ProxyAuthorization {
 export interface ProxyConfig {
     serverBaseUrl: string;
     token: string;
-    namespaceAliases: Record<string, string>;
     /**
      * Runs before every forwarded request. Return a Response to refuse it.
      * Required; returning an empty authorization forwards as the token holder.
+     * The proxy forwards any namespace ID in the path, so check
+     * `context.namespaceId` here.
      */
     authorize: (
         request: Request,
@@ -43,7 +44,8 @@ const HOP_BY_HOP_HEADERS = [
     "upgrade",
 ] as const;
 
-// These routes must match docs/specs/openapi-proxy.json.
+// These routes must match the `routes` list in
+// crates/loonfs-conformance/cases/proxy.json.
 interface ProxyRouteTemplate {
     method: "GET" | "POST" | "PUT" | "DELETE";
     template: string;
@@ -51,34 +53,34 @@ interface ProxyRouteTemplate {
 
 const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
     { method: "GET", template: "/v0/capabilities" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/changes" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/commits" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/content" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/entries" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/entry" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/filesystem/trash" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/grep" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/snapshots" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/snapshots" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}" },
-    { method: "DELETE", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads" },
-    { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete" },
-    { method: "PUT", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/changes" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/commits" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/filesystem/content" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/filesystem/downloads" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/filesystem/entries" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/filesystem/entry" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/filesystem/revisions" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/filesystem/trash" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/grep" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/snapshots" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/snapshots" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}" },
+    { method: "DELETE", template: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/uploads" },
+    { method: "GET", template: "/v0/namespaces/{namespace_id}/uploads/{upload_id}" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete" },
+    { method: "PUT", template: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content" },
+    { method: "POST", template: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts" },
 ];
 
 function patternFor(template: string): RegExp {
     const source = template
         .split("/")
         .map((segment) => {
-            if (segment === "{namespace_alias}") {
-                return "(?<namespaceAlias>[^/]+)";
+            if (segment === "{namespace_id}") {
+                return "(?<namespaceId>[^/]+)";
             }
             if (segment.startsWith("{") && segment.endsWith("}")) {
                 return "[^/]+";
@@ -99,7 +101,6 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
     const serverBaseUrl = new URL(config.serverBaseUrl);
     const serverBasePath = serverBaseUrl.pathname.replace(/\/+$/, "");
     const token = config.token;
-    const namespaceAliases = new Map(Object.entries(config.namespaceAliases));
     const authorize = config.authorize;
     if (typeof authorize !== "function") {
         throw new TypeError("authorize must be a function");
@@ -107,12 +108,12 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
 
     return async (request: Request): Promise<Response> => {
         const requestUrl = new URL(request.url);
-        const resolved = resolveRoute(request.method, requestUrl.pathname, namespaceAliases);
-        if (resolved === undefined) {
+        const context = resolveRoute(request.method, requestUrl.pathname);
+        if (context === undefined) {
             return notFound();
         }
 
-        const authorization = await authorize(request, resolved.context);
+        const authorization = await authorize(request, context);
         if (authorization instanceof Response) {
             return authorization;
         }
@@ -148,7 +149,7 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         }
 
         const upstreamUrl = new URL(serverBaseUrl);
-        upstreamUrl.pathname = `${serverBasePath}${resolved.path}`;
+        upstreamUrl.pathname = `${serverBasePath}${requestUrl.pathname}`;
         upstreamUrl.search = requestUrl.search;
         const upstream = await fetch(upstreamUrl, init);
         return new Response(upstream.body, {
@@ -159,11 +160,7 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
     };
 }
 
-function resolveRoute(
-    method: string,
-    pathname: string,
-    namespaceAliases: ReadonlyMap<string, string>,
-): { path: string; context: ProxyRouteContext } | undefined {
+function resolveRoute(method: string, pathname: string): ProxyRouteContext | undefined {
     for (const route of PROXY_ROUTES) {
         if (route.method !== method) {
             continue;
@@ -173,26 +170,15 @@ function resolveRoute(
             continue;
         }
         const context: ProxyRouteContext = { method, template: route.template };
-        const encodedNamespaceAlias = match.groups?.namespaceAlias;
-        if (encodedNamespaceAlias === undefined) {
-            return { path: pathname, context };
+        const encodedNamespaceId = match.groups?.namespaceId;
+        if (encodedNamespaceId !== undefined) {
+            try {
+                context.namespaceId = decodeURIComponent(encodedNamespaceId);
+            } catch {
+                return undefined;
+            }
         }
-        try {
-            context.namespaceAlias = decodeURIComponent(encodedNamespaceAlias);
-        } catch {
-            return undefined;
-        }
-        context.namespaceId = namespaceAliases.get(context.namespaceAlias);
-        if (context.namespaceId === undefined) {
-            return undefined;
-        }
-
-        const namespaceAliasPrefix = `/v0/namespace-aliases/${encodedNamespaceAlias}`;
-        const suffix = pathname.slice(namespaceAliasPrefix.length);
-        return {
-            path: `/v0/namespaces/${encodeURIComponent(context.namespaceId)}${suffix}`,
-            context,
-        };
+        return context;
     }
     return undefined;
 }

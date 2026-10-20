@@ -20,11 +20,10 @@ test("proxy uses upstream authority and replaces browser credentials", async () 
         const proxy = createProxyHandler({
             serverBaseUrl: "https://api.test",
             token: "server-token",
-            namespaceAliases: { files: "demo" },
             authorize: () => ({ actorId: "app-user" }),
         });
         const response = await proxy(
-            new Request("https://app.test/v0/namespace-aliases/files/filesystem/content?path=%2Ffile", {
+            new Request("https://app.test/v0/namespaces/demo/filesystem/content?path=%2Ffile", {
                 headers: {
                     host: "app.test",
                     cookie: "session=private",

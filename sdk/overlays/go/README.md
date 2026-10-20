@@ -133,11 +133,16 @@ generated commit API also accepts `append_file_by_inode`.
 ## Proxy
 
 Use the `proxy` package in your backend to forward client requests while
-keeping the LoonFS credential on the server.
+keeping the LoonFS credential on the server. The proxy forwards
+`/v0/capabilities` and the namespace routes for files, uploads, snapshots,
+changes, and grep with the path unchanged, and returns 404 for every other
+route.
 
 Set `Authorize` to check each request and set `Loonfs-Actor` on forwarded
 requests. The proxy always removes the browser's actor header.
-The `Authorize` hook is required; returning `proxy.Authorization{}` with no error forwards as the token holder.
+The `Authorize` hook is required. Returning `proxy.Authorization{}` with no
+error forwards as the token holder. Any namespace ID in the path reaches LoonFS,
+so the hook checks that the caller may use `route.NamespaceID`.
 Here, `authorizedActor` checks the application's session and namespace access.
 
 ```go
@@ -151,7 +156,6 @@ import (
 handler, err := proxy.NewHandler(proxy.Config{
 	ServerBaseURL: os.Getenv("LOONFS_URL"),
 	Token: os.Getenv("LOONFS_AUTH_TOKEN"),
-	NamespaceAliases: map[string]string{"team-files": "demo"},
 	Authorize: func(r *http.Request, route proxy.RouteContext) (proxy.Authorization, error) {
 		actorID, ok := authorizedActor(r, route.NamespaceID)
 		if !ok {

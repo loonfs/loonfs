@@ -6,11 +6,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
-import { LoonFS, LoonFSClient, type PreparedFile } from "../../../generated/typescript/index.js";
 import {
-    LoonFS as BrowserLoonFS,
-    LoonFSClient as BrowserLoonFSClient,
-} from "../../../generated/typescript-client/index.js";
+    LoonFS,
+    LoonFSClient,
+    LoonFSError,
+    type PreparedFile,
+} from "../../../generated/typescript/index.js";
 import { createProxyHandler } from "../../../proxy/typescript/proxy.js";
 
 
@@ -331,9 +332,7 @@ interface ProxyCommitIds {
 }
 
 interface ProxyRequest {
-    namespace_alias: string;
     namespace_id: string;
-    unknown_namespace_alias: string;
     actor_id: LoonFS.ActorId;
     directory: string;
     proxied_path: string;
@@ -346,7 +345,6 @@ interface ProxyRequest {
 }
 
 interface ProxyACL {
-    namespace_alias: string;
     namespace_id: string;
     principal_scope: string;
     administrator: string;
@@ -364,6 +362,7 @@ interface ProxyAuthorize {
     directory: string;
     refuse_header: string;
     refused_status: number;
+    unlisted_namespace_id: string;
 }
 
 interface ProxyExpected {
@@ -371,13 +370,13 @@ interface ProxyExpected {
     proxied_committed_seq: number;
     direct_committed_seq: number;
     entry_count: number;
-    unknown_namespace_alias_status: number;
     disallowed_route_status: number;
     stamped_committed_by: LoonFS.ActorId;
     stamped_committed_seq: number;
     refused_status: number;
     acl_stamped_committed_seq: number;
     acl_forbidden_status: number;
+    routes: string[];
 }
 
 interface Harness {
@@ -625,9 +624,7 @@ const END_TO_END_EXPECTED_FIELDS = [
     "change_count",
 ] as const;
 const PROXY_REQUEST_FIELDS = [
-    "namespace_alias",
     "namespace_id",
-    "unknown_namespace_alias",
     "actor_id",
     "directory",
     "proxied_path",
@@ -643,13 +640,13 @@ const PROXY_EXPECTED_FIELDS = [
     "proxied_committed_seq",
     "direct_committed_seq",
     "entry_count",
-    "unknown_namespace_alias_status",
     "disallowed_route_status",
     "stamped_committed_by",
     "stamped_committed_seq",
     "refused_status",
     "acl_stamped_committed_seq",
     "acl_forbidden_status",
+    "routes",
 ] as const;
 
 function decodeErrorContract(
@@ -805,13 +802,13 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
             "directory",
             "refuse_header",
             "refused_status",
+            "unlisted_namespace_id",
         ],
         `${testCase.name} authorize`,
     );
     strictObject(
         testCase.request.acl,
         [
-            "namespace_alias",
             "namespace_id",
             "principal_scope",
             "administrator",
@@ -924,7 +921,7 @@ function fileCommit(
     return request;
 }
 
-function namespaceAliasDirectoryCommit(
+function proxyDirectoryCommit(
     commitId: string,
     path: string,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
@@ -934,7 +931,7 @@ function namespaceAliasDirectoryCommit(
     };
 }
 
-function namespaceAliasFileCommit(
+function proxyFileCommit(
     commitId: string,
     path: string,
     completed: CompletedUpload,
@@ -1031,15 +1028,15 @@ async function readProxied(
 }
 
 async function assertBrowserTransfer(
-    client: BrowserLoonFSClient,
-    namespaceAlias: string,
+    client: LoonFSClient,
+    namespaceId: string,
     path: string,
     bytes: Uint8Array,
     commitId: string,
     label: string,
 ): Promise<void> {
     const committed = await client.files.upload({
-        namespace_alias: namespaceAlias,
+        namespace_id: namespaceId,
         path,
         content: bytes,
         commit_id: commitId,
@@ -1047,7 +1044,7 @@ async function assertBrowserTransfer(
     assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
 
     const readback = await client.files.download({
-        namespace_alias: namespaceAlias,
+        namespace_id: namespaceId,
         path,
     });
     assert.deepEqual(readback.content, bytes);
@@ -2378,7 +2375,6 @@ test("proxy requires an authorize function", () => {
     const config = {
         serverBaseUrl: "http://upstream.invalid",
         token: "server-token",
-        namespaceAliases: {},
     };
     assert.throws(
         // @ts-expect-error JavaScript callers can omit the required hook.
@@ -2402,10 +2398,9 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxyHandler = createProxyHandler({
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
-        namespaceAliases: { [request.namespace_alias]: request.namespace_id },
         authorize: () => ({ actorId: request.actor_id }),
     });
-    const beginPath = `/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}/uploads`;
+    const beginPath = `/v0/namespaces/${encodeURIComponent(request.namespace_id)}/uploads`;
     const beginModes: string[] = [];
     const handler = async (incoming: Request): Promise<Response> => {
         if (incoming.method === "POST" && new URL(incoming.url).pathname === beginPath) {
@@ -2423,18 +2418,16 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
-    const namespaceAliasBase =
-        `${proxy.baseUrl}/v0/namespace-aliases/` +
-        encodeURIComponent(request.namespace_alias);
+    const namespaceBase = `${proxy.baseUrl}/v0/namespaces/${encodeURIComponent(request.namespace_id)}`;
     const payload = new TextEncoder().encode(request.content_utf8);
 
     const mkdir = await proxyJson<LoonFS.Commit>(
-        `${namespaceAliasBase}/commits`,
+        `${namespaceBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                namespaceAliasDirectoryCommit(request.commit_ids.directory, request.directory),
+                proxyDirectoryCommit(request.commit_ids.directory, request.directory),
             ),
         },
         "proxy directory commit",
@@ -2442,7 +2435,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
     const proxiedBegin = await proxyJson<LoonFS.UploadSession>(
-        `${namespaceAliasBase}/uploads`,
+        `${namespaceBase}/uploads`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -2452,7 +2445,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(proxiedBegin.mode, "service_proxied");
     const contentResponse = await fetchThroughProxy(
-        `${namespaceAliasBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/content`,
+        `${namespaceBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/content`,
         {
             method: "PUT",
             headers: { "content-type": "application/octet-stream" },
@@ -2467,7 +2460,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(uploadedContent.content_ref.size_bytes, payload.byteLength);
     const proxiedCompleted = completedUpload(
         await proxyJson<LoonFS.UploadSession>(
-            `${namespaceAliasBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
+            `${namespaceBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
             {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -2478,12 +2471,12 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(proxiedCompleted.content_ref, uploadedContent.content_ref);
     const proxiedCommit = await proxyJson<LoonFS.Commit>(
-        `${namespaceAliasBase}/commits`,
+        `${namespaceBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                namespaceAliasFileCommit(
+                proxyFileCommit(
                     request.commit_ids.proxied,
                     request.proxied_path,
                     proxiedCompleted,
@@ -2495,7 +2488,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(proxiedCommit.committed_seq, expected.proxied_committed_seq);
 
     const directBegin = await proxyJson<LoonFS.UploadSession>(
-        `${namespaceAliasBase}/uploads`,
+        `${namespaceBase}/uploads`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -2513,7 +2506,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     };
     const directCompleted = completedUpload(
         await proxyJson<LoonFS.UploadSession>(
-            `${namespaceAliasBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
+            `${namespaceBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
             {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -2524,12 +2517,12 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(directCompleted.content_ref.checksum, directClaim.checksum);
     const directCommit = await proxyJson<LoonFS.Commit>(
-        `${namespaceAliasBase}/commits`,
+        `${namespaceBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                namespaceAliasFileCommit(
+                proxyFileCommit(
                     request.commit_ids.direct,
                     request.direct_path,
                     directCompleted,
@@ -2540,7 +2533,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(directCommit.committed_seq, expected.direct_committed_seq);
 
-    const listUrl = new URL(`${namespaceAliasBase}/filesystem/entries`);
+    const listUrl = new URL(`${namespaceBase}/filesystem/entries`);
     listUrl.searchParams.set("path", request.directory);
     const listing = await proxyJson<LoonFS.ListPathEntriesResponse>(
         listUrl,
@@ -2549,23 +2542,14 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(listing.entries.length, expected.entry_count);
 
-    const readUrl = new URL(`${namespaceAliasBase}/filesystem/content`);
+    const readUrl = new URL(`${namespaceBase}/filesystem/content`);
     readUrl.searchParams.set("path", request.proxied_path);
     const read = await fetchThroughProxy(readUrl);
     await requireSuccessfulResponse(read, "proxy file read");
     assert.deepEqual(new Uint8Array(await read.arrayBuffer()), payload);
 
-    const unknownNamespaceAliasUrl = new URL(
-        `/v0/namespace-aliases/${encodeURIComponent(request.unknown_namespace_alias)}/filesystem/entries`,
-        proxy.baseUrl,
-    );
-    unknownNamespaceAliasUrl.searchParams.set("path", request.directory);
-    const unknownNamespaceAlias = await fetchThroughProxy(unknownNamespaceAliasUrl);
-    assert.equal(unknownNamespaceAlias.status, expected.unknown_namespace_alias_status);
-    assert.equal((await unknownNamespaceAlias.arrayBuffer()).byteLength, 0);
-
     const disallowedRoute = await fetchThroughProxy(
-        `${namespaceAliasBase}${request.disallowed_path_suffix}`,
+        `${namespaceBase}${request.disallowed_path_suffix}`,
     );
     assert.equal(disallowedRoute.status, expected.disallowed_route_status);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
@@ -2575,9 +2559,9 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         createProxyHandler({
             serverBaseUrl: activeHarness.serverBaseUrl,
             token: activeHarness.token,
-            namespaceAliases: { [request.namespace_alias]: request.namespace_id },
-            authorize: (incoming) =>
-                incoming.headers.has(request.authorize.refuse_header)
+            authorize: (incoming, route) =>
+                incoming.headers.has(request.authorize.refuse_header) ||
+                (route.namespaceId !== undefined && route.namespaceId !== request.namespace_id)
                     ? new Response(JSON.stringify(refusalBody), {
                           status: request.authorize.refused_status,
                           headers: { "content-type": "application/json" },
@@ -2586,7 +2570,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         }),
     );
     context.after(() => authorizedProxy.close());
-    const authorizedBase = `${authorizedProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}`;
+    const authorizedBase = `${authorizedProxy.baseUrl}/v0/namespaces/${encodeURIComponent(request.namespace_id)}`;
     const stamped = await proxyJson<LoonFS.Commit>(
         `${authorizedBase}/commits`,
         {
@@ -2596,7 +2580,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
                 "Loonfs-Actor": request.authorize.browser_actor_id,
             },
             body: JSON.stringify(
-                namespaceAliasDirectoryCommit(
+                proxyDirectoryCommit(
                     request.authorize.commit_id,
                     request.authorize.directory,
                 ),
@@ -2616,12 +2600,17 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.ok(stampedChange, "stamped commit is absent from the change feed");
     assert.equal(stampedChange.committed_by, expected.stamped_committed_by);
 
-    const refused = await fetchThroughProxy(`${authorizedBase}/filesystem/entry?path=/`, {
-        headers: { [request.authorize.refuse_header]: "1" },
-    });
-    assert.equal(refused.status, expected.refused_status);
-    assert.equal(refused.headers.get("content-type"), "application/json");
-    assert.deepEqual(await refused.json(), refusalBody);
+    const unlistedBase = `${authorizedProxy.baseUrl}/v0/namespaces/${encodeURIComponent(request.authorize.unlisted_namespace_id)}`;
+    for (const refused of [
+        await fetchThroughProxy(`${authorizedBase}/filesystem/entry?path=/`, {
+            headers: { [request.authorize.refuse_header]: "1" },
+        }),
+        await fetchThroughProxy(`${unlistedBase}/filesystem/entry?path=/`),
+    ]) {
+        assert.equal(refused.status, expected.refused_status);
+        assert.equal(refused.headers.get("content-type"), "application/json");
+        assert.deepEqual(await refused.json(), refusalBody);
+    }
 
     const acl = request.acl;
     const createdACL = await fetch(`${activeHarness.serverBaseUrl}/v0/namespaces`, {
@@ -2649,7 +2638,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         createProxyHandler({
             serverBaseUrl: activeHarness.serverBaseUrl,
             token: activeHarness.token,
-            namespaceAliases: { [acl.namespace_alias]: acl.namespace_id },
             authorize: () => ({
                 actorId: request.actor_id,
                 subjectId: acl.member_subject_id,
@@ -2659,7 +2647,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         }),
     );
     context.after(() => aclProxy.close());
-    const aclCommits = `${aclProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(acl.namespace_alias)}/commits`;
+    const aclCommits = `${aclProxy.baseUrl}/v0/namespaces/${encodeURIComponent(acl.namespace_id)}/commits`;
     const aclHeaders = {
         "content-type": "application/json",
         "Loonfs-Principal-Scope": acl.principal_scope,
@@ -2670,7 +2658,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         {
             method: "POST",
             headers: aclHeaders,
-            body: JSON.stringify(namespaceAliasDirectoryCommit(acl.commit_id, acl.directory)),
+            body: JSON.stringify(proxyDirectoryCommit(acl.commit_id, acl.directory)),
         },
         "ACL stamped commit",
     );
@@ -2687,11 +2675,13 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal((await aclForbidden.json()).code, "forbidden");
 
     beginModes.length = 0;
-    const browserClient = new BrowserLoonFSClient({ baseUrl: proxy.baseUrl });
+    // A browser uses the ordinary client. The proxy replaces the browser's token
+    // with the server token.
+    const browserClient = new LoonFSClient({ baseUrl: proxy.baseUrl, token: "browser-credential" });
     const browserPath = `${request.proxied_path}-browser`;
     await assertBrowserTransfer(
         browserClient,
-        request.namespace_alias,
+        request.namespace_id,
         browserPath,
         payload,
         `${request.commit_ids.proxied}-browser`,
@@ -2709,7 +2699,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
     await assertBrowserTransfer(
         browserClient,
-        request.namespace_alias,
+        request.namespace_id,
         `${request.direct_path}-browser`,
         directPutBytes,
         `${request.commit_ids.direct}-browser`,
@@ -2723,7 +2713,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     });
     await assertBrowserTransfer(
         browserClient,
-        request.namespace_alias,
+        request.namespace_id,
         `${request.direct_path}-browser-multipart`,
         multipartBytes,
         `${request.commit_ids.direct}-browser-multipart`,
@@ -2732,11 +2722,11 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.deepEqual(beginModes, ["direct_put", "direct_multipart"]);
 
     const prepared = await browserClient.files.prepareStream({
-        namespace_alias: request.namespace_alias,
+        namespace_id: request.namespace_id,
         content: new Blob([arrayBuffer(payload)]),
     });
     const input = {
-        namespace_alias: request.namespace_alias,
+        namespace_id: request.namespace_id,
         path: "/browser-prepared",
         prepared,
         commit_id: "browser-prepared-put",
@@ -2747,10 +2737,10 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(publishedReplay.committed_seq, published.committed_seq);
     await assert.rejects(
         browserClient.files.uploadPrepared({ ...input, message: "changed" }),
-        (error: unknown) => error instanceof BrowserLoonFS.ConflictError,
+        (error: unknown) => error instanceof LoonFS.ConflictError,
     );
     const entry = await browserClient.files.retrieve({
-        namespace_alias: request.namespace_alias,
+        namespace_id: request.namespace_id,
         path: input.path,
     });
     if (entry.inode_kind !== "file") throw new Error("expected file");
@@ -2766,17 +2756,22 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(replacedReplay.commit_id, replaced.commit_id);
     assert.equal(replacedReplay.committed_seq, replaced.committed_seq);
 
-    // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
+    // The hook refuses the first namespace request. No session exists then, so
+    // mid-flow cleanup is not covered.
+    const refusedClient = new LoonFSClient({
+        baseUrl: authorizedProxy.baseUrl,
+        token: "browser-credential",
+    });
     await assert.rejects(
-        browserClient.files.upload({
-            namespace_alias: request.unknown_namespace_alias,
+        refusedClient.files.upload({
+            namespace_id: request.authorize.unlisted_namespace_id,
             path: `${request.proxied_path}-browser-failure`,
             content: payload,
             commit_id: `${request.commit_ids.proxied}-browser-failure`,
         }),
         (error: unknown) => {
-            assert.ok(error instanceof BrowserLoonFS.NotFoundError);
-            assert.equal(error.statusCode, expected.unknown_namespace_alias_status);
+            assert.ok(error instanceof LoonFSError);
+            assert.equal(error.statusCode, expected.refused_status);
             return true;
         },
     );
@@ -3334,34 +3329,31 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     assert.equal(removedEntry.deletion_seq, removed.committed_seq);
 });
 
-// Every proxy route must reach the server.
-// Every excluded server route must stop at the proxy.
-test("proxy forwards every documented route", { skip: environmentSkip }, async (context) => {
+// Every route in the proxy case must reach the server unchanged.
+// Every other server route must stop at the proxy.
+test("proxy forwards every listed route", { skip: environmentSkip }, async (context) => {
     assert.ok(cases != null);
-    const [fixture] = decodeProxy(caseNamed(cases, "proxy"));
-    const documentPath = process.env.LOONFS_PROXY_DOCUMENT;
-    assert.ok(documentPath, "LOONFS_PROXY_DOCUMENT is not set");
-    const proxyDocument = JSON.parse(readFileSync(documentPath, "utf8")) as {
-        paths: Record<string, Record<string, unknown>>;
-    };
+    const [fixture, caseExpected] = decodeProxy(caseNamed(cases, "proxy"));
     const serverDocumentPath = process.env.LOONFS_SERVER_DOCUMENT;
     assert.ok(serverDocumentPath, "LOONFS_SERVER_DOCUMENT is not set");
     const serverDocument = JSON.parse(readFileSync(serverDocumentPath, "utf8")) as {
         paths: Record<string, Record<string, unknown>>;
     };
-    const proxyRoutes = new Set<string>();
-    for (const [template, item] of Object.entries(proxyDocument.paths)) {
-        for (const documentedMethod of Object.keys(item)) {
-            proxyRoutes.add(`${documentedMethod.toUpperCase()} ${template}`);
-        }
-    }
+    const serverRoutes = Object.entries(serverDocument.paths).flatMap(([template, item]) =>
+        Object.keys(item).map((method) => `${method.toUpperCase()} ${template}`),
+    );
+    const listedRoutes = new Set(caseExpected.routes);
+    assert.deepEqual(
+        [...listedRoutes].filter((route) => !serverRoutes.includes(route)),
+        [],
+        "every listed proxy route must be a server route",
+    );
 
     const stub = await startRecordingServer();
     context.after(() => stub.close());
     const handler = createProxyHandler({
         serverBaseUrl: stub.baseUrl,
         token: "recording-stub-token",
-        namespaceAliases: { [fixture.namespace_alias]: fixture.namespace_id },
         authorize: () => ({}),
     });
     const proxy = await startProxyServer(handler);
@@ -3369,52 +3361,20 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
 
     const instantiate = (template: string): string =>
         template.replace(/\{([^/{}]+)\}/g, (_placeholder, name: string) =>
-            name === "namespace_alias" ? fixture.namespace_alias : "x",
+            name === "namespace_id" ? fixture.namespace_id : "x",
         );
-    const proxyTemplateForServer = (template: string): string => {
-        const serverNamespacePrefix = "/v0/namespaces/{namespace_id}";
-        if (
-            template === serverNamespacePrefix ||
-            template.startsWith(`${serverNamespacePrefix}/`)
-        ) {
-            return template.replace(
-                serverNamespacePrefix,
-                "/v0/namespace-aliases/{namespace_alias}",
-            );
-        }
-        return template;
-    };
-
     const expected: string[] = [];
-    for (const [template, item] of Object.entries(proxyDocument.paths)) {
-        for (const documentedMethod of Object.keys(item)) {
-            const method = documentedMethod.toUpperCase();
-            const path = instantiate(template);
-            const forwardedTemplate = template.replace(
-                "/v0/namespace-aliases/{namespace_alias}",
-                `/v0/namespaces/${fixture.namespace_id}`,
-            );
-            expected.push(`${method} ${instantiate(forwardedTemplate)}`);
-            const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
-            assert.equal(response.status, 200);
-            await response.arrayBuffer();
+    for (const route of serverRoutes) {
+        const [method, template] = route.split(" ") as [string, string];
+        const path = instantiate(template);
+        const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
+        if (listedRoutes.has(route)) {
+            expected.push(`${method} ${path}`);
+            assert.equal(response.status, 200, route);
+        } else {
+            assert.equal(response.status, 404, route);
         }
+        await response.arrayBuffer();
     }
     assert.deepEqual([...stub.requests].sort(), expected.sort());
-
-    const observedBefore = [...stub.requests];
-    for (const [serverTemplate, item] of Object.entries(serverDocument.paths)) {
-        const proxyTemplate = proxyTemplateForServer(serverTemplate);
-        for (const documentedMethod of Object.keys(item)) {
-            const method = documentedMethod.toUpperCase();
-            if (proxyRoutes.has(`${method} ${proxyTemplate}`)) {
-                continue;
-            }
-            const path = instantiate(proxyTemplate);
-            const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
-            assert.equal(response.status, 404, `${method} ${path}`);
-            await response.arrayBuffer();
-        }
-    }
-    assert.deepEqual(stub.requests, observedBefore);
 });

@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LoonFSClient } from "../../../generated/typescript/transfers.js";
-import { LoonFSClient as BrowserClient } from "../../../generated/typescript-client/transfers.js";
 import { UploadSource, TransferScope } from "../../../generated/typescript/transfer-runtime.js";
 
 type Fixture = {
@@ -22,200 +21,186 @@ type Fixture = {
 const cases: Fixture[] = JSON.parse(
     readFileSync(join(__dirname, "../../../../../fixtures/streaming_uploads.json"), "utf8"),
 );
-for (const browser of [false, true])
-    for (const fixture of cases) {
-        test(`streaming upload ${browser ? "browser" : "server"} ${fixture.name}`, async () => {
-            let position = 0,
-                eof = false,
-                closed = false;
-            const content = new TextEncoder().encode(fixture.content);
-            const source = {
-                async *[Symbol.asyncIterator]() {
-                    try {
-                        while (position < content.length) {
-                            const start = position;
-                            position += Math.min(2, content.length - position);
-                            yield content.subarray(start, position);
-                        }
-                        eof = true;
-                        if (fixture.fault === "source_error")
-                            throw new Error("source failed after its last byte");
-                    } finally {
-                        closed = true;
+for (const fixture of cases) {
+    test(`streaming upload ${fixture.name}`, async () => {
+        let position = 0,
+            eof = false,
+            closed = false;
+        const content = new TextEncoder().encode(fixture.content);
+        const source = {
+            async *[Symbol.asyncIterator]() {
+                try {
+                    while (position < content.length) {
+                        const start = position;
+                        position += Math.min(2, content.length - position);
+                        yield content.subarray(start, position);
                     }
-                },
-            };
-            const counts = { payload: 0, abort: 0, complete: 0 };
-            const bodies: Uint8Array[] = [];
-            const claim = {
-                kind: "blob_v1",
-                owner_namespace_id: "demo",
-                content_id: "con_00000000000000000000000000000001",
-                size_bytes: fixture.size_bytes,
-                checksum: { algorithm: fixture.algorithm, value: fixture.checksum },
-            };
-            const session = {
-                namespace_id: "demo",
-                namespace_alias: "demo",
-                upload_id: "upl_test",
-                mode: fixture.mode,
-            };
-            const access = {
-                kind: "presigned_url",
-                method: "PUT",
-                url: "http://objects.test/object",
-                headers: {},
-                expires_at_ms: 2000000000000,
-            };
-            const send: typeof fetch = async (input, init) => {
-                const url = new URL(input instanceof Request ? input.url : input.toString());
-                const path = url.pathname,
-                    headers = new Headers(init?.headers);
-                assert.ok(init?.signal, "every transport needs a signal");
-                if (path === "/object") {
-                    assert.equal(headers.has("authorization"), false);
-                    assert.equal(headers.has("X-Private"), false);
-                } else {
-                    if (!browser) assert.equal(headers.get("authorization"), "Bearer private-token");
-                    if (!path.endsWith("/capabilities"))
-                        assert.ok(
-                            path.startsWith(browser ? "/v0/namespace-aliases/demo/" : "/v0/namespaces/demo/"),
-                        );
+                    eof = true;
+                    if (fixture.fault === "source_error")
+                        throw new Error("source failed after its last byte");
+                } finally {
+                    closed = true;
                 }
-                // Construct a real Request: Node rejects a stream if duplex was lost.
-                const request = new Request(url, init);
-                let value: unknown;
-                if (path.endsWith("/capabilities"))
-                    value = {
-                        protocol_version: "v0",
-                        api_groups: ["filesystem/v0"],
-                        features: {
-                            "filesystem.commits.inline_content": fixture.inline_limit !== undefined,
-                            "filesystem.uploads.direct_put": fixture.store_shape !== "local",
-                            "filesystem.uploads.direct_multipart": fixture.store_shape === "s3",
-                        },
-                        limits: {
-                            ...(fixture.mode === "direct_put"
-                                ? { "upload.service_proxied.max_content_bytes": 0 }
-                                : {}),
-                            ...(fixture.inline_limit === undefined
-                                ? {}
-                                : {
-                                      "commit.max_inline_content_bytes_per_operation": fixture.inline_limit,
-                                  }),
-                        },
-                    };
-                else if (path.endsWith("/uploads")) {
-                    assert.equal((await request.json()).mode, fixture.mode);
-                    value = {
+            },
+        };
+        const counts = { payload: 0, abort: 0, complete: 0 };
+        const bodies: Uint8Array[] = [];
+        const claim = {
+            kind: "blob_v1",
+            owner_namespace_id: "demo",
+            content_id: "con_00000000000000000000000000000001",
+            size_bytes: fixture.size_bytes,
+            checksum: { algorithm: fixture.algorithm, value: fixture.checksum },
+        };
+        const session = {
+            namespace_id: "demo",
+            upload_id: "upl_test",
+            mode: fixture.mode,
+        };
+        const access = {
+            kind: "presigned_url",
+            method: "PUT",
+            url: "http://objects.test/object",
+            headers: {},
+            expires_at_ms: 2000000000000,
+        };
+        const send: typeof fetch = async (input, init) => {
+            const url = new URL(input instanceof Request ? input.url : input.toString());
+            const path = url.pathname,
+                headers = new Headers(init?.headers);
+            assert.ok(init?.signal, "every transport needs a signal");
+            if (path === "/object") {
+                assert.equal(headers.has("authorization"), false);
+                assert.equal(headers.has("X-Private"), false);
+            } else {
+                assert.equal(headers.get("authorization"), "Bearer private-token");
+                if (!path.endsWith("/capabilities")) assert.ok(path.startsWith("/v0/namespaces/demo/"));
+            }
+            // Construct a real Request: Node rejects a stream if duplex was lost.
+            const request = new Request(url, init);
+            let value: unknown;
+            if (path.endsWith("/capabilities"))
+                value = {
+                    protocol_version: "v0",
+                    api_groups: ["filesystem/v0"],
+                    features: {
+                        "filesystem.commits.inline_content": fixture.inline_limit !== undefined,
+                        "filesystem.uploads.direct_put": fixture.store_shape !== "local",
+                        "filesystem.uploads.direct_multipart": fixture.store_shape === "s3",
+                    },
+                    limits: {
+                        ...(fixture.mode === "direct_put"
+                            ? { "upload.service_proxied.max_content_bytes": 0 }
+                            : {}),
+                        ...(fixture.inline_limit === undefined
+                            ? {}
+                            : {
+                                  "commit.max_inline_content_bytes_per_operation": fixture.inline_limit,
+                              }),
+                    },
+                };
+            else if (path.endsWith("/uploads")) {
+                assert.equal((await request.json()).mode, fixture.mode);
+                value = {
+                    ...session,
+                    status: "open",
+                    expires_at_ms: 2000000000000,
+                    checksum_algorithm: fixture.algorithm,
+                    ...(fixture.mode === "direct_multipart" ? { part_size_bytes: 4 } : {}),
+                    ...(fixture.mode === "direct_put" ? { access } : {}),
+                };
+            } else if (path.endsWith("/parts")) {
+                const { parts } = await request.json();
+                assert.equal(parts.length, 1);
+                assert.ok(position <= bodies.length * 4 + 4, "send a part before reading the next");
+                value = {
+                    ...session,
+                    parts: [{ part_number: parts[0].part_number, access }],
+                };
+            } else if (path === "/object" || path.endsWith("/content")) {
+                counts.payload++;
+                if (fixture.size !== null)
+                    assert.ok(
+                        !(init?.body instanceof ReadableStream),
+                        "small known bodies must remain portable in browsers",
+                    );
+                bodies.push(new Uint8Array(await request.arrayBuffer()));
+                if (fixture.fault === "timeout")
+                    return new Promise<Response>((_, reject) => {
+                        if (init!.signal!.aborted) reject(init!.signal!.reason);
+                        else
+                            init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), {
+                                once: true,
+                            });
+                    });
+                if (fixture.fault === "payload_error") return new Response(null, { status: 503 });
+                return Response.json(
+                    {
                         ...session,
                         status: "open",
                         expires_at_ms: 2000000000000,
                         checksum_algorithm: fixture.algorithm,
-                        ...(fixture.mode === "direct_multipart" ? { part_size_bytes: 4 } : {}),
-                        ...(fixture.mode === "direct_put" ? { access } : {}),
-                    };
-                } else if (path.endsWith("/parts")) {
-                    const { parts } = await request.json();
-                    assert.equal(parts.length, 1);
-                    assert.ok(position <= bodies.length * 4 + 4, "send a part before reading the next");
-                    value = {
-                        ...session,
-                        parts: [{ part_number: parts[0].part_number, access }],
-                    };
-                } else if (path === "/object" || path.endsWith("/content")) {
-                    counts.payload++;
-                    if (fixture.size !== null)
-                        assert.ok(
-                            !(init?.body instanceof ReadableStream),
-                            "small known bodies must remain portable in browsers",
-                        );
-                    bodies.push(new Uint8Array(await request.arrayBuffer()));
-                    if (fixture.fault === "timeout")
-                        return new Promise<Response>((_, reject) => {
-                            if (init!.signal!.aborted) reject(init!.signal!.reason);
-                            else
-                                init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), {
-                                    once: true,
-                                });
-                        });
-                    if (fixture.fault === "payload_error") return new Response(null, { status: 503 });
-                    return Response.json(
-                        {
-                            ...session,
-                            status: "open",
-                            expires_at_ms: 2000000000000,
-                            checksum_algorithm: fixture.algorithm,
-                            content_ref: claim,
-                        },
-                        { headers: { ETag: "test-etag" } },
-                    );
-                } else if (path.endsWith("/abort")) {
-                    counts.abort++;
-                    value = { ...session, status: "aborted", aborted_at_ms: 0 };
-                } else if (path.endsWith("/complete")) {
-                    counts.complete++;
-                    assert.ok(eof);
-                    const completion = await request.json();
-                    if (fixture.mode !== "service_proxied")
-                        assert.deepEqual(completion.content, {
-                            size_bytes: fixture.size_bytes,
-                            checksum: claim.checksum,
-                        });
-                    if (fixture.fault === "completion_error") return new Response(null, { status: 503 });
-                    value = {
-                        ...session,
-                        status: "completed",
-                        completed_at_ms: 0,
                         content_ref: claim,
-                        content_token: { token: "retained-token", content_ref: claim },
-                    };
-                } else throw new Error(`unexpected ${url}`);
-                return Response.json(value);
-            };
-            const options = {
-                baseUrl: "http://api.test",
-                token: "private-token",
-                headers: { "X-Private": "secret" },
-                fetch: send,
-            };
-            const requestOptions = {
-                timeoutInSeconds: fixture.fault === "timeout" ? 0.02 : 7,
-                maxRetries: 3,
-            };
-            const result = browser
-                ? new BrowserClient(options).files.prepareStream(
-                      {
-                          namespace_alias: "demo",
-                          content: source,
-                          size_bytes: fixture.size ?? undefined,
-                      },
-                      requestOptions,
-                  )
-                : new LoonFSClient(options).files.prepareStream(
-                      {
-                          namespace_id: "demo",
-                          content: source,
-                          size_bytes: fixture.size ?? undefined,
-                      },
-                      requestOptions,
-                  );
-            if (fixture.error) {
-                await assert.rejects(result, (error) => !(error instanceof assert.AssertionError));
-                assert.equal(counts.abort, fixture.fault === "completion_error" ? 0 : 1);
-                assert.equal(counts.complete, fixture.fault === "completion_error" ? 1 : 0);
-                if (fixture.fault === "payload_error") assert.equal(counts.payload, 1);
-            } else {
-                const prepared = await result;
-                assert.ok("contentRef" in prepared);
-                assert.equal(prepared.contentToken?.token, "retained-token");
-                assert.equal(Buffer.concat(bodies).toString(), fixture.content);
-                assert.equal(counts.complete, 1);
-                assert.equal(counts.abort, 0);
-            }
-            assert.ok(closed, "SDK consumes or returns the source");
-        });
-    }
+                    },
+                    { headers: { ETag: "test-etag" } },
+                );
+            } else if (path.endsWith("/abort")) {
+                counts.abort++;
+                value = { ...session, status: "aborted", aborted_at_ms: 0 };
+            } else if (path.endsWith("/complete")) {
+                counts.complete++;
+                assert.ok(eof);
+                const completion = await request.json();
+                if (fixture.mode !== "service_proxied")
+                    assert.deepEqual(completion.content, {
+                        size_bytes: fixture.size_bytes,
+                        checksum: claim.checksum,
+                    });
+                if (fixture.fault === "completion_error") return new Response(null, { status: 503 });
+                value = {
+                    ...session,
+                    status: "completed",
+                    completed_at_ms: 0,
+                    content_ref: claim,
+                    content_token: { token: "retained-token", content_ref: claim },
+                };
+            } else throw new Error(`unexpected ${url}`);
+            return Response.json(value);
+        };
+        const options = {
+            baseUrl: "http://api.test",
+            token: "private-token",
+            headers: { "X-Private": "secret" },
+            fetch: send,
+        };
+        const requestOptions = {
+            timeoutInSeconds: fixture.fault === "timeout" ? 0.02 : 7,
+            maxRetries: 3,
+        };
+        const result = new LoonFSClient(options).files.prepareStream(
+            {
+                namespace_id: "demo",
+                content: source,
+                size_bytes: fixture.size ?? undefined,
+            },
+            requestOptions,
+        );
+        if (fixture.error) {
+            await assert.rejects(result, (error) => !(error instanceof assert.AssertionError));
+            assert.equal(counts.abort, fixture.fault === "completion_error" ? 0 : 1);
+            assert.equal(counts.complete, fixture.fault === "completion_error" ? 1 : 0);
+            if (fixture.fault === "payload_error") assert.equal(counts.payload, 1);
+        } else {
+            const prepared = await result;
+            assert.ok("contentRef" in prepared);
+            assert.equal(prepared.contentToken?.token, "retained-token");
+            assert.equal(Buffer.concat(bodies).toString(), fixture.content);
+            assert.equal(counts.complete, 1);
+            assert.equal(counts.abort, 0);
+        }
+        assert.ok(closed, "SDK consumes or returns the source");
+    });
+}
 
 test("upload cancellation interrupts a stalled source without waiting for its cleanup", async () => {
     const scope = new TransferScope({ timeoutInSeconds: 0.02 });
