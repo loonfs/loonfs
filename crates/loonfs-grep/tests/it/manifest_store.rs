@@ -15,7 +15,8 @@ use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
+    replace_object, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_types::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use std::assert_matches;
@@ -278,13 +279,13 @@ async fn write_hint(store: &impl ObjectStore, namespace_id: &NamespaceId, manife
         namespace_id: namespace_id.clone(),
         manifest_no,
     };
-    store
-        .put_overwrite(
-            &hint_key(namespace_id),
-            Bytes::from(encode_grep_hint(hint).expect("hint").into_bytes()),
-        )
-        .await
-        .expect("write hint");
+    replace_object(
+        &store,
+        &hint_key(namespace_id),
+        Bytes::from(encode_grep_hint(hint).expect("hint").into_bytes()),
+    )
+    .await
+    .expect("write hint");
 }
 
 fn state(

@@ -509,15 +509,6 @@ where
         result
     }
 
-    async fn put_overwrite(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put_with(key, ObjectOperationKind::Put, bytes, PutMode::Overwrite)
-            .await
-    }
-
     async fn put_if_absent(
         &self,
         key: &str,
@@ -672,7 +663,6 @@ fn push_trace_event(
 
 fn put_mode_kind(mode: &PutMode) -> ObjectOperationKind {
     match mode {
-        PutMode::Overwrite => ObjectOperationKind::Put,
         PutMode::CreateIfAbsent => ObjectOperationKind::PutIfAbsent,
         PutMode::CompareAndSwap { .. } => ObjectOperationKind::CompareAndSwap,
     }
@@ -775,7 +765,7 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         store
-            .put_overwrite("a", Bytes::from_static(b"abc"))
+            .put_if_absent("a", Bytes::from_static(b"abc"))
             .await
             .expect("put");
         store.get("a", None).await.expect("get");
@@ -799,7 +789,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 1,
-                op_kind: Some(ObjectOperationKind::Put),
+                op_kind: Some(ObjectOperationKind::PutIfAbsent),
                 key_contains: None,
                 fault: ObjectStoreFault::PutSucceedsButResponseLost,
             }],
@@ -807,7 +797,7 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         assert_matches!(
-            store.put_overwrite("a", Bytes::from_static(b"abc")).await,
+            store.put_if_absent("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport { .. })
         );
         assert_eq!(
@@ -823,7 +813,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 1,
-                op_kind: Some(ObjectOperationKind::Put),
+                op_kind: Some(ObjectOperationKind::PutIfAbsent),
                 key_contains: None,
                 fault: ObjectStoreFault::PutReturnsTransientError,
             }],
@@ -831,7 +821,7 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         assert_matches!(
-            store.put_overwrite("a", Bytes::from_static(b"abc")).await,
+            store.put_if_absent("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport { .. })
         );
         assert_eq!(store.inner().get("a", None).await.expect("inner get"), None);
@@ -851,12 +841,16 @@ mod tests {
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        store
-            .put_overwrite("a", Bytes::from_static(b"old"))
+        let old = store
+            .put_if_absent("a", Bytes::from_static(b"old"))
             .await
             .expect("put old");
         store
-            .put_overwrite("a", Bytes::from_static(b"new-value"))
+            .compare_and_swap(
+                "a",
+                &old.etag.expect("etag"),
+                Bytes::from_static(b"new-value"),
+            )
             .await
             .expect("put new");
         let body = store
@@ -886,11 +880,11 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         store
-            .put_overwrite("prefix/a", Bytes::from_static(b"a"))
+            .put_if_absent("prefix/a", Bytes::from_static(b"a"))
             .await
             .expect("put a");
         store
-            .put_overwrite("prefix/b", Bytes::from_static(b"b"))
+            .put_if_absent("prefix/b", Bytes::from_static(b"b"))
             .await
             .expect("put b");
         let keys = store.list_prefix("prefix/").await.expect("list");

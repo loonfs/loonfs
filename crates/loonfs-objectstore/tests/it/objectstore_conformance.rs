@@ -112,13 +112,13 @@ async fn local_fs_lists_child_prefixes_inside_its_key_prefix() {
     let neighbour = LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-b"))
         .expect("create neighbouring local object store");
     neighbour
-        .put_overwrite("outside/1", Bytes::from_static(b"outside"))
+        .put_if_absent("outside/1", Bytes::from_static(b"outside"))
         .await
         .expect("write outside the key prefix");
 
     assert_child_prefix_contract(&store).await;
     store
-        .put_overwrite("inside/1", Bytes::from_static(b"inside"))
+        .put_if_absent("inside/1", Bytes::from_static(b"inside"))
         .await
         .expect("write inside the key prefix");
     let root = child_page(&store, "", None, 10).await;
@@ -252,11 +252,12 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
     #[allow(clippy::disallowed_methods)]
     // Wall-clock bounds a live-provider stall check; no protocol time depends on it.
     let started = std::time::Instant::now();
+    let run_id = loonfs_types::generated_id("runtime");
     for round in 0..5u32 {
-        let key = format!("runtime-affinity-probe/round-{round}.bin");
+        let key = format!("runtime-affinity-probe/{run_id}/round-{round}.bin");
         let bytes = Bytes::from(format!("round {round}"));
         runtime_a
-            .block_on(store.put_overwrite(&key, bytes))
+            .block_on(store.put_if_absent(&key, bytes))
             .expect("put on runtime a");
         let head = runtime_b
             .block_on(store.head(&key))
@@ -326,7 +327,7 @@ async fn assert_child_prefix_contract(store: &dyn ObjectStore) {
     .map(|key| format!("{prefix}{key}"));
     for key in &keys {
         store
-            .put_overwrite(key, Bytes::from_static(b"listed"))
+            .put_if_absent(key, Bytes::from_static(b"listed"))
             .await
             .expect("write child-prefix fixture");
     }
@@ -390,7 +391,7 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
     ];
     for key in &keys {
         store
-            .put_overwrite(key, Bytes::from_static(b"listed"))
+            .put_if_absent(key, Bytes::from_static(b"listed"))
             .await
             .expect("write start-after fixture");
     }
@@ -858,10 +859,6 @@ async fn assert_rejects_invalid_keys_consistently(store: &dyn ObjectStore) {
         assert_invalid_key(
             key,
             store.put_if_absent(key, Bytes::from_static(b"oops")).await,
-        );
-        assert_invalid_key(
-            key,
-            store.put_overwrite(key, Bytes::from_static(b"oops")).await,
         );
         assert_invalid_key(
             key,

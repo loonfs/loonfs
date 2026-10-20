@@ -149,7 +149,7 @@ mod tests {
     use loonfs_objectstore::ObjectStore;
     use loonfs_objectstore::ObjectStoreErrorKind;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
+        replace_object, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
     };
     use loonfs_types::format::control::HintPayload;
     use loonfs_types::NamespaceId;
@@ -179,8 +179,7 @@ mod tests {
     }
 
     async fn write_bytes(store: &LocalFsStore, object_key: &str, bytes: Vec<u8>) {
-        store
-            .put_overwrite(object_key, Bytes::from(bytes))
+        replace_object(&store, object_key, Bytes::from(bytes))
             .await
             .expect("write test object");
     }

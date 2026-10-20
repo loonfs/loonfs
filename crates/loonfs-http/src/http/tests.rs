@@ -494,8 +494,8 @@ use loonfs_test_support::provider_detail::{
     assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
 };
 use loonfs_test_support::stores::{
-    delegate_object_store, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
-    OperationContext, OperationKind, OperationSelector,
+    delegate_object_store, replace_object, BufferWatchStore, FailStore, InjectedError,
+    KeyPredicate, OperationContext, OperationKind, OperationSelector,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -921,13 +921,13 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
         seed_grep_error_namespace_on(&writer, namespace_id).await;
     }
 
-    store
-        .put_overwrite(
-            &grep_hint_key(&corrupt_pointer),
-            Bytes::from_static(b"corrupt grep pointer"),
-        )
-        .await
-        .expect("write corrupt grep pointer");
+    replace_object(
+        &store,
+        &grep_hint_key(&corrupt_pointer),
+        Bytes::from_static(b"corrupt grep pointer"),
+    )
+    .await
+    .expect("write corrupt grep pointer");
 
     write_grep_hint(
         &*store,
@@ -938,13 +938,13 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
     .await;
 
     let manifest_no = loonfs_types::ManifestNo(12);
-    store
-        .put_overwrite(
-            &grep_manifest_key(&corrupt_manifest, &manifest_no),
-            Bytes::from_static(b"corrupt grep manifest"),
-        )
-        .await
-        .expect("write corrupt grep manifest");
+    replace_object(
+        &store,
+        &grep_manifest_key(&corrupt_manifest, &manifest_no),
+        Bytes::from_static(b"corrupt grep manifest"),
+    )
+    .await
+    .expect("write corrupt grep manifest");
     write_grep_hint(
         &*store,
         &corrupt_manifest,
@@ -2656,13 +2656,13 @@ async fn write_grep_hint(
         manifest_no,
     })
     .expect("build grep pointer");
-    store
-        .put_overwrite(
-            &grep_hint_key(stored_namespace_id),
-            Bytes::from(envelope.into_bytes()),
-        )
-        .await
-        .expect("write grep pointer");
+    replace_object(
+        &store,
+        &grep_hint_key(stored_namespace_id),
+        Bytes::from(envelope.into_bytes()),
+    )
+    .await
+    .expect("write grep pointer");
 }
 
 /// A deployment that answers searches over an index it does not maintain:
@@ -4359,8 +4359,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             );
             let mut changed = payload.clone();
             changed[loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES)] ^= 1;
-            plain
-                .put_overwrite(&key, changed.into())
+            replace_object(&plain, &key, changed.into())
                 .await
                 .expect("corrupt unread bytes");
         }

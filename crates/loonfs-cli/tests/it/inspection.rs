@@ -164,7 +164,7 @@ fn doctor_renders_every_check_before_exiting_for_a_bad_config() {
 }
 
 #[test]
-fn doctor_write_check_appends_the_existing_fourteen_check_probe() {
+fn doctor_write_check_appends_the_existing_thirteen_check_probe() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
@@ -181,7 +181,7 @@ fn doctor_write_check_appends_the_existing_fourteen_check_probe() {
             .as_array()
             .expect("store probe checks")
             .len(),
-        14
+        13
     );
 }
 

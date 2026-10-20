@@ -424,7 +424,6 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
         counts.compare_and_swaps, 1,
         "one swap freezes the reference the write produced"
     );
-    assert_eq!(counts.overwrite_puts, 0, "a session is never clobbered");
     assert_eq!(
         sessions.count(OperationSelector::Read),
         0,

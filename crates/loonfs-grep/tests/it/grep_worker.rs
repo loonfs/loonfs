@@ -23,8 +23,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationContext,
-    OperationKind, OperationSelector, RecordedOperation, RecordingStore,
+    replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
+    OperationContext, OperationKind, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{
@@ -954,19 +954,19 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     };
     *expires_at_ms = Some(record.created_at_ms);
     let expired = record;
-    store
-        .put_overwrite(
-            &key,
-            Bytes::from(
-                loonfs_types::format::control::encode_control_state(
-                    loonfs_types::format::control::ControlObjectKind::Pin,
-                    &expired,
-                )
-                .expect("encode record"),
-            ),
-        )
-        .await
-        .expect("write the expired record");
+    replace_object(
+        &store,
+        &key,
+        Bytes::from(
+            loonfs_types::format::control::encode_control_state(
+                loonfs_types::format::control::ControlObjectKind::Pin,
+                &expired,
+            )
+            .expect("encode record"),
+        ),
+    )
+    .await
+    .expect("write the expired record");
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     assert!(control::pin(&store, &namespace_id, &checkpoint_id)
@@ -1457,13 +1457,13 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     worker.enable(&namespace_id).await.expect("enable");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    store
-        .put_overwrite(
-            &hint_key(&namespace_id),
-            Bytes::from_static(b"corrupt hint"),
-        )
-        .await
-        .expect("poison the grep manifest");
+    replace_object(
+        &store,
+        &hint_key(&namespace_id),
+        Bytes::from_static(b"corrupt hint"),
+    )
+    .await
+    .expect("poison the grep manifest");
 
     let actor = loonfs_test_support::test_actor();
     let (build, commit) = tokio::join!(
@@ -1521,26 +1521,26 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
     );
 
     let corrupt_manifest_no = loonfs_types::ManifestNo(21);
-    store
-        .put_overwrite(
-            &manifest_key(&namespace_id, &corrupt_manifest_no),
-            Bytes::from_static(b"corrupt manifest"),
-        )
-        .await
-        .expect("write corrupt manifest");
+    replace_object(
+        &store,
+        &manifest_key(&namespace_id, &corrupt_manifest_no),
+        Bytes::from_static(b"corrupt manifest"),
+    )
+    .await
+    .expect("write corrupt manifest");
     write_hint(&*store, &namespace_id, corrupt_manifest_no).await;
     assert_corrupt_index_error(
         "corrupt manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    store
-        .put_overwrite(
-            &hint_key(&namespace_id),
-            Bytes::from_static(b"corrupt hint"),
-        )
-        .await
-        .expect("write corrupt hint");
+    replace_object(
+        &store,
+        &hint_key(&namespace_id),
+        Bytes::from_static(b"corrupt hint"),
+    )
+    .await
+    .expect("write corrupt hint");
     assert_corrupt_index_error(
         "corrupt hint",
         new_query(&store, &namespace_id, &request("needle")).await,
@@ -1668,13 +1668,13 @@ async fn write_manifest_without_checkpoint_id(
     document["payload"]["manifest_no"] = serde_json::json!(manifest_no);
     let payload = serde_json::to_vec(&document["payload"]).expect("payload");
     document["payload_checksum"] = serde_json::json!(sha256_digest(&payload));
-    store
-        .put_overwrite(
-            &manifest_key(namespace_id, &manifest_no),
-            Bytes::from(serde_json::to_vec(&document).expect("encode corrupt manifest document")),
-        )
-        .await
-        .expect("write manifest missing checkpoint id");
+    replace_object(
+        &store,
+        &manifest_key(namespace_id, &manifest_no),
+        Bytes::from(serde_json::to_vec(&document).expect("encode corrupt manifest document")),
+    )
+    .await
+    .expect("write manifest missing checkpoint id");
     manifest_no
 }
 
@@ -1689,17 +1689,17 @@ async fn write_hint(
     })
     .expect("build hint")
     .into_envelope();
-    store
-        .put_overwrite(
-            &hint_key(namespace_id),
-            Bytes::from(
-                encode_grep_hint(envelope.payload().clone())
-                    .expect("encode hint")
-                    .into_bytes(),
-            ),
-        )
-        .await
-        .expect("write hint");
+    replace_object(
+        &store,
+        &hint_key(namespace_id),
+        Bytes::from(
+            encode_grep_hint(envelope.payload().clone())
+                .expect("encode hint")
+                .into_bytes(),
+        ),
+    )
+    .await
+    .expect("write hint");
 }
 
 #[tokio::test]
@@ -2573,13 +2573,13 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .put_if_absent(&unknown, Bytes::from_static(b"unknown"))
         .await
         .expect("unknown key");
-    store
-        .put_overwrite(
-            &hint_key(&namespace_id),
-            Bytes::from_static(b"invalid hint"),
-        )
-        .await
-        .expect("corrupt hint");
+    replace_object(
+        &store,
+        &hint_key(&namespace_id),
+        Bytes::from_static(b"invalid hint"),
+    )
+    .await
+    .expect("corrupt hint");
     recording.reset();
     assert_matches!(
         collector.gc_namespace(&namespace_id, u64::MAX).await,

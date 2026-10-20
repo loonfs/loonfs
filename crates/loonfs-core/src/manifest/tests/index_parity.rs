@@ -1,6 +1,7 @@
 //! Checkpoint secondary-index parity and manifest descriptor validation.
 
 use super::*;
+use loonfs_test_support::stores::replace_object;
 use loonfs_types::Checksum;
 use std::assert_matches;
 
@@ -34,13 +35,13 @@ pub(super) async fn rewrite_manifest_segment(
             .expect("rewritten rows should encode");
     }
     let built = builder.build().expect("rewritten segment");
-    store
-        .put_overwrite(
-            &metadata_segment_object_key(descriptor),
-            Bytes::from(built.bytes.clone()),
-        )
-        .await
-        .expect("overwrite segment");
+    replace_object(
+        &store,
+        &metadata_segment_object_key(descriptor),
+        Bytes::from(built.bytes.clone()),
+    )
+    .await
+    .expect("overwrite segment");
 
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
@@ -84,8 +85,7 @@ pub(super) async fn overwrite_manifest(
         encode_namespace_manifest_json(manifest.into_payload())
             .expect("updated manifest")
             .into_parts();
-    store
-        .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+    replace_object(&store, &manifest_key, Bytes::from(manifest_bytes))
         .await
         .expect("overwrite manifest");
 }
@@ -637,8 +637,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     let manifest_bytes = encode_namespace_manifest_json(payload)
         .expect("updated manifest")
         .into_bytes();
-    store
-        .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+    replace_object(&store, &manifest_key, Bytes::from(manifest_bytes))
         .await
         .expect("overwrite manifest");
 
@@ -704,13 +703,13 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .flat_map(|run| &mut run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .expect("inode segment");
-    store
-        .put_overwrite(
-            &metadata_segment_object_key(descriptor),
-            Bytes::from(built.bytes.clone()),
-        )
-        .await
-        .expect("replace inode segment");
+    replace_object(
+        &store,
+        &metadata_segment_object_key(descriptor),
+        Bytes::from(built.bytes.clone()),
+    )
+    .await
+    .expect("replace inode segment");
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;
@@ -882,8 +881,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     let manifest_bytes = encode_namespace_manifest_json(payload)
         .expect("updated manifest")
         .into_bytes();
-    store
-        .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+    replace_object(&store, &manifest_key, Bytes::from(manifest_bytes))
         .await
         .expect("overwrite manifest");
 

@@ -201,7 +201,7 @@ mod tests {
         let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
-            .put_overwrite(&hint_key, Bytes::from_static(br#"{"ok":true}"#))
+            .put_if_absent(&hint_key, Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect("write scoped object");
 
@@ -453,7 +453,7 @@ mod tests {
             .into_shared();
 
         let error = store
-            .put_overwrite("../hint.json", Bytes::from_static(br#"{"ok":true}"#))
+            .put_if_absent("../hint.json", Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect_err("traversal key should be rejected");
         assert_matches!(

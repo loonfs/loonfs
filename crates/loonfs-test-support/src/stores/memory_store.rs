@@ -98,7 +98,6 @@ impl ObjectStore for MemoryStore {
             .expect("objects lock should not be poisoned");
         let current = objects.entries.get(key);
         let accepts = match mode {
-            PutMode::Overwrite => true,
             PutMode::CreateIfAbsent => current.is_none(),
             PutMode::CompareAndSwap { expected_etag } => {
                 current.is_some_and(|object| object.metadata.etag.as_ref() == Some(&expected_etag))

@@ -1404,7 +1404,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
+        replace_object, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use loonfs_types::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use std::collections::BTreeMap;
@@ -1503,8 +1503,7 @@ mod tests {
         let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
-        store
-            .put_overwrite(&key, Bytes::from(bytes))
+        replace_object(&store, &key, Bytes::from(bytes))
             .await
             .expect("corrupt allocation");
 

@@ -323,9 +323,6 @@ impl LocalFsStore {
             object_key: key.to_owned(),
         };
         match mode {
-            PutMode::Overwrite => fs::rename(temp_path, path)
-                .await
-                .map_err(|err| io_error(key, err)),
             // `hard_link` fails if the key exists, which is exactly the
             // create-if-absent precondition.
             PutMode::CreateIfAbsent => fs::hard_link(temp_path, path)
@@ -472,7 +469,6 @@ impl LocalFsStore {
         };
 
         match mode {
-            PutMode::Overwrite => Self::replace_object(key, &self.root, &path, bytes).await?,
             PutMode::CreateIfAbsent => {
                 if fs::try_exists(&path)
                     .await
@@ -1099,7 +1095,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
-            .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
+            .put(&key, Bytes::from_static(b"{}"), PutMode::CreateIfAbsent)
             .await
             .expect("seed object");
 
@@ -1164,7 +1160,7 @@ mod tests {
         let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
         store
-            .put(&key, payload.clone(), PutMode::Overwrite)
+            .put(&key, payload.clone(), PutMode::CreateIfAbsent)
             .await
             .expect("seed object");
 
@@ -1225,14 +1221,16 @@ mod tests {
         let key = hint(
             &loonfs_types::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
         );
-        store
+        let mut etag = store
             .put(
                 &key,
                 Bytes::from(vec![0; PAYLOAD_BYTES]),
-                PutMode::Overwrite,
+                PutMode::CreateIfAbsent,
             )
             .await
-            .expect("seed replacement object");
+            .expect("seed replacement object")
+            .etag
+            .expect("seed etag");
 
         let round_barrier = Arc::new(Barrier::new(READER_COUNT + 1));
         let mut readers = Vec::new();
@@ -1259,14 +1257,18 @@ mod tests {
 
         for version in 1..=REPLACEMENT_COUNT {
             round_barrier.wait().await;
-            store
+            etag = store
                 .put(
                     &key,
                     Bytes::from(vec![version; PAYLOAD_BYTES]),
-                    PutMode::Overwrite,
+                    PutMode::CompareAndSwap {
+                        expected_etag: etag,
+                    },
                 )
                 .await
-                .expect("replace object");
+                .expect("replace object")
+                .etag
+                .expect("replacement etag");
             round_barrier.wait().await;
         }
 
@@ -1363,7 +1365,7 @@ mod tests {
         let key =
             hint(&loonfs_types::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
         store
-            .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
+            .put(&key, Bytes::from_static(b"{}"), PutMode::CreateIfAbsent)
             .await
             .expect("put object");
 
@@ -1387,7 +1389,7 @@ mod tests {
             .put(
                 "namespaces/ns-scratch/.hint.json.tmp-9-9",
                 Bytes::from_static(b"x"),
-                PutMode::Overwrite,
+                PutMode::CreateIfAbsent,
             )
             .await;
         assert_matches!(temp_shaped, Err(ObjectStoreError::InvalidKey { .. }));

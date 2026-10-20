@@ -42,7 +42,7 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     }
     for stray in ["namespaces/Not-An-Id/hint.json", "namespaces/stray-object"] {
         store
-            .put_overwrite(stray, Bytes::from_static(b"stray"))
+            .put_if_absent(stray, Bytes::from_static(b"stray"))
             .await
             .expect("write a stray key");
     }

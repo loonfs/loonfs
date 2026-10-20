@@ -32,6 +32,20 @@ pub use namespace_overlap_store::{NamespaceOverlapInterceptor, NamespaceOverlapS
 pub use operation::{OperationContext, OperationKind, OperationSelector, RecordedOperation};
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 
+use bytes::Bytes;
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+
+/// Replaces the object at `key` with `bytes` by deleting it and creating it
+/// again, for a test that corrupts or rewrites a stored object.
+pub async fn replace_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    bytes: Bytes,
+) -> Result<ObjectMetadata, ObjectStoreError> {
+    store.delete(key).await?;
+    store.put_if_absent(key, bytes).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,7 +80,7 @@ mod tests {
         ];
         for key in &keys {
             store
-                .put_overwrite(key, Bytes::from_static(b"fixture"))
+                .put_if_absent(key, Bytes::from_static(b"fixture"))
                 .await
                 .expect("write fixture");
         }

@@ -26,7 +26,7 @@ async fn namespace_listing_costs_one_request_per_page() {
             metadata_manifest_object(namespace_id, &ManifestNo(2)),
         ] {
             store
-                .put_overwrite(&key, Bytes::from_static(b"object"))
+                .put_if_absent(&key, Bytes::from_static(b"object"))
                 .await
                 .expect("write namespace object");
         }

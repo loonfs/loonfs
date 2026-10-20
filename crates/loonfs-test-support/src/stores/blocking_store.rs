@@ -162,7 +162,11 @@ mod tests {
             let store = Arc::clone(&store);
             async move {
                 store
-                    .put("parked", Bytes::from_static(b"body"), PutMode::Overwrite)
+                    .put(
+                        "parked",
+                        Bytes::from_static(b"body"),
+                        PutMode::CreateIfAbsent,
+                    )
                     .await
             }
         });
