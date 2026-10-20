@@ -1,27 +1,16 @@
 //! Maintenance from a runtime that holds no writer session for the
 //! namespace.
 
-use crate::common::SettableWallClock;
 use loonfs::{
-    CreateCheckpointOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore,
-    WalFoldStepOutcome, WallClock,
+    CreateCheckpointOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore, WalFoldStepOutcome,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use std::assert_matches;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-#[derive(Debug)]
-struct FixedWallClock(u64);
-
-impl WallClock for FixedWallClock {
-    fn now_ms(&self) -> u64 {
-        self.0
-    }
-}
 
 #[tokio::test]
 async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
@@ -29,7 +18,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     let directory = tempfile::tempdir().expect("directory");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(directory.path()).expect("local store"));
-    let clock = Arc::new(SettableWallClock(AtomicU64::new(COMMITTED_AT_MS)));
+    let clock = Arc::new(ManualClock::new(COMMITTED_AT_MS));
     let namespace_id = namespace_id("idle-tail");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
@@ -64,9 +53,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     };
     let idle_ms = MaintainMetadataOptions::default().idle_fold_after_ms;
 
-    clock
-        .0
-        .store(COMMITTED_AT_MS + idle_ms - 1, Ordering::SeqCst);
+    clock.set_ms(COMMITTED_AT_MS + idle_ms - 1);
     assert_eq!(
         maintenance
             .maintain_metadata(&namespace_id)
@@ -76,7 +63,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         WalFoldStepOutcome::NotNeeded,
         "a tail younger than the idle period waits"
     );
-    clock.0.store(COMMITTED_AT_MS + idle_ms, Ordering::SeqCst);
+    clock.set_ms(COMMITTED_AT_MS + idle_ms);
     assert_eq!(
         maintenance
             .maintain_metadata_with_options(&namespace_id, &disabled)
@@ -116,7 +103,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let clock = Arc::new(FixedWallClock(u64::MAX / 2));
+    let clock = Arc::new(ManualClock::new(u64::MAX / 2));
     let namespace_id = namespace_id("wall-clock");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
@@ -137,7 +124,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .await
             .expect("directory")
             .committed_at_ms,
-        clock.0
+        clock.now_ms()
     );
     let system = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("system"))
@@ -162,8 +149,8 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         )
         .await
         .expect("checkpoint");
-    assert_eq!(checkpoint.created_at_ms, clock.0);
-    assert_eq!(checkpoint.expires_at_ms, Some(clock.0 + 1_000));
+    assert_eq!(checkpoint.created_at_ms, clock.now_ms());
+    assert_eq!(checkpoint.expires_at_ms, Some(clock.now_ms() + 1_000));
     let derived = writer.maintenance(loonfs_test_support::ids::writer_id("derived"));
     for maintenance in [future, derived] {
         let object_key = loonfs_objectstore::keys::metadata_segment(

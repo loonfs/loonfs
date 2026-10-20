@@ -1,7 +1,7 @@
-//! Monotonic timers and bounded transport retry policy.
+//! Monotonic timers, the wall clock, and bounded transport retry policy.
 
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Supplies monotonic milliseconds for retry deadlines and deterministic test injection.
 pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
@@ -55,6 +55,38 @@ fn monotonic_now() -> Duration {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);
     start.elapsed()
+}
+
+/// The wall clock a writer stamps into durable state.
+pub trait WallClock: std::fmt::Debug + Send + Sync {
+    /// Unix milliseconds now.
+    fn now_ms(&self) -> u64;
+}
+
+/// The system wall clock.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemWallClock;
+
+impl WallClock for SystemWallClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the runtime's wall clock reads the system time, and tests inject their own clock"
+    )]
+    fn now_ms(&self) -> u64 {
+        unix_ms(SystemTime::now())
+    }
+}
+
+/// Converts a wall-clock instant to unix milliseconds.
+fn unix_ms(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map(|elapsed| {
+            u64::try_from(elapsed.as_millis()).expect("unix milliseconds should fit u64")
+        })
+        .expect(
+            "the system clock should read after the unix epoch, which the runtime builder \
+             checks with `system_clock_reads_after_epoch` before it starts",
+        )
 }
 
 /// Bounded retry configuration for replay-safe transport operations.
@@ -175,5 +207,10 @@ mod tests {
         }
         let second = StdMonotonicTimer::default();
         assert!(second.monotonic_now_ms() >= earlier_ms);
+    }
+
+    #[test]
+    fn the_wall_clock_counts_milliseconds_from_the_unix_epoch() {
+        assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }

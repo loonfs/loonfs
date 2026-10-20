@@ -507,9 +507,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let clock = Arc::new(super::SettableWallClock(std::sync::atomic::AtomicU64::new(
-        0,
-    )));
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let runtime = loonfs::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())

@@ -1,8 +1,6 @@
 //! Read views that keep related reads on one captured namespace state.
 
-use crate::common::{
-    assert_core_error_kind, metadata_options, open_runtime_async, store, SettableWallClock,
-};
+use crate::common::{assert_core_error_kind, metadata_options, open_runtime_async, store};
 use loonfs::{
     CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest,
     PaginationPolicy, PutFileOptions, SnapshotPolicy,
@@ -999,12 +997,12 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
 
 #[tokio::test]
 async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use loonfs_test_support::clock::ManualClock;
     use std::sync::Arc;
 
     const EXPIRES_AT_MS: u64 = 1_750_000_060_000;
     let temp_dir = tempdir().expect("tempdir");
-    let clock = Arc::new(SettableWallClock(AtomicU64::new(1_750_000_000_000)));
+    let clock = Arc::new(ManualClock::new(1_750_000_000_000));
     let writer = LoonFs::builder_with_store(store(temp_dir.path()))
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-clock-writer"))
         .wall_clock(clock.clone())
@@ -1030,7 +1028,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .await
         .expect("create snapshot");
 
-    clock.0.store(EXPIRES_AT_MS - 1, Ordering::SeqCst);
+    clock.set_ms(EXPIRES_AT_MS - 1);
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         let view = namespace
@@ -1039,7 +1037,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
             .expect("the snapshot is live one millisecond before its expiry");
         assert_eq!(view.head_seq(), snapshot.captured_seq);
     }
-    clock.0.store(EXPIRES_AT_MS, Ordering::SeqCst);
+    clock.set_ms(EXPIRES_AT_MS);
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         assert_core_error_kind(

@@ -3,6 +3,7 @@
 use super::*;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
+use loonfs_test_support::clock::ManualClock;
 use std::assert_matches;
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
@@ -153,30 +154,6 @@ fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunSh
             (run.run_seq, run.tier, segments)
         })
         .collect()
-}
-
-/// Deterministic timer advancing a fixed step per reading, so publication
-/// budgets are consumed by observations instead of wall time.
-#[derive(Debug)]
-struct SteppingTimer {
-    now_ms: std::sync::atomic::AtomicU64,
-    step_ms: u64,
-}
-
-impl SteppingTimer {
-    fn new(step_ms: u64) -> Self {
-        Self {
-            now_ms: std::sync::atomic::AtomicU64::new(0),
-            step_ms,
-        }
-    }
-}
-
-impl crate::time::MonotonicTimer for SteppingTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.now_ms
-            .fetch_add(self.step_ms, std::sync::atomic::Ordering::SeqCst)
-    }
 }
 
 #[tokio::test]
@@ -1938,7 +1915,7 @@ async fn a_read_anchor_that_goes_stale_on_every_check_stops_at_the_contention_li
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    let stale = crate::time::Observation::now(Arc::new(SteppingTimer::new(
+    let stale = crate::time::Observation::now(Arc::new(ManualClock::stepping(
         crate::limits::READ_REVALIDATION_BOUND_MS + 1,
     )));
 
@@ -1992,7 +1969,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
-    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    let overrun = Deadline::start(Arc::new(ManualClock::stepping(20 * 60 * 1000)));
     let error = super::compaction_step::compaction_step_with_deadline(
         &store,
         &namespace_id,

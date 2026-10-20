@@ -18,18 +18,7 @@ use loonfs_test_support::stores::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// A wall clock a test moves by storing a new time.
-#[derive(Debug)]
-pub(crate) struct SettableWallClock(pub(crate) AtomicU64);
-
-impl loonfs::WallClock for SettableWallClock {
-    fn now_ms(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
 
 /// Returns the object key of the WAL object at `wal_no`.
 pub(crate) fn wal_key(namespace_id: &NamespaceId, wal_no: loonfs_types::WalNo) -> String {

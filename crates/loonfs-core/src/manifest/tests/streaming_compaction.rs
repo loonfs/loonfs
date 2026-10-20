@@ -16,9 +16,9 @@ use super::super::streaming_compaction::{
 };
 use super::*;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::time::Deadline;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
     OperationContext, OperationSelector, RecordedOperation, RecordingStore,
@@ -26,7 +26,7 @@ use loonfs_test_support::stores::{
 use std::assert_matches;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // -------------------------------------------------------------------------
 // The family-group mapping
@@ -1844,16 +1844,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     );
 }
 
-/// A monotonic clock that advances a second per reading.
-#[derive(Debug, Default)]
-struct SteppingTimer(AtomicU64);
-
-impl MonotonicTimer for SteppingTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.0.fetch_add(1_000, Ordering::SeqCst)
-    }
-}
-
 // -------------------------------------------------------------------------
 // Resource discipline
 // -------------------------------------------------------------------------
@@ -2951,7 +2941,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect("merge");
-    let timer = Arc::new(SteppingTimer(AtomicU64::new(0)));
+    let timer = Arc::new(ManualClock::stepping(1_000));
     let mut publication = CompactionPublication {
         compactor_epoch: epoch,
         compaction: Deadline::start(timer.clone()),
@@ -3019,9 +3009,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert!(reads_only_manifests(&store));
 
     publication.compactor_epoch = next_epoch;
-    timer
-        .0
-        .store(METADATA_COMPACTION_BUDGET_MS + 1, Ordering::SeqCst);
+    timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
     let outcome = finalize_metadata_compaction(
         &store,
         &namespace,
@@ -3036,7 +3024,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
     assert_eq!(store.counts().puts, 0);
 
-    timer.0.store(0, Ordering::SeqCst);
+    timer.set_ms(0);
     crate::commit_engine::NamespaceCommitEngine::new(
         namespace.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+pub use loonfs_types::{SystemWallClock, WallClock};
 
 /// The start of one bounded publication, measured on a monotonic timer.
 #[derive(Debug, Clone)]
@@ -108,30 +109,13 @@ impl Observation {
     }
 }
 
-/// The wall clock a writer stamps into durable state.
-pub trait WallClock: std::fmt::Debug + Send + Sync {
-    /// Unix milliseconds now.
-    fn now_ms(&self) -> u64;
-}
-
-/// The system wall clock.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemWallClock;
-
-impl WallClock for SystemWallClock {
-    fn now_ms(&self) -> u64 {
-        current_time_ms()
-    }
-}
-
 /// Reads the wall clock as unix milliseconds.
 ///
 /// Every timestamp that reaches durable state — commit, checkpoint, upload
 /// session, maintenance schedule — is stamped here and then carried as a
 /// value, so replay below this boundary stays deterministic.
-#[allow(clippy::disallowed_methods)]
 pub fn current_time_ms() -> u64 {
-    unix_ms(SystemTime::now())
+    SystemWallClock.now_ms()
 }
 
 /// Reports whether the system clock reads after the unix epoch.
@@ -146,18 +130,6 @@ pub fn system_clock_reads_after_epoch() -> bool {
 
 fn reads_after_epoch(now: SystemTime) -> bool {
     now.duration_since(UNIX_EPOCH).is_ok()
-}
-
-/// Converts a wall-clock instant to unix milliseconds.
-fn unix_ms(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .map(|elapsed| {
-            u64::try_from(elapsed.as_millis()).expect("unix milliseconds should fit u64")
-        })
-        .expect(
-            "the system clock should read after the unix epoch, which the runtime builder \
-             checks with `system_clock_reads_after_epoch` before it starts",
-        )
 }
 
 #[cfg(test)]
@@ -183,6 +155,5 @@ mod tests {
     fn the_startup_clock_check_refuses_a_pre_epoch_clock() {
         assert!(!reads_after_epoch(UNIX_EPOCH - Duration::from_secs(1)));
         assert!(reads_after_epoch(UNIX_EPOCH + Duration::from_millis(1)));
-        assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }

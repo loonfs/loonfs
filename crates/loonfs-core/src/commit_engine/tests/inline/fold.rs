@@ -5,10 +5,10 @@ use crate::namespace::control::load_current_manifest;
 use crate::storage::content::content_object_key_for_ref;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationSelector};
 use loonfs_types::ErrorCode;
 use std::assert_matches;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {
     parse_object_key(operation.key()).map(|key| key.family())
@@ -308,15 +308,6 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
     );
 }
 
-#[derive(Debug)]
-struct SteppingTimer(AtomicU64);
-
-impl MonotonicTimer for SteppingTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.0.fetch_add(20 * 60 * 1000, Ordering::SeqCst)
-    }
-}
-
 #[tokio::test]
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let content_writes = tokio::sync::Semaphore::new(32);
@@ -381,7 +372,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     }
     failing.clear();
     store.reset();
-    let timer = Arc::new(SteppingTimer(AtomicU64::new(0)));
+    let timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
     assert!(matches!(
         fold_wal_tail(
             &store,

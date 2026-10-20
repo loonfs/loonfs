@@ -21,7 +21,7 @@ use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
-use loonfs_test_support::clock::bounded;
+use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
@@ -347,21 +347,6 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
 /// Pacing for standalone test publishers, long enough that
 /// `wait_past_publish_pacing` outlasting it is meaningful.
 const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
-
-#[derive(Debug, Default)]
-struct ManualMonotonicTimer(AtomicU64);
-
-impl ManualMonotonicTimer {
-    fn set(&self, now_ms: u64) {
-        self.0.store(now_ms, AtomicOrdering::Release);
-    }
-}
-
-impl loonfs_objectstore::timing::MonotonicTimer for ManualMonotonicTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.0.load(AtomicOrdering::Acquire)
-    }
-}
 
 fn publisher_state(
     publisher: &NamespacePublisher,
@@ -1212,7 +1197,7 @@ async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
     let runtime = test_runtime(store.clone() as SharedStore);
     create_namespace(&runtime, &namespace_id).await;
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
-    let timer = Arc::new(ManualMonotonicTimer::default());
+    let timer = Arc::new(ManualClock::new(0));
     publisher.timer = timer.clone();
     publisher.min_publish_interval = Duration::from_millis(400);
 
@@ -1235,7 +1220,7 @@ async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
     bounded(Duration::from_millis(200), &mut queued)
         .await
         .expect_err("a request queued behind a publish must wait out the pacing interval");
-    timer.set(400);
+    timer.set_ms(400);
     bounded(Duration::from_secs(10), queued)
         .await
         .expect("queued request publishes at the interval boundary")
@@ -1250,7 +1235,7 @@ async fn a_sequential_follow_up_publishes_at_once() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let mut writer = test_writer_with_interval(store, 400).await;
-    writer.mode.publisher.timer = Arc::new(ManualMonotonicTimer::default());
+    writer.mode.publisher.timer = Arc::new(ManualClock::new(0));
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -3170,7 +3155,7 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let mut writer =
         test_writer_with_cache(store, MetadataCache::default(), recorder.clone()).await;
-    let timer = Arc::new(ManualMonotonicTimer::default());
+    let timer = Arc::new(ManualClock::new(0));
     writer.mode.publisher.timer = timer.clone();
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     writer
@@ -3191,7 +3176,7 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
             2,
         ),
     ] {
-        timer.set(now_ms);
+        timer.set_ms(now_ms);
         namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 commit_id, commit_id,
@@ -3359,9 +3344,3 @@ mod inline_writer;
 mod pin_folds;
 mod session_compaction;
 mod write_stop_wait;
-
-impl loonfs_core::time::WallClock for ManualMonotonicTimer {
-    fn now_ms(&self) -> u64 {
-        self.0.load(AtomicOrdering::SeqCst)
-    }
-}

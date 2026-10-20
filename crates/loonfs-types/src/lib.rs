@@ -155,7 +155,7 @@ pub use path::{
 };
 pub use retry::{
     saturating_duration_ms, transport_retry_backoff, MonotonicTimer, OperationDeadline,
-    StdMonotonicTimer, TransportRetryOutcome, TransportRetryPolicy,
+    StdMonotonicTimer, SystemWallClock, TransportRetryOutcome, TransportRetryPolicy, WallClock,
 };
 pub use secret::{SecretString, REDACTED};
 pub use widths::usize_from_u64;
