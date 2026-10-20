@@ -18,7 +18,7 @@ An "API group" is a coherent area of responsibility with its own set of endpoint
 
 | API group | Operations | Status |
 | --- | --- | --- |
-| `filesystem/v0` | Path and inode reads, path and inode mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | Mandatory for any conforming deployment |
+| `filesystem/v0` | Path and inode reads, path and inode mutations, uploads, namespace lifecycle, snapshots, the change feed, namespace state, capability discovery, and standard errors. Inline commit content and direct transfers are features. | Mandatory for any conforming deployment |
 | `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance (as a feature). | Optional |
 | `query/v0` | Content search over derived indexes, as the `query.grep` feature. | Optional |
 
@@ -26,7 +26,7 @@ API groups are client contracts, and they don't describe node roles or deploymen
 
 Notes:
 
-- An embedded engine implements `filesystem/v0` (with the namespace-management features enabled) and `maintenance/v0` (maintenance can be triggered manually). A minimal server that wraps the embedded engine over HTTP advertises the same two API groups and is fully conformant.
+- An embedded engine implements `filesystem/v0` and `maintenance/v0` (maintenance can be triggered manually). A minimal server that wraps the embedded engine over HTTP advertises the same two API groups and is fully conformant.
 - A hosted LoonFS server serves `maintenance/v0` when its `maintenance` setting is `serve_and_maintain` or `serve_only`. In `maintain_only` or `disabled` mode, every route under `/v0/maintenance/` returns `route_not_found`, as any path outside the served routes does. All four modes are fully conformant.
 - Each API group has its own version, so `filesystem/v0` could coexist with a future `maintenance/v1`. The group name (the segment before the slash) is the stable identity that feature keys refer to.
 - This document doesn't define any queue or job-scheduling semantics. `maintenance/v0` exposes only the shapes for triggering work and reporting its status, and how work is scheduled is up to the implementation.
@@ -55,10 +55,6 @@ The example below is the reference deployment's document. It lists the runtime's
   "api_groups": ["filesystem/v0", "maintenance/v0", "query/v0"],
   "features": {
     "maintenance.grep.index": true,
-    "filesystem.namespaces.create": true,
-    "filesystem.namespaces.fork": true,
-    "filesystem.namespaces.delete": true,
-    "filesystem.snapshots": true,
     "filesystem.commits.inline_content": true,
     "query.grep": true
   },
@@ -131,17 +127,13 @@ This section defines every feature key and the operations it gates. The registry
 | Feature key | Gates | Notes |
 | --- | --- | --- |
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the `grep_gc` run kind. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes and for the run kind. |
-| `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
-| `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Deletion is terminal. After deletion, maintenance runs with `kind` set to `gc` can reclaim the metadata and the namespace's own content, subject to the conditions in [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns). A deployment can still advertise `false` and return `not_supported`. |
-| `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
-`maintenance.grep.index` is the only feature key in `maintenance/v0`. Every other operation in that API group is required.
+`maintenance.grep.index` is the only feature key in `maintenance/v0`, and inline commit content and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
 
 Listing namespaces isn't supported in v0, so callers MUST address namespaces by ID.
 
@@ -745,7 +737,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and clamps the expiry to the lifetime ceiling. |
 | Delete a snapshot | `delete_snapshot` | `not_idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID returns `snapshot_not_found`) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
-| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (requires the `filesystem.namespaces.delete` feature, and the precondition is optional) |
+| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`. Requires `name`, and accepts `ttl_ms`. |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |

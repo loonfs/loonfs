@@ -14,14 +14,6 @@ pub const API_GROUP_MAINTENANCE_V0: &str = "maintenance/v0";
 /// The optional derived-index query API group.
 pub const API_GROUP_QUERY_V0: &str = "query/v0";
 
-/// Gates namespace creation.
-pub const FEATURE_NAMESPACES_CREATE: &str = "filesystem.namespaces.create";
-/// Gates namespace forking.
-pub const FEATURE_NAMESPACES_FORK: &str = "filesystem.namespaces.fork";
-/// Gates namespace deletion.
-pub const FEATURE_NAMESPACES_DELETE: &str = "filesystem.namespaces.delete";
-/// Gates read-snapshot lifecycle operations.
-pub const FEATURE_SNAPSHOTS: &str = "filesystem.snapshots";
 /// Gates inline bytes on commit operations.
 pub const FEATURE_COMMIT_INLINE_CONTENT: &str = "filesystem.commits.inline_content";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
@@ -249,8 +241,8 @@ mod tests {
                 API_GROUP_MAINTENANCE_V0.to_owned(),
             ],
             features: BTreeMap::from([
-                (FEATURE_NAMESPACES_CREATE.to_owned(), true),
-                (FEATURE_NAMESPACES_DELETE.to_owned(), false),
+                (FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true),
+                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
             ]),
             limits: BTreeMap::new(),
         }
@@ -259,16 +251,16 @@ mod tests {
     #[test]
     fn supports_answers_gating_questions() {
         let document = document();
-        assert!(document.supports(FEATURE_NAMESPACES_CREATE));
+        assert!(document.supports(FEATURE_COMMIT_INLINE_CONTENT));
         // Advertised-false and absent keys are both unsupported.
-        assert!(!document.supports(FEATURE_NAMESPACES_DELETE));
-        assert!(!document.supports(FEATURE_NAMESPACES_FORK));
+        assert!(!document.supports(FEATURE_UPLOADS_DIRECT_PUT));
+        assert!(!document.supports(FEATURE_UPLOADS_DIRECT_MULTIPART));
     }
 
     #[test]
     fn feature_keys_require_non_empty_components_and_an_advertised_group() {
         for (feature, valid) in [
-            (FEATURE_NAMESPACES_CREATE, true),
+            (FEATURE_COMMIT_INLINE_CONTENT, true),
             ("filesystem.custom_feature", true),
             ("filesystem", false),
             ("query.index.fulltext", false),

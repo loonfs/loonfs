@@ -231,7 +231,7 @@ impl Client {
             .await
     }
 
-    /// Deletes the namespace (feature `filesystem.namespaces.delete`).
+    /// Deletes the namespace.
     ///
     /// Pass `expected_head_seq` to delete only if the namespace is still where
     /// you last observed it (`stale_head` on mismatch). Deleting an
