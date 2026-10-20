@@ -18,5 +18,6 @@ mod layout_acceptance;
 mod manifest_statistics;
 mod namespace_listing;
 mod path_intents;
+mod tree_listing;
 mod upload_sessions;
 mod visibility_equivalence;

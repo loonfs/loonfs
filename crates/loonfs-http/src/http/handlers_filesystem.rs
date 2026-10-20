@@ -9,8 +9,9 @@ use super::handlers_uploads::{
     content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
-    checked_cursor, effective_page_limit, parse_consistency, parse_include_attributes,
-    parse_public_ordinal, parse_revision_no, required_query_param,
+    checked_cursor, checked_list_cursor, effective_page_limit, parse_boolean_query_param,
+    parse_consistency, parse_include_attributes, parse_public_ordinal, parse_revision_no,
+    required_query_param,
 };
 #[cfg(feature = "openapi")]
 use super::query_params::{
@@ -33,8 +34,8 @@ use loonfs_types::ErrorResponse;
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_types::{
     api::v0::{Commit, ListChangesResponse},
-    CommitRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo, TrashPageCursor,
+    CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListFileRevisionsResponse,
+    ListTrashResponse, PageRequest, RevisionNo, TrashPageCursor,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -65,6 +66,7 @@ pub(super) struct ListPathPageQuery {
     limit: Option<String>,
     cursor: Option<String>,
     include_attributes: Option<String>,
+    recursive: Option<String>,
     snapshot_id: Option<String>,
     consistency: Option<String>,
     max_staleness_ms: Option<String>,
@@ -276,13 +278,14 @@ impl ReadTarget {
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
             ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
+            ("recursive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
             ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
             ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
@@ -305,9 +308,12 @@ pub(super) async fn list_path_entries(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
+    if let Some(value) = query.recursive.as_deref() {
+        options.recursive = parse_boolean_query_param(value, "recursive")?;
+    }
     let request = PageRequest {
         limit: effective_page_limit(query.limit)?,
-        cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
+        cursor: checked_list_cursor(query.cursor, &options)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     options.consistency = parse_consistency(

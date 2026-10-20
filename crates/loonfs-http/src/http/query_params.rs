@@ -2,10 +2,10 @@
 
 use super::error::ApiResponseError;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, ErrorCode};
+use loonfs::{Consistency, ErrorCode, ListOptions};
 use loonfs_types::{
-    decode_cursor, GeneratedIdValidationError, LimitError, OpaqueTokenError, PaginationPolicy,
-    PublicOrdinalRangeError, RevisionNo,
+    decode_cursor, GeneratedIdValidationError, LimitError, ListPageCursor, OpaqueTokenError,
+    PaginationPolicy, PublicOrdinalRangeError, RevisionNo,
 };
 use std::str::FromStr;
 use std::time::Duration;
@@ -173,6 +173,18 @@ pub(super) fn checked_cursor<C: loonfs_types::PageCursor>(
 ) -> Result<Option<String>, ApiResponseError> {
     if let Some(cursor) = cursor.as_deref() {
         decode_cursor::<C>(cursor).map_err(page_cursor_response_error)?;
+    }
+    Ok(cursor)
+}
+
+/// Checks that a directory listing's cursor is the kind that a listing with
+/// `options` issues, and returns it unchanged for the pager.
+pub(super) fn checked_list_cursor(
+    cursor: Option<String>,
+    options: &ListOptions,
+) -> Result<Option<String>, ApiResponseError> {
+    if let Some(cursor) = cursor.as_deref() {
+        ListPageCursor::decode(cursor, options).map_err(page_cursor_response_error)?;
     }
     Ok(cursor)
 }

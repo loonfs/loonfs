@@ -42,8 +42,8 @@ use loonfs_types::CompactorEpoch;
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
-    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
-    FileRevision, FileRevisionsPageCursor, InodeId, NamespaceAccess, NamespaceId,
+    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, FileRevision,
+    FileRevisionsPageCursor, InodeId, ListPageCursor, NamespaceAccess, NamespaceId,
     NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Snapshot, Subject,
     TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
@@ -301,14 +301,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
-    /// Lists one directory page against the pinned runtime read context.
+    /// Lists one directory page against the pinned runtime read context, of
+    /// the directory's children or, with `options.recursive`, of its subtree.
     pub async fn list_path_page(
         &self,
         path: impl AsRef<str>,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
         context: &RuntimeReadContext,
-    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, ListPageCursor>> {
         let head_view = self
             .authorization_head_view()
             .instrument(
@@ -322,19 +323,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
             )
             .await?;
-        view.list_path_page(path.as_ref(), request, options.include_attributes, &access)
+        view.list_path_page(path.as_ref(), request, &options, &access)
             .await
     }
 
     /// Lists one page of a directory's children by inode against the pinned
-    /// runtime read context.
+    /// runtime read context, or, with `options.recursive`, one page of its
+    /// subtree.
     pub async fn list_inode_children_page(
         &self,
         inode_id: InodeId,
-        request: PageRequest<DirectoryPageCursor>,
+        request: PageRequest<ListPageCursor>,
         options: ListOptions,
         context: &RuntimeReadContext,
-    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, ListPageCursor>> {
         let head_view = self
             .authorization_head_view()
             .instrument(
@@ -348,7 +350,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
             )
             .await?;
-        view.list_inode_children_page(inode_id, request, options.include_attributes, &access)
+        view.list_inode_children_page(inode_id, request, &options, &access)
             .await
     }
 }

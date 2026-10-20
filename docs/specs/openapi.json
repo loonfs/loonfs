@@ -6906,6 +6906,16 @@
             }
           },
           {
+            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only.",
+            "in": "query",
+            "name": "recursive",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
             "description": "The snapshot whose captured directory state to read.",
             "in": "query",
             "name": "snapshot_id",
@@ -6960,7 +6970,7 @@
                 }
               }
             },
-            "description": "Invalid path, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7875,6 +7885,16 @@
             }
           },
           {
+            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only.",
+            "in": "query",
+            "name": "recursive",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
             "description": "The snapshot whose captured directory state to read.",
             "in": "query",
             "name": "snapshot_id",
@@ -7929,7 +7949,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint"
           },
           "401": {
             "content": {

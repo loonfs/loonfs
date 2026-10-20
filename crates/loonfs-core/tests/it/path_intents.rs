@@ -16,7 +16,7 @@ use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    DirectoryPageCursor, EntryInodeKind, InodeId, NameKey, NamespaceId, NamespaceNaming, Page,
+    EntryInodeKind, InodeId, ListPageCursor, NameKey, NamespaceId, NamespaceNaming, Page,
     PageRequest, PathEntry, RevisionNo,
 };
 use std::assert_matches;
@@ -213,8 +213,8 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     limit: u32,
-    cursor: Option<DirectoryPageCursor>,
-) -> Result<Page<PathEntry, DirectoryPageCursor>, CoreError> {
+    cursor: Option<ListPageCursor>,
+) -> Result<Page<PathEntry, ListPageCursor>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
         .list_path_page(

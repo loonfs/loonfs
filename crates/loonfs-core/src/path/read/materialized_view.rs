@@ -2,7 +2,7 @@
 //! that answers core reads.
 
 use super::current_files::resolve_visible_inode;
-use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
+use super::listing::{invalid_cursor, validate_cursor_head, DirectoryListingRequest};
 use crate::authorize::{Absence, ReadAccess};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
@@ -12,8 +12,8 @@ use crate::manifest::{
     WalTailProjectionCacheKey,
 };
 use crate::metadata::{
-    LeafRevisionPreload, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
-    VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    DirentryBindingRecord, LeafRevisionPreload, MetadataView, MetadataViewSession,
+    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
@@ -29,11 +29,12 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
+use loonfs_types::options::ListOptions;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
     ContentRef, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId,
-    InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
-    TrashEntry, TrashPageCursor,
+    InodeKind, ListPageCursor, ManifestNo, NameKey, NamespaceId, Page, PageRequest, PathEntry,
+    PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -923,13 +924,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn list_path_page(
         &self,
         absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-        attributes: AttributeInclusion,
+        request: PageRequest<ListPageCursor>,
+        options: &ListOptions,
         access: &ReadAccess<'_, S>,
-    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
             self.head.seq,
-            request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            request.cursor.as_ref().map(ListPageCursor::head_seq),
         )?;
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -945,9 +946,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-        if let Some(cursor) = request.cursor.as_ref() {
-            validate_directory_cursor(cursor, &resolved)?;
-        }
+        let request = DirectoryListingRequest::new(request, options, &resolved)?;
 
         match resolved.inode_kind {
             InodeKind::File => {
@@ -956,7 +955,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                         self.build_authoritative_path_entry_with_session(
                             &mut session,
                             &resolved,
-                            attributes,
+                            options.include_attributes,
                         )
                         .await?,
                     ],
@@ -966,8 +965,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             InodeKind::Directory => {}
         }
 
-        self.directory_children_page(&mut session, &resolved, request, attributes, access)
-            .await
+        self.directory_listing_page(
+            &mut session,
+            &resolved,
+            request,
+            options.include_attributes,
+            access,
+        )
+        .await
     }
 
     /// Lists one page of a directory's children addressed by inode.
@@ -979,13 +984,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn list_inode_children_page(
         &self,
         inode_id: InodeId,
-        request: PageRequest<DirectoryPageCursor>,
-        attributes: AttributeInclusion,
+        request: PageRequest<ListPageCursor>,
+        options: &ListOptions,
         access: &ReadAccess<'_, S>,
-    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
             self.head.seq,
-            request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            request.cursor.as_ref().map(ListPageCursor::head_seq),
         )?;
 
         let mut session = self.metadata_view().session();
@@ -1007,11 +1012,47 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 kind: resolved.inode_kind,
             });
         }
-        if let Some(cursor) = request.cursor.as_ref() {
-            validate_directory_cursor(cursor, &resolved)?;
+        let request = DirectoryListingRequest::new(request, options, &resolved)?;
+        self.directory_listing_page(
+            &mut session,
+            &resolved,
+            request,
+            options.include_attributes,
+            access,
+        )
+        .await
+    }
+
+    /// Lists one page of the directory `resolved`: of its children, or of
+    /// its whole subtree.
+    async fn directory_listing_page(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        resolved: &ResolvedVisiblePath,
+        request: DirectoryListingRequest,
+        attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
+    ) -> Result<Page<PathEntry, ListPageCursor>> {
+        match request {
+            DirectoryListingRequest::Directory(request) => {
+                let page = self
+                    .directory_children_page(session, resolved, request, attributes, access)
+                    .await?;
+                Ok(Page {
+                    items: page.items,
+                    next_cursor: page.next_cursor.map(ListPageCursor::Directory),
+                })
+            }
+            DirectoryListingRequest::DirectoryTree(request) => {
+                let page = self
+                    .directory_tree_page(session, resolved, request, attributes, access)
+                    .await?;
+                Ok(Page {
+                    items: page.items,
+                    next_cursor: page.next_cursor.map(ListPageCursor::DirectoryTree),
+                })
+            }
         }
-        self.directory_children_page(&mut session, &resolved, request, attributes, access)
-            .await
     }
 
     /// Scans one page of `resolved`'s visible children and builds their
@@ -1026,24 +1067,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let start_after = request.cursor.as_ref().map(|cursor| &cursor.last_name_key);
-        let select_span = tracing::debug_span!(
-            target: "loonfs::page",
-            "loonfs.phase",
-            phase = "list_page_select_children",
-            list_page_requested_limit = request.limit.as_usize() as u64,
-            list_page_children_returned = tracing::field::Empty,
-        );
-        let mut children = session
-            .visible_children_page_by_name_key(
+        let mut children = self
+            .select_children(
+                session,
                 resolved.inode_id,
                 start_after,
-                request.limit.limit_plus_one(),
+                request.limit.as_usize(),
             )
-            .instrument(select_span.clone())
             .await?;
-        select_span.record("list_page_children_returned", children.len() as u64);
-        // Close at the phase boundary, not after entry materialization.
-        drop(select_span);
         let next_cursor = request
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
@@ -1052,7 +1083,58 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
             });
+        let children = self
+            .readable_children(session, children, access)
+            .await?
+            .into_iter()
+            .map(|child| ListedChild::new(resolved, child))
+            .collect();
+        let entries = self
+            .build_listed_entries(session, children, attributes)
+            .await?;
 
+        Ok(Page {
+            items: entries,
+            next_cursor,
+        })
+    }
+
+    /// Scans a directory's visible children after `start_after`, in name-key
+    /// order, up to `limit` and one more, so a full scan shows whether more
+    /// children follow.
+    pub(super) async fn select_children(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        directory_inode_id: InodeId,
+        start_after: Option<&NameKey>,
+        limit: usize,
+    ) -> Result<Vec<VisibleChildEntry>> {
+        let select_span = tracing::debug_span!(
+            target: "loonfs::page",
+            "loonfs.phase",
+            phase = "list_page_select_children",
+            list_page_requested_limit = limit as u64,
+            list_page_children_returned = tracing::field::Empty,
+        );
+        let children = session
+            .visible_children_page_by_name_key(
+                directory_inode_id,
+                start_after,
+                limit.saturating_add(1),
+            )
+            .instrument(select_span.clone())
+            .await?;
+        select_span.record("list_page_children_returned", children.len() as u64);
+        Ok(children)
+    }
+
+    /// Pairs each scanned child with whether the subject can read it.
+    pub(super) async fn readable_children(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        children: Vec<VisibleChildEntry>,
+        access: &ReadAccess<'_, S>,
+    ) -> Result<Vec<ScannedChild>> {
         let mut readable = vec![true; children.len()];
         async {
             if !access.is_unrestricted() {
@@ -1069,7 +1151,21 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "child_access"),
         )
         .await?;
+        Ok(children
+            .into_iter()
+            .zip(readable)
+            .map(|(child, readable)| ScannedChild { child, readable })
+            .collect())
+    }
 
+    /// Builds the entries of listed children, and includes the attributes of
+    /// the readable ones when `attributes` asks for them.
+    pub(super) async fn build_listed_entries(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        children: Vec<ListedChild>,
+        attributes: AttributeInclusion,
+    ) -> Result<Vec<PathEntry>> {
         let build_span = tracing::debug_span!(
             target: "loonfs::page",
             "loonfs.phase",
@@ -1088,27 +1184,31 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[10].0 } = tracing::field::Empty,
         );
         let entries = async {
-            session.preload_revision_heads(&children).await?;
+            let file_inode_ids: Vec<InodeId> = children
+                .iter()
+                .filter(|child| child.resolved.inode_kind == InodeKind::File)
+                .map(|child| child.resolved.inode_id)
+                .collect();
+            session.preload_revision_heads(&file_inode_ids).await?;
             if attributes == AttributeInclusion::Include {
-                let child_inode_ids: Vec<InodeId> = children
+                let readable_inode_ids: Vec<InodeId> = children
                     .iter()
-                    .zip(&readable)
-                    .filter_map(|(child, readable)| {
-                        readable.then_some(child.binding.child_inode_id)
-                    })
+                    .filter_map(|child| child.readable.then_some(child.resolved.inode_id))
                     .collect();
-                session.preload_attributes(&child_inode_ids).await?;
+                session.preload_attributes(&readable_inode_ids).await?;
             }
             let mut entries = Vec::with_capacity(children.len());
-            for (child, readable) in children.into_iter().zip(readable) {
-                let attributes = if readable {
+            for child in children {
+                let attributes = if child.readable {
                     attributes
                 } else {
                     AttributeInclusion::Omit
                 };
                 entries.push(
-                    self.build_authoritative_path_entry_from_visible_child(
-                        session, resolved, child, attributes,
+                    self.build_authoritative_path_entry_with_session(
+                        session,
+                        &child.resolved,
+                        attributes,
                     )
                     .await?,
                 );
@@ -1118,12 +1218,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         .instrument(build_span.clone())
         .await?;
         session.counters().record_on(&build_span);
-        drop(build_span);
-
-        Ok(Page {
-            items: entries,
-            next_cursor,
-        })
+        Ok(entries)
     }
 
     /// `resolved` must come from visible resolution or enumeration at this
@@ -1197,40 +1292,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    async fn build_authoritative_path_entry_from_visible_child(
-        &self,
-        session: &mut MetadataViewSession<'_, '_, S>,
-        resolved_directory: &ResolvedVisiblePath,
-        child: VisibleChildEntry,
-        attributes: AttributeInclusion,
-    ) -> Result<PathEntry> {
-        let child_path = resolved_directory.absolute_path.join(
-            child
-                .binding
-                .display_name()
-                .expect("visible binding should be bound"),
-        );
-        self.build_authoritative_path_entry_with_session(
-            session,
-            &ResolvedVisiblePath {
-                absolute_path: child_path,
-                inode_id: child.binding.child_inode_id,
-                inode_kind: child.binding.child_kind,
-                created_by: child.binding.child_created_by.clone(),
-                created_at_ms: child.binding.child_created_at_ms,
-                parent_inode_id: Some(child.binding.parent_inode_id),
-                display_name: child
-                    .binding
-                    .display_name()
-                    .expect("visible binding should be bound")
-                    .to_string(),
-                binding_version: Some(child.binding.position()),
-            },
-            attributes,
-        )
-        .await
-    }
-
     pub(crate) async fn revision_by_inode(
         &self,
         inode_id: InodeId,
@@ -1259,6 +1320,49 @@ pub(crate) fn ensure_within_read_limit(
             max_bytes,
         }),
         _ => Ok(()),
+    }
+}
+
+/// A scanned child of one directory, and whether the subject can read it.
+pub(super) struct ScannedChild {
+    pub(super) child: VisibleChildEntry,
+    pub(super) readable: bool,
+}
+
+/// A child that a listing page returns, resolved to its path, and whether
+/// the subject can read the child.
+pub(super) struct ListedChild {
+    pub(super) resolved: ResolvedVisiblePath,
+    pub(super) readable: bool,
+}
+
+impl ListedChild {
+    /// Resolves a scanned child of `directory` to its path.
+    pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
+        Self {
+            resolved: resolve_visible_child(directory, &scanned.child.binding),
+            readable: scanned.readable,
+        }
+    }
+}
+
+/// Resolves the path of `binding`'s child, a visible child of `directory`.
+pub(super) fn resolve_visible_child(
+    directory: &ResolvedVisiblePath,
+    binding: &DirentryBindingRecord,
+) -> ResolvedVisiblePath {
+    let display_name = binding
+        .display_name()
+        .expect("visible binding should be bound");
+    ResolvedVisiblePath {
+        absolute_path: directory.absolute_path.join(display_name),
+        inode_id: binding.child_inode_id,
+        inode_kind: binding.child_kind,
+        created_by: binding.child_created_by.clone(),
+        created_at_ms: binding.child_created_at_ms,
+        parent_inode_id: Some(binding.parent_inode_id),
+        display_name: display_name.to_string(),
+        binding_version: Some(binding.position()),
     }
 }
 
@@ -1574,10 +1678,9 @@ mod tests {
             assert_eq!(children.len(), 2);
             for child in children {
                 let entry = view
-                    .build_authoritative_path_entry_from_visible_child(
+                    .build_authoritative_path_entry_with_session(
                         &mut session,
-                        &resolved,
-                        child,
+                        &resolve_visible_child(&resolved, &child.binding),
                         projection,
                     )
                     .await
@@ -1629,10 +1732,9 @@ mod tests {
             );
 
             for child in children {
-                view.build_authoritative_path_entry_from_visible_child(
+                view.build_authoritative_path_entry_with_session(
                     &mut session,
-                    &resolved,
-                    child,
+                    &resolve_visible_child(&resolved, &child.binding),
                     projection,
                 )
                 .await

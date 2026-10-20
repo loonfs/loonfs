@@ -634,12 +634,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
     pub(crate) async fn preload_revision_heads(
         &mut self,
-        children: &[VisibleChildEntry],
+        file_inode_ids: &[InodeId],
     ) -> Result<()> {
-        let mut pending: Vec<_> = children
+        let mut pending: Vec<_> = file_inode_ids
             .iter()
-            .filter(|child| child.binding.child_kind == InodeKind::File)
-            .map(|child| child.binding.child_inode_id)
+            .copied()
             .filter(|inode_id| !self.latest_revision_head_cache.contains_key(inode_id))
             .collect();
         pending.sort_unstable();

@@ -7,7 +7,8 @@ use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
-use loonfs_types::{AttributeInclusion, DirectoryPageCursor, InodeKind, PageRequest};
+use loonfs_types::options::ListOptions;
+use loonfs_types::{AttributeInclusion, InodeKind, ListPageCursor, PageRequest};
 use std::assert_matches;
 
 #[tokio::test]
@@ -172,11 +173,11 @@ async fn assert_names<S: ObjectStore + ?Sized>(
     let page = view
         .list_path_page(
             "/",
-            PageRequest::<DirectoryPageCursor> {
+            PageRequest::<ListPageCursor> {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(16).expect("nonzero limit")),
             },
-            AttributeInclusion::Omit,
+            &ListOptions::default(),
             &access,
         )
         .await

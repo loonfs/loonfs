@@ -4,6 +4,7 @@
 mod current_files;
 mod listing;
 mod materialized_view;
+mod tree_listing;
 
 pub(crate) use current_files::{
     ensure_stat_batch_within_cap, resolve_visible_inode, stat_current_files_by_inode,
