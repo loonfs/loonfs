@@ -5,6 +5,10 @@
 //! conflicting reuse is rejected, and namespace deletion is ordered with
 //! other mutations.
 //!
+//! A new commit that reaches the write stop waits at the front of the queue
+//! for the session's fold, for at most the publication policy's write-stop
+//! wait. The worker releases its publication slot while the commit waits.
+//!
 //! Admitted work continues if its caller is cancelled. Shutdown closes
 //! admission and drains the queues through
 //! [`LoonFs::shutdown`](crate::LoonFs::shutdown).
@@ -32,7 +36,7 @@ use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
-use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS};
+use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
     SharedWriterSessionStatus, TailSource, WalPublishError, WriterSessionStatus,
@@ -602,6 +606,10 @@ struct NamespacePublisher {
     /// Set once the session stops admitting work. A session never compacts
     /// again after that.
     compaction_cancellation: MaintenanceCancellation,
+    /// Signals each fold of this session that publishes, so a worker waiting
+    /// at the write stop wakes once that fold frees room, even when the fold
+    /// task goes on to fold again.
+    fold_published: watch::Sender<()>,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -832,6 +840,16 @@ struct BatchCandidate {
     commit_id: CommitId,
     candidate: CommitCandidate,
     enqueued_at: u64,
+    /// Whether this commit was queued when a wait at the write stop ended, so
+    /// `write_stop_waits` records it once.
+    write_stop_wait_recorded: bool,
+    /// Whether the engine refused this commit at the write stop when the
+    /// worker last published it.
+    ///
+    /// Only such a commit can reach the end of the write-stop wait without
+    /// another publish, because the engine returns a retry's result from its
+    /// receipt.
+    refused_by_write_stop: bool,
 }
 
 struct InFlightRequest {
@@ -890,6 +908,7 @@ impl NamespacePublisher {
                 .map(|writer| writer.inline_content.clone())
                 .unwrap_or_default(),
             compaction_cancellation: MaintenanceCancellation::new(),
+            fold_published: watch::Sender::new(()),
         }
     }
 
@@ -1152,6 +1171,8 @@ impl NamespacePublisher {
             commit_id: commit_id.clone(),
             candidate: candidate.candidate,
             enqueued_at,
+            write_stop_wait_recorded: false,
+            refused_by_write_stop: false,
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the
@@ -1272,6 +1293,10 @@ impl NamespacePublisher {
 
             match item {
                 WorkItem::Batch(batch) => {
+                    // Subscribed before the publish, so a fold that publishes
+                    // after the engine refuses commits at the write stop still
+                    // wakes the wait below.
+                    let fold_published = self.fold_published.subscribe();
                     self.runtime_core
                         .instruments()
                         .publisher_batch(batch.candidates.len());
@@ -1285,7 +1310,21 @@ impl NamespacePublisher {
                         queue_depth_end = usize_to_u64(batch.candidates.len()),
                         collect_ms = self.elapsed_ms_since(collect_started)
                     );
-                    self.publish_batch(batch.candidates).await;
+                    let OpenBatch {
+                        candidates,
+                        wal_record_bytes_upper_bound,
+                        inline_content_bytes,
+                    } = batch;
+                    let waiting = self.publish_batch(candidates).await;
+                    if !waiting.is_empty() {
+                        drop(publication);
+                        let waiting = OpenBatch {
+                            candidates: waiting,
+                            wal_record_bytes_upper_bound,
+                            inline_content_bytes,
+                        };
+                        self.wait_at_write_stop(waiting, fold_published).await;
+                    }
                 }
                 WorkItem::Delete(pending) => {
                     // A delete is bounded by its fold permit alone. Holding a
@@ -1323,24 +1362,112 @@ impl NamespacePublisher {
         item
     }
 
-    /// Publishes one batch while containing panics from the publication.
+    /// Keeps the commits that the engine refused at the write stop at the
+    /// front of the queue, and waits until a fold of this session publishes,
+    /// the fold task exits, or the oldest of the commits reaches the
+    /// write-stop wait.
+    ///
+    /// A fold that fails, or finds its tail already folded, publishes
+    /// nothing, so the fold task's exit also ends the wait. The worker then
+    /// publishes the queue again, and a refusal at the write stop starts the
+    /// next fold.
+    async fn wait_at_write_stop(
+        &self,
+        waiting: OpenBatch,
+        mut fold_published: watch::Receiver<()>,
+    ) {
+        let oldest_enqueued_at = waiting.candidates[0].enqueued_at;
+        let fold_task = {
+            let mut state = self.lock_state();
+            state.queue.push_front(WorkItem::Batch(waiting));
+            state.fold.as_ref().map(|fold| fold.liveness.clone())
+        };
+        let started_at_ms = self.timer.monotonic_now_ms();
+        let remaining_ms = oldest_enqueued_at
+            .saturating_add(self.admission.write_stop_wait_budget_ms())
+            .saturating_sub(started_at_ms);
+        tokio::select! {
+            _ = fold_published.changed() => {}
+            () = wait_for_fold_task_exit(fold_task) => {}
+            () = wait_for_write_stop_budget(Duration::from_millis(remaining_ms)) => {}
+        }
+        self.runtime_core
+            .instruments()
+            .publisher_write_stop_wait_duration(self.elapsed_ms_since(started_at_ms));
+        self.end_write_stop_wait();
+    }
+
+    /// Records each queued commit that waited at the write stop for the first
+    /// time, and returns `maintenance_required` to each commit that the
+    /// engine refused at the write stop and that has waited for the whole
+    /// write-stop wait, measured from when it entered the queue.
+    ///
+    /// A commit queued behind those publishes next, so the engine examines
+    /// it before it can be refused.
+    fn end_write_stop_wait(&self) {
+        let budget_ms = self.admission.write_stop_wait_budget_ms();
+        let now_ms = self.timer.monotonic_now_ms();
+        let mut first_waits = 0;
+        let mut refused = Vec::new();
+        {
+            let mut state = self.lock_state();
+            for item in &mut state.queue {
+                if let WorkItem::Batch(batch) = item {
+                    batch.candidates.retain_mut(|candidate| {
+                        if !candidate.write_stop_wait_recorded {
+                            candidate.write_stop_wait_recorded = true;
+                            first_waits += 1;
+                        }
+                        let past = candidate.refused_by_write_stop
+                            && elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
+                        if past {
+                            refused.push(candidate.commit_id.clone());
+                        }
+                        !past
+                    });
+                }
+            }
+            state.queue.retain(
+                |item| !matches!(item, WorkItem::Batch(batch) if batch.candidates.is_empty()),
+            );
+        }
+        let instruments = self.runtime_core.instruments();
+        instruments.publisher_write_stop_wait(usize_to_u64(first_waits));
+        if refused.is_empty() {
+            return;
+        }
+        instruments.publisher_write_stop_refusal(usize_to_u64(refused.len()));
+        let error = Error::Core(
+            crate::MetadataViewError::MaintenanceRequired {
+                namespace_id: self.namespace_id.clone(),
+                reason: format!(
+                    "WAL tail stayed at {MAX_UNFOLDED_WAL_OBJECTS} objects through the write-stop wait of {budget_ms} ms, and publishes resume once a fold brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
+                ),
+            }
+            .into(),
+        );
+        let results = refused.iter().map(|_| Err(error.clone())).collect();
+        self.deliver_batch_results(refused, results, now_ms);
+    }
+
+    /// Publishes one batch while containing panics from the publication, and
+    /// returns the commits that wait at the write stop.
     ///
     /// This worker is the namespace's only publication path. If publication
     /// panics, each request in the batch receives `commit_outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
     /// the outcome. The worker then continues with queued work.
-    async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
+    async fn publish_batch(&self, candidates: Vec<BatchCandidate>) -> Vec<BatchCandidate> {
         let taken_commit_ids = candidates
             .iter()
             .map(|candidate| candidate.commit_id.clone())
             .collect::<Vec<_>>();
-        if AssertUnwindSafe(self.publish_taken_batch(candidates))
+        if let Ok(waiting) = AssertUnwindSafe(self.publish_taken_batch(candidates))
             .catch_unwind()
             .await
-            .is_ok()
         {
-            return;
+            return waiting;
         }
         self.record_panic();
         // A panic can follow the WAL put, so the position's tail may omit
@@ -1362,9 +1489,15 @@ impl NamespacePublisher {
             ))
             .into()));
         }
+        Vec::new()
     }
 
-    async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
+    /// Publishes one batch and delivers each result, except to the new
+    /// commits that the engine refused at the write stop.
+    ///
+    /// Returns those commits in arrival order, to wait in the queue for a
+    /// fold.
+    async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) -> Vec<BatchCandidate> {
         let selected_at = self.timer.monotonic_now_ms();
         for candidate in &candidates {
             phase_event!(
@@ -1380,6 +1513,13 @@ impl NamespacePublisher {
             .iter()
             .map(|candidate| Arc::clone(&candidate.permit))
             .collect();
+        let queued: Vec<_> = candidates
+            .iter()
+            .map(|candidate| (candidate.enqueued_at, candidate.write_stop_wait_recorded))
+            .collect();
+        // A copy of each candidate that the engine refused at the write stop,
+        // so the commit can wait in the queue.
+        let mut stopped = vec![None; candidates.len()];
         let (commit_ids, candidates): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .map(|candidate| (candidate.commit_id, candidate.candidate))
@@ -1424,6 +1564,11 @@ impl NamespacePublisher {
                         .map(|_| Err(CoreError::ShuttingDown))
                         .collect(),
                 };
+                for ((index, candidate), result) in indices.iter().zip(&candidates).zip(&observed) {
+                    if is_maintenance_required(result) {
+                        stopped[*index] = Some(candidate.clone());
+                    }
+                }
                 pending = settle_publish_attempt(
                     &mut results,
                     indices.into_iter().zip(candidates),
@@ -1451,7 +1596,36 @@ impl NamespacePublisher {
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
-        self.deliver_batch_results(commit_ids, results, selected_at);
+        // A commit whose earlier put had an unknown outcome keeps
+        // `commit_outcome_unknown` under the settling rule, so only a commit
+        // whose result is the refusal waits.
+        let mut waiting = Vec::new();
+        let (mut delivered_ids, mut delivered) = (Vec::new(), Vec::new());
+        for (index, (commit_id, result)) in commit_ids.into_iter().zip(results).enumerate() {
+            let refused = matches!(
+                &result,
+                Err(error) if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
+            );
+            match stopped[index].take() {
+                Some(candidate) if refused => {
+                    let (enqueued_at, write_stop_wait_recorded) = queued[index];
+                    waiting.push(BatchCandidate {
+                        permit: Arc::clone(&permits[index]),
+                        commit_id,
+                        candidate,
+                        enqueued_at,
+                        write_stop_wait_recorded,
+                        refused_by_write_stop: true,
+                    });
+                }
+                _ => {
+                    delivered_ids.push(commit_id);
+                    delivered.push(result);
+                }
+            }
+        }
+        self.deliver_batch_results(delivered_ids, delivered, selected_at);
+        waiting
     }
 
     /// Publishes through the publisher-owned engine: one namespace, one
@@ -1477,16 +1651,15 @@ impl NamespacePublisher {
             self.runtime_core.instruments().publisher_tail_replay();
         }
         if !publish.results.iter().any(is_retryable_wal_publish) {
-            for permit in permits {
-                permit.release_inline();
+            for (permit, result) in permits.iter().zip(&publish.results) {
+                // A commit refused at the write stop publishes later, so its
+                // inline bytes stay reserved against the tail limit.
+                if !is_maintenance_required(result) {
+                    permit.release_inline();
+                }
             }
         }
         let write_stopped = publish.results.iter().any(is_maintenance_required);
-        if write_stopped {
-            self.runtime_core
-                .instruments()
-                .publisher_write_stop_refusal();
-        }
         let fold_start = if publish
             .wal_tail
             .is_some_and(|tail| self.fold_is_due(tail.objects, tail.inline_bytes))
@@ -1567,7 +1740,10 @@ impl NamespacePublisher {
             // commits published during the pass before it.
             loop {
                 match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
-                    Ok(true) => publisher.start_compaction(),
+                    Ok(true) => {
+                        publisher.fold_published.send_replace(());
+                        publisher.start_compaction();
+                    }
                     Ok(false) => return,
                     Err(_) => {
                         publisher.record_panic();
@@ -2178,6 +2354,22 @@ fn elapsed_ms_from(start: u64, end: u64) -> u64 {
 // The configured publication pacing delay does not affect publication validity.
 async fn wait_for_publish_pacing(delay: Duration) {
     tokio::time::sleep(delay).await;
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the write-stop wait only decides when a waiting commit returns `maintenance_required`"
+)]
+async fn wait_for_write_stop_budget(delay: Duration) {
+    tokio::time::sleep(delay).await;
+}
+
+/// Waits until the fold task that `liveness` reports on exits, and returns at
+/// once when the session has no fold task.
+async fn wait_for_fold_task_exit(liveness: Option<watch::Receiver<bool>>) {
+    if let Some(mut liveness) = liveness {
+        let _ = liveness.wait_for(|exited| *exited).await;
+    }
 }
 
 fn usize_to_u64(value: usize) -> u64 {

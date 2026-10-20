@@ -26,11 +26,11 @@ pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 
 /// The admission limits one writable runtime applies to each namespace's
-/// publication requests.
+/// publication requests, and how long a commit waits at the write stop.
 ///
 /// Every admitted caller counts, including duplicate commits and namespace
 /// deletes. Counts and bytes remain charged until the work settles, even if
-/// the caller disconnects. Reaching either limit returns
+/// the caller disconnects. Reaching either admission limit returns
 /// `commit_queue_full`. The totals across namespaces, and across the runtimes
 /// that share an execution budget, are limits of the
 /// [`ExecutionBudget`](crate::ExecutionBudget).
@@ -40,6 +40,11 @@ pub struct PublicationPolicy {
     pub max_requests_per_namespace: std::num::NonZeroUsize,
     /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
+    /// How long a new commit at the write stop waits in the queue for the
+    /// session's fold, measured from when it entered the queue, before it
+    /// returns `maintenance_required`. Defaults to 30,000 ms. See
+    /// `docs/specs/api.md`, section 5.2.
+    pub write_stop_wait_budget_ms: u64,
 }
 
 impl Default for PublicationPolicy {
@@ -49,6 +54,7 @@ impl Default for PublicationPolicy {
             max_estimated_bytes_per_namespace: const {
                 std::num::NonZeroUsize::new(8 * 1024 * 1024).unwrap()
             },
+            write_stop_wait_budget_ms: 30_000,
         }
     }
 }

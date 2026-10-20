@@ -313,8 +313,8 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
-    /// Sets the admission limits this runtime applies to each namespace's
-    /// publication requests.
+    /// Sets the admission limits and the write-stop wait this runtime applies
+    /// to each namespace's publication requests.
     ///
     /// The totals across namespaces, and the publications running at once, are
     /// limits of the execution budget (see [`Self::execution_budget`]).

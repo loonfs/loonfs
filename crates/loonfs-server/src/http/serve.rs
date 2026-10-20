@@ -333,7 +333,7 @@ pub(super) async fn build_handles(
     let mut builder = LoonFs::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
-        .publication_policy(config.publication.effective_policy())
+        .publication_policy(config.publication_policy())
         .inline_content(config.inline_content.effective_policy())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
         // Every read the server serves goes through this runtime, so the

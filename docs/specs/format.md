@@ -752,7 +752,7 @@ A rejected request isn't assigned a sequence number and creates no WAL record. P
 To publish a batch, a writer:
 
 1. Resolves retained commit IDs, and then validates new requests against the discovered view and the requests accepted earlier in the batch.
-2. Refuses new commits with `maintenance_required` when the unfolded WAL reaches its write-stop threshold. Fence objects count toward that threshold.
+2. Keeps new commits in the writer's queue while the unfolded WAL is at its write-stop threshold (fence objects count toward that threshold), until a fold frees room. A commit that's still waiting when the [write-stop wait](#73-recovery-material-and-maintenance-policy) passes (measured from when it entered the queue) returns `maintenance_required` and isn't committed.
 3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id`.
 4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
 5. On success, moves its [writer position](glossary.md#writer-position) to the new head and acknowledges the requests.
@@ -831,7 +831,7 @@ The writer checks for the commit receipt before it uploads inline bytes as conte
 
 The guarantee lasts as long as the receipt. Compaction can remove receipts below the retention floor, and once a receipt is gone, the old ID can't be distinguished from an unused one, so a later request can run as a new mutation. A receipt that hasn't been compacted yet might still be available, but callers MUST NOT depend on that extra lifetime.
 
-Receipt lookup still works at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits are rejected with `maintenance_required`, and the writer-session, availability, and corruption checks still apply.
+Receipt lookup still works at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits wait for a fold, and they return `maintenance_required` if the write-stop wait passes first. The writer-session, availability, and corruption checks still apply.
 
 File revision history and commit idempotency have different retention rules. Keeping an old file revision doesn't require keeping its commit receipt.
 
@@ -980,7 +980,8 @@ Implementations can fold automatically as the WAL grows. The reference implement
 | Trigger | Reference default |
 | --- | --- |
 | Request a fold | 32 unfolded WAL objects |
-| Reject new commits with `maintenance_required` | 128 unfolded WAL objects |
+| Make new commits wait for a fold | 128 unfolded WAL objects |
+| Refuse a commit still waiting for a fold with `maintenance_required` (the write-stop wait) | 30 s after the commit entered the queue |
 | Fold an idle tail | The tail contains a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock |
 
 The commit that triggers a fold can finish before the fold does. Reads and lookups of retained receipts still work at the write-stop threshold. Idleness is measured from the newest commit's timestamp, so a tail that contains only fences is never idle. The timestamp determines when to fold, but a fold is valid at any time.
@@ -2144,7 +2145,8 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Maximum bounded compaction decoded input | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
-| Unfolded-tail write rejection threshold | 128 WAL objects |
+| Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
+| `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
 | `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
 | `LoonFsBuilder::max_staleness_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |

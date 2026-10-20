@@ -319,11 +319,33 @@ impl RuntimeInstruments {
             .record(seconds_from_ms(elapsed_ms));
     }
 
-    pub(crate) fn publisher_write_stop_refusal(&self) {
+    /// Reports commits that waited in the queue at the write stop for the
+    /// first time.
+    pub(crate) fn publisher_write_stop_wait(&self, commits: u64) {
         let Some(installed) = &self.installed else {
             return;
         };
-        installed.publisher.write_stop_refusals.increment(1);
+        installed.publisher.write_stop_waits.increment(commits);
+    }
+
+    /// Reports one wait of a namespace's queue at the write stop.
+    pub(crate) fn publisher_write_stop_wait_duration(&self, elapsed_ms: u64) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .publisher
+            .write_stop_wait_seconds
+            .record(seconds_from_ms(elapsed_ms));
+    }
+
+    /// Reports commits that returned `maintenance_required` because they
+    /// waited for the whole write-stop wait.
+    pub(crate) fn publisher_write_stop_refusal(&self, commits: u64) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.write_stop_refusals.increment(commits);
     }
 
     pub(crate) fn publisher_tail_replay(&self) {
@@ -770,6 +792,8 @@ struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     wal_folds: Arc<dyn CounterHandle>,
     wal_fold_seconds: Arc<dyn HistogramHandle>,
+    write_stop_waits: Arc<dyn CounterHandle>,
+    write_stop_wait_seconds: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
     tail_replays: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
@@ -797,9 +821,20 @@ impl PublisherInstruments {
                 &[],
                 LATENCY_SECONDS_BOUNDARIES,
             ),
+            write_stop_waits: recorder.register_counter(
+                "loonfs.publisher.write_stop_waits",
+                "Commits that waited in a namespace's queue at the write stop for a fold",
+                &[],
+            ),
+            write_stop_wait_seconds: recorder.register_histogram(
+                "loonfs.publisher.write_stop_wait_seconds",
+                "Duration of a namespace queue's wait at the write stop in seconds",
+                &[],
+                LATENCY_SECONDS_BOUNDARIES,
+            ),
             write_stop_refusals: recorder.register_counter(
                 "loonfs.publisher.write_stop_refusals",
-                "Mutation batches refused because the WAL tail reached its write-stop bound",
+                "Commits refused because they waited for the whole write-stop wait",
                 &[],
             ),
             tail_replays: recorder.register_counter(
@@ -1094,7 +1129,9 @@ mod tests {
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
         instruments.publisher_wal_fold_duration(5);
-        instruments.publisher_write_stop_refusal();
+        instruments.publisher_write_stop_wait(2);
+        instruments.publisher_write_stop_wait_duration(5);
+        instruments.publisher_write_stop_refusal(1);
         instruments.publisher_publish(PublishOutcome::Ok);
     }
 
