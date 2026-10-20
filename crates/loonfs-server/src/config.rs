@@ -2209,12 +2209,12 @@ secret_access_key = "file-secret"
 
         let config = load_server_config(&path).expect("load config");
         match config.store {
-            super::StoreConfig::AwsS3 { credentials, .. } => {
+            super::StoreConfig::AwsS3(store) => {
                 let loonfs_objectstore::AwsS3Credentials::Static {
                     access_key_id,
                     secret_access_key,
                     ..
-                } = credentials
+                } = store.credentials
                 else {
                     panic!("expected static credentials")
                 };

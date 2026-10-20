@@ -12,7 +12,9 @@ use crate::profiles::resolve_profile;
 use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::probe_runs_prefix;
+use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;
@@ -342,9 +344,9 @@ async fn embedded_health_check(
         Ok(_) => {
             let key_prefix = match store_config {
                 StoreConfig::LocalFs { key_prefix, .. }
-                | StoreConfig::AwsS3 { key_prefix, .. }
-                | StoreConfig::CloudflareR2 { key_prefix, .. }
-                | StoreConfig::GcpGcs { key_prefix, .. } => key_prefix,
+                | StoreConfig::AwsS3(AwsS3StoreConfig { key_prefix, .. })
+                | StoreConfig::CloudflareR2(CloudflareR2StoreConfig { key_prefix, .. })
+                | StoreConfig::GcpGcs(GcpGcsStoreConfig { key_prefix, .. }) => key_prefix,
             };
             let message = match key_prefix
                 .as_deref()

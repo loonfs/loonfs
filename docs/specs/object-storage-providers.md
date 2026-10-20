@@ -215,7 +215,7 @@ The footnotes in this document cite these sources.
 
 [^46]: Google Cloud Storage, "XML API multipart uploads": [https://cloud.google.com/storage/docs/multipart-uploads](https://cloud.google.com/storage/docs/multipart-uploads)
 
-[^47]: A credentialed conformance run against a live bucket proved this. The provider conformance assertions and both signed direct-transfer tests (the round trip, and the scoped, bounded, single-use capability checks) passed. `GCS_DIRECT_TRANSFERS_PROVEN` in `crates/loonfs-objectstore/src/configured.rs` records the run.
+[^47]: A credentialed conformance run against a live bucket proved this. The GCS provider conformance assertions in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` and both GCS signed direct-transfer tests in `crates/loonfs-server/tests/it/direct_put_real_provider.rs` (the round trip, and the scoped, bounded, single-use capability checks) passed.
 
 [^48]: AWS S3 User Guide, "Checking object integrity for data uploads in Amazon S3": [https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html)
 

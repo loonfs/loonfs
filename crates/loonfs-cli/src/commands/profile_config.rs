@@ -12,6 +12,8 @@ use crate::config::{
 use crate::error::CliError;
 use crate::prompt;
 use crate::resolve::subject_flag_error;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::config::non_blank;
 use loonfs_types::{ActorId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, SubjectId};
@@ -518,28 +520,13 @@ fn s3_store(
 ) -> Result<StoreConfig, CliError> {
     let current = current
         .map(|store| {
-            let StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                credentials,
-                key_prefix,
-                force_path_style,
-            } = store
-            else {
+            let StoreConfig::AwsS3(current) = store else {
                 return None;
             };
-            Some((
-                bucket,
-                region,
-                endpoint_url.as_ref(),
-                credentials,
-                key_prefix.as_ref(),
-                *force_path_style,
-            ))
+            Some(current)
         })
         .map(|current| current.expect("s3 store builder should receive an s3 current store"));
-    let credentials = match (current.map(|value| value.3), source) {
+    let credentials = match (current.map(|value| &value.credentials), source) {
         (Some(current), FieldSource::Prompt) => prompt_aws_credentials(current.clone())?,
         (Some(current), FieldSource::Fail) => updated_aws_credentials(current.clone(), args)?,
         (None, _) => build_aws_credentials(
@@ -550,7 +537,11 @@ fn s3_store(
             source,
         )?,
     };
-    let region = match (args.region.as_ref(), current.map(|value| value.1), source) {
+    let region = match (
+        args.region.as_ref(),
+        current.map(|value| &value.region),
+        source,
+    ) {
         (Some(region), _, _) if !region.trim().is_empty() => region.clone(),
         (_, Some(region), FieldSource::Fail) => region.clone(),
         (_, Some(region), FieldSource::Prompt) => {
@@ -565,31 +556,31 @@ fn s3_store(
             return Err(CliError::non_interactive_field_required("region"))
         }
     };
-    Ok(StoreConfig::AwsS3 {
+    Ok(StoreConfig::AwsS3(AwsS3StoreConfig {
         bucket: required_field(
             args.bucket.as_ref(),
-            current.map(|value| value.0),
+            current.map(|value| &value.bucket),
             "bucket",
             source,
         )?,
         region,
         endpoint_url: optional_field(
             args.endpoint_url.as_ref(),
-            current.and_then(|value| value.2),
+            current.and_then(|value| value.endpoint_url.as_ref()),
             "endpoint url",
             source,
         )?,
         credentials,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
-            current.and_then(|value| value.4),
+            current.and_then(|value| value.key_prefix.as_ref()),
             "key prefix",
             source,
         )?,
         force_path_style: force_path_style
-            .or(current.map(|value| value.5))
+            .or(current.map(|value| value.force_path_style))
             .unwrap_or_default(),
-    })
+    }))
 }
 
 fn r2_store(
@@ -599,26 +590,13 @@ fn r2_store(
 ) -> Result<StoreConfig, CliError> {
     let current = current
         .map(|store| {
-            let StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                credentials,
-                key_prefix,
-            } = store
-            else {
+            let StoreConfig::CloudflareR2(current) = store else {
                 return None;
             };
-            Some((
-                bucket,
-                account_id,
-                endpoint_url,
-                credentials,
-                key_prefix.as_ref(),
-            ))
+            Some(current)
         })
         .map(|current| current.expect("r2 store builder should receive an r2 current store"));
-    let credentials = match (current.map(|value| value.3), source) {
+    let credentials = match (current.map(|value| &value.credentials), source) {
         (Some(current), FieldSource::Prompt) => prompt_r2_credentials(current.clone())?,
         (Some(current), FieldSource::Fail) => updated_r2_credentials(current.clone(), args)?,
         (None, _) => build_r2_credentials(
@@ -628,33 +606,33 @@ fn r2_store(
             source,
         )?,
     };
-    Ok(StoreConfig::CloudflareR2 {
+    Ok(StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
         bucket: required_field(
             args.bucket.as_ref(),
-            current.map(|value| value.0),
+            current.map(|value| &value.bucket),
             "bucket",
             source,
         )?,
         account_id: required_field(
             args.account_id.as_ref(),
-            current.map(|value| value.1),
+            current.map(|value| &value.account_id),
             "account-id",
             source,
         )?,
         endpoint_url: required_field(
             args.endpoint_url.as_ref(),
-            current.map(|value| value.2),
+            current.map(|value| &value.endpoint_url),
             "endpoint-url",
             source,
         )?,
         credentials,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
-            current.and_then(|value| value.4),
+            current.and_then(|value| value.key_prefix.as_ref()),
             "key prefix",
             source,
         )?,
-    })
+    }))
 }
 
 fn gcs_store(
@@ -664,18 +642,18 @@ fn gcs_store(
 ) -> Result<StoreConfig, CliError> {
     let current = current
         .map(|store| {
-            let StoreConfig::GcpGcs {
+            let StoreConfig::GcpGcs(GcpGcsStoreConfig {
                 bucket,
                 credentials: GcpGcsCredentials::ServiceAccountFile { path },
                 key_prefix,
-            } = store
+            }) = store
             else {
                 return None;
             };
             Some((bucket, path, key_prefix.as_ref()))
         })
         .map(|current| current.expect("gcs store builder should receive a gcs current store"));
-    Ok(StoreConfig::GcpGcs {
+    Ok(StoreConfig::GcpGcs(GcpGcsStoreConfig {
         bucket: required_field(
             args.bucket.as_ref(),
             current.map(|value| value.0),
@@ -696,7 +674,7 @@ fn gcs_store(
             "key prefix",
             source,
         )?,
-    })
+    }))
 }
 
 fn remote_profile(
@@ -1185,6 +1163,7 @@ mod tests {
     };
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
+    use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
     use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
     use std::assert_matches;
 
@@ -1233,7 +1212,7 @@ mod tests {
         };
         assert_eq!(
             store,
-            StoreConfig::CloudflareR2 {
+            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket: "documents".to_owned(),
                 account_id: "account".to_owned(),
                 endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
@@ -1242,7 +1221,7 @@ mod tests {
                     secret_access_key: "secret".into(),
                 },
                 key_prefix: Some("tenant-a".to_owned()),
-            }
+            })
         );
     }
 
@@ -1276,7 +1255,7 @@ mod tests {
         };
         assert_eq!(
             *store,
-            StoreConfig::CloudflareR2 {
+            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket: "archive".to_owned(),
                 account_id: "account".to_owned(),
                 endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
@@ -1285,7 +1264,7 @@ mod tests {
                     secret_access_key: "secret".into(),
                 },
                 key_prefix: Some("tenant-b".to_owned()),
-            }
+            })
         );
         let reset = update_spec(CreateProviderSpec::R2(ProfileR2Args {
             bucket: Some("documents".to_owned()),
@@ -1342,9 +1321,9 @@ mod tests {
             let mut expected = profile.clone();
             let ProfileConfig::Embedded {
                 store:
-                    StoreConfig::AwsS3 {
+                    StoreConfig::AwsS3(AwsS3StoreConfig {
                         force_path_style, ..
-                    },
+                    }),
                 ..
             } = &mut expected
             else {
@@ -1375,7 +1354,7 @@ mod tests {
         )
         .expect("build ambient s3 profile");
         let ProfileConfig::Embedded {
-            store: StoreConfig::AwsS3 { credentials, .. },
+            store: StoreConfig::AwsS3(AwsS3StoreConfig { credentials, .. }),
             ..
         } = s3
         else {
@@ -1427,10 +1406,10 @@ mod tests {
         assert_matches!(
             complete,
             ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3 {
+                store: StoreConfig::AwsS3(AwsS3StoreConfig {
                     credentials: AwsS3Credentials::Static { .. },
                     ..
-                },
+                }),
                 ..
             }
         );
@@ -1558,14 +1537,14 @@ mod tests {
     #[test]
     fn update_switches_credential_source_only_with_a_complete_static_set() {
         let profile = ProfileConfig::Embedded {
-            store: StoreConfig::AwsS3 {
+            store: StoreConfig::AwsS3(AwsS3StoreConfig {
                 bucket: "bucket".to_owned(),
                 region: "us-east-1".to_owned(),
                 endpoint_url: None,
                 credentials: AwsS3Credentials::Ambient {},
                 key_prefix: None,
                 force_path_style: false,
-            },
+            }),
             actor_id: None,
             subject_id: None,
             principal_scope: None,
@@ -1588,10 +1567,10 @@ mod tests {
         assert_matches!(
             profile,
             ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3 {
+                store: StoreConfig::AwsS3(AwsS3StoreConfig {
                     credentials: AwsS3Credentials::Ambient {},
                     ..
-                },
+                }),
                 ..
             }
         );
@@ -1609,10 +1588,10 @@ mod tests {
         assert_matches!(
             updated,
             ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3 {
+                store: StoreConfig::AwsS3(AwsS3StoreConfig {
                     credentials: AwsS3Credentials::Static { .. },
                     ..
-                },
+                }),
                 ..
             }
         );

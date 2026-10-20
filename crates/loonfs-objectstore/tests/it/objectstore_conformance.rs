@@ -6,15 +6,16 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_objectstore::gcs::{gcp_gcs, GcpGcsStoreConfig};
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
-use loonfs_objectstore::s3_compatible::{
-    aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
-};
+use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStoreError};
-use loonfs_objectstore::{AwsS3Credentials, ByteRange, ObjectStore, ProviderObjectStore};
+use loonfs_objectstore::{
+    AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
+    SharedObjectStore, StoreConfig,
+};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
@@ -23,10 +24,10 @@ use tempfile::TempDir;
 
 const MIB: usize = 1024 * 1024;
 
-fn aws_s3_store() -> ProviderObjectStore {
+fn aws_s3_store() -> SharedObjectStore {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    aws_s3(AwsS3StoreConfig {
+    StoreConfig::AwsS3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -38,32 +39,42 @@ fn aws_s3_store() -> ProviderObjectStore {
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
+    .configured_object_store()
     .expect("create AWS S3 object store")
+    .into_shared()
 }
 
-fn cloudflare_r2_store() -> ProviderObjectStore {
+fn cloudflare_r2_store() -> SharedObjectStore {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    cloudflare_r2(CloudflareR2StoreConfig {
+    StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
+        credentials: CloudflareR2Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+        },
         key_prefix: Some(config.prefix),
     })
+    .configured_object_store()
     .expect("create Cloudflare R2 object store")
+    .into_shared()
 }
 
-fn gcp_gcs_store() -> ProviderObjectStore {
+fn gcp_gcs_store() -> SharedObjectStore {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
-    gcp_gcs(GcpGcsStoreConfig {
+    StoreConfig::GcpGcs(GcpGcsStoreConfig {
         bucket: config.bucket,
-        service_account_key_path: config.service_account_key_path,
+        credentials: GcpGcsCredentials::ServiceAccountFile {
+            path: config.service_account_key_path,
+        },
         key_prefix: Some(config.prefix),
     })
+    .configured_object_store()
     .expect("create GCP GCS object store")
+    .into_shared()
 }
 
 #[test]
