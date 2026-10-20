@@ -38,6 +38,17 @@ RUN groupadd --system --gid 10001 loonfs \
 
 COPY --from=builder /src/target/release/loonfs-server /usr/local/bin/loonfs-server
 
+# glibc settings that keep the server's resident memory close to what it
+# uses: two arenas instead of up to eight per core, a trim of the heap's free
+# top above 128 KiB, and mmap for every allocation of 128 KiB or more, which
+# returns that allocation to the kernel when it's freed. With these, the lab's
+# Linux peaks were 10% to 32% above the same workload on macOS, and with
+# glibc's defaults up to about three times above. The server's memory sizing
+# assumes these values. A deployment's own environment overrides them.
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072 \
+    MALLOC_MMAP_THRESHOLD_=131072
+
 # Numeric, not the name. A kubelet running a pod with `runAsNonRoot: true`
 # reads this field to decide whether the user is root, and it cannot resolve
 # a name to an id without starting the container first. A named user there
