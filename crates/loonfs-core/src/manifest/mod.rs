@@ -86,4 +86,5 @@ pub(crate) use self::load::{
 };
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
+pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;

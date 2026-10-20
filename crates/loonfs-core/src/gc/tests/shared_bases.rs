@@ -378,3 +378,97 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
             .all(|operation| !operation.key().starts_with(&prefix)));
     }
 }
+
+/// Checks that an extent that only a superseded layout row lists stays
+/// protected while a rooted manifest lists that row's segment, and is
+/// collected once no rooted manifest lists the segment.
+#[tokio::test]
+async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segment() {
+    use loonfs_types::format::manifest::{MetadataRunRef, RunTier};
+    use loonfs_types::RunNo;
+
+    let directory = tempdir().expect("directory");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("superseded-layout").expect("namespace");
+    let chain = ContentId::generate();
+    let layout = |object, size_bytes, committed_seq| ContentLayoutRecord {
+        owner_namespace_id: namespace_id.clone(),
+        content_id: chain.clone(),
+        size_bytes,
+        committed_seq: ChangeSeq(committed_seq),
+        layout: ContentLayout {
+            extents: vec![ContentExtent {
+                owner_namespace_id: namespace_id.clone(),
+                content_id: chain.clone(),
+                object,
+                offset: 0,
+                length: size_bytes,
+            }],
+        },
+    };
+    // The longer layout, from a later run, supersedes the first one and lists
+    // a merged object instead of the first object.
+    let (mut first, superseded) =
+        layout_manifest(&store, &namespace_id, [layout(ExtentObject::Whole, 1, 1)]).await;
+    let (longer, kept) = layout_manifest(
+        &store,
+        &namespace_id,
+        [layout(ExtentObject::Span { start: 0, end: 2 }, 2, 2)],
+    )
+    .await;
+    let longer_run = |tier| MetadataRunRef {
+        run_no: RunNo(1),
+        run_seq: ChangeSeq(2),
+        tier,
+        segments: longer.runs[0].segments.clone(),
+    };
+    first.head_seq = ChangeSeq(2);
+    first.next_run_no = RunNo(2);
+    let mut compacted = first.clone();
+    first.runs.push(longer_run(RunTier::Delta));
+    compacted.manifest_no = ManifestNo(2);
+    compacted.runs = vec![longer_run(RunTier::Base)];
+    publish_layout_manifest(&store, first).await;
+    write_namespace_manifest(&store, compacted)
+        .await
+        .expect("compacted manifest");
+
+    let now_ms = GRACE_MS + 1;
+    let successor = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let young_successor = MetadataMapStore::new(
+        &store,
+        KeyPredicate::exact(&successor),
+        move |mut metadata| {
+            metadata.last_modified_at_ms = Some(now_ms);
+            metadata
+        },
+    );
+    let aged = MetadataMapStore::aged(&store, KeyPredicate::any());
+    let both = superseded.union(&kept).cloned().collect::<BTreeSet<_>>();
+    for (pass_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
+        let report = gc_namespace(
+            pass_store,
+            None,
+            None,
+            &namespace_id,
+            &options(),
+            &context(now_ms),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("pass");
+        assert_eq!(report.deleted.content_objects, deleted);
+        assert_eq!(
+            store
+                .list_prefix(&content_prefix(&namespace_id))
+                .await
+                .expect("survivors")
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            survivors
+        );
+    }
+}

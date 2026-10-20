@@ -18,8 +18,9 @@ use loonfs_types::{GcResponse, NamespaceId};
 
 /// Collects one namespace.
 ///
-/// The root scan reads through `segment_cache` and charges exact content
-/// roots to that cache's read working memory. The shared base filter has a
+/// The root scan reads each distinct layout segment of the rooted manifests
+/// once per scan, through `segment_cache`, and charges exact content roots to
+/// that cache's read working memory. The shared base filter has a
 /// separate byte cap. The pass doesn't read the record of a completed upload
 /// session that `session_cache` has, and it adds each completed session that
 /// it keeps to `session_cache`.
