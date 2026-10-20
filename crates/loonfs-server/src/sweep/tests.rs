@@ -10,6 +10,7 @@ use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::Namespaces;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationKind, OperationSelector,
@@ -18,7 +19,7 @@ use loonfs_test_support::stores::{
 use loonfs_test_support::test_actor;
 use loonfs_types::EffectiveLimit;
 use std::assert_matches;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -26,30 +27,9 @@ use tempfile::tempdir;
 const MINUTE_MS: u64 = 60 * 1_000;
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
-#[derive(Debug)]
-struct SettableWallClock(AtomicU64);
-
-impl SettableWallClock {
-    fn advance_ms(&self, elapsed_ms: u64) {
-        self.0.fetch_add(elapsed_ms, Ordering::SeqCst);
-    }
-}
-
-impl loonfs_types::MonotonicTimer for SettableWallClock {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-impl loonfs::WallClock for SettableWallClock {
-    fn now_ms(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
 /// A server's runtime and sweep over `store`, reading `clock`.
 struct SweepServer {
-    clock: Arc<SettableWallClock>,
+    clock: Arc<ManualClock>,
     recorder: Arc<DefaultMetricsRecorder>,
     runtime: LoonFs<Writable>,
     maintenance: Maintenance,
@@ -59,7 +39,7 @@ struct SweepServer {
 
 impl SweepServer {
     async fn start(store: SharedObjectStore, config: &ServerConfig, now_ms: u64) -> Self {
-        let clock = Arc::new(SettableWallClock(AtomicU64::new(now_ms)));
+        let clock = Arc::new(ManualClock::new(now_ms));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let runtime = LoonFs::builder_with_store(store)
             .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))

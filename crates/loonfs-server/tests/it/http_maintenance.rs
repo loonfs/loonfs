@@ -486,15 +486,6 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     harness.server.abort();
 }
 
-#[derive(Debug)]
-struct FixedWallClock(u64);
-
-impl loonfs::WallClock for FixedWallClock {
-    fn now_ms(&self) -> u64 {
-        self.0
-    }
-}
-
 #[tokio::test]
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
     let default_idle_ms = loonfs::MaintainMetadataOptions::default().idle_fold_after_ms;
@@ -517,7 +508,9 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         // by a writer whose clock is long past is idle on arrival.
         let writer = loonfs::LoonFs::builder_with_store(store)
             .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
-            .wall_clock(std::sync::Arc::new(FixedWallClock(1_750_000_000_000)))
+            .wall_clock(std::sync::Arc::new(
+                loonfs_test_support::clock::ManualClock::new(1_750_000_000_000),
+            ))
             .build()
             .await
             .expect("writer");

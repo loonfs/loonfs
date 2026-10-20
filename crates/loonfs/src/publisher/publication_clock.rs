@@ -6,7 +6,7 @@ use super::*;
 async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> CommitResult {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("retry-clock").expect("namespace");
-    let clock = Arc::new(ManualMonotonicTimer::default());
+    let clock = Arc::new(ManualClock::new(0));
     let delayed = Arc::clone(&clock);
     let retry_time = Arc::new(AtomicU64::new(0));
     let delay_until = Arc::clone(&retry_time);
@@ -19,10 +19,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
             {
                 // Both wall and monotonic time advance together. Only the first
                 // matching put fails; the retry itself consumes no further time.
-                delayed.0.fetch_max(
-                    delay_until.load(AtomicOrdering::SeqCst),
-                    AtomicOrdering::SeqCst,
-                );
+                delayed.set_ms(delay_until.load(AtomicOrdering::SeqCst));
                 true
             } else {
                 false
@@ -68,7 +65,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     let started = expires - remaining_ms;
     let prepared = loonfs_core::content::verify_content_token("secret", &catalog, &token, started)
         .expect("proof valid at admission");
-    clock.set(started);
+    clock.set_ms(started);
     retry_time.store(started + 10, AtomicOrdering::SeqCst);
     Arc::get_mut(&mut runtime.core.inner)
         .expect("unshared runtime core")
@@ -129,7 +126,7 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
     ));
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;
-    let clock = Arc::new(ManualMonotonicTimer::default());
+    let clock = Arc::new(ManualClock::new(0));
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.timer = clock.clone();
     publisher.min_publish_interval = Duration::ZERO;
@@ -142,7 +139,7 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
         ))),
         async {
             store.wait_until_blocked().await;
-            clock.set(loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1);
+            clock.set_ms(loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1);
             store.release();
         }
     );

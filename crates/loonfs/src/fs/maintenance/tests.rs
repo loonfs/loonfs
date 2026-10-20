@@ -962,20 +962,10 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A wall clock a week ahead, so a collection pass finds everything the test
-/// wrote past every grace window.
-#[derive(Debug)]
-struct WeekAheadClock(u64);
-
-impl crate::WallClock for WeekAheadClock {
-    fn now_ms(&self) -> u64 {
-        self.0
-    }
-}
-
 #[tokio::test]
 async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     use loonfs_core::time::WallClock;
+    use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     /// GET, HEAD, and LIST requests, then every write.
@@ -1021,10 +1011,12 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("delete the namespace");
     writer.shutdown().await.expect("shut down the writer");
 
+    // A week ahead, a collection pass finds everything the test wrote past
+    // every grace window.
     let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
-        .wall_clock(Arc::new(WeekAheadClock(week_ahead_ms)))
+        .wall_clock(Arc::new(ManualClock::new(week_ahead_ms)))
         .build()
         .await
         .expect("maintenance")
