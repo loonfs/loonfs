@@ -2,7 +2,7 @@
 //! subtree, paged with a cursor that records the walk's stack.
 
 use super::materialized_view::{
-    resolved_visible_child, ListedChild, LoadedMetadataView, ScannedChild,
+    resolve_visible_child, ListedChild, LoadedMetadataView, ScannedChild,
 };
 use crate::authorize::ReadAccess;
 use crate::error::Result;
@@ -64,8 +64,10 @@ impl TreeFrame {
 impl<S: ObjectStore + ?Sized> LoadedMetadataView<'_, S> {
     /// Lists one page of the subtree below `root`, depth first, with each
     /// directory's children in name-key order and each directory before its
-    /// descendants. The caller has established that `root` is a directory
-    /// the subject can read, and validated any cursor against `root`.
+    /// descendants.
+    ///
+    /// The caller has established that `root` is a directory the subject can
+    /// read, and validated any cursor against `root`.
     ///
     /// A child directory that the subject can't read is returned and not
     /// descended into, because listing it on its own would fail.
@@ -144,10 +146,11 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataView<'_, S> {
 
 /// Rebuilds the walk's stack from a validated cursor.
 ///
-/// Each level below the listed directory must still be the directory bound
-/// at its parent's last name key, and readable. The first level that isn't
-/// (because it was deleted, moved, or replaced, or the subject can no
-/// longer read it) ends the stack, so the walk continues in its parent
+/// Each frame after the first must still refer to the directory bound at the
+/// previous frame's last name key, and the subject must still be able to
+/// read that directory. The first frame that doesn't (because its directory
+/// was deleted, moved, or replaced, or the subject can no longer read it)
+/// ends the stack, so the walk continues in the previous frame's directory
 /// after that name key.
 async fn resume_stack<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
@@ -181,7 +184,7 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
         {
             break;
         }
-        let directory = resolved_visible_child(&parent.directory, &binding);
+        let directory = resolve_visible_child(&parent.directory, &binding);
         stack.push(TreeFrame::new(directory, frame.last_name_key));
     }
     Ok(stack)
@@ -253,7 +256,7 @@ mod tests {
         .into_iter()
         .next()
         .expect("one result")
-        .expect("commit lands");
+        .expect("commit is published");
         (temp_dir, store, namespace_id)
     }
 

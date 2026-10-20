@@ -92,14 +92,14 @@ impl Default for StatOptions {
 pub struct ListOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
+    /// Whether to list the directory's whole subtree, depth first in name-key
+    /// order, instead of its children only, disabled by default.
+    pub recursive: bool,
     /// Read the directory from this snapshot.
     pub snapshot_id: Option<PinId>,
     /// How recently each page confirms the live head, or `None` for the
     /// runtime's default. A snapshot read takes only `None`.
     pub consistency: Option<Consistency>,
-    /// Whether to list the directory's whole subtree, depth first in name-key
-    /// order, instead of its children only, disabled by default.
-    pub recursive: bool,
 }
 
 /// The attribute writes and removals one update applies.

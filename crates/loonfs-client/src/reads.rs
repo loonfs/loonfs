@@ -64,11 +64,12 @@ fn push_consistency(query: &mut QueryBuilder, consistency: Option<Consistency>) 
     }
 }
 
-/// Adds `recursive` to a directory listing that sets it. A listing that
-/// doesn't sends nothing, so it still works against a server that predates
-/// the parameter.
-fn push_recursive(query: &mut QueryBuilder, options: &ListOptions) {
-    if options.recursive {
+/// Adds `recursive` to a directory listing that sets it.
+///
+/// A listing that doesn't sends nothing, so it still works against a server
+/// that predates the parameter.
+fn push_recursive(query: &mut QueryBuilder, recursive: bool) {
+    if recursive {
         query.push("recursive", true);
     }
 }
@@ -329,7 +330,7 @@ impl Client {
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
-        push_recursive(&mut query, options);
+        push_recursive(&mut query, options.recursive);
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
@@ -444,7 +445,7 @@ impl Client {
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
-        push_recursive(&mut query, options);
+        push_recursive(&mut query, options.recursive);
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }

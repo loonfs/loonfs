@@ -32,8 +32,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Binding rows one directory scan reads per manifest round-trip, at the
-/// least.
+/// The fewest binding rows that one directory scan reads per manifest
+/// round-trip.
 pub(crate) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are

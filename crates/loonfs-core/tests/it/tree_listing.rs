@@ -36,8 +36,9 @@ const SMALL_TREE: &[&str] = &[
     "/top.txt",
 ];
 
-/// The recursive listing of `/docs` in the small tree. `B.txt` sorts after
-/// `a` because name keys ignore case.
+/// The recursive listing of `/docs` in the small tree.
+///
+/// `B.txt` sorts after `a` because name keys ignore case.
 const SMALL_TREE_LISTING: &[&str] = &[
     "/docs/a",
     "/docs/a/m",
@@ -121,7 +122,9 @@ async fn page<S: ObjectStore + ?Sized>(
 }
 
 /// Lists `path` recursively in pages of `limit`, and returns each page's
-/// entry paths. Every cursor goes through its wire encoding.
+/// entry paths.
+///
+/// Every cursor goes through its wire encoding.
 async fn recursive_pages<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -332,16 +335,16 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
         KeyPredicate::any(),
     );
     let namespace_id = namespace_id("demo");
-    let mut paths = vec!["/tree/".to_owned(), "/flat/".to_owned()];
+    let mut paths = vec!["/tree/".to_owned(), "/wide/".to_owned()];
     for directory in 0..16 {
         paths.push(format!("/tree/d{directory:02}/"));
         for file in 0..4 {
             paths.push(format!("/tree/d{directory:02}/f{file}.txt"));
-            paths.push(format!("/flat/d{directory:02}-f{file}.txt"));
+            paths.push(format!("/wide/d{directory:02}-f{file}.txt"));
         }
     }
     for directory in 0..16 {
-        paths.push(format!("/flat/d{directory:02}/"));
+        paths.push(format!("/wide/d{directory:02}/"));
     }
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     seed(&store, &namespace_id, &paths).await;
@@ -350,7 +353,7 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
         .expect("fold the tree into segments");
 
     let mut requests = Vec::new();
-    for (path, recursive) in [("/tree", true), ("/flat", false)] {
+    for (path, recursive) in [("/tree", true), ("/wide", false)] {
         let context = read_context(&store, &namespace_id).await;
         store.reset();
         let listed = namespace_engine(&store, &namespace_id, &mutation_context())

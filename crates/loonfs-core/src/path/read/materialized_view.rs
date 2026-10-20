@@ -1034,22 +1034,22 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         match request {
-            DirectoryListingRequest::Children(request) => {
+            DirectoryListingRequest::Directory(request) => {
                 let page = self
                     .directory_children_page(session, resolved, request, attributes, access)
                     .await?;
                 Ok(Page {
                     items: page.items,
-                    next_cursor: page.next_cursor.map(ListPageCursor::Children),
+                    next_cursor: page.next_cursor.map(ListPageCursor::Directory),
                 })
             }
-            DirectoryListingRequest::Tree(request) => {
+            DirectoryListingRequest::DirectoryTree(request) => {
                 let page = self
                     .directory_tree_page(session, resolved, request, attributes, access)
                     .await?;
                 Ok(Page {
                     items: page.items,
-                    next_cursor: page.next_cursor.map(ListPageCursor::Tree),
+                    next_cursor: page.next_cursor.map(ListPageCursor::DirectoryTree),
                 })
             }
         }
@@ -1128,7 +1128,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(children)
     }
 
-    /// Finds whether the subject can read each scanned child.
+    /// Pairs each scanned child with whether the subject can read it.
     pub(super) async fn readable_children(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -1340,14 +1340,14 @@ impl ListedChild {
     /// Resolves a scanned child of `directory` to its path.
     pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
         Self {
-            resolved: resolved_visible_child(directory, &scanned.child.binding),
+            resolved: resolve_visible_child(directory, &scanned.child.binding),
             readable: scanned.readable,
         }
     }
 }
 
 /// Resolves the path of `binding`'s child, a visible child of `directory`.
-pub(super) fn resolved_visible_child(
+pub(super) fn resolve_visible_child(
     directory: &ResolvedVisiblePath,
     binding: &DirentryBindingRecord,
 ) -> ResolvedVisiblePath {
@@ -1680,7 +1680,7 @@ mod tests {
                 let entry = view
                     .build_authoritative_path_entry_with_session(
                         &mut session,
-                        &resolved_visible_child(&resolved, &child.binding),
+                        &resolve_visible_child(&resolved, &child.binding),
                         projection,
                     )
                     .await
@@ -1734,7 +1734,7 @@ mod tests {
             for child in children {
                 view.build_authoritative_path_entry_with_session(
                     &mut session,
-                    &resolved_visible_child(&resolved, &child.binding),
+                    &resolve_visible_child(&resolved, &child.binding),
                     projection,
                 )
                 .await

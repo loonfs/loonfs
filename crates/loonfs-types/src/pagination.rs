@@ -407,7 +407,7 @@ pub struct DirectoryTreePageCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_id: Option<crate::PinId>,
     /// The walk's position in each directory from the listed directory down,
-    /// one frame per level.
+    /// one frame per directory.
     pub frames: Vec<DirectoryTreeFrame>,
 }
 
@@ -415,15 +415,18 @@ impl PageCursor for DirectoryTreePageCursor {
     const KIND: &'static str = "directory_tree";
 }
 
-/// One level of a recursive listing's position: a directory, and the last
+/// One frame of a recursive listing's position: a directory, and the last
 /// name key the walk returned from that directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryTreeFrame {
-    /// Directory inode at this level, a child of the level above.
+    /// Directory inode of this frame, a child of the previous frame's
+    /// directory.
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned from this directory, or `None` when
     /// the walk entered the directory without returning any of its children
-    /// yet. Only the last frame can omit the key.
+    /// yet.
+    ///
+    /// Only the last frame can omit the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_name_key: Option<NameKey>,
 }
@@ -435,9 +438,9 @@ pub struct DirectoryTreeFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListPageCursor {
     /// Resumes a listing of one directory's children.
-    Children(DirectoryPageCursor),
+    Directory(DirectoryPageCursor),
     /// Resumes a recursive listing of a directory's subtree.
-    Tree(DirectoryTreePageCursor),
+    DirectoryTree(DirectoryTreePageCursor),
 }
 
 impl ListPageCursor {
@@ -447,24 +450,24 @@ impl ListPageCursor {
         options: &crate::options::ListOptions,
     ) -> Result<Self, OpaqueTokenError> {
         match options.recursive {
-            false => decode_cursor(value).map(Self::Children),
-            true => decode_cursor(value).map(Self::Tree),
+            false => decode_cursor(value).map(Self::Directory),
+            true => decode_cursor(value).map(Self::DirectoryTree),
         }
     }
 
     /// Encodes the cursor as the opaque string clients round-trip.
     pub fn encode(&self) -> Result<String, OpaqueTokenError> {
         match self {
-            Self::Children(cursor) => encode_cursor(cursor),
-            Self::Tree(cursor) => encode_cursor(cursor),
+            Self::Directory(cursor) => encode_cursor(cursor),
+            Self::DirectoryTree(cursor) => encode_cursor(cursor),
         }
     }
 
     /// Returns the head sequence the issuing page was evaluated at.
     pub fn head_seq(&self) -> ChangeSeq {
         match self {
-            Self::Children(cursor) => cursor.head_seq,
-            Self::Tree(cursor) => cursor.head_seq,
+            Self::Directory(cursor) => cursor.head_seq,
+            Self::DirectoryTree(cursor) => cursor.head_seq,
         }
     }
 
@@ -472,16 +475,16 @@ impl ListPageCursor {
     /// `None` for a live read.
     pub fn pin_id(&self) -> Option<&crate::PinId> {
         match self {
-            Self::Children(cursor) => cursor.pin_id.as_ref(),
-            Self::Tree(cursor) => cursor.pin_id.as_ref(),
+            Self::Directory(cursor) => cursor.pin_id.as_ref(),
+            Self::DirectoryTree(cursor) => cursor.pin_id.as_ref(),
         }
     }
 
-    /// Returns the pin field, for the read that issues the cursor to set.
+    /// Returns the cursor's pin, so the read that issues the cursor can set it.
     pub fn pin_id_mut(&mut self) -> &mut Option<crate::PinId> {
         match self {
-            Self::Children(cursor) => &mut cursor.pin_id,
-            Self::Tree(cursor) => &mut cursor.pin_id,
+            Self::Directory(cursor) => &mut cursor.pin_id,
+            Self::DirectoryTree(cursor) => &mut cursor.pin_id,
         }
     }
 }
@@ -894,18 +897,18 @@ mod tests {
         );
     }
 
-    /// Checks that a listing accepts only the cursor kind that its own
-    /// shape issues, so a cursor from a flat listing can't resume a
-    /// recursive one, or the reverse.
+    /// Checks that a listing accepts only the cursor kind that its own kind
+    /// of listing issues, so a cursor from a listing that isn't recursive
+    /// can't resume a recursive one, or the reverse.
     #[test]
-    fn a_list_cursor_decodes_only_for_the_listing_shape_that_issued_it() {
-        let flat = ListPageCursor::Children(DirectoryPageCursor {
+    fn a_list_cursor_decodes_only_for_the_kind_of_listing_that_issued_it() {
+        let directory = ListPageCursor::Directory(DirectoryPageCursor {
             head_seq: ChangeSeq(11),
             pin_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
-        let tree = ListPageCursor::Tree(DirectoryTreePageCursor {
+        let directory_tree = ListPageCursor::DirectoryTree(DirectoryTreePageCursor {
             head_seq: ChangeSeq(11),
             pin_id: None,
             frames: vec![DirectoryTreeFrame {
@@ -919,8 +922,8 @@ mod tests {
         };
 
         for (cursor, recursive, kind, other_kind) in [
-            (&flat, false, "directory", "directory_tree"),
-            (&tree, true, "directory_tree", "directory"),
+            (&directory, false, "directory", "directory_tree"),
+            (&directory_tree, true, "directory_tree", "directory"),
         ] {
             let encoded = cursor.encode().expect("encode cursor");
             assert_eq!(

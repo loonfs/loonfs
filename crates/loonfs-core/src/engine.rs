@@ -328,7 +328,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Lists one page of a directory's children by inode against the pinned
-    /// runtime read context, or with `options.recursive`, one page of its
+    /// runtime read context, or, with `options.recursive`, one page of its
     /// subtree.
     pub async fn list_inode_children_page(
         &self,

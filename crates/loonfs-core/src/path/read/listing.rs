@@ -32,8 +32,8 @@ pub(super) fn validate_cursor_head(
 /// One page of a directory listing: of the directory's children, or of its
 /// whole subtree.
 pub(super) enum DirectoryListingRequest {
-    Children(PageRequest<DirectoryPageCursor>),
-    Tree(PageRequest<DirectoryTreePageCursor>),
+    Directory(PageRequest<DirectoryPageCursor>),
+    DirectoryTree(PageRequest<DirectoryTreePageCursor>),
 }
 
 impl DirectoryListingRequest {
@@ -48,41 +48,41 @@ impl DirectoryListingRequest {
     ) -> Result<Self> {
         let PageRequest { limit, cursor } = request;
         match (options.recursive, cursor) {
-            (false, None) => Ok(Self::Children(PageRequest {
+            (false, None) => Ok(Self::Directory(PageRequest {
                 limit,
                 cursor: None,
             })),
-            (false, Some(ListPageCursor::Children(cursor))) => {
+            (false, Some(ListPageCursor::Directory(cursor))) => {
                 validate_cursor_directory(cursor.directory_inode_id, resolved)?;
-                Ok(Self::Children(PageRequest {
+                Ok(Self::Directory(PageRequest {
                     limit,
                     cursor: Some(cursor),
                 }))
             }
-            (true, None) => Ok(Self::Tree(PageRequest {
+            (true, None) => Ok(Self::DirectoryTree(PageRequest {
                 limit,
                 cursor: None,
             })),
-            (true, Some(ListPageCursor::Tree(cursor))) => {
+            (true, Some(ListPageCursor::DirectoryTree(cursor))) => {
                 validate_tree_cursor(&cursor, resolved)?;
-                Ok(Self::Tree(PageRequest {
+                Ok(Self::DirectoryTree(PageRequest {
                     limit,
                     cursor: Some(cursor),
                 }))
             }
-            (false, Some(ListPageCursor::Tree(_))) => Err(invalid_cursor(
-                "a recursive listing cursor can't resume a listing that isn't recursive",
+            (false, Some(ListPageCursor::DirectoryTree(_))) => Err(invalid_cursor(
+                "cursor kind `directory_tree` cannot resume a listing that is not recursive",
             )),
-            (true, Some(ListPageCursor::Children(_))) => Err(invalid_cursor(
-                "a directory cursor can't resume a recursive listing",
+            (true, Some(ListPageCursor::Directory(_))) => Err(invalid_cursor(
+                "cursor kind `directory` cannot resume a recursive listing",
             )),
         }
     }
 }
 
-/// Checks a recursive listing cursor's shape: one frame for each level from
-/// the listed directory down, at most the walk's depth, and a name key in
-/// every frame but the last.
+/// Checks a recursive listing cursor's shape: one frame for each directory
+/// from the listed directory down, at most the walk's depth, and a name key
+/// in every frame but the last.
 fn validate_tree_cursor(
     cursor: &DirectoryTreePageCursor,
     resolved: &ResolvedVisiblePath,

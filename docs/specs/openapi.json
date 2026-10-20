@@ -6906,7 +6906,7 @@
             }
           },
           {
-            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only. A cursor from one kind of listing can't resume the other.",
+            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only.",
             "in": "query",
             "name": "recursive",
             "required": false,
@@ -7885,7 +7885,7 @@
             }
           },
           {
-            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only. A cursor from one kind of listing can't resume the other.",
+            "description": "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only.",
             "in": "query",
             "name": "recursive",
             "required": false,
