@@ -706,10 +706,14 @@ Behavior notes
   Recursive put, get, and cp discover entries while the transfers run,
   with at most eight pending file operations. Discovery pauses when all
   eight slots are full. Local traversal keeps one directory handle per
-  depth, and remote traversal keeps up to 64 entries per depth. The
-  existing path-depth limit bounds both. Overall totals become known when
-  discovery finishes. Per-file progress starts right away, and the
-  traversal order is unspecified.
+  depth. Remote traversal reads the tree with one recursive listing, in
+  pages of the default page size (1,000 entries), and lists a directory
+  on its own only when the listing returned it with nothing below it
+  (because it's empty, or because the subject can't read it). It keeps
+  one page for each listing it has open. The existing path-depth limit
+  bounds both. Overall totals become known when discovery finishes.
+  Per-file progress starts right away, and the traversal order is
+  unspecified.
 
   Successful results are counted right away. Failures are written to a
   local temporary file and printed incrementally, so every error is kept

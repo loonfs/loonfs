@@ -642,39 +642,49 @@ fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
 }
 
 #[test]
-fn recursive_get_surfaces_drift_across_directory_listings() {
+fn recursive_get_reports_drift_across_listing_pages() {
     let harness = Harness::new();
-    let (server_url, server) = json_response_server(vec![
+    let directory = |path: &str, inode_id: &str, parent_inode_id: &str, head_seq: u64| {
         serde_json::json!({
             "namespace_id": "demo",
-            "path": "/docs",
-            "inode_id": "ino_2",
+            "path": path,
+            "inode_id": inode_id,
             "created_by": "loonfs",
             "created_at_ms": 1_752_624_000_000_u64,
             "inode_kind": "dir",
-            "head_seq": 20,
-            "parent_inode_id": "ino_1",
-            "display_name": "docs",
-        }),
+            "head_seq": head_seq,
+            "parent_inode_id": parent_inode_id,
+            "display_name": path.rsplit('/').next().expect("a name"),
+        })
+    };
+    // The stat of the root, then two pages of its listing read at different
+    // heads. The listing returns `inner` with nothing below it, so the walk
+    // lists `inner` on its own, and that listing returns `deeper` (as it
+    // would for a directory deeper than the first listing descends).
+    let (server_url, server) = json_response_server(vec![
+        directory("/docs", "ino_2", "ino_1", 20),
         serde_json::json!({
             "namespace_id": "demo",
             "path": "/docs",
             "head_seq": 20,
-            "entries": [{
-                "namespace_id": "demo",
-                "path": "/docs/sub",
-                "inode_id": "ino_3",
-                "created_by": "loonfs",
-                "created_at_ms": 1_752_624_000_000_u64,
-                "inode_kind": "dir",
-                "head_seq": 20,
-                "parent_inode_id": "ino_2",
-                "display_name": "sub",
-            }],
+            "entries": [directory("/docs/sub", "ino_3", "ino_2", 20)],
+            "next_cursor": "after-sub",
         }),
         serde_json::json!({
             "namespace_id": "demo",
-            "path": "/docs/sub",
+            "path": "/docs",
+            "head_seq": 21,
+            "entries": [directory("/docs/sub/inner", "ino_4", "ino_3", 21)],
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "path": "/docs/sub/inner",
+            "head_seq": 21,
+            "entries": [directory("/docs/sub/inner/deeper", "ino_5", "ino_4", 21)],
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "path": "/docs/sub/inner/deeper",
             "head_seq": 21,
             "entries": [],
         }),
@@ -693,7 +703,8 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
     assert!(get.stderr.is_empty());
     let data = json_data(&get);
     assert_eq!(data["files"], 0);
-    assert_eq!(data["directories"], 2);
+    assert_eq!(data["directories"], 4);
+    assert!(destination.join("sub/inner/deeper").is_dir());
     assert_eq!(
         data["head_drift"],
         serde_json::json!({
@@ -774,4 +785,160 @@ fn recursive_transfers_preserve_a_completely_empty_root() {
     let destination = harness.temp_dir.path().join("back");
     assert_success(&harness.run(&["get", "-r", "/copy", destination.to_str().expect("path")]));
     assert!(destination.is_dir());
+}
+
+/// Creates a remote profile over a running server, and a tree at `/src` with
+/// three directories below it and four files.
+fn remote_harness_with_tree() -> (Harness, ExternalServer) {
+    let harness = Harness::new();
+    let server =
+        harness.start_external_server(harness.write_server_config("remote", "listing-count"));
+    assert_success(&harness.run(&[
+        "profile",
+        "create",
+        "remote",
+        "default",
+        "--server-url",
+        &server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs/drafts")).expect("create docs");
+    fs::create_dir_all(tree.join("images")).expect("create images");
+    fs::write(tree.join("top.txt"), b"top").expect("write top");
+    fs::write(tree.join("docs/a.txt"), b"alpha").expect("write a");
+    fs::write(tree.join("docs/drafts/b.txt"), b"beta").expect("write b");
+    fs::write(tree.join("images/c.txt"), b"gamma").expect("write c");
+    assert_success(&harness.run(&["put", "-r", tree.to_str().expect("utf-8 path"), "/src"]));
+    (harness, server)
+}
+
+/// Returns how many directory listing requests the server has served.
+fn served_listings(server_url: &str) -> u64 {
+    let scrape = raw_agent()
+        .get(&format!("{server_url}/metrics"))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect("scrape metrics")
+        .into_string()
+        .expect("read metrics");
+    scrape
+        .lines()
+        .filter(|line| {
+            line.starts_with(
+                "loonfs_server_requests_total{method=\"GET\",\
+                 route=\"/v0/namespaces/{namespace_id}/filesystem/entries\",",
+            )
+        })
+        .map(|line| {
+            let (_, count) = line
+                .rsplit_once(' ')
+                .expect("a counter line ends in its value");
+            count.parse::<u64>().expect("a counter value")
+        })
+        .sum()
+}
+
+/// Checks that `get -r` discovers a small tree with one listing request.
+#[test]
+fn recursive_get_lists_a_small_tree_in_one_request() {
+    let (harness, server) = remote_harness_with_tree();
+    let before = served_listings(&server.server_url);
+    let destination = harness.temp_dir.path().join("back");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/src",
+        destination.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(json_data(&get)["files"], 4);
+    assert_eq!(served_listings(&server.server_url) - before, 1);
+}
+
+/// Checks that `cp -r` discovers a small tree with one listing request.
+#[test]
+fn recursive_copy_lists_a_small_tree_in_one_request() {
+    let (harness, server) = remote_harness_with_tree();
+    let before = served_listings(&server.server_url);
+    let copy = harness.run(&["--json", "cp", "-r", "/src", "/copy"]);
+    assert_success(&copy);
+    assert_eq!(json_data(&copy)["files"], 4);
+    assert_eq!(served_listings(&server.server_url) - before, 1);
+}
+
+/// Checks that `get -r` and `cp -r` report a directory that the subject
+/// can't read as a failure, and transfer the rest of the tree.
+#[test]
+fn recursive_transfers_report_a_directory_the_subject_cannot_read() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&[
+        "namespace",
+        "create",
+        "demo",
+        "--access",
+        "acl",
+        "--principal-scope",
+        "org",
+        "--administrator",
+        "prn_root",
+    ]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let administrator = [
+        ("LOONFS_PRINCIPAL_SCOPE", "org"),
+        ("LOONFS_PRINCIPALS", "prn_root"),
+    ];
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("open")).expect("create open");
+    fs::create_dir_all(tree.join("secret")).expect("create secret");
+    fs::write(tree.join("top.txt"), b"top").expect("write top");
+    fs::write(tree.join("open/a.txt"), b"alpha").expect("write a");
+    fs::write(tree.join("secret/b.txt"), b"beta").expect("write b");
+    assert_success(&harness.run_with_env(
+        &administrator,
+        &["put", "-r", tree.to_str().expect("utf-8 path"), "/src"],
+    ));
+    assert_success(&harness.run_with_env(
+        &administrator,
+        &["access", "set", "/src/secret", "--boundary"],
+    ));
+    assert_success(&harness.run_with_env(
+        &administrator,
+        &["access", "set", "/", "--grant", "reader=read,create"],
+    ));
+
+    let reader = [
+        ("LOONFS_PRINCIPAL_SCOPE", "org"),
+        ("LOONFS_PRINCIPALS", "reader"),
+    ];
+    let destination = harness.temp_dir.path().join("back");
+    let get = harness.run_with_env(
+        &reader,
+        &[
+            "--json",
+            "get",
+            "-r",
+            "/src",
+            destination.to_str().expect("utf-8 path"),
+        ],
+    );
+    let copy = harness.run_with_env(&reader, &["--json", "cp", "-r", "/src", "/copy"]);
+    for transfer in [get, copy] {
+        assert_failure(&transfer);
+        let data = json_data(&transfer);
+        assert_eq!(data["files"], 2, "{data}");
+        let failures = data["failures"].as_array().expect("failures");
+        assert_eq!(failures.len(), 1, "{data}");
+        assert_eq!(failures[0]["path"], "/src/secret", "{data}");
+        assert_eq!(failures[0]["error"]["code"], "path_not_found", "{data}");
+    }
+    assert_eq!(
+        fs::read(destination.join("open/a.txt")).expect("downloaded a.txt"),
+        b"alpha"
+    );
 }

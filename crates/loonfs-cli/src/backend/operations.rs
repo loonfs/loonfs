@@ -30,6 +30,23 @@ impl ResolvedTarget {
         )
     }
 
+    /// Lists the whole subtree below a directory, depth first, with each
+    /// directory before the entries below it.
+    pub(crate) fn list_tree_at_snapshot(
+        &self,
+        spec: &NamespacePath,
+        snapshot_id: Option<&PinId>,
+    ) -> PathEntriesPager {
+        self.client.list_with_options(
+            spec,
+            &ListOptions {
+                recursive: true,
+                snapshot_id: snapshot_id.cloned(),
+                ..ListOptions::default()
+            },
+        )
+    }
+
     pub(crate) async fn stat_at_snapshot(
         &self,
         spec: &NamespacePath,
