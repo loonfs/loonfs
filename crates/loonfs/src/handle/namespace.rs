@@ -194,7 +194,23 @@ impl Namespace<Writable> {
         Ok(self.session().close().await?)
     }
 
-    /// Waits for the WAL-tail fold this session is running, if any.
+    /// Waits for this session's fold task to end, and returns at once if no
+    /// fold is running.
+    ///
+    /// A session starts a fold when a publish leaves its WAL tail over the
+    /// fold trigger (32 WAL objects, or
+    /// [`inline_content_fold_at_bytes`](crate::InlineContentPolicy::inline_content_fold_at_bytes)
+    /// of inline content). The fold task folds again while the tail that its
+    /// last fold left is over the trigger, so the wait usually ends with the
+    /// tail under the trigger, and commits published during the wait can keep
+    /// the task folding. The task also ends after a fold that fails, or that
+    /// finds that another process already folded the tail, so the tail can
+    /// still be over the trigger when this returns.
+    ///
+    /// This doesn't start a fold, and it doesn't wait for the metadata
+    /// compaction that a fold starts.
+    /// [`Maintenance::fold_wal`](crate::Maintenance::fold_wal) folds the tail
+    /// now, and [`LoonFs::drain`] also waits for the compaction.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.wait_for_fold",
