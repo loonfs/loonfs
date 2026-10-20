@@ -12,12 +12,14 @@ use crate::presign::{
 };
 use crate::provider_object_store::{
     map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController, PartReader,
-    StoredChecksumReader,
+    ProviderClient, StoredChecksumReader,
 };
+use crate::retry::{with_transport_retry, RetryWarnings};
 use crate::signed_request::{
     classify_signed_response, send, send_signed, signing_time, SignedResponse,
 };
 use crate::store_io_runtime::StoreIoRuntime;
+use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig,
@@ -59,6 +61,7 @@ struct GcsRequestSigner {
     credentials: GcpCredentialProvider,
     bucket: String,
     key_prefix: Option<String>,
+    retry_warnings: Arc<RetryWarnings>,
 }
 
 /// Builds a native GCS adapter whose compare tokens are object generations.
@@ -100,6 +103,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         .with_credentials(Arc::clone(&credentials))
         .build()
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let retry_warnings = Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default())));
     let signer = Arc::new(GcsRequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
@@ -107,6 +111,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         credentials,
         bucket: config.bucket,
         key_prefix,
+        retry_warnings: Arc::clone(&retry_warnings),
     });
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
@@ -128,7 +133,9 @@ pub(crate) fn gcp_gcs_with_issuers(
     };
 
     Ok((
-        store.compare_token(CompareToken::Generation),
+        store
+            .compare_token(CompareToken::Generation)
+            .retry_warnings(retry_warnings),
         direct_transfers,
     ))
 }
@@ -151,7 +158,7 @@ impl GcsRequestSigner {
             .credentials
             .get_credential()
             .await
-            .map_err(|error| map_provider_error(key, error))?;
+            .map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))?;
         let request = request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer));
         succeeded(key, send(&self.http, key, request, body).await?)
     }
@@ -160,16 +167,19 @@ impl GcsRequestSigner {
 #[async_trait]
 impl StoredChecksumReader for GcsRequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let signed = self
-            .request_signer
-            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        let mut metadata = crate::signed_request::metadata_from_signed_head(
-            key,
-            &response,
-            "x-goog-generation",
-            stored_crc32c_from_headers,
-        )?;
+        let mut metadata = with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
+            let signed =
+                self.request_signer
+                    .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())?;
+            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+            crate::signed_request::metadata_from_signed_head(
+                key,
+                &response,
+                "x-goog-generation",
+                stored_crc32c_from_headers,
+            )
+        })
+        .await?;
         if let Some(metadata) = &mut metadata {
             metadata.etag.clone_from(&metadata.version);
         }
@@ -180,9 +190,10 @@ impl StoredChecksumReader for GcsRequestSigner {
 #[async_trait]
 impl MultipartController for GcsRequestSigner {
     /// Sends the parts through one JSON API resumable upload whose start
-    /// carries `ifGenerationMatch=0`, because XML API multipart uploads
+    /// includes `ifGenerationMatch=0`, because XML API multipart uploads
     /// refuse preconditions. A resumable upload takes its bytes in order, so
-    /// the parts go one at a time whatever the window.
+    /// the parts go one at a time whatever the window, and a chunk that fails
+    /// with a retryable transport error is sent again at the same offset.
     async fn put_if_absent(
         &self,
         key: &str,
@@ -249,22 +260,39 @@ impl MultipartController for GcsRequestSigner {
                 (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
                 (false, false) => format!("bytes {offset}-{}/*", end - 1),
             };
-            let mut request = http::Request::put(&session)
-                .header(CONTENT_LENGTH, chunk.len())
-                .header(CONTENT_RANGE, content_range);
-            if last {
-                let full = std::mem::replace(
+            let full_checksum = last.then(|| {
+                std::mem::replace(
                     &mut checksum,
                     ChecksumDigest::new(ChecksumAlgorithm::Crc32c),
                 )
-                .finish();
-                request = request.header(GCS_HASH_HEADER, crc32c_header(&full));
-            }
-            let response = send(&self.http, key, request, chunk.into()).await?;
+                .finish()
+            });
+            let response = with_transport_retry(
+                &self.retry_warnings,
+                key,
+                "put_chunk",
+                chunk.len() as u64,
+                || {
+                    let mut request = http::Request::put(&session)
+                        .header(CONTENT_LENGTH, chunk.len())
+                        .header(CONTENT_RANGE, &content_range);
+                    if let Some(full) = &full_checksum {
+                        request = request.header(GCS_HASH_HEADER, crc32c_header(full));
+                    }
+                    let chunk = chunk.clone();
+                    async move {
+                        let response = send(&self.http, key, request, chunk.into()).await?;
+                        match response.status.as_u16() {
+                            308 => Ok(response),
+                            _ => succeeded(key, response),
+                        }
+                    }
+                },
+            )
+            .await?;
             if response.status.as_u16() != 308 {
-                let finished = succeeded(key, response)?;
                 abort_on_drop.disarm();
-                return gcs_object(key, &finished.body);
+                return gcs_object(key, &response.body);
             }
             if last || persisted_bytes(&response.headers) != Some(end) {
                 return Err(ObjectStoreError::transport(
@@ -365,11 +393,17 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
 #[cfg(test)]
 mod tests {
     use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
-    use crate::test_support::gcs_fixture_service_account_key_file;
+    use crate::retry::{RetryWarnings, DEFAULT};
+    use crate::test_support::{
+        gcs_fixture_service_account_key_file, request_timeout, stall, RequestFault, TokioTimer,
+    };
+    use crate::timing::MonotonicTimer;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
     use loonfs_types::Checksum;
+    use object_store::client::HttpClient;
     use std::assert_matches;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_json_object_resource_reports_its_generation_and_stored_crc32c() {
@@ -449,6 +483,120 @@ mod tests {
         }
     }
 
+    /// Builds a signer that sends its requests to `http`, with the fixture
+    /// service account at `path` and a static token.
+    fn test_signer(path: &std::path::Path, http: HttpClient) -> super::GcsRequestSigner {
+        use std::sync::Arc;
+        super::GcsRequestSigner {
+            request_signer: Arc::new(
+                super::GcsV4Presigner::new(&GcpGcsStoreConfig {
+                    bucket: "bucket".to_owned(),
+                    service_account_key_path: path.display().to_string(),
+                    key_prefix: None,
+                })
+                .expect("signer"),
+            ),
+            http,
+            io_runtime: tokio::runtime::Handle::current(),
+            credentials: Arc::new(object_store::StaticCredentialProvider::new(
+                object_store::gcp::GcpCredential {
+                    bearer: "test".to_owned(),
+                },
+            )),
+            bucket: "bucket".to_owned(),
+            key_prefix: None,
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioTimer::start()))),
+        }
+    }
+
+    /// Fails every resumable chunk but the last with one fault and counts
+    /// the attempts, and sends every other request to the upload double.
+    #[derive(Debug, Clone)]
+    struct FaultyChunks {
+        inner: UploadRequests,
+        fault: RequestFault,
+        attempts: std::sync::Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::client::HttpService for FaultyChunks {
+        async fn call(
+            &self,
+            request: object_store::client::HttpRequest,
+        ) -> Result<object_store::client::HttpResponse, object_store::client::HttpError> {
+            let partial_chunk = request
+                .headers()
+                .get(http::header::CONTENT_RANGE)
+                .is_some_and(|range| range.to_str().expect("range").ends_with("/*"));
+            if !partial_chunk {
+                return self.inner.call(request).await;
+            }
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            match self.fault {
+                RequestFault::Status(status) => Ok(http::Response::builder()
+                    .status(status)
+                    .body(Bytes::from(format!(r#"{{"error":{{"code":{status}}}}}"#)))
+                    .expect("fault response")
+                    .map(object_store::client::HttpResponseBody::from)),
+                RequestFault::Timeout => {
+                    let body_bytes = request.body().content_length() as u64;
+                    stall(crate::provider_object_store::request_phase_bound(
+                        body_bytes,
+                    ))
+                    .await;
+                    Err(request_timeout())
+                }
+            }
+        }
+    }
+
+    /// Checks that a resumable chunk that fails is sent again at most once
+    /// more than the retry count, within one operation deadline and one
+    /// attempt bound, and that a refused chunk fails at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_chunk_is_attempted_under_one_retry_budget() {
+        use super::*;
+        use futures::{stream, StreamExt};
+        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-chunk-retry");
+        let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
+        // Four 30 s attempts and their backoffs pass the 120 s deadline.
+        for (fault, attempts) in [
+            (RequestFault::Status(400), 1),
+            (RequestFault::Status(503), retried),
+            (RequestFault::Timeout, 4),
+        ] {
+            let service = FaultyChunks {
+                inner: UploadRequests::default(),
+                fault,
+                attempts: Arc::default(),
+            };
+            let signer = test_signer(&path, HttpClient::new(service.clone()));
+            let mut parts = PartReader::new(
+                stream::iter(vec![Ok(Bytes::from_static(b"hello"))]).boxed(),
+                3,
+            );
+            let head = parts.next_part().await.expect("head").expect("bytes");
+            let clock = TokioTimer::start();
+            signer
+                .put_if_absent("key", head, parts, 1)
+                .await
+                .expect_err("every first chunk fails");
+            let elapsed_ms = clock.monotonic_now_ms();
+            assert_eq!(
+                service.attempts.load(Ordering::SeqCst),
+                attempts,
+                "{fault:?} attempts"
+            );
+            assert!(
+                elapsed_ms
+                    <= loonfs_types::saturating_duration_ms(
+                        crate::PROVIDER_OPERATION_DEADLINE + crate::PROVIDER_ATTEMPT_TIMEOUT
+                    ),
+                "{fault:?} took {elapsed_ms} ms"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn media_and_resumable_uploads_send_crc32c_and_chunk_lengths() {
         use super::*;
@@ -456,25 +604,7 @@ mod tests {
         let (_directory, path) = gcs_fixture_service_account_key_file("gcs-checksum");
         for part_bytes in [3, 5, 8] {
             let requests = UploadRequests::default();
-            let signer = GcsRequestSigner {
-                request_signer: Arc::new(
-                    GcsV4Presigner::new(&GcpGcsStoreConfig {
-                        bucket: "bucket".to_owned(),
-                        service_account_key_path: path.display().to_string(),
-                        key_prefix: None,
-                    })
-                    .expect("signer"),
-                ),
-                http: HttpClient::new(requests.clone()),
-                io_runtime: tokio::runtime::Handle::current(),
-                credentials: Arc::new(object_store::StaticCredentialProvider::new(
-                    object_store::gcp::GcpCredential {
-                        bearer: "test".to_owned(),
-                    },
-                )),
-                bucket: "bucket".to_owned(),
-                key_prefix: None,
-            };
+            let signer = test_signer(&path, HttpClient::new(requests.clone()));
             let mut parts = PartReader::new(
                 stream::iter(vec![
                     Ok(Bytes::from_static(b"he")),
@@ -514,25 +644,7 @@ mod tests {
         use super::*;
         let (_directory, path) = gcs_fixture_service_account_key_file("gcs-assembly");
         let requests = UploadRequests::default();
-        let signer = GcsRequestSigner {
-            request_signer: Arc::new(
-                GcsV4Presigner::new(&GcpGcsStoreConfig {
-                    bucket: "bucket".to_owned(),
-                    service_account_key_path: path.display().to_string(),
-                    key_prefix: None,
-                })
-                .expect("signer"),
-            ),
-            http: HttpClient::new(requests.clone()),
-            io_runtime: tokio::runtime::Handle::current(),
-            credentials: Arc::new(object_store::StaticCredentialProvider::new(
-                object_store::gcp::GcpCredential {
-                    bearer: "test".to_owned(),
-                },
-            )),
-            bucket: "bucket".to_owned(),
-            key_prefix: None,
-        };
+        let signer = test_signer(&path, HttpClient::new(requests.clone()));
         let expected = Checksum::crc32c(b"hello");
         let key = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
         for sources in [

@@ -1,5 +1,5 @@
-//! The shared provider transport: timeouts, bounded retries for replay-safe
-//! deletes, and the routing of large creates to the provider's own
+//! The shared provider transport: timeouts, the classification of provider
+//! client errors, and the routing of large creates to the provider's own
 //! conditional requests.
 
 use crate::keyspace::{
@@ -7,11 +7,9 @@ use crate::keyspace::{
     unscope_listed_key,
 };
 use crate::object_store::{unsupported_multipart, Result};
-use crate::retry::{
-    provider_transport_retryable, with_transport_retry, RetryWarnings, StoreRetry, DEFAULT,
-};
+use crate::retry::{RetryWarnings, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::timing::StdMonotonicTimer;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
@@ -22,7 +20,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
-use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
+use loonfs_types::{EffectiveLimit, Page};
 use object_store as provider_store;
 use provider_store::list::{PaginatedListOptions, PaginatedListStore};
 use provider_store::path::Path;
@@ -55,11 +53,12 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deadline shared by all retries of one logical object-store operation.
 ///
-/// Reads apply it through the provider client. Verified immutable writes and
-/// deletes apply it through `TransportRetryPolicy`. A new outer attempt may
-/// start only while time remains. S3 multipart uploads apply it to each part,
-/// so one part's retries cannot outlast it. The garbage-collection grace
-/// period is longer than the maximum publication operation.
+/// The retrying provider client applies it to each request it sends, as its
+/// retry timeout. LoonFS applies it to each of its own retry loops: one
+/// verified immutable write, or one request it signs, such as a part, so one
+/// part's retries cannot outlast it. A new attempt may start only while time
+/// remains. The garbage-collection grace period is longer than the maximum
+/// publication operation.
 pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Maximum retry delay after the provider client admits a final retry.
@@ -148,9 +147,9 @@ pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
         .with_connect_timeout(PROVIDER_CONNECT_TIMEOUT)
 }
 
-/// Retry configuration every provider builder applies: the client's internal
-/// read retries consume [`PROVIDER_OPERATION_DEADLINE`] as one per-operation budget,
-/// matching the write loops above.
+/// Retry configuration every provider builder applies: the client's retries
+/// of each request it sends share [`PROVIDER_OPERATION_DEADLINE`] as one
+/// budget, matching LoonFS's own retry loop.
 pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
     provider_store::RetryConfig {
         retry_timeout: PROVIDER_OPERATION_DEADLINE,
@@ -252,8 +251,6 @@ pub struct ProviderObjectStore {
     io_runtime: StoreIoRuntime,
     multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
-    transport_retry: TransportRetryPolicy,
-    timer: Arc<dyn MonotonicTimer>,
     retry_warnings: Arc<RetryWarnings>,
 }
 
@@ -271,9 +268,10 @@ impl ProviderObjectStore {
     /// Wraps a provider client, the same client built to never resend a
     /// request, and the paged delimiter listing surface.
     ///
-    /// Every single-request put goes to `one_attempt`, and reads and deletes
-    /// use `inner`. Construction fails when `config.key_prefix` is not a
-    /// normalized, non-escaping logical prefix.
+    /// Every single-request put goes to `one_attempt`, and reads, deletes and
+    /// listings use `inner`, so [`map_provider_error`] can tell which client
+    /// an error came from. Construction fails when `config.key_prefix` is not
+    /// a normalized, non-escaping logical prefix.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
@@ -286,7 +284,6 @@ impl ProviderObjectStore {
         checksum_reader: Arc<dyn StoredChecksumReader>,
         multipart_controller: Arc<dyn MultipartController>,
     ) -> Result<Self> {
-        let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
         Ok(Self {
             inner,
             one_attempt,
@@ -299,9 +296,7 @@ impl ProviderObjectStore {
             io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
-            transport_retry: DEFAULT,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::clone(&timer))),
-            timer,
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default()))),
         })
     }
 
@@ -311,17 +306,10 @@ impl ProviderObjectStore {
     }
 
     /// Shares `retry_warnings` with the requests a provider adapter signs
-    /// itself, so the bucket keeps one limiter.
+    /// itself, so the bucket keeps one limiter and one retry clock.
     pub(crate) fn retry_warnings(mut self, retry_warnings: Arc<RetryWarnings>) -> Self {
         self.retry_warnings = retry_warnings;
         self
-    }
-
-    fn retry(&self) -> StoreRetry<'_> {
-        StoreRetry {
-            policy: &self.transport_retry,
-            warnings: &self.retry_warnings,
-        }
     }
 
     #[cfg(test)]
@@ -331,24 +319,11 @@ impl ProviderObjectStore {
     }
 
     #[cfg(test)]
-    fn transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
-        self.transport_retry = transport_retry;
-        self
-    }
-
-    #[cfg(test)]
     fn multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
         self.multipart_geometry = MultipartGeometry {
             threshold_bytes,
             part_bytes,
         };
-        self
-    }
-
-    #[cfg(test)]
-    fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
-        self.retry_warnings = Arc::new(RetryWarnings::new(Arc::clone(&timer)));
-        self.timer = timer;
         self
     }
 
@@ -576,14 +551,14 @@ impl ObjectStore for ProviderObjectStore {
                 let bytes = result
                     .bytes()
                     .await
-                    .map_err(|err| map_provider_error(key, err))?;
+                    .map_err(|err| map_provider_error(key, err, ProviderClient::Retrying))?;
                 Ok(Some(ObjectBody {
                     metadata,
                     bytes: bytes.to_vec(),
                 }))
             }
             Err(err) if provider_not_found(&err) => Ok(None),
-            Err(err) => Err(map_provider_error(key, err)),
+            Err(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
         }
     }
 
@@ -603,9 +578,9 @@ impl ObjectStore for ProviderObjectStore {
                     .bytes()
                     .await
                     .map(Some)
-                    .map_err(|err| map_provider_error(key, err)),
+                    .map_err(|err| map_provider_error(key, err, ProviderClient::Retrying)),
                 Err(err) if provider_not_found(&err) => Ok(None),
-                Err(err) => Err(map_provider_error(key, err)),
+                Err(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
             };
         };
         if range.end_exclusive < range.start_inclusive {
@@ -654,10 +629,12 @@ impl ObjectStore for ProviderObjectStore {
                         {
                             RangedGet::Bytes(bytes) => Ok(Some(bytes)),
                             RangedGet::NotFound => Ok(None),
-                            RangedGet::Refused(err) => Err(map_provider_error(key, err)),
+                            RangedGet::Refused(err) => {
+                                Err(map_provider_error(key, err, ProviderClient::Retrying))
+                            }
                         }
                     }
-                    Some(_) => Err(map_provider_error(key, err)),
+                    Some(_) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
                 }
             }
         }
@@ -737,26 +714,16 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
+    /// Sends one delete through the retrying client, which retries it, so
+    /// LoonFS doesn't retry it again.
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.to_path(key)?;
-        let deadline =
-            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
-        with_transport_retry(
-            self.retry(),
-            key,
-            "delete",
-            0,
-            Some(&deadline),
-            provider_transport_retryable,
-            || async {
-                match self.inner.delete(&path).await {
-                    Err(error) if provider_not_found(&error) => Ok(()),
-                    result => result,
-                }
-            },
-        )
-        .await
-        .map_err(|error| map_provider_error(key, error))
+        match self.inner.delete(&path).await {
+            Err(error) if provider_not_found(&error) => Ok(()),
+            result => {
+                result.map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))
+            }
+        }
     }
 
     async fn assemble(
@@ -876,7 +843,11 @@ impl ObjectStore for ProviderObjectStore {
                             ),
                         }))
                     }
-                    Err(err) => Some(Err(map_provider_error(&listed_prefix, err))),
+                    Err(err) => Some(Err(map_provider_error(
+                        &listed_prefix,
+                        err,
+                        ProviderClient::Retrying,
+                    ))),
                 }
             }
         })
@@ -916,7 +887,7 @@ impl ObjectStore for ProviderObjectStore {
                 options,
             )
             .await
-            .map_err(|err| map_provider_error(prefix, err))?;
+            .map_err(|err| map_provider_error(prefix, err, ProviderClient::Retrying))?;
         let children: Vec<String> = listed
             .result
             .common_prefixes
@@ -984,7 +955,7 @@ impl ProviderObjectStore {
                     object_key: key.to_owned(),
                 })
             }
-            Err(err) => Err(map_provider_error(key, err)),
+            Err(err) => Err(map_provider_error(key, err, ProviderClient::OneAttempt)),
         }
     }
 
@@ -1031,9 +1002,34 @@ fn provider_not_found(error: &provider_store::Error) -> bool {
     matches!(error, provider_store::Error::NotFound { .. })
 }
 
+/// The provider client that returned an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderClient {
+    /// The client that retries each request it sends, under
+    /// [`provider_retry_config`].
+    Retrying,
+    /// The client that sends each request once, for conditional puts.
+    OneAttempt,
+}
+
+/// Classifies a provider client error, using `client` to decide whether a
+/// `Generic` error is retryable.
+///
+/// The provider client reports a failed request as `Error::Generic`, whether
+/// the provider responded with a status or no response arrived, and its retry
+/// error type is private, so LoonFS can't read the status. LoonFS classifies
+/// a `Generic` error by the client that returned it instead:
+///
+/// - From [`ProviderClient::Retrying`], it's a non-retryable transport
+///   failure, because that client already spent its retry budget on the
+///   request (or refused to spend it, for a status such as 400).
+/// - From [`ProviderClient::OneAttempt`], it's a retryable transport failure,
+///   because the outcome is unknown. The caller's receipt check decides
+///   whether an earlier attempt succeeded.
 pub(crate) fn map_provider_error(
     object_key: &str,
     error: provider_store::Error,
+    client: ProviderClient,
 ) -> ObjectStoreError {
     match error {
         provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
@@ -1061,10 +1057,17 @@ pub(crate) fn map_provider_error(
         provider_store::Error::Generic { source, .. } => {
             match source.downcast::<ObjectStoreError>() {
                 Ok(error) => *error,
-                Err(source) => ObjectStoreError::retryable_transport(
-                    object_key,
-                    sanitize_provider_message(&source.to_string()),
-                ),
+                Err(source) => {
+                    let message = sanitize_provider_message(&source.to_string());
+                    match client {
+                        ProviderClient::Retrying => {
+                            ObjectStoreError::transport(object_key, message)
+                        }
+                        ProviderClient::OneAttempt => {
+                            ObjectStoreError::retryable_transport(object_key, message)
+                        }
+                    }
+                }
             }
         }
         provider_store::Error::JoinError { source } => {
@@ -1163,10 +1166,8 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
 mod tests {
     use super::*;
     use crate::aws_credentials::{aws_credentials_source, ObjectStoreAwsCredentialProvider};
-    use crate::metrics::{
-        InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
-    };
-    use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
+    use crate::metrics::{InstrumentedObjectStore, VecObjectStoreMetricsRecorder};
+    use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use futures::{StreamExt, TryStreamExt};
     use loonfs_types::transport_retry_backoff;
     use object_store::client::CredentialProvider;
@@ -1233,7 +1234,7 @@ mod tests {
                 .client
                 .put_opts(&path, PutPayload::from(bytes), options)
                 .await
-                .map_err(|error| map_provider_error(key, error))?;
+                .map_err(|error| map_provider_error(key, error, ProviderClient::OneAttempt))?;
             Ok(ObjectMetadata {
                 etag: result.e_tag,
                 version: result.version,
@@ -1261,10 +1262,9 @@ mod tests {
             match self.get(&path).await {
                 Ok(result) => {
                     let meta = result.meta.clone();
-                    let bytes = result
-                        .bytes()
-                        .await
-                        .map_err(|error| map_provider_error(key, error))?;
+                    let bytes = result.bytes().await.map_err(|error| {
+                        map_provider_error(key, error, ProviderClient::Retrying)
+                    })?;
                     Ok(Some(ObjectMetadata {
                         etag: meta.e_tag,
                         version: meta.version,
@@ -1276,7 +1276,7 @@ mod tests {
                     }))
                 }
                 Err(error) if provider_not_found(&error) => Ok(None),
-                Err(error) => Err(map_provider_error(key, error)),
+                Err(error) => Err(map_provider_error(key, error, ProviderClient::Retrying)),
             }
         }
     }
@@ -1365,17 +1365,28 @@ mod tests {
         );
     }
 
+    /// Checks that an opaque provider client failure is retryable only from
+    /// the client that sends each request once, and that a permission
+    /// failure is classified the same way from either client.
     #[test]
     fn provider_client_failures_are_classified_at_the_adapter_boundary() {
         let path = Path::from("private-key");
-        assert_eq!(
-            map_provider_error("private-key", transport_glitch()).kind(),
-            crate::ObjectStoreErrorKind::RetryableTransport
-        );
-        assert_eq!(
-            map_provider_error("private-key", auth_rejection(&path)).kind(),
-            crate::ObjectStoreErrorKind::PermissionDenied
-        );
+        for (client, opaque) in [
+            (ProviderClient::Retrying, crate::ObjectStoreErrorKind::Other),
+            (
+                ProviderClient::OneAttempt,
+                crate::ObjectStoreErrorKind::RetryableTransport,
+            ),
+        ] {
+            assert_eq!(
+                map_provider_error("private-key", transport_glitch(), client).kind(),
+                opaque
+            );
+            assert_eq!(
+                map_provider_error("private-key", auth_rejection(&path), client).kind(),
+                crate::ObjectStoreErrorKind::PermissionDenied
+            );
+        }
     }
 
     #[tokio::test]
@@ -1392,7 +1403,7 @@ mod tests {
             .await
             .expect_err("isolated credential chain should be empty");
 
-        let error = map_provider_error("private-key", error);
+        let error = map_provider_error("private-key", error, ProviderClient::Retrying);
 
         assert_eq!(error.kind(), crate::ObjectStoreErrorKind::Configuration);
         assert_eq!(
@@ -1913,12 +1924,6 @@ mod tests {
             Arc::new(ConditionalPutController::over(flaky, Some("tenant-a"))),
         )
         .expect("provider store")
-        .transport_retry(TransportRetryPolicy {
-            max_retries: 4,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(1),
-            operation_deadline: PROVIDER_OPERATION_DEADLINE,
-        })
     }
 
     fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
@@ -2160,37 +2165,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_retries_stop_once_the_operation_deadline_is_spent() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky))
-            .monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
-        let key = "namespaces/demo/uploads/upl_10.json";
-        store
-            .put_if_absent(key, Bytes::from_static(b"payload"))
-            .await
-            .expect("seed object");
-        for _ in 0..6 {
-            flaky
-                .delete_script
-                .lock()
-                .expect("delete script")
-                .push_back(WriteScript::FailWithoutLanding);
-        }
-
-        let error = store
-            .delete(key)
-            .await
-            .expect_err("deadline exhaustion surfaces the transport failure");
-
-        assert_matches!(error, ObjectStoreError::Transport { .. });
-        let attempts = flaky.deletes.load(Ordering::SeqCst);
-        assert!(
-            attempts < 5,
-            "deadline must stop the loop before the count budget ({attempts} attempts)"
-        );
-    }
-
-    #[tokio::test]
     async fn non_transport_provider_errors_are_not_retried() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
@@ -2212,81 +2186,72 @@ mod tests {
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
+    /// Checks that a delete is one call to the client that retries its own
+    /// requests, so a failure from that client returns at once and isn't
+    /// classified as retryable.
     #[tokio::test]
-    async fn delete_retries_transient_failures_and_landed_deletes() {
+    async fn a_delete_is_one_call_to_the_client_that_retries_it() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-
-        let landed_key = "namespaces/demo/uploads/upl_6.json";
+        let key = "namespaces/demo/uploads/upl_6.json";
         store
-            .put_if_absent(landed_key, Bytes::from_static(b"payload"))
+            .put_if_absent(key, Bytes::from_static(b"payload"))
             .await
             .expect("seed object");
-        flaky
-            .delete_script
-            .lock()
-            .expect("delete script")
-            .push_back(WriteScript::LandThenFail);
-        store
-            .delete(landed_key)
-            .await
-            .expect("landed delete converges to success");
-        assert_eq!(flaky.deletes.load(Ordering::SeqCst), 2);
-        assert!(store.head(landed_key).await.expect("head").is_none());
 
-        let transient_key = "namespaces/demo/uploads/upl_7.json";
+        for script in [WriteScript::FailWithoutLanding, WriteScript::LandThenFail] {
+            flaky.deletes.store(0, Ordering::SeqCst);
+            flaky
+                .delete_script
+                .lock()
+                .expect("delete script")
+                .push_back(script);
+            let error = store
+                .delete(key)
+                .await
+                .expect_err("the retrying client's failure is the delete's");
+            assert_eq!(error.kind(), crate::ObjectStoreErrorKind::Other);
+            assert_eq!(flaky.deletes.load(Ordering::SeqCst), 1);
+        }
+        assert!(store.head(key).await.expect("head").is_none());
         store
-            .put_if_absent(transient_key, Bytes::from_static(b"payload"))
+            .delete(key)
             .await
-            .expect("seed object");
-        flaky
-            .delete_script
-            .lock()
-            .expect("delete script")
-            .push_back(WriteScript::FailWithoutLanding);
-        store
-            .delete(transient_key)
-            .await
-            .expect("transient delete failure is retried");
-        assert_eq!(flaky.deletes.load(Ordering::SeqCst), 4);
-        assert!(store.head(transient_key).await.expect("head").is_none());
+            .expect("a delete of a missing object succeeds");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_retried_call_reports_its_attempts_to_the_metrics_wrapper() {
         let flaky = Arc::new(FlakyStore::default());
         let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
         let store =
             InstrumentedObjectStore::new(retrying_store(Arc::clone(&flaky)), recorder.clone());
-        let key = "namespaces/demo/uploads/upl_8.json";
 
         store
-            .put_if_absent(key, Bytes::from_static(b"payload"))
+            .put_if_absent(
+                "namespaces/demo/uploads/upl_8.json",
+                Bytes::from_static(b"payload"),
+            )
             .await
-            .expect("seed object");
-        flaky
-            .delete_script
-            .lock()
-            .expect("delete script")
-            .push_back(WriteScript::FailWithoutLanding);
-        store.delete(key).await.expect("the delete converges");
+            .expect("one conditional put");
+        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+        store
+            .put_immutable_verified(
+                "namespaces/demo/segments/seg_8.sst.zst",
+                Bytes::from_static(b"payload"),
+            )
+            .await
+            .expect("the immutable write converges");
 
-        let samples = recorder.samples();
-        let delete = samples
+        let attempts: Vec<_> = recorder
+            .samples()
             .iter()
-            .find(|sample| sample.operation == ObjectStoreOperation::Delete)
-            .expect("the delete is sampled");
+            .map(|sample| sample.attempts)
+            .collect();
         assert_eq!(
-            delete.attempts, 2,
-            "one failed attempt, then the one that landed"
-        );
-        let seed = samples
-            .iter()
-            .find(|sample| sample.operation == ObjectStoreOperation::Put)
-            .expect("the seed write is sampled");
-        assert_eq!(
-            seed.attempts, 1,
-            "a call that never retried made one attempt"
+            attempts,
+            [1, 2],
+            "a call that never retried made one attempt, and the retried write two"
         );
     }
 

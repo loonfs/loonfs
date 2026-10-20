@@ -1,10 +1,9 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
-use crate::retry::{with_transport_retry, RetryWarnings, StoreRetry, DEFAULT};
-use crate::timing::StdMonotonicTimer;
+use crate::retry::{with_transport_retry, RetryWarnings};
 use crate::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use bytes::Bytes;
-use loonfs_types::{Checksum, OperationDeadline};
+use loonfs_types::Checksum;
 use std::future::Future;
 use thiserror::Error;
 
@@ -73,18 +72,11 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = crate::object_store::Result<ObjectMetadata>>,
 {
-    let timer = StdMonotonicTimer::default();
-    let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
     let written = with_transport_retry(
-        StoreRetry {
-            policy: &DEFAULT,
-            warnings,
-        },
+        warnings,
         key,
         "put_immutable_verified",
         bytes.len() as u64,
-        Some(&deadline),
-        |error: &ObjectStoreError| matches!(error, ObjectStoreError::Transport { .. }),
         create,
     )
     .await;
@@ -158,6 +150,7 @@ fn transport(key: &str, source: ObjectStoreError) -> ImmutableWriteError {
 mod tests {
     use super::*;
     use crate::test_support::SteppingTimer;
+    use loonfs_types::OperationDeadline;
     use std::assert_matches;
     use std::time::Duration;
 

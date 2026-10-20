@@ -9,6 +9,7 @@ use crate::presign::percent_encode_segment;
 use crate::provider_object_store::{
     AbortUploadOnDrop, MultipartController, PartReader, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
+use crate::retry::with_transport_retry;
 use crate::signed_request::SignedResponse;
 use crate::{AssemblySource, ByteRange, ObjectMetadata, ObjectStoreError, Result};
 use bytes::Bytes;
@@ -38,11 +39,15 @@ impl GcsRequestSigner {
             percent_encode_segment(&self.bucket),
             self.object_name(key)?
         );
-        let body = serde_json::json!({ "sourceObjects": sources, "destination": {} });
-        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
-        let response = self
-            .send_authorized(key, request, body.to_string().into())
-            .await?;
+        let body = serde_json::json!({ "sourceObjects": sources, "destination": {} }).to_string();
+        // A retried compose whose earlier attempt succeeded fails its
+        // `ifGenerationMatch=0` precondition. For the destination, the
+        // assembly's stored-checksum check then accepts the object.
+        let response = with_transport_retry(&self.retry_warnings, key, "compose", 0, || {
+            let request = http::Request::post(&url).header(CONTENT_TYPE, "application/json");
+            self.send_authorized(key, request, body.clone().into())
+        })
+        .await?;
         gcs_object(key, &response.body)
     }
 
@@ -52,18 +57,17 @@ impl GcsRequestSigner {
             percent_encode_segment(&self.bucket),
             self.object_name(key)?
         );
-        let request = http::Request::get(url).header(
-            http::header::RANGE,
-            format!(
-                "bytes={}-{}",
-                range.start_inclusive,
-                range.end_exclusive - 1
-            ),
+        let bytes = format!(
+            "bytes={}-{}",
+            range.start_inclusive,
+            range.end_exclusive - 1
         );
-        let response = self
-            .send_authorized(key, request, HttpRequestBody::empty())
-            .await
-            .map_err(precondition_failed_when_missing)?;
+        let response = with_transport_retry(&self.retry_warnings, key, "get_range", 0, || {
+            let request = http::Request::get(&url).header(http::header::RANGE, &bytes);
+            self.send_authorized(key, request, HttpRequestBody::empty())
+        })
+        .await
+        .map_err(precondition_failed_when_missing)?;
         if response.body.len() as u64 != range.end_exclusive - range.start_inclusive {
             return Err(crate::assembly::missing_source(key));
         }

@@ -552,8 +552,9 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Creates an immutable object and accepts an occupied key only when its stored
-    /// checksum equals the checksum of `bytes`. Transport failures retry under
-    /// one operation deadline. Missing stored checksums fail verification.
+    /// checksum equals the checksum of `bytes`. Retryable transport failures
+    /// retry under one operation deadline. Missing stored checksums fail
+    /// verification.
     async fn put_immutable_verified(
         &self,
         key: &str,
