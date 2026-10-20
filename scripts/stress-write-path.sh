@@ -67,6 +67,7 @@ runtime|publisher::tests::a_delete_waiting_for_a_fold_does_not_hold_a_publicatio
 runtime|publisher::tests::write_stop_wait::commits_waiting_at_the_write_stop_are_committed_in_arrival_order
 runtime|publisher::tests::inline_writer::a_fold_that_leaves_the_tail_over_the_trigger_folds_again
 runtime|publisher::tests::inline_writer::a_delayed_fold_callback_preserves_a_freshly_observed_tail
+runtime|publisher::tests::inline_writer::the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome
 runtime|publisher::tests::session_compaction::a_session_streaming_compaction_survives_its_own_next_fold
 runtime|publisher::tests::session_compaction::closing_a_session_cancels_its_compaction_and_returns
 runtime|publisher::tests::session_compaction::shutdown_drains_session_compactions

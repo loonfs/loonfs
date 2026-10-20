@@ -30,7 +30,6 @@ use tracing::Instrument;
 pub(crate) struct PublishBatchReport {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) effect: PublishViewEffect,
-    pub(crate) unconfirmed_inline_bytes: usize,
 }
 
 /// What one batch did to the publish view it ran against — the whole of what
@@ -57,7 +56,6 @@ impl PublishBatchReport {
         Self {
             results,
             effect: PublishViewEffect::Unchanged,
-            unconfirmed_inline_bytes: 0,
         }
     }
 }
@@ -256,14 +254,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         }
     }
     if let Err(error) = publish_wal_object(store, &wal, &clock.tip).await {
-        let mut result = abort_batch(slots, &error);
-        if matches!(
-            error,
-            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
-        ) {
-            result.unconfirmed_inline_bytes = wal_inline_bytes;
-        }
-        return result;
+        return abort_batch(slots, &error);
     }
 
     let wal_records = wal.envelope().payload().records.clone();
@@ -289,7 +280,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     PublishBatchReport {
         results: finish_batch_outcomes(&slots),
-        unconfirmed_inline_bytes: 0,
         effect: PublishViewEffect::Advanced {
             records: wal_records,
             head: resulting_head,
@@ -303,7 +293,6 @@ fn abort_batch(mut slots: Vec<BatchOutcomeSlot>, error: &CoreError) -> PublishBa
     PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
-        unconfirmed_inline_bytes: 0,
     }
 }
 

@@ -7,6 +7,7 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use std::assert_matches;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn policy() -> InlineContentPolicy {
     InlineContentPolicy {
@@ -25,24 +26,25 @@ async fn receipt_replay_survives_another_requests_terminal_reload_failure() {
     check_terminal_reload_failure(true).await;
 }
 
-async fn check_terminal_reload_failure(include_replay: bool) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let directory = tempdir().expect("directory");
-    let namespace = NamespaceId::parse("inline-unknown").expect("namespace");
-    let armed = Arc::new(AtomicBool::new(false));
-    let unreadable = Arc::new(AtomicBool::new(false));
-    let put_armed = Arc::clone(&armed);
-    let put_unreadable = Arc::clone(&unreadable);
-    let wal_prefix = wal_prefix(&namespace);
-    let lost_ack = FailStore::matching(
-        LocalFsStore::new(directory.path()).expect("store"),
+/// Builds a store over `root` that writes the next WAL publication after
+/// `armed` is set and then reports a transport error for it, and returns the
+/// store with a flag that the lost acknowledgement sets.
+fn lost_wal_ack_store(
+    root: &Path,
+    namespace: &NamespaceId,
+    armed: &Arc<AtomicBool>,
+) -> (FailStore<LocalFsStore>, Arc<AtomicBool>) {
+    let lost = Arc::new(AtomicBool::new(false));
+    let (put_armed, put_lost) = (Arc::clone(armed), Arc::clone(&lost));
+    let wal_prefix = wal_prefix(namespace);
+    let store = FailStore::matching(
+        LocalFsStore::new(root).expect("store"),
         move |operation| {
             if operation.key().starts_with(&wal_prefix)
                 && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
                 && put_armed.swap(false, Ordering::SeqCst)
             {
-                put_unreadable.store(true, Ordering::SeqCst);
+                put_lost.store(true, Ordering::SeqCst);
                 true
             } else {
                 false
@@ -51,7 +53,15 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         InjectedError::Transport("lost inline WAL acknowledgement".to_owned()),
     )
     .apply_then_fail();
-    lost_ack.fail_all();
+    store.fail_all();
+    (store, lost)
+}
+
+async fn check_terminal_reload_failure(include_replay: bool) {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("inline-unknown").expect("namespace");
+    let armed = Arc::new(AtomicBool::new(false));
+    let (lost_ack, unreadable) = lost_wal_ack_store(directory.path(), &namespace, &armed);
     let read_unreadable = Arc::clone(&unreadable);
     let store = Arc::new(FailStore::matching(
         lost_ack,
@@ -193,6 +203,69 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         b"next"
     );
     drop(permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a put whose outcome is unknown starts no fold, though its
+/// inline bytes reach the fold trigger, and that the batch's retry starts the
+/// fold once the tail it reads from the store includes those bytes.
+#[tokio::test]
+async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome() {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("inline-unknown-fold").expect("namespace");
+    let armed = Arc::new(AtomicBool::new(false));
+    let (lost_ack, lost) = lost_wal_ack_store(directory.path(), &namespace, &armed);
+    // Parks the retry's first read of the tail, which starts after the
+    // attempt that lost the acknowledgement has checked the fold trigger.
+    let store = Arc::new(BlockingStore::matching(lost_ack, move |operation| {
+        lost.load(Ordering::SeqCst) && !matches!(operation.kind(), OperationKind::Put { .. })
+    }));
+    store.block_next();
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
+        .inline_content(InlineContentPolicy {
+            inline_content_fold_at_bytes: 4,
+            ..policy()
+        })
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    namespace_writer
+        .create_directory("/warmup", &actor)
+        .await
+        .expect("acquire writer epoch");
+    let publisher = namespace_writer.session().publisher.clone();
+    let folds = hold_every_fold_permit(&writer).await;
+    armed.store(true, Ordering::SeqCst);
+    let unknown = put_options("unknown");
+    let (put, ()) = tokio::join!(
+        namespace_writer.put_file_with_options("/file", b"four", &actor, &unknown),
+        async {
+            bounded(Duration::from_secs(10), store.wait_until_blocked())
+                .await
+                .expect("the retry reads the tail from the store");
+            assert!(publisher_state(&publisher).fold.is_none());
+            store.release();
+        }
+    );
+    put.expect("the retry finds the receipt of the put that was written");
+    assert!(publisher_state(&publisher).fold.is_some());
+    drop(folds);
+    namespace_writer.wait_for_fold().await.expect("fold");
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("tail usage after the fold");
+    assert_eq!(
+        (usage.wal_tail_objects, usage.wal_tail_inline_bytes),
+        (0, 0)
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
