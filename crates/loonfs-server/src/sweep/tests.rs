@@ -63,7 +63,7 @@ impl SweepServer {
             config,
             runtime.object_store(),
             maintenance.clone(),
-            Arc::new(Namespaces::new_with_timer(runtime.clone(), clock.clone())),
+            Arc::new(Namespaces::new(runtime.clone())),
             grep_worker.clone(),
             recorder.as_ref(),
         )

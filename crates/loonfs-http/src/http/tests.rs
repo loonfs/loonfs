@@ -46,6 +46,7 @@ fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
         consistency: None,
         store: Some(store),
         direct_transfers: None,
+        monotonic_timer: None,
     }
 }
 
@@ -2943,6 +2944,7 @@ mod direct_download {
             TestAppOptions {
                 max_staleness_ms: None,
                 consistency: None,
+                monotonic_timer: None,
                 store: Some(store),
                 direct_transfers: Some(transfers),
             },
@@ -3231,6 +3233,7 @@ mod direct_download {
             TestAppOptions {
                 max_staleness_ms: None,
                 consistency: None,
+                monotonic_timer: None,
                 store: None,
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),
@@ -3499,6 +3502,7 @@ mod direct_download {
             TestAppOptions {
                 max_staleness_ms: None,
                 consistency: None,
+                monotonic_timer: None,
                 store: Some(store),
                 direct_transfers,
             },
@@ -3742,6 +3746,7 @@ mod direct_download {
             TestAppOptions {
                 max_staleness_ms: None,
                 consistency: None,
+                monotonic_timer: None,
                 store: Some(store),
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),

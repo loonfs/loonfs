@@ -407,11 +407,20 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
 
 #[tokio::test]
 async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
-    let (_directory, _router, state) = host("idle-close-host").await;
+    let directory = tempdir().expect("tempdir");
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let (_router, state) = test_app(
+        test_options(directory.path(), "idle-close-host"),
+        TestAppOptions {
+            monotonic_timer: Some(timer.clone()),
+            ..TestAppOptions::default()
+        },
+    )
+    .await
+    .expect("app");
     let namespace_id = namespace_id("idle-close-checks");
     create_namespace(&state, &namespace_id).await;
-    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let namespaces = crate::Namespaces::new_with_timer(state.runtime.clone(), timer.clone());
+    let namespaces = crate::Namespaces::new(state.runtime.clone());
     let handle = namespaces.open(&namespace_id).await.expect("open");
     let initial = handle
         .put_file("/first", b"first", &loonfs_test_support::test_actor())
@@ -476,14 +485,16 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         ));
         let mut options = test_options(directory.path(), "closing-host");
         options.binding.inline_content.inline_content_fold_at_bytes = 1;
-        let (_, mut state) = test_app(options, options_with_store(store.clone()))
-            .await
-            .expect("host");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        state.namespaces = Arc::new(crate::Namespaces::new_with_timer(
-            state.runtime.clone(),
-            timer.clone(),
-        ));
+        let (_, state) = test_app(
+            options,
+            TestAppOptions {
+                monotonic_timer: Some(timer.clone()),
+                ..options_with_store(store.clone())
+            },
+        )
+        .await
+        .expect("host");
         create_namespace(&state, &namespace_id).await;
         create_namespace(&state, &other).await;
         let old = state.namespaces.open(&namespace_id).await.expect("open");

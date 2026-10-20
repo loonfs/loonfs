@@ -14,7 +14,6 @@ use loonfs_grep::{
 };
 use loonfs_http::{HeldNamespace, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::EffectiveLimit;
@@ -104,7 +103,6 @@ struct SweepInner {
     slots: Semaphore,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
-    timer: StdMonotonicTimer,
     metrics: SweepMetrics,
 }
 
@@ -205,7 +203,6 @@ impl Sweep {
                         .expect("the namespace page limit should be nonzero"),
                 ),
                 stop: MaintenanceCancellation::new(),
-                timer: StdMonotonicTimer::default(),
                 metrics: SweepMetrics::register(recorder),
             }),
         })
@@ -232,10 +229,10 @@ impl Sweep {
     /// streaming compaction stops at its next block.
     pub async fn run_pass(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        let started_at_ms = inner.timer.monotonic_now_ms();
+        let started_at_ms = inner.namespaces.now_ms();
         let collect_garbage = garbage == GarbageCollection::Collect;
         let listed = self.visit_every_namespace(garbage).await;
-        let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
+        let elapsed_ms = inner.namespaces.now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .pass_seconds

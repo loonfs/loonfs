@@ -532,10 +532,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
     assert!(held.metadata_caught_up());
     assert_eq!(held.last_published_at_ms(), Some(0));
     let recorder = loonfs::metrics::DefaultMetricsRecorder::new();
-    let namespaces = Arc::new(loonfs_http::Namespaces::new_with_timer(
-        runtime.clone(),
-        clock.clone(),
-    ));
+    let namespaces = Arc::new(loonfs_http::Namespaces::new(runtime.clone()));
     namespaces.open(&namespace_id).await.expect("hold");
     let sweep = super::Sweep::new(
         &sweep_config(None),
@@ -556,4 +553,66 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         "self-maintenance leaves no work for the host"
     );
     runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a tick reads the runtime's paused timer, so a held session's
+/// tail folds and the session closes exactly when that timer says each is idle.
+#[tokio::test]
+async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let mut config = sweep_config(None);
+    config.idle_fold_after_ms = 60_000;
+    // The runtime's timer starts a day ahead of the system timer, so a host
+    // that read a second timer would disagree with it.
+    let server = SweepServer::start(store.clone(), &config, DAY_MS).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("one-host-clock");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let handle = namespaces.open(&namespace_id).await.expect("open");
+    handle
+        .put_file("/note", b"data", &test_actor())
+        .await
+        .expect("publish");
+    assert_eq!(handle.last_published_at_ms(), Some(DAY_MS));
+    drop(handle);
+
+    server.tick_after(config.tick_interval_ms).await;
+    assert!(server.wal_tail_objects(&namespace_id).await > 0);
+    store.reset();
+    server
+        .tick_after(config.idle_fold_after_ms - config.tick_interval_ms - 1)
+        .await;
+    assert!(
+        store.take().is_empty(),
+        "the tail is not idle yet on the runtime's timer"
+    );
+    server.tick_after(1).await;
+    assert_eq!(
+        server.wal_tail_objects(&namespace_id).await,
+        0,
+        "the tail folds once it is idle"
+    );
+
+    server
+        .tick_after(config.idle_session_close_after_ms - config.idle_fold_after_ms)
+        .await;
+    assert_eq!(
+        namespaces.held_ids().len(),
+        1,
+        "the session is not idle yet on the runtime's timer"
+    );
+    server.tick_after(1).await;
+    assert!(
+        namespaces.held_ids().is_empty(),
+        "the session closes once it is idle"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
 }
