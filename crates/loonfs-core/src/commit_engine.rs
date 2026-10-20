@@ -559,8 +559,8 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct WalTailReport {
     /// Unfolded WAL objects.
     pub objects: u64,
-    /// Inline content bytes in the tail, including the inline bytes of a put
-    /// whose outcome is unknown.
+    /// Inline content bytes in the unfolded WAL objects that the position
+    /// records, leaving out a put whose outcome is unknown.
     pub inline_bytes: usize,
     /// Where the attempt found the tail.
     pub source: TailSource,
@@ -1077,7 +1077,6 @@ impl NamespaceCommitEngine {
         .await;
         let position = publish_view.into_position();
         self.projection_observed = Some(projection_observed);
-        let unknown_inline_bytes = published.unconfirmed_inline_bytes;
         let update = self.update_publish_tail_projection(position, published.effect);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
@@ -1088,7 +1087,7 @@ impl NamespaceCommitEngine {
             results: published.results,
             wal_tail: Some(WalTailReport {
                 objects: update.wal_tail_objects,
-                inline_bytes: update.wal_tail_inline_bytes + unknown_inline_bytes,
+                inline_bytes: update.wal_tail_inline_bytes,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
