@@ -10,7 +10,7 @@ use loonfs::{
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
-use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, StdMonotonicTimer};
+use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -193,16 +193,12 @@ impl HeldNamespace {
 }
 
 impl Namespaces {
+    /// Builds an empty table that measures idle ages on the runtime's monotonic timer.
     pub fn new(runtime: LoonFs<Writable>) -> Self {
-        Self::new_with_timer(runtime, Arc::new(StdMonotonicTimer::default()))
-    }
-
-    /// Supplies monotonic time for idle checks and deterministic host tests.
-    pub fn new_with_timer(runtime: LoonFs<Writable>, timer: Arc<dyn MonotonicTimer>) -> Self {
         Self {
+            timer: runtime.monotonic_timer(),
             runtime,
             handles: Mutex::default(),
-            timer,
             fenced_sessions_dropped: AtomicU64::new(0),
         }
     }
@@ -359,6 +355,8 @@ impl Namespaces {
         self.lock().get(namespace_id).cloned()
     }
 
+    /// Reads the runtime's monotonic timer, which the host measures idle ages
+    /// and retry times on.
     pub fn now_ms(&self) -> u64 {
         self.timer.monotonic_now_ms()
     }

@@ -10,7 +10,7 @@ use loonfs_grep::{
 use loonfs_objectstore::{
     local_fs_store::LocalFsStore, presign::DirectTransferIssuers, ConfiguredObjectStoreKind,
 };
-use loonfs_types::WriterId;
+use loonfs_types::{MonotonicTimer, WriterId};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,6 +31,8 @@ pub(super) struct TestAppOptions {
     pub(super) max_staleness_ms: Option<u64>,
     /// The runtime's default consistency, or the default when `None`.
     pub(super) consistency: Option<loonfs::Consistency>,
+    /// The runtime's monotonic timer, or the system timer when `None`.
+    pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -72,6 +74,10 @@ pub(super) async fn test_app(
     };
     let builder = match inputs.consistency {
         Some(consistency) => builder.consistency(consistency),
+        None => builder,
+    };
+    let builder = match inputs.monotonic_timer {
+        Some(timer) => builder.monotonic_timer(timer),
         None => builder,
     };
     let runtime = builder
