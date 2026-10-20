@@ -321,7 +321,7 @@ impl RuntimeInstruments {
 
     /// Reports commits that waited in the queue at the write stop for the
     /// first time.
-    pub(crate) fn publisher_write_stop_waits(&self, commits: u64) {
+    pub(crate) fn publisher_write_stop_wait(&self, commits: u64) {
         let Some(installed) = &self.installed else {
             return;
         };
@@ -340,8 +340,8 @@ impl RuntimeInstruments {
     }
 
     /// Reports commits that returned `maintenance_required` because they
-    /// waited out the write-stop wait.
-    pub(crate) fn publisher_write_stop_refusals(&self, commits: u64) {
+    /// waited for the whole write-stop wait.
+    pub(crate) fn publisher_write_stop_refusal(&self, commits: u64) {
         let Some(installed) = &self.installed else {
             return;
         };
@@ -828,13 +828,13 @@ impl PublisherInstruments {
             ),
             write_stop_wait_seconds: recorder.register_histogram(
                 "loonfs.publisher.write_stop_wait_seconds",
-                "Duration of one wait of a namespace's queue at the write stop in seconds",
+                "Duration of a namespace queue's wait at the write stop in seconds",
                 &[],
                 LATENCY_SECONDS_BOUNDARIES,
             ),
             write_stop_refusals: recorder.register_counter(
                 "loonfs.publisher.write_stop_refusals",
-                "Commits refused with `maintenance_required` because they waited out the write-stop wait",
+                "Commits refused because they waited for the whole write-stop wait",
                 &[],
             ),
             tail_replays: recorder.register_counter(
@@ -1129,9 +1129,9 @@ mod tests {
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
         instruments.publisher_wal_fold_duration(5);
-        instruments.publisher_write_stop_waits(2);
+        instruments.publisher_write_stop_wait(2);
         instruments.publisher_write_stop_wait_duration(5);
-        instruments.publisher_write_stop_refusals(1);
+        instruments.publisher_write_stop_refusal(1);
         instruments.publisher_publish(PublishOutcome::Ok);
     }
 

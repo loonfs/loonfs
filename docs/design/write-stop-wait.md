@@ -48,7 +48,7 @@ The reference server sets the write-stop wait to half its `request_deadline_ms`,
 
 ## What the format and API specs change
 
-No object, field, or bound in the format changes. In the format specification, step 2 of [Publication and group commit](../specs/format.md#63-publication-and-group-commit), the write-stop paragraph of [Commit identity and retries](../specs/format.md#65-commit-identity-and-retries), and the write-stop row of [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) describe the wait.
+No object, field, or bound in the format changes. In the format specification, step 2 of [Publication and group commit](../specs/format.md#63-publication-and-group-commit), the write-stop paragraph of [Commit identity and retries](../specs/format.md#65-commit-identity-and-retries), the write-stop row of [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy), and the write-stop rows of [Reference-implementation sizing and admission defaults](../specs/format.md#c4-reference-implementation-sizing-and-admission-defaults) describe the wait.
 
 In the API specification's [Standard error contract](../specs/api.md#3-standard-error-contract), `maintenance_required` stays an error, and its row describes the deadline case (the wait passed, and the commit wasn't committed). The code stays out of automatic retry and without `Retry-After`, because a retry would wait again for a fold that isn't finishing, and `commit_queue_full` keeps `Retry-After: 1`. [Commit responses and safe retry](../specs/api.md#52-commit-responses-and-safe-retry) says that commits at the write stop wait.
 

@@ -437,11 +437,11 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
 }
 
 /// Checks that a new session's replay of a retained commit returns the
-/// original commit at a preexisting write-stopped tail and starts a fold,
-/// and that a new commit at that tail waits for the fold and is committed without a
-/// retry.
+/// original commit at a preexisting write-stopped tail and starts a fold, and
+/// that a new commit at that tail waits for the fold and is committed without
+/// a retry.
 #[test]
-fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_lands() {
+fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_committed() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -518,7 +518,7 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_lands() {
         blocking.release();
         put.await
             .expect("join the commit")
-            .expect("the commit lands after the fold, without a retry");
+            .expect("the commit is committed after the fold, without a retry");
         let maintenance = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
@@ -542,10 +542,10 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_lands() {
     });
 }
 
-/// Checks that while every fold fails, a commit at the write stop waits out
-/// the write-stop wait and returns `maintenance_required`, and that once the
-/// store recovers, a commit at the write stop waits for a fold that succeeds
-/// and is committed.
+/// Checks that while every fold fails, a commit at the write stop waits for
+/// the whole write-stop wait and returns `maintenance_required`, and that
+/// once the store recovers, a commit at the write stop waits for a fold that
+/// succeeds and is committed.
 #[test]
 fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
     let temp_dir = tempdir().expect("tempdir");
@@ -564,7 +564,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 ..Default::default()
             })
             .publication_policy(loonfs::PublicationPolicy {
-                write_stop_wait_deadline_ms: 2_000,
+                write_stop_wait_budget_ms: 2_000,
                 ..Default::default()
             })
             .build()
@@ -608,7 +608,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect_err("the commit at the write stop waits out the write-stop wait");
+            .expect_err("the commit at the write stop waits for the whole write-stop wait");
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
 
         failing.clear();
@@ -619,7 +619,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect("the commit at the write stop lands after the recovered fold");
+            .expect("the commit at the write stop is committed after the recovered fold");
         let maintenance = LoonFs::builder_with_store(failing as SharedObjectStore)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",

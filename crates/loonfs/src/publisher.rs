@@ -842,12 +842,14 @@ struct BatchCandidate {
     enqueued_at: u64,
     /// Whether this commit was queued when a wait at the write stop ended, so
     /// `write_stop_waits` records it once.
-    waited_at_write_stop: bool,
+    write_stop_wait_recorded: bool,
     /// Whether the engine refused this commit at the write stop when the
-    /// worker last published it. Only such a commit can reach the end of the
-    /// write-stop wait without another publish, because the engine returns a
-    /// retry's result from its receipt.
-    refused_at_write_stop: bool,
+    /// worker last published it.
+    ///
+    /// Only such a commit can reach the end of the write-stop wait without
+    /// another publish, because the engine returns a retry's result from its
+    /// receipt.
+    refused_by_write_stop: bool,
 }
 
 struct InFlightRequest {
@@ -1169,8 +1171,8 @@ impl NamespacePublisher {
             commit_id: commit_id.clone(),
             candidate: candidate.candidate,
             enqueued_at,
-            waited_at_write_stop: false,
-            refused_at_write_stop: false,
+            write_stop_wait_recorded: false,
+            refused_by_write_stop: false,
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the
@@ -1382,12 +1384,12 @@ impl NamespacePublisher {
         };
         let started_at_ms = self.timer.monotonic_now_ms();
         let remaining_ms = oldest_enqueued_at
-            .saturating_add(self.admission.write_stop_wait_deadline_ms())
+            .saturating_add(self.admission.write_stop_wait_budget_ms())
             .saturating_sub(started_at_ms);
         tokio::select! {
             _ = fold_published.changed() => {}
             () = wait_for_fold_task_exit(fold_task) => {}
-            () = wait_for_write_stop_deadline(Duration::from_millis(remaining_ms)) => {}
+            () = wait_for_write_stop_budget(Duration::from_millis(remaining_ms)) => {}
         }
         self.runtime_core
             .instruments()
@@ -1397,12 +1399,13 @@ impl NamespacePublisher {
 
     /// Records each queued commit that waited at the write stop for the first
     /// time, and returns `maintenance_required` to each commit that the
-    /// engine refused at the write stop and that has waited out the
-    /// write-stop wait, counted from when it entered the queue. A commit
-    /// queued behind those publishes next, so the engine examines it before
-    /// it can be refused.
+    /// engine refused at the write stop and that has waited for the whole
+    /// write-stop wait, measured from when it entered the queue.
+    ///
+    /// A commit queued behind those publishes next, so the engine examines
+    /// it before it can be refused.
     fn end_write_stop_wait(&self) {
-        let deadline_ms = self.admission.write_stop_wait_deadline_ms();
+        let budget_ms = self.admission.write_stop_wait_budget_ms();
         let now_ms = self.timer.monotonic_now_ms();
         let mut first_waits = 0;
         let mut refused = Vec::new();
@@ -1411,12 +1414,12 @@ impl NamespacePublisher {
             for item in &mut state.queue {
                 if let WorkItem::Batch(batch) = item {
                     batch.candidates.retain_mut(|candidate| {
-                        if !candidate.waited_at_write_stop {
-                            candidate.waited_at_write_stop = true;
+                        if !candidate.write_stop_wait_recorded {
+                            candidate.write_stop_wait_recorded = true;
                             first_waits += 1;
                         }
-                        let past = candidate.refused_at_write_stop
-                            && elapsed_ms_from(candidate.enqueued_at, now_ms) >= deadline_ms;
+                        let past = candidate.refused_by_write_stop
+                            && elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
                         if past {
                             refused.push(candidate.commit_id.clone());
                         }
@@ -1429,16 +1432,16 @@ impl NamespacePublisher {
             );
         }
         let instruments = self.runtime_core.instruments();
-        instruments.publisher_write_stop_waits(usize_to_u64(first_waits));
+        instruments.publisher_write_stop_wait(usize_to_u64(first_waits));
         if refused.is_empty() {
             return;
         }
-        instruments.publisher_write_stop_refusals(usize_to_u64(refused.len()));
+        instruments.publisher_write_stop_refusal(usize_to_u64(refused.len()));
         let error = Error::Core(
             crate::MetadataViewError::MaintenanceRequired {
                 namespace_id: self.namespace_id.clone(),
                 reason: format!(
-                    "no fold freed the WAL tail from the write stop of {MAX_UNFOLDED_WAL_OBJECTS} WAL objects within the write-stop wait of {deadline_ms} ms"
+                    "WAL tail stayed at {MAX_UNFOLDED_WAL_OBJECTS} objects through the write-stop wait of {budget_ms} ms, and publishes resume once a fold brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
                 ),
             }
             .into(),
@@ -1490,8 +1493,10 @@ impl NamespacePublisher {
     }
 
     /// Publishes one batch and delivers each result, except to the new
-    /// commits that the engine refused at the write stop. Returns those
-    /// commits in arrival order, to wait in the queue for a fold.
+    /// commits that the engine refused at the write stop.
+    ///
+    /// Returns those commits in arrival order, to wait in the queue for a
+    /// fold.
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) -> Vec<BatchCandidate> {
         let selected_at = self.timer.monotonic_now_ms();
         for candidate in &candidates {
@@ -1510,7 +1515,7 @@ impl NamespacePublisher {
             .collect();
         let queued: Vec<_> = candidates
             .iter()
-            .map(|candidate| (candidate.enqueued_at, candidate.waited_at_write_stop))
+            .map(|candidate| (candidate.enqueued_at, candidate.write_stop_wait_recorded))
             .collect();
         // A copy of each candidate that the engine refused at the write stop,
         // so the commit can wait in the queue.
@@ -1603,14 +1608,14 @@ impl NamespacePublisher {
             );
             match stopped[index].take() {
                 Some(candidate) if refused => {
-                    let (enqueued_at, waited_at_write_stop) = queued[index];
+                    let (enqueued_at, write_stop_wait_recorded) = queued[index];
                     waiting.push(BatchCandidate {
                         permit: Arc::clone(&permits[index]),
                         commit_id,
                         candidate,
                         enqueued_at,
-                        waited_at_write_stop,
-                        refused_at_write_stop: true,
+                        write_stop_wait_recorded,
+                        refused_by_write_stop: true,
                     });
                 }
                 _ => {
@@ -2355,7 +2360,7 @@ async fn wait_for_publish_pacing(delay: Duration) {
     clippy::disallowed_methods,
     reason = "the write-stop wait only decides when a waiting commit returns `maintenance_required`"
 )]
-async fn wait_for_write_stop_deadline(delay: Duration) {
+async fn wait_for_write_stop_budget(delay: Duration) {
     tokio::time::sleep(delay).await;
 }
 

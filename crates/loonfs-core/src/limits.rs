@@ -65,9 +65,11 @@ pub const MAX_POSITION_MOVES: usize = 8;
 
 /// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
 ///
-/// The commit engine refuses new commits at this length, so a landed
-/// publication never leaves more than this behind. A writer session's
-/// refused commits wait for its fold before they return `maintenance_required`.
+/// The commit engine refuses new commits at this length, so a published WAL
+/// object never leaves more than this behind. A writer session keeps those
+/// commits queued until its fold frees room, and returns
+/// `maintenance_required` to a commit that's still waiting when the
+/// write-stop wait passes.
 pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 128;
 
 /// Visible WAL-tail length, in WAL objects, that starts an automatic WAL fold.

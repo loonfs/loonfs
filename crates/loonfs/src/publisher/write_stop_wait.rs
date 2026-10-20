@@ -19,7 +19,7 @@ struct Fixture {
     namespace: crate::Namespace<crate::Writable>,
 }
 
-/// Creates a fixture whose writer `configure` finishes, with its namespace
+/// Creates a fixture with a writer built by `configure`, with its namespace
 /// created and opened.
 async fn fixture(
     configure: impl FnOnce(
@@ -55,28 +55,29 @@ async fn fixture(
     }
 }
 
-/// A publication policy whose write-stop wait ends in half a second.
+/// Creates a publication policy whose write-stop wait ends in half a second.
 fn short_write_stop_wait() -> crate::PublicationPolicy {
     crate::PublicationPolicy {
-        write_stop_wait_deadline_ms: 500,
+        write_stop_wait_budget_ms: 500,
         ..crate::PublicationPolicy::default()
     }
 }
 
-/// The write-stop wait of a writer whose clock the test moves. The worker
-/// sleeps this long before the wait expires, so the test moves the clock past
-/// the wait well before then.
-const MANUAL_WRITE_STOP_WAIT_MS: u64 = 2_000;
+/// The write-stop wait of a writer whose clock the test moves.
+///
+/// The worker sleeps this long before the wait expires, so the test moves
+/// the clock past the wait well before then.
+const MANUAL_WRITE_STOP_WAIT_BUDGET_MS: u64 = 2_000;
 
 /// Creates a fixture whose writer reads `clock`, with a write-stop wait of
-/// [`MANUAL_WRITE_STOP_WAIT_MS`].
+/// [`MANUAL_WRITE_STOP_WAIT_BUDGET_MS`].
 async fn fixture_with_clock(clock: &Arc<ManualClock>) -> Fixture {
     let clock = Arc::clone(clock);
     fixture(|builder| {
         builder
             .monotonic_timer(clock)
             .publication_policy(crate::PublicationPolicy {
-                write_stop_wait_deadline_ms: MANUAL_WRITE_STOP_WAIT_MS,
+                write_stop_wait_budget_ms: MANUAL_WRITE_STOP_WAIT_BUDGET_MS,
                 ..crate::PublicationPolicy::default()
             })
     })
@@ -117,8 +118,10 @@ async fn unfolded_wal_objects<S: ObjectStore + ?Sized>(
 }
 
 /// Appends WAL objects from another writer until the namespace's tail has
-/// `objects` WAL objects. Runs before the session's first publish, which
-/// acquires a later writer epoch.
+/// `objects` WAL objects.
+///
+/// Runs before the session's first publish, which acquires a later writer
+/// epoch.
 async fn seed_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -142,6 +145,7 @@ async fn seed_wal_tail<S: ObjectStore + ?Sized>(
 
 /// Seeds the tail to the write stop, parks the next fold at its manifest
 /// put, and starts a commit, which the engine refuses at the write stop.
+///
 /// Returns once the commit waits at the front of the queue, or once it has
 /// settled after a short write-stop wait.
 async fn start_commit_at_the_write_stop(fixture: &Fixture) -> JoinHandle<crate::Result<Commit>> {
@@ -203,7 +207,7 @@ async fn engine_wal_tail_objects(publisher: &NamespacePublisher) -> u64 {
 /// Checks that a commit at the write stop waits in the queue while its fold
 /// runs, and is committed once the fold publishes, without an error or a
 /// retry, and that `write_stop_waits` records it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
     let fixture = fixture(|builder| builder).await;
     let commit = start_commit_at_the_write_stop(&fixture).await;
@@ -226,7 +230,7 @@ async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
 /// Checks that a commit that waits at the write stop past the write-stop
 /// wait returns `maintenance_required`, isn't committed, and that
 /// `write_stop_refusals` records it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
     let fixture = fixture(|builder| builder.publication_policy(short_write_stop_wait())).await;
     let commit = start_commit_at_the_write_stop(&fixture).await;
@@ -256,7 +260,7 @@ async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
 /// Checks that commits waiting at the write stop are committed in arrival
 /// order, including when the first fold frees room for only some of them
 /// and the rest wait for the next fold.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     const WAITING_COMMITS: usize = 40;
     let fixture = fixture(|builder| {
@@ -360,7 +364,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
 
 /// Checks that while one namespace's commit waits at the write stop, its
 /// worker releases the publication slot, so another namespace publishes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn another_namespace_publishes_while_a_commit_waits_at_the_write_stop() {
     let fixture = fixture(|builder| {
         builder.execution_budget(
@@ -404,7 +408,7 @@ async fn another_namespace_publishes_while_a_commit_waits_at_the_write_stop() {
 /// Checks that a session close waits for a commit at the write stop until
 /// the commit is committed, and that a shutdown drain waits for one until it
 /// reaches the write-stop wait.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn closing_and_draining_wait_for_commits_at_the_write_stop() {
     let closing = fixture(|builder| builder).await;
     let commit = start_commit_at_the_write_stop(&closing).await;
@@ -510,7 +514,7 @@ async fn an_unknown_outcome_before_the_write_stop_keeps_commit_outcome_unknown()
 /// Checks that a retry of a committed request, queued behind a commit that
 /// waits at the write stop, returns its original commit when that wait
 /// expires, instead of `maintenance_required`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_retry_queued_behind_an_expired_wait_returns_its_original_commit() {
     let clock = Arc::new(ManualClock::new(0));
     let fixture = fixture_with_clock(&clock).await;
@@ -553,15 +557,15 @@ async fn a_retry_queued_behind_an_expired_wait_returns_its_original_commit() {
     .await;
 
     // Both commits entered the queue at the clock's start, so both have
-    // waited out the write-stop wait when it expires.
-    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_MS);
+    // waited for the whole write-stop wait when it expires.
+    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_BUDGET_MS);
     let error = settle_commit(commit)
         .await
         .expect_err("the waiting commit reaches the write-stop wait");
     assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
     let replay = settle_commit(retry)
         .await
-        .expect("the engine answers the retry from its receipt");
+        .expect("the engine returns the retry's result from its receipt");
     assert_eq!(replay, original);
     fixture.store.release();
     fixture.writer.shutdown().await.expect("shut down writer");
@@ -571,7 +575,7 @@ async fn a_retry_queued_behind_an_expired_wait_returns_its_original_commit() {
 /// stop, and past the write-stop wait when that wait expires, returns
 /// `maintenance_required` only after the engine examines it at the next
 /// publish.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_commit_queued_behind_an_expired_wait_is_refused_after_the_engine_examines_it() {
     let clock = Arc::new(ManualClock::new(0));
     let fixture = fixture_with_clock(&clock).await;
@@ -587,11 +591,11 @@ async fn a_commit_queued_behind_an_expired_wait_is_refused_after_the_engine_exam
     )
     .await;
 
-    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_MS);
+    clock.advance_ms(MANUAL_WRITE_STOP_WAIT_BUDGET_MS);
     for commit in [commit, behind] {
         let error = settle_commit(commit)
             .await
-            .expect_err("the commit waits out the write-stop wait");
+            .expect_err("the commit waits for the whole write-stop wait");
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
     }
     let recorder = &fixture.recorder;

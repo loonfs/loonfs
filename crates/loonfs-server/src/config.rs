@@ -114,11 +114,8 @@ pub struct PublicationLimitsConfig {
 }
 
 impl PublicationLimitsConfig {
-    /// The per-namespace limits the server's runtime applies, with a
-    /// write-stop wait of half `request_deadline_ms`, so a commit that waits
-    /// out the write stop returns `maintenance_required` before the request
-    /// deadline returns `deadline_exceeded`.
-    pub(crate) fn effective_policy(&self, request_deadline_ms: u64) -> loonfs::PublicationPolicy {
+    /// The per-namespace limits the server's runtime applies.
+    pub(crate) fn effective_policy(&self) -> loonfs::PublicationPolicy {
         let defaults = loonfs::PublicationPolicy::default();
         loonfs::PublicationPolicy {
             max_requests_per_namespace: self
@@ -127,7 +124,7 @@ impl PublicationLimitsConfig {
             max_estimated_bytes_per_namespace: self
                 .max_estimated_bytes_per_namespace
                 .unwrap_or(defaults.max_estimated_bytes_per_namespace),
-            write_stop_wait_deadline_ms: request_deadline_ms / 2,
+            ..defaults
         }
     }
 }
@@ -776,6 +773,19 @@ impl ServerConfig {
             None
         };
         self.memory_sizing(cgroup_limit)
+    }
+
+    /// Builds the publication policy of the server's one runtime from its
+    /// `[publication]` table and `request_deadline_ms`.
+    ///
+    /// The write-stop wait is half the request deadline, so a commit that
+    /// waits for the whole write-stop wait returns `maintenance_required`
+    /// before its request returns `deadline_exceeded`.
+    pub(crate) fn publication_policy(&self) -> loonfs::PublicationPolicy {
+        loonfs::PublicationPolicy {
+            write_stop_wait_budget_ms: self.request_deadline_ms / 2,
+            ..self.publication.effective_policy()
+        }
     }
 
     /// Builds the execution budget of the server's one runtime from its fold,
@@ -1898,7 +1908,7 @@ root = "/tmp/loonfs-server"
     fn publication_overrides_are_strict_and_positive() {
         let defaults: PublicationLimitsConfig = toml::from_str("").expect("empty overrides");
         assert_eq!(
-            defaults.effective_policy(loonfs_http::DEFAULT_REQUEST_DEADLINE_MS),
+            defaults.effective_policy(),
             loonfs::PublicationPolicy::default()
         );
         for field in [
@@ -1916,16 +1926,23 @@ root = "/tmp/loonfs-server"
         let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
         assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
-        let policy = overrides.effective_policy(loonfs_http::DEFAULT_REQUEST_DEADLINE_MS);
-        assert_eq!(policy.max_requests_per_namespace.get(), 3);
         assert_eq!(
-            policy.max_estimated_bytes_per_namespace,
+            overrides
+                .effective_policy()
+                .max_requests_per_namespace
+                .get(),
+            3
+        );
+        assert_eq!(
+            overrides
+                .effective_policy()
+                .max_estimated_bytes_per_namespace,
             loonfs::PublicationPolicy::default().max_estimated_bytes_per_namespace
         );
     }
 
     /// Checks that the server's write-stop wait is half its request deadline,
-    /// so a commit that waits out the write stop returns
+    /// so a commit that waits for the whole write-stop wait returns
     /// `maintenance_required` before its request returns `deadline_exceeded`.
     #[test]
     fn the_write_stop_wait_is_half_the_request_deadline() {
@@ -1942,13 +1959,7 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let config = load_server_config(&path).expect("valid config");
-        assert_eq!(
-            config
-                .publication
-                .effective_policy(config.request_deadline_ms)
-                .write_stop_wait_deadline_ms,
-            5_000
-        );
+        assert_eq!(config.publication_policy().write_stop_wait_budget_ms, 5_000);
     }
 
     #[test]

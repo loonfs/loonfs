@@ -752,7 +752,7 @@ A rejected request isn't assigned a sequence number and creates no WAL record. P
 To publish a batch, a writer:
 
 1. Resolves retained commit IDs, and then validates new requests against the discovered view and the requests accepted earlier in the batch.
-2. Doesn't publish new commits while the unfolded WAL is at its write-stop threshold (fence objects count toward that threshold). Those commits wait in the writer's queue for a fold to free room, and a commit that is still waiting when its write-stop wait passes, counted from when it entered the queue, returns `maintenance_required` and isn't committed.
+2. Keeps new commits in the writer's queue while the unfolded WAL is at its write-stop threshold (fence objects count toward that threshold), until a fold frees room. A commit that's still waiting when the [write-stop wait](#73-recovery-material-and-maintenance-policy) passes (measured from when it entered the queue) returns `maintenance_required` and isn't committed.
 3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id`.
 4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
 5. On success, moves its [writer position](glossary.md#writer-position) to the new head and acknowledges the requests.
@@ -981,7 +981,7 @@ Implementations can fold automatically as the WAL grows. The reference implement
 | --- | --- |
 | Request a fold | 32 unfolded WAL objects |
 | Make new commits wait for a fold | 128 unfolded WAL objects |
-| Return `maintenance_required` to a commit that is still waiting for a fold (the write-stop wait) | 30 s after the commit entered the queue |
+| Refuse a commit still waiting for a fold with `maintenance_required` (the write-stop wait) | 30 s after the commit entered the queue |
 | Fold an idle tail | The tail contains a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock |
 
 The commit that triggers a fold can finish before the fold does. Reads and lookups of retained receipts still work at the write-stop threshold. Idleness is measured from the newest commit's timestamp, so a tail that contains only fences is never idle. The timestamp determines when to fold, but a fold is valid at any time.
@@ -2145,7 +2145,8 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Maximum bounded compaction decoded input | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
-| Unfolded-tail write rejection threshold | 128 WAL objects |
+| Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
+| `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
 | `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
 | `LoonFsBuilder::max_staleness_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |

@@ -97,8 +97,10 @@ impl MonotonicTimer for PausedClock {
 }
 
 /// Retries a write that the publisher refused because its queue was full,
-/// as a client does. A write at the write stop waits in the queue for the
-/// writer's fold, so the publisher doesn't refuse it.
+/// as a client does.
+///
+/// A write at the write stop waits in the queue for the writer's fold, so
+/// the publisher refuses it only after the write-stop wait.
 async fn retry_refusals<T, Fut>(mut call: impl FnMut() -> Fut) -> loonfs::Result<T>
 where
     Fut: std::future::Future<Output = loonfs::Result<T>>,

@@ -65,8 +65,8 @@ impl PublicationAdmission {
         self.budget.publication_permit().await
     }
 
-    pub(super) fn write_stop_wait_deadline_ms(&self) -> u64 {
-        self.limits.write_stop_wait_deadline_ms
+    pub(super) fn write_stop_wait_budget_ms(&self) -> u64 {
+        self.limits.write_stop_wait_budget_ms
     }
 
     pub(super) fn acquire_candidate(
