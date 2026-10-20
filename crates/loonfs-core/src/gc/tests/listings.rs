@@ -271,3 +271,98 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             .all(|key| layout_segments(&current).contains(key)));
     }
 }
+
+/// Checks that a pass reads each layout segment once in each of its two layout
+/// scans, when every rooted manifest adds one delta run over a base that the
+/// current manifest no longer lists, and that it loads those manifests with
+/// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
+#[tokio::test]
+async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_it() {
+    use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
+    use crate::namespace::control::load_current_manifest;
+
+    const DELTA_RUNS: usize = 8;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("shared-layout-base").expect("namespace");
+    let store = RecordingStore::metadata_segments(ConcurrencyWatchStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+    ));
+    let setup_store = store.inner().inner();
+    let setup = context(1_000);
+    create(setup_store, &namespace_id, &setup)
+        .await
+        .expect("namespace");
+    let mut segments = BTreeSet::new();
+    let mut base = BTreeSet::new();
+    for index in 0..=DELTA_RUNS {
+        let path = format!("/docs/{index}");
+        write_test_file(
+            setup_store,
+            &namespace_id,
+            &path,
+            &format!("file-{index}"),
+            &setup,
+        )
+        .await;
+        fold_wal(setup_store, &namespace_id).await.expect("fold");
+        let folded = load_current_manifest(setup_store, &namespace_id)
+            .await
+            .expect("folded manifest");
+        if index == 0 {
+            base = layout_segments(&folded);
+        }
+        segments.extend(layout_segments(&folded));
+    }
+    assert_eq!((base.len(), segments.len()), (1, DELTA_RUNS + 1));
+    // Compacting the layouts replaces the base, so each fold's manifest except
+    // the last adds a layout segment that no earlier root lists.
+    while !matches!(
+        compaction_step(
+            setup_store,
+            &namespace_id,
+            loonfs_types::CompactorEpoch(0),
+            Default::default(),
+            MetadataCompactionPolicy::CompactImmediately,
+            None,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("compact"),
+        CompactionStepOutcome::UnitPublished {
+            group: loonfs_types::MetadataFamilyGroup::ContentLayouts,
+            ..
+        }
+    ) {}
+    let current = load_current_manifest(setup_store, &namespace_id)
+        .await
+        .expect("compacted manifest");
+    assert!(layout_segments(&current).is_disjoint(&base));
+    segments.extend(layout_segments(&current));
+    // Every successor is younger than the grace, so every manifest is a root.
+    let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
+    gc_namespace(
+        &store,
+        None,
+        None,
+        &namespace_id,
+        &options(),
+        &context(now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("pass");
+
+    // Without a segment cache, each read of a small segment is one GET. A
+    // merge per view would read the base once for each of the eight views
+    // that list it.
+    let mut reads = std::collections::BTreeMap::<String, usize>::new();
+    for key in store.take_get_keys() {
+        *reads.entry(key).or_default() += 1;
+    }
+    assert_eq!(reads.keys().cloned().collect::<BTreeSet<_>>(), segments);
+    assert!(reads.values().all(|&reads| reads == 2), "{reads:?}");
+    let manifest_reads = store.inner().reads();
+    assert!(manifest_reads.peak_in_flight > 1);
+    assert!(manifest_reads.peak_in_flight <= STORE_READS_IN_FLIGHT);
+}

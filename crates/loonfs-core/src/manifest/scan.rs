@@ -326,7 +326,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         });
 
         let loader = ScanLoader {
-            segments: self,
+            store: self.store,
+            segment_cache: self.segment_cache,
+            block_memo: &self.block_memo,
             readahead,
             upper_bound,
         };

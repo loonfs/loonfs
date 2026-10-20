@@ -1446,9 +1446,11 @@ Garbage collection considers every other content object under `namespaces/N/cont
 
 To find the protected objects, the pass:
 
-1. Considers the layout views in root order. A view whose layout segments are already covered by the views kept earlier adds no scan, and views with the same set of layout segments are scanned only once.
-2. Scans for extents whose content ID is different from their row's (shared base extents, which can point into any shard), and inserts their object keys into a Bloom filter.
-3. Scans disjoint content ID ranges, one shard at a time, and protects the exact extent object keys in that shard.
+1. Lists each layout segment of the layout views once, however many views list it.
+2. Scans the rows of each listed segment for extents whose content ID is different from their row's (shared base extents, which can point into any shard), and inserts their object keys into a Bloom filter.
+3. Scans the rows of the listed segments in disjoint content ID ranges, one shard at a time, and protects the exact extent object keys in that shard.
+
+The pass reads each segment's own rows, and doesn't merge the segments of a view. A view's layout rows are the rows of its segments, so the listed segments include every row of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it.
 
 Tail and session IDs protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 

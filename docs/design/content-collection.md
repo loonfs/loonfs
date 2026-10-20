@@ -10,7 +10,7 @@ A base compaction keeps each file's revisions above the retention floor, and its
 
 A content object owned by namespace `N` is kept while a layout refers to that object, or a tail or session root refers to its chain:
 
-1. **Layout views.** An extent owned by `N`, in a layout row of a rooted view. A rooted view is `N`'s current manifest, a pinned manifest, or a manifest whose immediate successor is younger than `T`, according to the successor's modification time in the listing. A successor listed without a time counts as young. A missing successor doesn't make the older manifest a root. A view whose layout segments are already covered adds no scan.
+1. **Layout views.** An extent owned by `N`, in a layout row of a rooted view. A rooted view is `N`'s current manifest, a pinned manifest, or a manifest whose immediate successor is younger than `T`, according to the successor's modification time in the listing. A successor listed without a time counts as young. A missing successor doesn't make the older manifest a root. The pass scans each layout segment that a rooted view lists once, however many views list it.
 2. **WAL tail.** A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the layouts of the tail's row state.
 3. **Upload sessions.** An upload session record in `N`, whatever its status.
 
@@ -39,15 +39,17 @@ The pass lists upload sessions before it reads the WAL tail, and it scans layout
 
 Why list sessions before reading the tail? In the other order, a commit that uses an upload's content could succeed after the pass reads the tail, and a concurrent collector could then remove the session record before the pass lists sessions.
 
+Why scan segments instead of views? A view's layout rows are the rows of its layout segments, so scanning each distinct segment reads every row of every view, and a segment that many views list is read once. The rows include a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no rooted view lists the old segment.
+
 ## Costs
 
 Content roots add these costs to a collection pass:
 
-- Two scans of the layout family for each distinct layout view. The first scan inserts shared base object keys into the Bloom filter, and the second scans disjoint ID ranges, one shard at a time. A fork's scans also read inherited segments.
+- Two scans of the rows of each distinct layout segment that a rooted view lists, so the scan work grows with the distinct layout rows and not with the number of views. The first scan inserts shared base object keys into the Bloom filter, and the second scans disjoint ID ranges, one shard at a time. A fork's scans also read inherited segments.
 - One content listing for each shard. The row counts of the current manifest's layout segments, and `content_shard_rows`, determine the shard count. The hex prefix width is the smallest `k` from 0 through 4 for which `rows / 16^k <= content_shard_rows`, and the pass visits the `16^k` shards in order. The default target is 65,536 rows per shard. An uneven distribution of IDs can put more rows in one shard.
 - One listing of upload sessions, before the tail is read. The pass reads the record of each open or aborted session (up to 16 at a time). A completed record can't change, so LoonFS reads it once per process. The runtime keeps each completed session's content ID and completion time between passes, in a cache with its own byte limit (32 MiB by default). If the cache drops a session, the next pass reads its record again. The session sweep lists the sessions again, but it reads only the records of sessions that weren't completed at the first read.
 - No HEAD requests during the sweep. (Discovery still sends its HEAD probe for the current manifest's successor.) Candidate ages and successor ages come from listing timestamps, and the pass keeps an object whose timestamp is missing.
-- Read working memory for the manifest and segment keys that the rooted manifests protect, the rooted manifests that the layout scans read, their layout segment keys, one shard's exact object keys, the tail and session IDs, and scan blocks. If a set exceeds that budget, the pass fails. The pass releases a shard's set before it moves to the next shard.
+- Read working memory for the manifest and segment keys that the rooted manifests protect, the rooted manifests (the pass loads up to 16 at a time), the list of distinct layout segments, one shard's exact object keys, the tail and session IDs, and the blocks of up to 16 open segments while they load. If a set exceeds that budget, the pass fails. The pass releases a shard's set before it moves to the next shard.
 - A shared base Bloom filter, with its own 64 MiB byte cap that's separate from read working memory. The filter follows these rules:
   - It uses the same xxh64 double hashing and seven probes as layout compaction.
   - Its initial expectation is the current manifest's layout row count, with a minimum of one. When an insertion would exceed a level's expectation, the filter adds a level with twice that expectation and a seed derived from the pass seed and the level index. A key is protected when any level matches.
