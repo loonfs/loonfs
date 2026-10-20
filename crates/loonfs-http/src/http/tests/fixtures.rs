@@ -36,6 +36,8 @@ pub(super) struct TestAppOptions {
     pub(super) consistency: Option<loonfs::Consistency>,
     /// The runtime's monotonic timer, or the system timer when `None`.
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
+    /// The runtime's execution budget, or the default when `None`.
+    pub(super) execution_budget: Option<loonfs::ExecutionBudget>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -80,6 +82,10 @@ pub(super) async fn test_app(
     };
     let builder = match inputs.monotonic_timer {
         Some(timer) => builder.monotonic_timer(timer),
+        None => builder,
+    };
+    let builder = match inputs.execution_budget {
+        Some(execution_budget) => builder.execution_budget(execution_budget),
         None => builder,
     };
     let runtime = builder

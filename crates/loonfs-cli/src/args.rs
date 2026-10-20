@@ -333,7 +333,6 @@ impl Command {
                         | MaintenanceCommand::Metadata(_)
                         | MaintenanceCommand::Fold(_)
                         | MaintenanceCommand::Retention { .. }
-                        | MaintenanceCommand::Compact(_)
                         | MaintenanceCommand::Gc(_)
                         | MaintenanceCommand::GrepGc(_)
                         | MaintenanceCommand::RecoverAdministrator(_),
@@ -1308,16 +1307,15 @@ pub(crate) struct SnapshotDeleteArgs {
 pub(crate) enum MaintenanceCommand {
     /// Restore a principal's administrator grant on the root.
     RecoverAdministrator(MaintenanceRecoverAdministratorArgs),
-    /// Run one metadata maintenance pass.
-    Metadata(MaintenanceMetadataArgs),
-    /// Fold the WAL tail into metadata segments, whatever its length.
-    Fold(MaintenanceNamespaceArgs),
-    /// Run one metadata compaction unit.
+    /// Fold the WAL tail if it's due, and compact metadata until nothing is due.
     ///
-    /// A unit is one bounded merge or one streaming compaction of a family
-    /// group. Repeat the command while it publishes to compact every eligible
-    /// group.
-    Compact(MaintenanceNamespaceArgs),
+    /// A streaming compaction can take minutes, so the command can too. It
+    /// stops after 16 compaction units. A `due` outcome means that work
+    /// remains, and a later run continues it.
+    Metadata(MaintenanceMetadataArgs),
+    /// Fold the WAL tail whatever its length, and compact metadata until
+    /// nothing is due.
+    Fold(MaintenanceNamespaceArgs),
     /// Create, list, or delete checkpoint pins.
     Checkpoint {
         #[command(subcommand)]
@@ -1599,7 +1597,6 @@ command_kinds! {
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceMetadata => "maintenance_metadata",
-    MaintenanceCompact => "maintenance_compact",
     MaintenanceGc => "maintenance_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
     MaintenanceIndexEnable => "maintenance_index_enable",
@@ -1680,7 +1677,6 @@ impl Command {
                 }
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold(_) => CommandKind::MaintenanceFold,
-                MaintenanceCommand::Compact(_) => CommandKind::MaintenanceCompact,
                 MaintenanceCommand::Checkpoint { command } => match command {
                     MaintenanceCheckpointCommand::Create(_) => {
                         CommandKind::MaintenanceCheckpointCreate
@@ -2025,7 +2021,6 @@ mod tests {
                 "recover-administrator",
                 "metadata",
                 "fold",
-                "compact",
                 "checkpoint",
                 "index",
                 "retention",

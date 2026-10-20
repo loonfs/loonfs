@@ -104,28 +104,6 @@ fn normalize_probe_message(message: &str) -> String {
     }
 }
 
-/// Formats the result of one WAL fold step.
-pub(super) fn wal_fold_summary(outcome: &WalFoldStepOutcome) -> String {
-    match outcome {
-        WalFoldStepOutcome::NotNeeded => "wal fold not needed".to_owned(),
-        WalFoldStepOutcome::Folded { manifest_head_seq } => {
-            format!("wal folded @ seq {}", manifest_head_seq.0)
-        }
-        WalFoldStepOutcome::AlreadyPublished {
-            attempted_seq,
-            current_manifest_no,
-        } => format!(
-            "wal fold @ seq {} already published (current manifest {current_manifest_no})",
-            attempted_seq.0
-        ),
-        WalFoldStepOutcome::RetriesExhausted { observed_head_seq } => format!(
-            "wal fold ran out of attempts (head was at seq {})",
-            observed_head_seq.0
-        ),
-        WalFoldStepOutcome::Unknown => "wal fold outcome unknown to this CLI".to_owned(),
-    }
-}
-
 /// Formats the current grep index state.
 pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
     match state {

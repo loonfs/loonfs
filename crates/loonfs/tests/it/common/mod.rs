@@ -7,7 +7,7 @@ use loonfs::{
     ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, CompleteUploadBody,
     ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
     FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
-    LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataMaintenanceResponse, Namespace,
+    LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace,
     NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
     SharedObjectStore, UploadId, UploadSession, Writable,
 };
@@ -469,7 +469,7 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         options: MaintainMetadataOptions,
-    ) -> loonfs::Result<MetadataMaintenanceResponse>;
+    ) -> loonfs::Result<MetadataPassReport>;
     fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse>;
     fn stat_path_blocking(
         &self,
@@ -599,7 +599,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: MaintainMetadataOptions,
-    ) -> loonfs::Result<MetadataMaintenanceResponse> {
+    ) -> loonfs::Result<MetadataPassReport> {
         block_on(
             self.maintenance
                 .maintain_metadata_with_options(namespace_id, &options),

@@ -1107,7 +1107,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             "RunMaintenanceRequest",
             &[
                 "RunMaintenanceRequestMetadata",
-                "RunMaintenanceRequestMetadataCompaction",
                 "RunMaintenanceRequestGc",
                 "RunMaintenanceRequestGrepGc",
                 "RunMaintenanceRequestRetention",
@@ -1118,7 +1117,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             "RunMaintenanceResponse",
             &[
                 "RunMaintenanceResponseMetadata",
-                "RunMaintenanceResponseMetadataCompaction",
                 "RunMaintenanceResponseGc",
                 "RunMaintenanceResponseGrepGc",
                 "RunMaintenanceResponseRetention",
@@ -1206,25 +1204,6 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "GrepIndexStatusDisabled",
                 "GrepIndexStatusBackfilling",
                 "GrepIndexStatusActive",
-            ][..],
-        ),
-        (
-            "CompactionStepOutcome",
-            &[
-                "CompactionStepOutcomeNotNeeded",
-                "CompactionStepOutcomeBoundedMergePublished",
-                "CompactionStepOutcomeMetadataCompactionRequired",
-                "CompactionStepOutcomeManifestAdvanced",
-                "CompactionStepOutcomeFenced",
-            ][..],
-        ),
-        (
-            "WalFoldStepOutcome",
-            &[
-                "WalFoldStepOutcomeNotNeeded",
-                "WalFoldStepOutcomeFolded",
-                "WalFoldStepOutcomeAlreadyPublished",
-                "WalFoldStepOutcomeRetriesExhausted",
             ][..],
         ),
     ] {

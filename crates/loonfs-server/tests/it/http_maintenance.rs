@@ -55,6 +55,17 @@ fn upkeep(
     metadata
 }
 
+async fn wal_tail_objects(
+    client: &loonfs_client::Client,
+    namespace: &loonfs_types::NamespaceId,
+) -> u64 {
+    client
+        .get_namespace_diagnostics(namespace)
+        .await
+        .expect("namespace diagnostics")
+        .wal_tail_objects
+}
+
 fn retention_floor(response: loonfs_types::RunMaintenanceResponse) -> ChangeSeq {
     let loonfs_types::RunMaintenanceResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
@@ -441,8 +452,9 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 
     let idle = post_metadata_run(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(
-        upkeep(&idle).wal_fold,
-        loonfs_types::WalFoldStepOutcome::NotNeeded
+        upkeep(&idle).outcome,
+        loonfs_types::MetadataMaintenanceOutcome::Due,
+        "a tail below the threshold stays due until it goes idle"
     );
 
     let forced = client
@@ -458,15 +470,11 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .await
         .expect("forced step");
     assert_eq!(
-        upkeep(&forced).wal_fold,
-        loonfs_types::WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(1),
-        }
+        upkeep(&forced).outcome,
+        loonfs_types::MetadataMaintenanceOutcome::CaughtUp
     );
-    assert_eq!(
-        upkeep(&forced).compaction,
-        loonfs_types::CompactionStepOutcome::NotNeeded {}
-    );
+    assert_eq!(upkeep(&forced).compaction_units, 0);
+    assert_eq!(wal_tail_objects(&client, &namespace).await, 0);
     let retention = client
         .run_maintenance(
             &namespace,
@@ -491,13 +499,10 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
     let default_idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS;
     for (idle_fold_after_ms, expected) in [
-        (0, loonfs_types::WalFoldStepOutcome::NotNeeded),
-        (
-            default_idle_ms,
-            loonfs_types::WalFoldStepOutcome::Folded {
-                manifest_head_seq: ChangeSeq(1),
-            },
-        ),
+        // With the idle rule off, the run leaves both WAL objects in the tail.
+        (0, 2),
+        // The commit is long past the idle period, so the run folds it.
+        (default_idle_ms, 0),
     ] {
         let temp_dir = tempdir().expect("tempdir");
         let store_root = temp_dir.path().join("store");
@@ -545,7 +550,12 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .await
             .expect("metadata run");
         assert_eq!(
-            upkeep(&response).wal_fold,
+            upkeep(&response).outcome,
+            loonfs_types::MetadataMaintenanceOutcome::CaughtUp,
+            "idle_fold_after_ms = {idle_fold_after_ms}"
+        );
+        assert_eq!(
+            wal_tail_objects(&harness.client, &namespace).await,
             expected,
             "idle_fold_after_ms = {idle_fold_after_ms}"
         );

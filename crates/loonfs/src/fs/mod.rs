@@ -10,7 +10,7 @@ mod uploads;
 mod writes;
 mod writes_by_inode;
 
-pub use maintenance::{CheckpointsPager, MetadataMaintenanceOutcome};
+pub use maintenance::CheckpointsPager;
 pub use reads::{
     ChangesPager, CheckpointFilesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
     ReadView, TrashPager,

@@ -7,9 +7,8 @@ use loonfs_types::api::v0::{
     StoreProbeResponse,
 };
 use loonfs_types::{
-    ChangeSeq, Checkpoint, CompactionStepOutcome, DeleteCheckpointResponse,
-    DeleteNamespaceResponse, ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceMetadata,
-    RunMaintenanceResponse,
+    ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
+    ListCheckpointsResponse, MetadataMaintenanceOutcome, NamespaceMetadata, RunMaintenanceResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -152,48 +151,15 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
         ),
         RunMaintenanceResponse::Metadata(metadata) => format!(
-            "metadata maintenance for {}: {}; {}",
+            "metadata maintenance for {}: {} ({} compaction units published)",
             metadata.namespace_id,
-            wal_fold_summary(&metadata.wal_fold),
-            match metadata.compaction {
-                CompactionStepOutcome::NotNeeded {} => "compaction not needed",
-                CompactionStepOutcome::BoundedMergePublished {} => "compacted one family group",
-                CompactionStepOutcome::MetadataCompactionRequired {} => {
-                    "one family group needs the metadata_compaction job"
-                }
-                CompactionStepOutcome::Fenced {} => "compaction fenced by a newer runtime",
-                CompactionStepOutcome::ManifestAdvanced {} => {
-                    "another publisher advanced the manifest number, so compaction published nothing"
-                }
-                CompactionStepOutcome::Unknown => "compaction outcome unknown to this CLI",
-            }
+            match metadata.outcome {
+                MetadataMaintenanceOutcome::CaughtUp => "caught up",
+                MetadataMaintenanceOutcome::Due => "work still due, run again later",
+                MetadataMaintenanceOutcome::Unknown => "outcome unknown to this CLI",
+            },
+            metadata.compaction_units,
         ),
-        RunMaintenanceResponse::MetadataCompaction(response) => {
-            let summary = match &response.compaction {
-                MetadataCompactionOutcome::NotNeeded => "not needed".to_owned(),
-                MetadataCompactionOutcome::BoundedMergePublished => {
-                    "published one bounded merge".to_owned()
-                }
-                MetadataCompactionOutcome::Published {
-                    manifest_no,
-                    rows_read,
-                    rows_written,
-                    output_segments,
-                    ..
-                } => format!(
-                    "published manifest {manifest_no}: {rows_read} rows read, \
-                 {rows_written} rows written, {output_segments} output segments"
-                ),
-                MetadataCompactionOutcome::Cancelled => "cancelled".to_owned(),
-                MetadataCompactionOutcome::Abandoned => "abandoned".to_owned(),
-                MetadataCompactionOutcome::Fenced => "fenced".to_owned(),
-                MetadataCompactionOutcome::Unknown => "outcome unknown to this CLI".to_owned(),
-            };
-            format!(
-                "metadata compaction for {}: {summary}",
-                response.namespace_id
-            )
-        }
         RunMaintenanceResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }

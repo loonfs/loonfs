@@ -882,14 +882,14 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
 
-        // `maintenance fold` runs metadata maintenance with a fold threshold of one
-        // WAL object, so it reports both halves and nothing else.
+        // `maintenance fold` runs the metadata job with a fold threshold of one
+        // WAL object, so it folds the tail and leaves nothing due.
         let fold = harness.run(&["--json", "maintenance", "fold", "--profile", profile]);
         assert_success(&fold);
         let fold_data = json_data(&fold);
         assert_eq!(fold_data["kind"], "metadata");
-        assert_eq!(fold_data["compaction"]["outcome"], "not_needed");
-        assert!(fold_data["wal_fold"].is_object());
+        assert_eq!(fold_data["outcome"], "caught_up");
+        assert_eq!(fold_data["compaction_units"], 0);
 
         let delete = harness.run(&[
             "--json",
@@ -994,30 +994,22 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(stdout_string(&unchanged_retention)
             .contains("retention for demo: floor unchanged at seq 2"));
 
-        // The checkpoint above already covers the head, so the metadata job reports
-        // not-needed identically in both modes.
+        // The checkpoint above already covers the head, so the metadata job
+        // reports the namespace caught up identically in both modes.
         let metadata = harness.run(&["--json", "maintenance", "metadata", "--profile", profile]);
         assert_success(&metadata);
         let metadata_data = json_data(&metadata);
         assert_eq!(metadata_data["kind"], "metadata");
         assert_eq!(metadata_data["namespace_id"], "demo");
-        assert_eq!(metadata_data["wal_fold"]["outcome"], "not_needed");
-        assert_eq!(metadata_data["compaction"]["outcome"], "not_needed");
+        assert_eq!(metadata_data["outcome"], "caught_up");
+        assert_eq!(metadata_data["compaction_units"], 0);
 
         let metadata_human = harness.run(&["maintenance", "metadata", "--profile", profile]);
         assert_success(&metadata_human);
-        assert!(stdout_string(&metadata_human).starts_with("metadata maintenance for demo:"));
-
-        let compact = harness.run(&["--json", "maintenance", "compact", "--profile", profile]);
-        assert_success(&compact);
-        let compact_data = json_data(&compact);
-        assert_eq!(compact_data["kind"], "metadata_compaction");
-        assert_eq!(compact_data["namespace_id"], "demo");
-        assert_eq!(compact_data["compaction"]["outcome"], "not_needed");
-
-        let compact_human = harness.run(&["maintenance", "compact", "--profile", profile]);
-        assert_success(&compact_human);
-        assert!(stdout_string(&compact_human).starts_with("metadata compaction for demo:"));
+        assert_eq!(
+            stdout_string(&metadata_human).trim_end(),
+            "metadata maintenance for demo: caught up (0 compaction units published)"
+        );
 
         // A fresh namespace has nothing eligible to sweep.
         let gc = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);

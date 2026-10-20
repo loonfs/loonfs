@@ -867,7 +867,8 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
-            .expect("a lost race is an outcome, not an error"),
+            .expect("a lost race is an outcome, not an error")
+            .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
     assert_eq!(
@@ -891,7 +892,8 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
-            .expect("a fenced step is an outcome, not an error"),
+            .expect("a fenced step is an outcome, not an error")
+            .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
     assert_eq!(
@@ -932,13 +934,13 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         let before = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
-        let outcome = maintenance
+        let response = maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("run the metadata loop");
         if published.is_empty() {
             assert_eq!(
-                outcome,
+                response.outcome,
                 crate::MetadataMaintenanceOutcome::Due,
                 "the unit cap cannot establish completion"
             );
@@ -946,6 +948,11 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         let after = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
+        assert_eq!(
+            response.compaction_units,
+            after.0 - before.0,
+            "the response counts every unit the call published"
+        );
         published.push(after.0 - before.0);
     }
     assert_eq!(
@@ -1043,7 +1050,8 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         maintenance
             .maintain_metadata_while_due(&idle, &cancelled)
             .await
-            .expect("cancellation is not completion"),
+            .expect("cancellation is not completion")
+            .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
     assert_eq!(requests(store.counts()), [0; 4]);
@@ -1072,7 +1080,10 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .await;
         if metadata_error.is_none() {
             assert_eq!(
-                *metadata.as_ref().expect("idle metadata is caught up"),
+                metadata
+                    .as_ref()
+                    .expect("idle metadata is caught up")
+                    .outcome,
                 crate::MetadataMaintenanceOutcome::CaughtUp
             );
         }

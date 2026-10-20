@@ -11,7 +11,7 @@ use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, D
 use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_types::api::v0::{GrepIndexStatus, StoreProbeCheckOutcome, StoreProbeCheckResult};
-use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse, WalFoldStepOutcome};
+use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse};
 use serde::Serialize;
 use std::io::{self, Write};
 

@@ -1862,7 +1862,7 @@ impl NamespacePublisher {
             .await;
         let outcome = result
             .as_ref()
-            .map_or(MetadataMaintenanceOutcome::Due, |outcome| *outcome);
+            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
         self.record_metadata_maintenance(seq, outcome);
         if let Err(error) = result {
             phase_event!(
