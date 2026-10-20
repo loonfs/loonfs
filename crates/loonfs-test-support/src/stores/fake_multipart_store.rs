@@ -9,6 +9,9 @@
 //! - a completed upload is *consumed*, so replaying its completion succeeds
 //!   and changes nothing, and the object it produced is the only evidence of
 //!   what happened: the lost-completion case;
+//! - a completion is create-only, so completing over an existing object
+//!   leaves that object in place, and the adapter reports success so that
+//!   the read-back decides;
 //! - the whole-object checksum supplied at completion is not necessarily
 //!   enforced (Cloudflare R2 accepts a wrong one and stores the true value),
 //!   which is why LoonFS reads the object back;
@@ -224,12 +227,15 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             ));
         }
 
-        // A direct completion sends no precondition, so it replaces whatever
-        // the key contains.
-        self.inner.delete(key).await?;
-        self.inner
+        match self
+            .inner
             .put(key, Bytes::from(assembled), PutMode::CreateIfAbsent)
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(ObjectStoreError::PreconditionFailed { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         self.stored_checksums
             .lock()
             .expect("stored checksum lock should not be poisoned")

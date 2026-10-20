@@ -24,15 +24,6 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
-
-/// The condition a signed `CompleteMultipartUpload` puts on its key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CompletionCondition {
-    /// Completes only while the key is absent, with `if-none-match: *`.
-    CreateOnly,
-    /// Completes whatever the key contains, with no precondition header.
-    Unconditional,
-}
 pub(crate) const S3_IF_MATCH_HEADER: &str = "if-match";
 const S3_COPY_SOURCE_HEADER: &str = "x-amz-copy-source";
 const S3_COPY_SOURCE_RANGE_HEADER: &str = "x-amz-copy-source-range";
@@ -288,8 +279,8 @@ impl S3CompatiblePresigner {
         )
     }
 
-    /// Signs `CompleteMultipartUpload` carrying the whole-object checksum when
-    /// given, and `condition` on the key.
+    /// Signs a create-only `CompleteMultipartUpload` carrying the
+    /// whole-object checksum when given.
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble
     /// an object that does not match it. Cloudflare R2 accepts the request
@@ -300,7 +291,6 @@ impl S3CompatiblePresigner {
         object_key: &str,
         provider_upload_id: &str,
         checksum: Option<&Checksum>,
-        condition: CompletionCondition,
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
@@ -311,12 +301,7 @@ impl S3CompatiblePresigner {
                 base64_crc64nvme(checksum)?,
             );
         }
-        match condition {
-            CompletionCondition::CreateOnly => {
-                required_headers.insert(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned());
-            }
-            CompletionCondition::Unconditional => {}
-        }
+        required_headers.insert(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned());
         let credentials = self.signing_credentials(ttl, now).await?;
         self.presign_with_query(
             &credentials,
@@ -598,9 +583,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CompletionCondition, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
-    };
+    use super::{S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES};
     use crate::aws_credentials::{
         AwsCredentialsSource, AwsSigningCredentials, ObjectStoreAwsCredentialProvider,
         SharedAwsCredentialsSource,
@@ -975,37 +958,17 @@ mod tests {
             .presign_create_multipart(CONTENT_KEY, ttl, now)
             .await
             .expect("presign create");
-        let create_only = signer
-            .presign_complete_multipart(
-                CONTENT_KEY,
-                "upload",
-                None,
-                CompletionCondition::CreateOnly,
-                ttl,
-                now,
-            )
+        let completed = signer
+            .presign_complete_multipart(CONTENT_KEY, "upload", None, ttl, now)
             .await
             .expect("presign complete");
         assert_eq!(
-            create_only.headers.get("if-none-match").map(String::as_str),
+            completed.headers.get("if-none-match").map(String::as_str),
             Some("*")
         );
-        assert!(create_only
+        assert!(completed
             .url
             .contains("X-Amz-SignedHeaders=host%3Bif-none-match&"));
-        let unconditional = signer
-            .presign_complete_multipart(
-                CONTENT_KEY,
-                "upload",
-                None,
-                CompletionCondition::Unconditional,
-                ttl,
-                now,
-            )
-            .await
-            .expect("presign complete");
-        assert!(unconditional.headers.is_empty());
-        assert!(unconditional.url.contains("X-Amz-SignedHeaders=host&"));
         let base_key = "namespaces/other/content/con_fedcba9876543210fedcba9876543210";
         assert_eq!(
             created
