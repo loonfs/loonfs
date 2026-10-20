@@ -15,7 +15,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
         KeyPredicate::any(),
     ));
     let mut config = test_config(directory.path(), "admission-writer");
-    config.max_in_flight_requests = 1;
+    config.max_in_flight_requests = std::num::NonZeroUsize::MIN;
     let (router, state) = app(config, options_with_store(store.clone()))
         .await
         .expect("app");
@@ -138,7 +138,7 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
         |_| true,
     ));
     let mut config = test_config(directory.path(), "unsent-body-writer");
-    config.max_in_flight_requests = 1;
+    config.max_in_flight_requests = std::num::NonZeroUsize::MIN;
     let (router, state) = app(config, options_with_store(store.clone()))
         .await
         .expect("app");

@@ -202,15 +202,15 @@ async fn capabilities_endpoint_advertises_capabilities() {
         (LIMIT_SNAPSHOT_MAX_AGE_MS, config.snapshot_max_age_ms),
         (
             LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-            config.snapshot_max_live_per_namespace as u64,
+            config.snapshot_max_live_per_namespace.get() as u64,
         ),
         (
             LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
-            config.max_concurrent_uploads as u64,
+            config.max_concurrent_uploads.get() as u64,
         ),
         (
             LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
-            config.max_concurrent_downloads as u64,
+            config.max_concurrent_downloads.get() as u64,
         ),
         (LIMIT_COMMIT_MAX_OPERATIONS, MAX_COMMIT_OPERATIONS as u64),
         (

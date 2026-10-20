@@ -331,7 +331,7 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
         OperationSelector::PutCreateIfAbsent,
     ));
     let mut options = test_options(directory.path(), "ending-host");
-    options.binding.inline_content.inline_content_fold_at_bytes = 1;
+    options.inline_content.inline_content_fold_at_bytes = 1;
     let (router, state) = test_app(options, options_with_store(blocking.clone()))
         .await
         .expect("host");
@@ -484,7 +484,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
             OperationSelector::PutCreateIfAbsent,
         ));
         let mut options = test_options(directory.path(), "closing-host");
-        options.binding.inline_content.inline_content_fold_at_bytes = 1;
+        options.inline_content.inline_content_fold_at_bytes = 1;
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
         let (_, state) = test_app(
             options,

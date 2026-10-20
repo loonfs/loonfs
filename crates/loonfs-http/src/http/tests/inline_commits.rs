@@ -38,7 +38,7 @@ impl Harness {
             KeyPredicate::any(),
         ));
         let mut config = test_options(directory.path(), "inline-host");
-        config.binding.inline_content = inline_content;
+        config.inline_content = inline_content;
         config.binding.serves_maintenance = false;
         config.grep = JobMode::Disabled;
         let (router, state) = test_app(config, options_with_store(store.clone()))

@@ -24,9 +24,8 @@ use loonfs_types::{
     ExtendSnapshotRequest, ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse,
     NamespaceAccess, PageRequest, PaginationPolicy, PinId, RunMaintenanceRequest,
     RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+    API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
@@ -83,13 +82,6 @@ pub(super) async fn get_capabilities(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::CapabilityDocument>, ApiResponseError> {
     let mut capabilities = state.runtime.capabilities();
-    if let Some(threshold) = state.options.inline_content.inline_content_threshold_bytes {
-        set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
-        capabilities.limits.insert(
-            LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
-            threshold as u64,
-        );
-    }
     // Each direct transport is advertised from the issuer that performs it,
     // so a provider that signs whole-object writes but has no multipart API
     // says exactly that. The read is advertised for the bundle as a whole:

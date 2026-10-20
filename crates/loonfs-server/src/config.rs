@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -151,22 +152,22 @@ pub struct ServerConfig {
     pub writer_id: WriterId,
     /// Maximum public reads running at once. Reads past this limit wait.
     #[serde(default = "default_max_concurrent_reads")]
-    pub max_concurrent_reads: usize,
+    pub max_concurrent_reads: NonZeroUsize,
     #[serde(default = "default_max_in_flight_requests")]
-    pub max_in_flight_requests: usize,
+    pub max_in_flight_requests: NonZeroUsize,
     #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
+    pub max_connections: NonZeroUsize,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
     /// low.
     #[serde(default = "default_max_concurrent_folds")]
-    pub max_concurrent_folds: usize,
+    pub max_concurrent_folds: NonZeroUsize,
     /// Maximum metadata merges this server runs at once, bounded compaction
     /// steps and streaming compactions alike, whether writer sessions, the
     /// maintenance sweep, or maintenance requests start them. A merge never
     /// holds a fold permit.
     #[serde(default = "default_max_concurrent_compactions")]
-    pub max_concurrent_compactions: usize,
+    pub max_concurrent_compactions: NonZeroUsize,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsConfig,
@@ -237,24 +238,24 @@ pub struct ServerConfig {
     /// Maximum live snapshots per namespace. Advertised as
     /// the `snapshot.max_live_per_namespace` capability limit.
     #[serde(default = "default_snapshot_max_live_per_namespace")]
-    pub snapshot_max_live_per_namespace: usize,
+    pub snapshot_max_live_per_namespace: NonZeroUsize,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap answer `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
     /// bodies forward to the store incrementally instead of buffering.
     #[serde(default = "default_max_concurrent_uploads")]
-    pub max_concurrent_uploads: usize,
+    pub max_concurrent_uploads: NonZeroUsize,
     /// How many proxied content streams the server will serve at once;
     /// requests past the cap answer `server_busy` before any fetch.
     /// Content memory follows this count times the internal read chunk size,
     /// independent of `max_download_bytes`. Admission lasts until the body
     /// finishes or is dropped.
     #[serde(default = "default_max_concurrent_downloads")]
-    pub max_concurrent_downloads: usize,
+    pub max_concurrent_downloads: NonZeroUsize,
     /// How many namespaces the maintenance sweep visits at once. Folds and
     /// merges also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
-    pub max_concurrent_maintenance: usize,
+    pub max_concurrent_maintenance: NonZeroUsize,
     /// Milliseconds between ticks of held sessions. Defaults to 5000.
     #[serde(default = "default_tick_interval_ms")]
     pub tick_interval_ms: u64,
@@ -406,40 +407,41 @@ fn default_snapshot_max_age_ms() -> u64 {
     loonfs::SnapshotPolicy::default().max_age_ms
 }
 
-fn default_snapshot_max_live_per_namespace() -> usize {
-    loonfs::SnapshotPolicy::default().max_live_per_namespace
+fn default_snapshot_max_live_per_namespace() -> NonZeroUsize {
+    NonZeroUsize::new(loonfs::SnapshotPolicy::default().max_live_per_namespace)
+        .expect("the default live snapshot limit should be nonzero")
 }
 
-fn default_max_in_flight_requests() -> usize {
-    256
+fn default_max_in_flight_requests() -> NonZeroUsize {
+    const { NonZeroUsize::new(256).unwrap() }
 }
 
-fn default_max_connections() -> usize {
-    1024
+fn default_max_connections() -> NonZeroUsize {
+    const { NonZeroUsize::new(1024).unwrap() }
 }
 
-fn default_max_concurrent_uploads() -> usize {
-    loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
+fn default_max_concurrent_uploads() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS).unwrap() }
 }
 
-fn default_max_concurrent_reads() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_READS
+fn default_max_concurrent_reads() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap() }
 }
 
-fn default_max_concurrent_folds() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+fn default_max_concurrent_folds() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap() }
 }
 
-fn default_max_concurrent_compactions() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
+fn default_max_concurrent_compactions() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap() }
 }
 
-fn default_max_concurrent_downloads() -> usize {
-    loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS
+fn default_max_concurrent_downloads() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS).unwrap() }
 }
 
-fn default_max_concurrent_maintenance() -> usize {
-    8
+fn default_max_concurrent_maintenance() -> NonZeroUsize {
+    const { NonZeroUsize::new(8).unwrap() }
 }
 
 fn default_tick_interval_ms() -> u64 {
@@ -656,21 +658,6 @@ impl ServerConfig {
             ("snapshot_max_ttl_ms", self.snapshot_max_ttl_ms),
             ("snapshot_max_age_ms", self.snapshot_max_age_ms),
             (
-                "snapshot_max_live_per_namespace",
-                self.snapshot_max_live_per_namespace as u64,
-            ),
-            ("max_concurrent_reads", self.max_concurrent_reads as u64),
-            ("max_concurrent_folds", self.max_concurrent_folds as u64),
-            (
-                "max_concurrent_compactions",
-                self.max_concurrent_compactions as u64,
-            ),
-            ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
-            (
-                "max_concurrent_downloads",
-                self.max_concurrent_downloads as u64,
-            ),
-            (
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes
                     .unwrap_or(default_max_merge_input_bytes()) as u64,
@@ -682,8 +669,7 @@ impl ServerConfig {
             ("max_in_flight_requests", self.max_in_flight_requests),
             ("max_connections", self.max_connections),
         ] {
-            validate_positive(field, value as u64, None)?;
-            if value > tokio::sync::Semaphore::MAX_PERMITS {
+            if value.get() > tokio::sync::Semaphore::MAX_PERMITS {
                 return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                     field,
                     reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
@@ -713,10 +699,6 @@ impl ServerConfig {
             }));
         }
         for (field, value) in [
-            (
-                "max_concurrent_maintenance",
-                self.max_concurrent_maintenance as u64,
-            ),
             ("tick_interval_ms", self.tick_interval_ms),
             ("maintenance_interval_ms", self.maintenance_interval_ms),
             ("gc_interval_ms", self.gc_interval_ms),
@@ -797,12 +779,12 @@ impl ServerConfig {
         recorder: Arc<dyn MetricsRecorder>,
     ) -> ExecutionBudget {
         let positive = |value: usize| {
-            std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
+            NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
         let mut builder = ExecutionBudget::builder()
-            .max_concurrent_reads(positive(self.max_concurrent_reads))
-            .max_concurrent_folds(positive(self.max_concurrent_folds))
-            .max_concurrent_compactions(positive(self.max_concurrent_compactions))
+            .max_concurrent_reads(self.max_concurrent_reads)
+            .max_concurrent_folds(self.max_concurrent_folds)
+            .max_concurrent_compactions(self.max_concurrent_compactions)
             .max_merge_input_bytes(positive(memory.merge_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.publication.bytes))
@@ -958,11 +940,12 @@ impl ServerConfig {
             ("process", (128 * MIB) as u128),
             (
                 "connections (`max_connections` x 472 KiB)",
-                self.max_connections as u128 * 472 * 1024,
+                self.max_connections.get() as u128 * 472 * 1024,
             ),
             (
                 "transfers ((`max_concurrent_uploads` + `max_concurrent_downloads`) x 8 MiB)",
-                (self.max_concurrent_uploads as u128 + self.max_concurrent_downloads as u128)
+                (self.max_concurrent_uploads.get() as u128
+                    + self.max_concurrent_downloads.get() as u128)
                     * (8 * MIB) as u128,
             ),
         ];
@@ -982,11 +965,6 @@ impl ServerConfig {
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
         let serves_grep = self.grep.mode.serves();
-        validate_positive(
-            "max_concurrent_compactions",
-            self.max_concurrent_compactions as u64,
-            None,
-        )?;
         let memory = MemorySizing {
             limit: limit.map(|bytes| {
                 MemoryTerm::new(
@@ -1041,10 +1019,10 @@ impl ServerConfig {
             merge_input: MemoryTerm::new(
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes,
-                share(10).map(|bytes| bytes / self.max_concurrent_compactions),
+                share(10).map(|bytes| bytes / self.max_concurrent_compactions.get()),
                 default_max_merge_input_bytes(),
             ),
-            compactions: self.max_concurrent_compactions,
+            compactions: self.max_concurrent_compactions.get(),
             serves_grep,
         };
         memory.validate()?;
@@ -1142,6 +1120,7 @@ mod tests {
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
+    use std::num::NonZeroUsize;
     use tempfile::tempdir;
 
     fn memory_config(settings: &str) -> super::ServerConfig {
@@ -1203,13 +1182,13 @@ root = "unused"
                 }
             }
         }
-        assert_eq!(config.max_concurrent_reads, 64);
-        assert_eq!(config.max_concurrent_folds, 2);
-        assert_eq!(config.max_concurrent_compactions, 2);
-        assert_eq!(config.max_in_flight_requests, 256);
-        assert_eq!(config.max_connections, 1024);
-        assert_eq!(config.max_concurrent_uploads, 8);
-        assert_eq!(config.max_concurrent_downloads, 16);
+        assert_eq!(config.max_concurrent_reads.get(), 64);
+        assert_eq!(config.max_concurrent_folds.get(), 2);
+        assert_eq!(config.max_concurrent_compactions.get(), 2);
+        assert_eq!(config.max_in_flight_requests.get(), 256);
+        assert_eq!(config.max_connections.get(), 1024);
+        assert_eq!(config.max_concurrent_uploads.get(), 8);
+        assert_eq!(config.max_concurrent_downloads.get(), 16);
         assert_eq!(config.publication.max_concurrent_publications, None);
     }
 
@@ -1972,31 +1951,32 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
         assert_eq!(
-            config.max_concurrent_reads,
+            config.max_concurrent_reads.get(),
             loonfs::DEFAULT_MAX_CONCURRENT_READS
         );
         assert_eq!(
-            config.max_concurrent_folds,
+            config.max_concurrent_folds.get(),
             loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
         );
         assert_eq!(
-            config.max_concurrent_compactions,
+            config.max_concurrent_compactions.get(),
             loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
         );
         for field in ["max_in_flight_requests", "max_connections"] {
             let mut oversized = config.clone();
-            let value = tokio::sync::Semaphore::MAX_PERMITS + 1;
+            let value = NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1)
+                .expect("a bound past the permit limit is nonzero");
             match field {
                 "max_in_flight_requests" => oversized.max_in_flight_requests = value,
                 _ => oversized.max_connections = value,
             }
             assert_invalid_field(oversized.validate().expect_err("oversized bound"), field);
         }
-        assert_eq!(config.max_in_flight_requests, 256);
-        assert_eq!(config.max_connections, 1024);
-        assert_eq!(config.max_concurrent_uploads, 8);
-        assert_eq!(config.max_concurrent_downloads, 16);
-        assert_eq!(config.max_concurrent_maintenance, 8);
+        assert_eq!(config.max_in_flight_requests.get(), 256);
+        assert_eq!(config.max_connections.get(), 1024);
+        assert_eq!(config.max_concurrent_uploads.get(), 8);
+        assert_eq!(config.max_concurrent_downloads.get(), 16);
+        assert_eq!(config.max_concurrent_maintenance.get(), 8);
         assert_eq!(config.tick_interval_ms, 5_000);
         assert_eq!(config.maintenance_interval_ms, 300_000);
         assert_eq!(config.gc_interval_ms, 3_600_000);
@@ -2005,14 +1985,6 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
-            "max_concurrent_reads",
-            "max_in_flight_requests",
-            "max_connections",
-            "max_concurrent_folds",
-            "max_concurrent_compactions",
-            "max_concurrent_uploads",
-            "max_concurrent_downloads",
-            "max_concurrent_maintenance",
             "tick_interval_ms",
             "maintenance_interval_ms",
             "gc_interval_ms",
@@ -2034,6 +2006,37 @@ root = "/tmp/loonfs-server"
             ));
             let error = load_server_config(&path).expect_err("zero bound must be rejected");
             assert_invalid_field(error, field);
+        }
+        for field in [
+            "max_concurrent_reads",
+            "max_in_flight_requests",
+            "max_connections",
+            "max_concurrent_folds",
+            "max_concurrent_compactions",
+            "max_concurrent_uploads",
+            "max_concurrent_downloads",
+            "max_concurrent_maintenance",
+            "snapshot_max_live_per_namespace",
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+{field} = 0
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+            match load_server_config(&path).expect_err("a zero count must be rejected") {
+                ServerConfigError::Decode(message) => assert!(
+                    message.contains(field) && message.contains("expected a nonzero usize"),
+                    "the decode error should identify `{field}` and say why: {message}"
+                ),
+                other => panic!("expected a decode error for `{field}`, got {other:?}"),
+            }
         }
 
         let path = write_config(

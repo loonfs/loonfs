@@ -156,7 +156,8 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
             OperationSelector::Any,
         ));
         let mut config = sweep_config(None);
-        config.max_concurrent_maintenance = slots;
+        config.max_concurrent_maintenance =
+            std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
         config.idle_fold_after_ms = 0;
         let server = SweepServer::start(store.clone(), &config, 0).await;
         server

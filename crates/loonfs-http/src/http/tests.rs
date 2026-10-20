@@ -1918,7 +1918,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.inline_content.inline_content_threshold_bytes = None;
+    config.inline_content.inline_content_threshold_bytes = None;
     config.binding.max_upload_bytes = Some(1024);
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
@@ -2243,7 +2243,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.inline_content.inline_content_threshold_bytes = None;
+    config.inline_content.inline_content_threshold_bytes = None;
     config.binding.max_concurrent_uploads = 1;
     let TestHarness {
         addr,

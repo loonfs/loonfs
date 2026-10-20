@@ -58,15 +58,15 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
 async fn app_validates_directly_built_configs() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(temp_dir.path(), "app-validate-writer");
-    config.max_concurrent_uploads = 0;
+    config.max_upload_bytes = 0;
     match app(config, AppConfig::default()).await {
         Err(crate::config::ServerConfigError::Field(
             loonfs_types::config::ConfigFieldError::Invalid { field, .. },
         )) => {
-            assert_eq!(field, "max_concurrent_uploads");
+            assert_eq!(field, "max_upload_bytes");
         }
         Err(other) => panic!("expected invalid field error, got {other:?}"),
-        Ok(_) => panic!("app must reject a zero upload bound"),
+        Ok(_) => panic!("app must reject a zero upload size"),
     }
 }
 
@@ -384,7 +384,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     let mut config = test_config(temp_dir.path(), "sweep-shutdown-server");
     // No run fits a one-byte merge, so the due compaction streams.
     config.max_merge_input_bytes = Some(1);
-    config.max_concurrent_maintenance = 1;
+    config.max_concurrent_maintenance = std::num::NonZeroUsize::MIN;
     let (router, state) = app(config, options_with_store(store.clone()))
         .await
         .expect("build app");
@@ -831,9 +831,15 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: loonfs_test_support::ids::writer_id(writer_id),
-        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
-        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
-        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        max_concurrent_reads: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap()
+        },
+        max_concurrent_folds: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap()
+        },
+        max_concurrent_compactions: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
+        },
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
@@ -850,12 +856,12 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_download_bytes: 256 * 1024 * 1024,
         snapshot_max_ttl_ms: 86_400_000,
         snapshot_max_age_ms: 604_800_000,
-        snapshot_max_live_per_namespace: 16,
-        max_in_flight_requests: 256,
-        max_connections: 1024,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
-        max_concurrent_maintenance: 8,
+        snapshot_max_live_per_namespace: const { std::num::NonZeroUsize::new(16).unwrap() },
+        max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
+        max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
+        max_concurrent_uploads: const { std::num::NonZeroUsize::new(8).unwrap() },
+        max_concurrent_downloads: const { std::num::NonZeroUsize::new(16).unwrap() },
+        max_concurrent_maintenance: const { std::num::NonZeroUsize::new(8).unwrap() },
         tick_interval_ms: 5_000,
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,

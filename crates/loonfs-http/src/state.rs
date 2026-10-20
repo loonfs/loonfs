@@ -4,8 +4,8 @@ use crate::{HttpMetrics, RequestLimit};
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
-    ChangeSeq, CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace,
-    NamespaceSessionStatus, SharedObjectStore, SnapshotPolicy, Writable,
+    ChangeSeq, CloseNamespaceReport, LoonFs, Maintenance, Namespace, NamespaceSessionStatus,
+    SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -79,7 +79,6 @@ pub struct BindingConfig {
     pub max_upload_bytes: Option<u64>,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
-    pub inline_content: InlineContentPolicy,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
     pub store_kind: ConfiguredObjectStoreKind,

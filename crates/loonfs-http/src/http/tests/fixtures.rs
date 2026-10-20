@@ -3,7 +3,7 @@
 use crate::{
     AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, JobMode, Namespaces,
 };
-use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
+use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
@@ -17,6 +17,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(super) struct TestOptions {
     pub(super) binding: BindingConfig,
+    /// The runtime's inline content policy, which the binding reads from the
+    /// runtime.
+    pub(super) inline_content: InlineContentPolicy,
     pub(super) grep: JobMode,
     pub(super) writer_id: WriterId,
     pub(super) store: SharedObjectStore,
@@ -48,12 +51,12 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             max_download_bytes: Some(256 * 1024 * 1024),
             max_concurrent_uploads: 8,
             max_concurrent_downloads: 16,
-            inline_content: Default::default(),
             content_token_secret: "test-content-token-secret".into(),
             request_deadline_ms: 60_000,
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
+        inline_content: InlineContentPolicy::default(),
         grep: JobMode::ServeAndMaintain,
         writer_id: WriterId::parse(writer_id).expect("writer id"),
         store: Arc::new(LocalFsStore::with_key_prefix(root, Some("http-tests")).expect("store")),
@@ -84,7 +87,7 @@ pub(super) async fn test_app(
             config.writer_id.as_str(),
         ))
         .min_publish_interval_ms(0)
-        .inline_content(options.inline_content.clone())
+        .inline_content(config.inline_content)
         .max_read_content_bytes(
             options
                 .max_download_bytes

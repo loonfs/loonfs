@@ -351,9 +351,15 @@ pub(crate) fn test_config(
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
         writer_id: loonfs_test_support::ids::writer_id(writer_id),
-        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
-        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
-        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        max_concurrent_reads: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap()
+        },
+        max_concurrent_folds: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap()
+        },
+        max_concurrent_compactions: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
+        },
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
@@ -370,12 +376,12 @@ pub(crate) fn test_config(
         max_download_bytes: 256 * 1024 * 1024,
         snapshot_max_ttl_ms: 86_400_000,
         snapshot_max_age_ms: 604_800_000,
-        snapshot_max_live_per_namespace: 16,
-        max_in_flight_requests: 256,
-        max_connections: 1024,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
-        max_concurrent_maintenance: 8,
+        snapshot_max_live_per_namespace: const { std::num::NonZeroUsize::new(16).unwrap() },
+        max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
+        max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
+        max_concurrent_uploads: const { std::num::NonZeroUsize::new(8).unwrap() },
+        max_concurrent_downloads: const { std::num::NonZeroUsize::new(16).unwrap() },
+        max_concurrent_maintenance: const { std::num::NonZeroUsize::new(8).unwrap() },
         tick_interval_ms: 5_000,
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
