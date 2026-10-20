@@ -6,7 +6,7 @@ use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::metrics::{
     fan_out_object_store_recorder, MetricsRecorder, ObjectStoreMetricsRecorder, RuntimeInstruments,
 };
-use crate::publisher::PublisherRegistry;
+use crate::publisher::{FoldTrigger, PublisherRegistry};
 use crate::{
     Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, Result,
     SharedObjectStore, StoreConfig, TraceMode,
@@ -18,6 +18,7 @@ use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::WriterId;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
@@ -66,6 +67,7 @@ struct WriterConfig {
     min_publish_interval_ms: u64,
     publication_policy: PublicationPolicy,
     inline_content: InlineContentPolicy,
+    idle_fold_after_ms: Option<NonZeroU64>,
 }
 
 impl<M> LoonFsBuilder<M> {
@@ -103,6 +105,7 @@ impl<M> LoonFsBuilder<M> {
                 min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
                 publication_policy: PublicationPolicy::default(),
                 inline_content: InlineContentPolicy::default(),
+                idle_fold_after_ms: NonZeroU64::new(crate::config::DEFAULT_IDLE_FOLD_AFTER_MS),
             },
             mode: PhantomData,
         }
@@ -329,6 +332,22 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
+    /// Sets how old a WAL tail's newest commit must be, in milliseconds,
+    /// before maintenance folds a tail that is below the fold thresholds, or
+    /// turns that rule off with `None`.
+    ///
+    /// Defaults to
+    /// [`DEFAULT_IDLE_FOLD_AFTER_MS`](crate::DEFAULT_IDLE_FOLD_AFTER_MS), 15
+    /// minutes. [`Maintenance`](crate::Maintenance) measures the age on the
+    /// runtime's wall clock from the newest commit's `committed_at_ms`. A
+    /// writer session doesn't fold on age. A host that sweeps its sessions
+    /// reads when a session reaches the age with
+    /// [`Namespace::idle_fold_due_at_ms`](crate::Namespace::idle_fold_due_at_ms).
+    pub fn idle_fold_after_ms(mut self, idle_fold_after_ms: Option<NonZeroU64>) -> Self {
+        self.writer.idle_fold_after_ms = idle_fold_after_ms;
+        self
+    }
+
     /// Turns this builder into one for a read-only runtime.
     ///
     /// It keeps the settings both modes share, such as the store, the
@@ -360,6 +379,7 @@ impl LoonFsBuilder<Writable> {
         let core = self.core.open()?;
         let execution_budget = core.inner.config.execution_budget.clone();
         let bits = Arc::new(WriterBits {
+            fold_trigger: FoldTrigger::new(&writer.inline_content, writer.idle_fold_after_ms),
             inline_content: writer.inline_content,
             identity,
             execution_budget: execution_budget.clone(),

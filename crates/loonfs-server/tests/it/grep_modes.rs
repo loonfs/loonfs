@@ -820,7 +820,7 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         max_staleness_ms: None,
         consistency: Default::default(),
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::DEFAULT_IDLE_FOLD_AFTER_MS,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

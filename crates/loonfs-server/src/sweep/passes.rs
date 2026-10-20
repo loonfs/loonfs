@@ -54,19 +54,18 @@ impl Sweep {
                 return;
             }
             let metadata_caught_up = held.handle.metadata_caught_up();
-            let idle_fold_due = inner.metadata.idle_fold_after_ms != 0
-                && held
-                    .handle
-                    .last_published_at_ms()
-                    .is_some_and(|published_at_ms| {
-                        let fold_due_at_ms =
-                            published_at_ms.saturating_add(inner.metadata.idle_fold_after_ms);
-                        now_ms >= fold_due_at_ms
-                            && held
-                                .metadata_retry_at_ms
-                                .saturating_sub(inner.metadata_retry_interval_ms)
-                                < fold_due_at_ms
-                    });
+            // The idle fold allows one metadata call before the retry time,
+            // when no call has run since the tail reached the idle fold age.
+            let idle_fold_due = held
+                .handle
+                .idle_fold_due_at_ms()
+                .is_some_and(|fold_due_at_ms| {
+                    now_ms >= fold_due_at_ms
+                        && held
+                            .metadata_retry_at_ms
+                            .saturating_sub(inner.metadata_retry_interval_ms)
+                            < fold_due_at_ms
+                });
             let due = if !metadata_caught_up
                 && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
                 && !self.backed_off(&namespace_id, SweepCall::Metadata)

@@ -1218,26 +1218,16 @@ async fn commit_two_values(
 #[tokio::test]
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
     for mode in ["automatic", "explicit"] {
-        // Every fold takes a fold permit, so holding them would stop an
-        // explicit fold too. Only the automatic case folds at four bytes on
-        // the session's own path and holds the permits until it is checked.
-        let automatic = mode == "automatic";
+        // Every fold takes a fold permit, so keeping them keeps the session's
+        // fold waiting until each case has checked the tail.
         let (_directory, store, writer, namespace, namespace_writer) =
             writer_with_policy(InlineContentPolicy {
-                inline_content_fold_at_bytes: if automatic {
-                    4
-                } else {
-                    InlineContentPolicy::default().inline_content_fold_at_bytes
-                },
+                inline_content_fold_at_bytes: 4,
                 ..policy()
             })
             .await;
         let namespace_reader = writer.namespace(&namespace);
-        let permits = if automatic {
-            Some(hold_every_fold_permit(&writer).await)
-        } else {
-            None
-        };
+        let permits = hold_every_fold_permit(&writer).await;
         namespace_writer
             .put_file_with_options(
                 "/file",
@@ -1253,12 +1243,13 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         assert_eq!(usage.wal_tail_inline_bytes, 4);
         assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-        let options = MaintainMetadataOptions {
-            inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
-            ..Default::default()
-        };
+        let options = MaintainMetadataOptions::default();
         let independent = crate::LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("independent"))
+            .inline_content(InlineContentPolicy {
+                inline_content_fold_at_bytes: 4,
+                ..policy()
+            })
             .build()
             .await
             .expect("independent maintenance")
@@ -1275,24 +1266,40 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             "one windowed WAL discovery without a byte-count replay"
         );
         if mode == "explicit" {
-            let step = maintenance
-                .maintain_metadata_with_options(&namespace, &options)
-                .await
-                .expect("explicit fold");
-            assert_matches!(step.wal_fold, crate::WalFoldStepOutcome::Folded { .. });
-            // The fold moved the session's position to its manifest, so the
-            // next pass finds nothing left to fold.
-            let again = maintenance
-                .maintain_metadata_with_options(&namespace, &options)
-                .await
-                .expect("pass after the fold");
-            assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
+            let (step, ()) = tokio::join!(
+                maintenance.maintain_metadata_with_options(&namespace, &options),
+                async {
+                    // The explicit step decides to fold before it waits for a
+                    // permit, so the session's fold can't empty the tail first.
+                    bounded(Duration::from_secs(10), async {
+                        while writer.execution_budget().stats().folds_waiting < 2 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the session's fold and the explicit fold wait for permits");
+                    drop(permits);
+                }
+            );
+            assert_ne!(
+                step.expect("explicit fold").wal_fold,
+                crate::WalFoldStepOutcome::NotNeeded,
+                "the runtime's inline fold size makes the explicit fold due"
+            );
+        } else {
+            drop(permits);
         }
-        drop(permits);
         namespace_writer
             .wait_for_fold()
             .await
             .expect("automatic fold settles");
+        // The fold moved the session's position to its manifest, so the next
+        // pass finds nothing left to fold.
+        let again = maintenance
+            .maintain_metadata_with_options(&namespace, &options)
+            .await
+            .expect("pass after the fold");
+        assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
         let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
             .await
             .expect("usage after fold");

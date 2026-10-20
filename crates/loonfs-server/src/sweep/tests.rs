@@ -64,6 +64,8 @@ impl SweepServer {
         let runtime = LoonFs::builder_with_store(store)
             .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))
             .min_publish_interval_ms(0)
+            .inline_content(config.inline_content.effective_policy())
+            .idle_fold_after_ms(std::num::NonZeroU64::new(config.idle_fold_after_ms))
             .wall_clock(clock.clone())
             .monotonic_timer(clock.clone())
             .metrics_recorder(recorder.clone() as Arc<dyn MetricsRecorder>)

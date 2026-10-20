@@ -24,6 +24,9 @@ pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// larger WAL objects. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
+/// Default age, in milliseconds, of a WAL tail's newest commit at which
+/// maintenance folds a tail that is below the fold thresholds (15 minutes).
+pub const DEFAULT_IDLE_FOLD_AFTER_MS: u64 = 15 * 60 * 1_000;
 
 /// The admission limits one writable runtime applies to each namespace's
 /// publication requests, and how long a commit waits at the write stop.

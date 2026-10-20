@@ -928,11 +928,8 @@ pub(super) async fn run_maintenance(
     let maintenance = &state.maintenance;
     let response = match request {
         RunMaintenanceRequest::Metadata(request) => {
-            let options = MaintainMetadataOptions {
-                idle_fold_after_ms: state.options.idle_fold_after_ms,
-                ..MaintainMetadataOptions::from_request(request)
-                    .map_err(ApiResponseError::for_namespace(&namespace_id))?
-            };
+            let options = MaintainMetadataOptions::from_request(request)
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             maintenance
                 .maintain_metadata_with_options(&namespace_id, &options)
                 .await

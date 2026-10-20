@@ -229,6 +229,7 @@ fn test_runtime_core(
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentPolicy::default(),
+        fold_trigger: super::FoldTrigger::default(),
         identity: WriterIdentity {
             writer_id: loonfs_test_support::ids::writer_id("writer-a"),
         },

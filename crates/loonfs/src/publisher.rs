@@ -21,6 +21,7 @@
 //! writable [`Namespace`](crate::Namespace).
 
 mod admission;
+mod fold_trigger;
 mod inline_content;
 
 use crate::cache::{HeadPositions, ReadPositionSlot};
@@ -33,6 +34,7 @@ use crate::{
     MaintenanceCancellation, MetadataMaintenanceOutcome,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
+pub(crate) use fold_trigger::FoldTrigger;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
@@ -187,6 +189,13 @@ impl NamespaceSession {
 
     pub(crate) fn metadata_caught_up(&self) -> bool {
         self.publisher.lock_state().metadata_caught_up
+    }
+
+    pub(crate) fn idle_fold_due_at_ms(&self) -> Option<u64> {
+        let published_at_ms = self.last_published_at_ms()?;
+        self.publisher
+            .fold_trigger
+            .idle_fold_due_at_ms(published_at_ms)
     }
 
     pub(crate) fn record_metadata_maintenance(
@@ -603,6 +612,7 @@ struct NamespacePublisher {
     timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
     inline_content: crate::InlineContentPolicy,
+    fold_trigger: FoldTrigger,
     /// Set once the session stops admitting work. A session never compacts
     /// again after that.
     compaction_cancellation: MaintenanceCancellation,
@@ -875,6 +885,11 @@ impl NamespacePublisher {
     fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
         let session = SharedWriterSessionStatus::default();
         let read_position = Arc::new(ReadPositionSlot::new(registry.runtime_core.head_state()));
+        let (inline_content, fold_trigger) = registry
+            .writer
+            .upgrade()
+            .map(|writer| (writer.inline_content.clone(), writer.fold_trigger))
+            .unwrap_or_default();
         Self {
             namespace_id,
             runtime_core: registry.runtime_core.clone(),
@@ -902,11 +917,8 @@ impl NamespacePublisher {
             timer: Arc::clone(&registry.timer),
             min_publish_interval: registry.min_publish_interval,
             admission: Arc::clone(&registry.shared.admission),
-            inline_content: registry
-                .writer
-                .upgrade()
-                .map(|writer| writer.inline_content.clone())
-                .unwrap_or_default(),
+            inline_content,
+            fold_trigger,
             compaction_cancellation: MaintenanceCancellation::new(),
             fold_published: watch::Sender::new(()),
         }
@@ -1660,10 +1672,10 @@ impl NamespacePublisher {
             }
         }
         let write_stopped = publish.results.iter().any(is_maintenance_required);
-        let fold_start = if publish
-            .wal_tail
-            .is_some_and(|tail| self.fold_is_due(tail.objects, tail.inline_bytes))
-            || write_stopped
+        let fold_start = if publish.wal_tail.is_some_and(|tail| {
+            self.fold_trigger
+                .fold_is_due(FOLD_AT_WAL_OBJECTS, tail.objects, tail.inline_bytes)
+        }) || write_stopped
         {
             self.start_fold()
         } else {
@@ -1759,13 +1771,6 @@ impl NamespacePublisher {
         Some(start)
     }
 
-    /// Whether a tail of `objects` WAL objects with `inline_bytes` of inline
-    /// content is over the fold trigger.
-    fn fold_is_due(&self, objects: u64, inline_bytes: usize) -> bool {
-        objects >= FOLD_AT_WAL_OBJECTS
-            || inline_bytes >= self.inline_content.inline_content_fold_at_bytes
-    }
-
     /// Whether the engine's position shows its tail over the fold trigger.
     /// Without a position the tail is unknown, and the next publish reads
     /// the tail and starts the fold.
@@ -1775,7 +1780,10 @@ impl NamespacePublisher {
             engine
                 .wal_tail_objects()
                 .zip(engine.wal_tail_inline_bytes())
-                .is_some_and(|(objects, inline_bytes)| self.fold_is_due(objects, inline_bytes))
+                .is_some_and(|(objects, inline_bytes)| {
+                    self.fold_trigger
+                        .fold_is_due(FOLD_AT_WAL_OBJECTS, objects, inline_bytes)
+                })
         })
     }
 
@@ -1842,26 +1850,15 @@ impl NamespacePublisher {
         (task, liveness)
     }
 
-    /// Runs the maintenance loop over this session's namespace with options
-    /// that never fold, so folding stays with [`Self::run_fold`].
+    /// Runs the maintenance loop over this session's namespace without its
+    /// fold step, so folding stays with [`Self::run_fold`].
     async fn run_compaction(&self) {
         let Some(maintenance) = self.maintenance() else {
             return;
         };
-        let never_fold = crate::MaintainMetadataOptions {
-            max_wal_tail_objects: std::num::NonZeroU64::MAX,
-            inline_content_fold_at_bytes: std::num::NonZeroUsize::MAX,
-            // A remaining tail must stay unsettled for the host's idle fold.
-            idle_fold_after_ms: u64::MAX,
-            ..crate::MaintainMetadataOptions::default()
-        };
         let seq = self.lock_state().last_published.map(|last| last.seq);
         let result = maintenance
-            .maintain_metadata_while_due_with_options(
-                &self.namespace_id,
-                &self.compaction_cancellation,
-                &never_fold,
-            )
+            .compact_metadata_while_due(&self.namespace_id, &self.compaction_cancellation)
             .await;
         let outcome = result
             .as_ref()
@@ -1924,7 +1921,11 @@ impl NamespacePublisher {
                 engine
                     .wal_tail_objects()
                     .zip(engine.wal_tail_inline_bytes())
-                    .is_some_and(|(objects, inline_bytes)| !self.fold_is_due(objects, inline_bytes))
+                    .is_some_and(|(objects, inline_bytes)| {
+                        !self
+                            .fold_trigger
+                            .fold_is_due(FOLD_AT_WAL_OBJECTS, objects, inline_bytes)
+                    })
             }) {
                 return false;
             }

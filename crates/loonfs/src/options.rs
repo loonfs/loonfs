@@ -11,7 +11,7 @@ use loonfs_core::limits::{
     FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 pub use loonfs_types::options::{
@@ -23,17 +23,14 @@ pub use loonfs_types::options::{
 };
 
 /// Overrides for the metadata-upkeep action.
+///
+/// The inline fold size and the idle fold age are settings of the runtime
+/// (see [`LoonFsBuilder::inline_content`](crate::LoonFsBuilder::inline_content)
+/// and [`LoonFsBuilder::idle_fold_after_ms`](crate::LoonFsBuilder::idle_fold_after_ms)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintainMetadataOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.
     pub max_wal_tail_objects: NonZeroU64,
-    /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
-    /// Applies only when the runtime's publisher knows the count.
-    pub inline_content_fold_at_bytes: NonZeroUsize,
-    /// Fold a WAL tail of any size once its newest commit is this old on
-    /// the runtime's wall clock; defaults to 15 minutes. Zero
-    /// turns this off.
-    pub idle_fold_after_ms: u64,
     /// Whether run sizes must justify the rewrite before maintenance merges them.
     pub compaction_policy: MetadataCompactionPolicy,
 }
@@ -42,11 +39,6 @@ impl Default for MaintainMetadataOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_objects: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
-            inline_content_fold_at_bytes: NonZeroUsize::new(
-                crate::InlineContentPolicy::default().inline_content_fold_at_bytes,
-            )
-            .expect("default inline fold threshold should be nonzero"),
-            idle_fold_after_ms: 15 * 60 * 1_000,
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -77,26 +69,6 @@ impl MaintainMetadataOptions {
         Ok(Self {
             max_wal_tail_objects,
             ..Self::default()
-        })
-    }
-
-    /// Returns whether the WAL tail has reached the fold threshold.
-    pub fn fold_is_due(&self, wal_tail_objects: u64, wal_tail_inline_bytes: usize) -> bool {
-        wal_tail_objects >= self.max_wal_tail_objects.get()
-            || wal_tail_inline_bytes >= self.inline_content_fold_at_bytes.get()
-    }
-
-    /// Returns whether a WAL tail has gone idle: it holds a commit, and the
-    /// newest one is at least `idle_fold_after_ms` old at `now_ms`. A commit
-    /// stamped after `now_ms` counts as zero milliseconds old.
-    pub(crate) fn idle_fold_is_due(
-        &self,
-        wal_tail_newest_commit_at_ms: Option<u64>,
-        now_ms: u64,
-    ) -> bool {
-        wal_tail_newest_commit_at_ms.is_some_and(|committed_at_ms| {
-            self.idle_fold_after_ms > 0
-                && now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_after_ms
         })
     }
 }

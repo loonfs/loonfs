@@ -92,7 +92,6 @@ fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MaintainMeta
     MaintainMetadataOptions {
         max_wal_tail_objects: NonZeroU64::MIN,
         compaction_policy,
-        ..Default::default()
     }
 }
 
@@ -490,7 +489,6 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
             &crate::MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
-                ..Default::default()
             },
         )
         .await

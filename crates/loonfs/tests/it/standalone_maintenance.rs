@@ -51,6 +51,14 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     writer.shutdown().await.expect("writer shutdown");
     drop(writer);
 
+    let disabled = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("idle-off-worker"))
+        .wall_clock(clock.clone())
+        .idle_fold_after_ms(None)
+        .build()
+        .await
+        .expect("maintenance without idle folds")
+        .maintenance(loonfs_test_support::ids::writer_id("idle-off-worker"));
     let maintenance = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("fresh-worker"))
         .wall_clock(clock.clone())
@@ -58,11 +66,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let disabled = MaintainMetadataOptions {
-        idle_fold_after_ms: 0,
-        ..MaintainMetadataOptions::default()
-    };
-    let idle_ms = MaintainMetadataOptions::default().idle_fold_after_ms;
+    let idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS;
 
     clock
         .0
@@ -78,13 +82,13 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     );
     clock.0.store(COMMITTED_AT_MS + idle_ms, Ordering::SeqCst);
     assert_eq!(
-        maintenance
-            .maintain_metadata_with_options(&namespace_id, &disabled)
+        disabled
+            .maintain_metadata(&namespace_id)
             .await
             .expect("idle rule off")
             .wal_fold,
         WalFoldStepOutcome::NotNeeded,
-        "zero turns the idle rule off"
+        "a runtime without an idle fold age leaves a short tail"
     );
     assert_matches!(
         maintenance
