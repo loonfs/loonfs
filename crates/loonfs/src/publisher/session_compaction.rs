@@ -148,8 +148,8 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
     writer.shutdown().await.expect("shut down writer");
 }
 
-/// A session whose streaming compaction is parked at its first segment
-/// write. Compaction became due on the session's own fold.
+/// A session whose compaction unit is parked at its first segment write.
+/// Compaction became due on the session's own fold.
 struct ParkedCompaction {
     _temp_dir: tempfile::TempDir,
     store: Arc<BlockingStore<LocalFsStore>>,
@@ -176,12 +176,6 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
-        // No run fits a one-byte step, so every compaction streams.
-        .execution_budget(
-            ExecutionBudget::builder()
-                .max_merge_input_bytes(NonZeroUsize::MIN)
-                .build(),
-        )
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -189,7 +183,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     let namespace = session_one_fold_short(&writer, store.inner(), "parked-compaction").await;
     let namespace_id = namespace.id().clone();
 
-    // The job waits for a permit until the gate is armed, so the first
+    // The unit waits for a permit until the gate is armed, so the first
     // segment write it parks at is its own.
     let mut permits = Vec::new();
     for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
@@ -204,7 +198,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     drop(permits);
     bounded(Duration::from_secs(10), store.wait_until_blocked())
         .await
-        .expect("the streaming compaction reaches its first segment write");
+        .expect("the compaction unit reaches its first segment write");
     ParkedCompaction {
         _temp_dir: temp_dir,
         store,
@@ -357,13 +351,13 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
         write_and_settle(&writer, &namespace, &format!("/direct-{index}")).await;
     }
     let direct = writer.maintenance(loonfs_test_support::ids::writer_id("direct-maintenance"));
-    assert_eq!(
+    assert_matches!(
         direct
             .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact through another maintenance value")
             .compaction,
-        MetadataCompactionOutcome::BoundedMergePublished
+        MetadataCompactionOutcome::Published { .. }
     );
 
     write_until_the_session_compacts(&writer, &namespace, store.as_ref(), "/after").await;

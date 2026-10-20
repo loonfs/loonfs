@@ -7,8 +7,7 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::ids::writer_id;
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
-use loonfs_types::{CompactionStepOutcome, MetadataCompactionOutcome};
-use std::num::NonZeroUsize;
+use loonfs_types::MetadataCompactionOutcome;
 use tower::ServiceExt;
 
 async fn run(
@@ -111,23 +110,17 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
         options,
         TestAppOptions {
             store: Some(store.clone()),
-            // No run fits a one-byte merge, so every compaction unit streams.
-            execution_budget: Some(
-                loonfs::ExecutionBudget::builder()
-                    .max_merge_input_bytes(NonZeroUsize::MIN)
-                    .build(),
-            ),
             ..TestAppOptions::default()
         },
     )
     .await
     .expect("app");
 
-    // These are the calls of a client that ran one step per `metadata` run
-    // and one unit per `metadata_compaction` run, until a step found nothing
-    // due.
+    // These are the calls of a client that ran one pass per `metadata` run,
+    // and one unit per `metadata_compaction` run whenever a pass reported a
+    // window too large for it, until a pass found nothing due.
     store.reset();
-    let mut streamed_units = 0;
+    let mut units = 0;
     loop {
         let step = state
             .maintenance
@@ -135,17 +128,18 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
             .await
             .expect("metadata step");
         match step.compaction {
-            CompactionStepOutcome::NotNeeded {} => break,
-            CompactionStepOutcome::MetadataCompactionRequired {} => {
+            MetadataCompactionOutcome::NotNeeded => break,
+            MetadataCompactionOutcome::Published { .. } => units += 1,
+            MetadataCompactionOutcome::MetadataCompactionRequired => {
                 let unit = state
                     .maintenance
                     .compact_metadata(&stepped, &MaintenanceCancellation::new())
                     .await
                     .expect("compaction unit");
                 assert_matches!(unit.compaction, MetadataCompactionOutcome::Published { .. });
-                streamed_units += 1;
+                units += 1;
             }
-            outcome => panic!("a one-byte merge budget streams every unit, not {outcome:?}"),
+            outcome => panic!("no other publisher runs in this test, not {outcome:?}"),
         }
     }
     let stepped_requests = segment_reads_and_manifest_puts(&store);
@@ -154,13 +148,10 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
     let (status, body) = run(&router, &looping, r#"{"kind":"metadata"}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["outcome"], "caught_up");
-    assert_eq!(body["compaction_units"], streamed_units);
+    assert_eq!(body["compaction_units"], units);
     let looping_requests = segment_reads_and_manifest_puts(&store);
 
-    assert!(
-        streamed_units > 0,
-        "the history needs a streaming compaction"
-    );
+    assert!(units > 0, "the history needs a compaction unit");
     assert_eq!(looping_requests, stepped_requests);
     let mut manifests = Vec::new();
     for namespace_id in [&stepped, &looping] {

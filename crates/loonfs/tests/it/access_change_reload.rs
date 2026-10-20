@@ -21,6 +21,7 @@ use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, ActorId, ChecksumAlgorithm, NamespaceAccess,
     NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -176,9 +177,9 @@ impl Fixture {
             .compact_metadata(&self.namespace_id, &MaintenanceCancellation::new())
             .await
             .expect("compact");
-        assert_eq!(
+        assert_matches!(
             outcome.compaction,
-            MetadataCompactionOutcome::BoundedMergePublished
+            MetadataCompactionOutcome::Published { .. }
         );
     }
 
@@ -393,9 +394,9 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
         .compact_metadata(&fixture.namespace_id, &MaintenanceCancellation::new())
         .await
         .expect("compact");
-    assert_eq!(
+    assert_matches!(
         outcome.compaction,
-        MetadataCompactionOutcome::BoundedMergePublished
+        MetadataCompactionOutcome::Published { .. }
     );
     fixture.recording.reset();
     fixture

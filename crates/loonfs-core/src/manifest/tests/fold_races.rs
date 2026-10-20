@@ -37,20 +37,22 @@ impl Rival {
             Self::Merge => {
                 let mut merges = 0;
                 loop {
-                    match compaction_step(
+                    match compact_unit(
                         store,
+                        None,
                         namespace_id,
                         CompactorEpoch(0),
                         MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
-                        None,
+                        crate::manifest::CompactionAdmission::AnySize,
+                        &crate::manifest::MetadataCompactionCancellation::default(),
                         crate::test_support::std_timer(),
                     )
                     .await
                     .expect("merge")
                     {
-                        CompactionStepOutcome::UnitPublished { .. } => merges += 1,
-                        CompactionStepOutcome::NotNeeded { .. } => break,
+                        CompactionUnitOutcome::Published { .. } => merges += 1,
+                        CompactionUnitOutcome::NotNeeded => break,
                         other => panic!("expected a merge, got {other:?}"),
                     }
                 }

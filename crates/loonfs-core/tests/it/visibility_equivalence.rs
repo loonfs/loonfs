@@ -7,7 +7,7 @@ use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
-    CompactionStepOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
+    CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -931,30 +931,27 @@ async fn drain_compaction(
     for _ in 0..16 {
         let report = harness
             .engine
-            .metadata_compaction_step(
+            .compact_metadata_unit(
                 loonfs_core::MetadataCompactionPolicy::default(),
+                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compact metadata");
         match report {
-            CompactionStepOutcome::NotNeeded { .. } => {
+            CompactionUnitOutcome::NotNeeded => {
                 assert!(published_units > 0, "scenario must force compaction");
                 return;
             }
-            CompactionStepOutcome::UnitPublished { .. } => {
+            CompactionUnitOutcome::Published { .. } => {
                 published_units += 1;
                 let context = harness.read_context().await;
                 harness
                     .assert_equivalence(&context, checkpoint, expected)
                     .await;
             }
-            CompactionStepOutcome::Superseded | CompactionStepOutcome::Fenced => {
-                panic!("single-writer test must not supersede compaction")
-            }
-            CompactionStepOutcome::CompactionPlanned { .. } => {
-                panic!("default budget must admit the visibility scenario")
-            }
+            other => panic!("a single-writer test's unit should publish, got {other:?}"),
         }
     }
     panic!("compaction did not drain within the family-group bound");

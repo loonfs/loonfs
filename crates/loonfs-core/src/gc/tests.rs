@@ -1245,21 +1245,20 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
     .await
     .expect("advance floor");
     for _ in 0..16 {
-        let outcome = crate::manifest::compaction_step(
+        let outcome = crate::manifest::compact_unit(
             store,
+            None,
             namespace_id,
             loonfs_types::CompactorEpoch(0),
             Default::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compact a family group");
-        if matches!(
-            outcome,
-            crate::manifest::CompactionStepOutcome::NotNeeded { .. }
-        ) {
+        if matches!(outcome, crate::manifest::CompactionUnitOutcome::NotNeeded) {
             return;
         }
     }
@@ -2092,21 +2091,20 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         ..Default::default()
     };
     for _ in 0..16 {
-        let report = crate::manifest::compaction_step(
+        let report = crate::manifest::compact_unit(
             &store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             merge_policy,
             MetadataCompactionPolicy::default(),
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compact step");
-        if matches!(
-            report,
-            crate::manifest::CompactionStepOutcome::NotNeeded { .. }
-        ) {
+        if matches!(report, crate::manifest::CompactionUnitOutcome::NotNeeded) {
             break;
         }
     }

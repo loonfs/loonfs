@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
+    ChangeSeq, CommitId, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
     MaintainMetadataOptions, ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy,
     NamespaceId, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
@@ -13,6 +13,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -288,7 +289,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         .compaction;
     assert_eq!(
         compaction,
-        CompactionStepOutcome::NotNeeded {},
+        MetadataCompactionOutcome::NotNeeded,
         "the upkeep pass reports its compaction half rather than hiding it"
     );
 
@@ -436,17 +437,16 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
         .expect("status before the call")
         .current_manifest_no;
 
-    // Nothing here has outgrown a bounded step, so the plan is a merge and
-    // this call reports exactly that: it published the unit the planner
-    // chose, as the next maintenance pass would have, and ran no job.
-    assert_eq!(
+    // Nothing here has outgrown the row budget, so this call publishes the
+    // unit the planner chose, as the next maintenance pass would have.
+    assert_matches!(
         block_on(
             fs.maintenance
                 .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         )
         .expect("plan a compaction")
         .compaction,
-        MetadataCompactionOutcome::BoundedMergePublished
+        MetadataCompactionOutcome::Published { .. }
     );
     assert_ne!(
         fs.namespace_diagnostics_blocking(&namespace_id)
@@ -498,14 +498,14 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             .expect("fold WAL");
     }
     for runtime in [&first, &second] {
-        assert_eq!(
+        assert_matches!(
             runtime
                 .maintenance
                 .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim and compact")
                 .compaction,
-            MetadataCompactionOutcome::BoundedMergePublished
+            MetadataCompactionOutcome::Published { .. }
         );
     }
     let before =
@@ -532,14 +532,14 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             .expect("manifest after fencing");
     assert_eq!(fenced.state.manifest(), before.state.manifest());
 
-    assert_eq!(
+    assert_matches!(
         first
             .maintenance
             .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .expect("claim again and compact")
             .compaction,
-        MetadataCompactionOutcome::BoundedMergePublished
+        MetadataCompactionOutcome::Published { .. }
     );
     let published =
         loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
@@ -588,14 +588,14 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
             .expect("fold");
     }
     for runtime in [&first, &second] {
-        assert_eq!(
+        assert_matches!(
             runtime
                 .maintenance
                 .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim")
                 .compaction,
-            MetadataCompactionOutcome::BoundedMergePublished,
+            MetadataCompactionOutcome::Published { .. }
         );
     }
 
@@ -620,14 +620,14 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
                 .compaction,
             MetadataCompactionOutcome::Fenced,
         );
-        assert_eq!(
+        assert_matches!(
             first
                 .maintenance
                 .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim again")
                 .compaction,
-            MetadataCompactionOutcome::BoundedMergePublished,
+            MetadataCompactionOutcome::Published { .. }
         );
         let current =
             loonfs_core::control::load_namespace_current_manifest(shared.as_ref(), &namespace_id)

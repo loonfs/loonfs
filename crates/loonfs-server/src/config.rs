@@ -164,10 +164,9 @@ pub struct ServerConfig {
     /// low.
     #[serde(default = "default_max_concurrent_folds")]
     pub max_concurrent_folds: NonZeroUsize,
-    /// Maximum metadata merges this server runs at once, bounded compaction
-    /// steps and streaming compactions alike, whether writer sessions, the
-    /// maintenance sweep, or maintenance requests start them. A merge never
-    /// holds a fold permit.
+    /// Maximum metadata compaction units this server runs at once, whether
+    /// writer sessions, the maintenance sweep, or maintenance requests start
+    /// them. A merge never takes a fold permit.
     #[serde(default = "default_max_concurrent_compactions")]
     pub max_concurrent_compactions: NonZeroUsize,
     /// Shared request and concurrency limits for namespace publications.

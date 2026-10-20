@@ -963,7 +963,7 @@ Every successor manifest MUST:
 
 A namespace tombstone has no successor.
 
-The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Streaming compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
+The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
 After the publication, the fold raises the hint within the publication budget. If raising the hint fails, the manifest is still published. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
 
@@ -1189,7 +1189,7 @@ Why check that the segments exist first? Advancing the floor ends the guarantee 
 
 Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
-A bounded compaction merges a contiguous window of runs, starting from the oldest. It can skip the group's oldest run, when that run is too large for one bounded step, and merge the delta runs above it instead. It can't skip a delta run in the middle.
+A compaction merges a contiguous window of at most eight runs, starting from the oldest. It can skip the group's oldest run when the runs above it are much smaller, and merge the delta runs above it instead. It can't skip a delta run in the middle.
 
 ```text
 oldest                                       newest
@@ -1205,7 +1205,7 @@ oldest                                       newest
 
 A group has at most one base run. Base runs are ordered before delta runs, whatever their sequence stamps, and a compaction that skips the oldest run stays at its position in the group.
 
-A delta-only compaction MUST merge at least two runs. Once a group has only one delta run above an oversized base, a bounded delta-only compaction can't reduce the run count any further, but a larger streaming compaction can process the complete group.
+A delta-only compaction MUST merge at least two runs. Once a group has only one delta run above a much larger base, a delta-only compaction can't reduce the run count any further, so the next compaction of the group includes the base.
 
 Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.
 
@@ -1227,7 +1227,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 
 An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor, but it can drop superseded layout rows, because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before they merge layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, and its expected count is the sum of the revision segments' `row_count`. If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Every compaction scans the basis's revisions once before it merges layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, and its expected count is the sum of the revision segments' `row_count`. If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
 
 Each binding event appears in both indexes, and both indexes group their rows by edge, so compaction keeps or removes each event in both indexes the same way. Row counts and row digests verify that the two indexes agree, and every event above the floor stays.
 
@@ -1243,30 +1243,30 @@ Compaction MUST preserve the visible metadata at every retained sequence. It pub
 
 ### 10.4 Streaming compaction
 
-A streaming compaction merges the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
+A compaction streams: it merges the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
 
-A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications MUST match the current epoch, so a newer claim fences older compactors. Both also check the epoch of the manifest they load before they read a segment.
+A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Compaction publications MUST match the current epoch, so a newer claim fences older compactors. A compaction also checks the epoch of the manifest it loads before it reads a segment.
 
-Before each publication attempt, a job checks its elapsed monotonic time and reloads the current manifest. Its selected input segments MUST still be present and unchanged. While both conditions are true, a lost numbered put can be retried against a new manifest. A changed epoch produces `fenced`, and changed inputs produce `abandoned`.
+Before each publication attempt, a compaction checks its elapsed monotonic time and reloads the current manifest. Its selected input segments MUST still be present and unchanged. While both conditions are true, a lost numbered put can be retried against a new manifest. A changed epoch produces `fenced`, and changed inputs produce `abandoned`.
 
-A job runs under two deadlines:
+A compaction runs under two deadlines:
 
 | Deadline | Starts | Limit | Past the limit |
 | --- | --- | --- | --- |
-| Job deadline | Before the job reads its input | The job starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS`. | The job returns `abandoned`. |
+| Compaction deadline | Before the compaction reads its input | The compaction starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS`. | The compaction returns `abandoned`. |
 | Publication deadline | When finalization starts | Every finalization attempt runs under one `METADATA_PUBLICATION_BUDGET_MS`. | The attempt fails with the metadata publication budget error. |
 
-Segments that no root references are protected until their provider age is at least 24 hours. The streaming publication budget reserves the minimum garbage collection grace inside that interval:
+Segments that no root references are protected until their provider age is at least 24 hours. The compaction deadline reserves the minimum garbage collection grace inside that interval:
 
 ```text
-streaming publication budget + minimum GC grace <= 24 hours
+compaction deadline + minimum GC grace <= 24 hours
 ```
 
-With the current constants, a job can start its publication for at most 23 hours, 18 minutes, and 30 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed job leaves output that's subject to the same age rule.
+With the current constants, a compaction can start its publication for at most 23 hours, 18 minutes, and 30 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
 
-Streaming compaction applies the row-retention rules for its selected window, the same way bounded compaction does, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
+A compaction applies the row-retention rules for its selected window, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
-Why does core keep a compactor epoch? A streaming compaction merges a window that's too large for one bounded step, and it publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race costs one step, and grep doesn't need an epoch.)
+Why does core keep a compactor epoch? A compaction of a large window publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race costs one step, and grep doesn't need an epoch.)
 
 ## 11. Garbage collection
 
@@ -1339,7 +1339,7 @@ Garbage collection deletes an unreferenced object based on its age, which is cal
 
 The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider clock that's ahead of the collector's delays garbage collection, but doesn't make it unsafe. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
-Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum ordinary grace covers the longer of two times: the longest bounded publication, or the revalidation bound plus the lifetime of a direct transfer capability (a view up to that bound old can still issue a capability). It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
+Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum ordinary grace covers the longer of two times: the longest bounded publication, or the revalidation bound plus the lifetime of a direct transfer capability (a view up to that bound old can still issue a capability). It then adds the provider publication request bound and the combined allowance. Fork installation and compaction reserve that grace within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
 If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the put might have been applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
 
@@ -2075,7 +2075,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, or a writer position. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
-| `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a streaming compaction starts its publication. |
+| `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a direct transfer capability. |
 | `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
 
@@ -2142,9 +2142,9 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Inline filter threshold | 1,024 stored bytes |
 | Target segment rows | 65,536 |
 | Target decoded segment size | 8 MiB |
-| Maximum bounded compaction input runs | 8 |
-| Maximum bounded compaction input rows | 131,072 |
-| Maximum bounded compaction decoded input | 64 MiB |
+| Maximum compaction input runs | 8 |
+| Maximum compaction input rows in one metadata maintenance pass | 131,072 |
+| Maximum decoded input one merge keeps in memory | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
 | Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
@@ -2203,7 +2203,7 @@ A step writes segments first, and then it publishes the next manifest with put-i
 
 A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
 
-Every step that publishes a manifest MUST start that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on, and it writes no manifest after that bound. Grep uses bounded steps instead of core streaming compaction's epoch claim. Conditional numbered publication and input revalidation control competing steps.
+Every step that publishes a manifest MUST start that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on, and it writes no manifest after that bound. Grep uses bounded steps instead of core compaction's epoch claim. Conditional numbered publication and input revalidation control competing steps.
 
 ### D.2 Index lifecycle
 

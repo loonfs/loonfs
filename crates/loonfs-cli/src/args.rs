@@ -1309,7 +1309,7 @@ pub(crate) enum MaintenanceCommand {
     RecoverAdministrator(MaintenanceRecoverAdministratorArgs),
     /// Fold the WAL tail if it's due, and compact metadata until nothing is due.
     ///
-    /// A streaming compaction can take minutes, so the command can too. It
+    /// A compaction unit can take minutes, so the command can too. It
     /// stops after 16 compaction units. A `due` outcome means that work
     /// remains, and a later run continues it.
     Metadata(MaintenanceMetadataArgs),

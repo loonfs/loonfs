@@ -1,15 +1,16 @@
-//! The frozen-base policy over a live runtime: amortized bounded work and
-//! explicit compaction.
+//! The frozen-base policy over a live runtime: `metadata` passes within the
+//! row budget and explicit compaction.
 //!
-//! These tests need a family group whose base run no bounded step can compact,
-//! with delta runs still arriving above it. The shipped row budget only
-//! reaches that state at a scale no test can write, so the budget is narrowed
-//! through [`Maintenance::starve_compaction_row_budget`]. Everything else —
-//! planning, admission, the executor, the finalizer — is the shipped path.
+//! These tests need a family group whose window is too large for a `metadata`
+//! pass, with delta runs still arriving above its base. The shipped row budget
+//! only reaches that state at a scale no test can write, so the budget is
+//! narrowed through [`Maintenance::starve_compaction_row_budget`]. Everything
+//! else (planning, admission, the merge, the finalization) is the shipped
+//! path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCompactionOutcome,
+    LoonFs, MaintainMetadataOptions, Maintenance, MetadataCompactionOutcome,
     MetadataCompactionPolicy, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_core::MetadataFamilyGroup;
@@ -233,7 +234,7 @@ async fn namespace_with_a_frozen_base(
             )
             .await
             .expect("merge a unit");
-        if response.compaction == (CompactionStepOutcome::NotNeeded {}) {
+        if response.compaction == MetadataCompactionOutcome::NotNeeded {
             break;
         }
     }
@@ -251,7 +252,7 @@ async fn namespace_with_a_frozen_base(
 }
 
 /// Keeps writing while the group's base is frozen, so a delta-only merge is
-/// always available above it. Each write is folded with no compaction step,
+/// always available above it. Each write is folded with no compaction unit,
 /// so each leaves one more delta run behind.
 async fn sustained_writes(
     writer: &LoonFs<Writable>,
@@ -381,7 +382,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
         .expect("plan automatic compaction");
     assert_eq!(
         metadata.compaction,
-        CompactionStepOutcome::MetadataCompactionRequired {}
+        MetadataCompactionOutcome::MetadataCompactionRequired
     );
 
     writer.shutdown().await.expect("shut down the first writer");
@@ -406,7 +407,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
         .expect("replan after restart");
     assert_eq!(
         metadata.compaction,
-        CompactionStepOutcome::MetadataCompactionRequired {},
+        MetadataCompactionOutcome::MetadataCompactionRequired,
         "the same durable run sizes produce the same plan after restart"
     );
     fresh_writer
@@ -420,6 +421,11 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
         "the group must hold a base run and delta runs above it, got {runs_before:?}"
     );
 
+    let completed_before = counter(
+        &recorder.snapshot(),
+        "loonfs.maintenance.compactions",
+        &[("outcome", "completed")],
+    );
     let outcome = standalone
         .compact_metadata(&explicit, &crate::MaintenanceCancellation::new())
         .await
@@ -427,14 +433,15 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     assert_matches!(
         outcome.compaction,
         MetadataCompactionOutcome::Published { .. },
-        "the explicit call must run and publish the job rather than a delta merge, got {outcome:?}"
+        "the explicit call must merge the whole window rather than a delta window, got \
+         {outcome:?}"
     );
 
     let (runs_after, rows_after) = bindings_runs(&store, &explicit).await;
     assert_eq!(
         runs_after.len(),
         runs_before.len() - 8 + 1,
-        "one job replaces eight inputs and preserves the rest, got {runs_after:?}"
+        "one unit replaces eight inputs and preserves the rest, got {runs_after:?}"
     );
     assert_eq!(
         runs_after
@@ -457,7 +464,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
             "loonfs.maintenance.compactions",
             &[("outcome", "completed")],
         ),
-        1,
+        completed_before + 1,
     );
     for (name, direction) in [
         ("loonfs.maintenance.compaction_rows", "input"),
@@ -495,7 +502,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .expect("run an immediate step");
     assert_eq!(
         response.compaction,
-        CompactionStepOutcome::MetadataCompactionRequired {},
+        MetadataCompactionOutcome::MetadataCompactionRequired,
         "an immediate step says the namespace needs a compaction job"
     );
 
@@ -659,7 +666,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     }
                 );
             } else {
-                assert_eq!(compaction, MetadataCompactionOutcome::BoundedMergePublished);
+                assert_matches!(compaction, MetadataCompactionOutcome::Published { .. });
             }
             if attribute_runs(&next) == 7 {
                 let response = maintenance
@@ -674,7 +681,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     .expect("plan the base rebuild");
                 assert_eq!(
                     response.compaction,
-                    CompactionStepOutcome::MetadataCompactionRequired {}
+                    MetadataCompactionOutcome::MetadataCompactionRequired
                 );
             }
         }
@@ -724,13 +731,19 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .expect("checkpoint");
     let before = current_manifest_payload(store.as_ref(), &namespace).await;
     store.reset();
-    assert!(matches!(
+    assert_eq!(
         maintenance
-            .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered, None)
+            .compact_once(
+                &namespace,
+                MetadataCompactionPolicy::SizeTiered,
+                loonfs_core::CompactionAdmission::WithinRowBudget,
+                None,
+                &crate::MaintenanceCancellation::new(),
+            )
             .await
             .expect("no work"),
-        super::CompactionUnitOutcome::Concluded(CompactionStepOutcome::NotNeeded {})
-    ));
+        MetadataCompactionOutcome::NotNeeded
+    );
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
     let (first, second) = tokio::join!(
@@ -767,16 +780,22 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     );
     assert_eq!(
         maintenance
-            .run_compaction_step(&namespace, MetadataCompactionPolicy::SizeTiered, None)
+            .compact_once(
+                &namespace,
+                MetadataCompactionPolicy::SizeTiered,
+                loonfs_core::CompactionAdmission::WithinRowBudget,
+                None,
+                &crate::MaintenanceCancellation::new(),
+            )
             .await
             .expect("fenced compaction"),
-        CompactionStepOutcome::Fenced {}
+        MetadataCompactionOutcome::Fenced
     );
     assert_eq!(store.counts().puts, 0);
 }
 
 /// Lets a rival write one commit and fold it before each manifest write it
-/// sees while it has races left, so the compaction step that reaches its
+/// sees while it has races left, so the compaction unit that reaches its
 /// publication loses that race.
 #[derive(Debug)]
 struct RivalFold {
@@ -830,8 +849,12 @@ impl Interceptor for RivalFold {
     }
 }
 
+/// Checks that a unit whose put loses to a fold publishes its output over the
+/// fold's manifest, that the metadata loop counts only abandoned units as
+/// lost races and stops after three, and that a fenced loop stops without
+/// claiming the namespace back.
 #[tokio::test]
-async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
+async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_units() {
     use std::sync::atomic::Ordering::SeqCst;
     let temp_dir = tempdir().expect("tempdir");
     let namespace = namespace_id("losing-loop");
@@ -862,7 +885,36 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .await
         .expect("claim the namespace before the races start");
 
-    store.interceptor().races_left.store(5, SeqCst);
+    // One race: the unit's put loses to the rival's fold, and the next
+    // attempt publishes over the fold's manifest.
+    let before = current_manifest_payload(store.as_ref(), &namespace)
+        .await
+        .manifest_no;
+    store.interceptor().races_left.store(1, SeqCst);
+    let outcome = maintenance
+        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
+        .await
+        .expect("a lost put is retried, not an error");
+    let MetadataCompactionOutcome::Published { manifest_no, .. } = outcome.compaction else {
+        panic!("a unit that loses one put publishes, got {outcome:?}");
+    };
+    assert_eq!(store.interceptor().races_run.load(SeqCst), 1);
+    // The rival's claim and fold took the numbers after `before`.
+    assert!(
+        manifest_no.0 > before.0 + 1,
+        "the unit publishes over the rival's fold, {manifest_no} after {before}"
+    );
+    assert_eq!(
+        current_manifest_payload(store.as_ref(), &namespace)
+            .await
+            .manifest_no,
+        manifest_no
+    );
+
+    // Every put loses: each unit abandons after its four attempts, and the
+    // loop stops after three abandoned units in a row.
+    store.interceptor().races_run.store(0, SeqCst);
+    store.interceptor().races_left.store(64, SeqCst);
     assert_eq!(
         maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
@@ -873,8 +925,8 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
     );
     assert_eq!(
         store.interceptor().races_run.load(SeqCst),
-        3,
-        "the loop gives up after three lost races in a row"
+        3 * 4,
+        "the loop stops after three abandoned units of four attempts each"
     );
 
     store.interceptor().races_left.store(0, SeqCst);
@@ -892,7 +944,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
-            .expect("a fenced step is an outcome, not an error")
+            .expect("a fenced unit is an outcome, not an error")
             .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
@@ -1120,7 +1172,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .maintain_metadata(&claimed)
         .await
         .expect("a fenced step is an outcome, not an error");
-    assert_eq!(fenced.compaction, CompactionStepOutcome::Fenced {});
+    assert_eq!(fenced.compaction, MetadataCompactionOutcome::Fenced);
     assert_eq!(
         requests(store.counts()),
         [5, 1, 0, 0],
@@ -1284,9 +1336,9 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
             .expect("compact one unit")
             .compaction
         {
-            MetadataCompactionOutcome::BoundedMergePublished => units += 1,
+            MetadataCompactionOutcome::Published { .. } => units += 1,
             MetadataCompactionOutcome::NotNeeded => break,
-            other => panic!("expected a bounded unit, found {other:?}"),
+            other => panic!("expected a published unit, found {other:?}"),
         }
     }
     assert!(units > 0, "the second fold leaves runs to merge");

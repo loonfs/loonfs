@@ -382,8 +382,6 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         KeyPredicate::any(),
     ));
     let mut config = test_config(temp_dir.path(), "sweep-shutdown-server");
-    // No run fits a one-byte merge, so the due compaction streams.
-    config.max_merge_input_bytes = Some(1);
     config.max_concurrent_maintenance = std::num::NonZeroUsize::MIN;
     let (router, state) = app(config, options_with_store(store.clone()))
         .await
@@ -409,7 +407,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         store.inner().wait_until_blocked(),
     )
     .await
-    .expect("the sweep's streaming compaction reaches its first segment write");
+    .expect("the sweep's compaction unit reaches its first segment write");
 
     shutdown_tx.send(()).expect("trigger shutdown");
     while !state.runtime.is_shutting_down() {

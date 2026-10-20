@@ -221,7 +221,7 @@ impl Sweep {
     /// that ended it once the visits it had started returned. A failed call
     /// on one namespace does not fail the pass.
     /// After [`Sweep`] is stopped, no new visit starts and a running
-    /// streaming compaction stops at its next block.
+    /// compaction unit stops at its next block.
     pub async fn run_pass(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         let started_at_ms = inner.namespaces.now_ms();
@@ -732,8 +732,8 @@ pub(crate) struct RunningSweep {
 }
 
 impl RunningSweep {
-    /// Starts no new visit and stops a running streaming compaction at its
-    /// next block. Returns at once.
+    /// Starts no new visit and stops a running compaction unit at its next
+    /// block. Returns at once.
     pub(crate) fn cancel(&self) {
         self.stop.cancel();
     }

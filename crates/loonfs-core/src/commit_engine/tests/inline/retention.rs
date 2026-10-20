@@ -4,7 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use crate::manifest::{
-    advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
+    advance_retention_floor, compact_unit, CompactionUnitOutcome, MetadataCompactionPolicy,
     MetadataRunPolicy, RetentionTarget,
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
@@ -42,13 +42,15 @@ async fn compact_and_check_pair(
 ) {
     let mut finished = false;
     for _ in 0..32 {
-        let outcome = compaction_step(
+        let outcome = compact_unit(
             store,
+            None,
             namespace_id,
             loonfs_types::CompactorEpoch(0),
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
@@ -63,11 +65,11 @@ async fn compact_and_check_pair(
             .expect("receipt");
         let record = metadata.commit_at_seq(seq).await.expect("commit record");
         assert_eq!(receipt.is_some(), record.is_some());
-        if matches!(outcome, CompactionStepOutcome::NotNeeded { .. }) {
+        if matches!(outcome, CompactionUnitOutcome::NotNeeded) {
             finished = true;
             break;
         }
-        assert_matches!(outcome, CompactionStepOutcome::UnitPublished { .. });
+        assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
     }
     assert!(finished, "small fixture did not finish compaction");
 }

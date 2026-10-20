@@ -43,7 +43,7 @@ Each open session keeps its publisher, engine state, head position, and allocate
 
 The tick and the pass share `max_concurrent_maintenance` visit slots and a per-namespace set of visits in progress, so they never visit the same namespace at the same time. If a namespace is busy, it's left to its current visit. A full pass lists up to 1000 IDs per page, and it requests the next page when a visit slot in that pass is free and no listed ID is waiting. After a listing failure, the pass starts no more visits, and the running visits finish before the pass returns the error. The next daily pass lists the store again.
 
-The tick and the daily pass run in separate loops. A streaming compaction uses one visit slot until it finishes, and the other free slots can keep working. All maintenance from one runtime shares that runtime's compactor claim and execution budget. Shutdown cancels both loops and stops new visits, and a streaming compaction stops at its next block, within the server's shutdown deadline.
+The tick and the daily pass run in separate loops. A long compaction uses one visit slot until it finishes, and the other free slots can keep working. All maintenance from one runtime shares that runtime's compactor claim and execution budget. Shutdown cancels both loops and stops new visits, and a running compaction stops at its next block, within the server's shutdown deadline.
 
 ## Shared read working memory
 
@@ -55,7 +55,7 @@ The pool's size is `max_read_working_bytes` in `ExecutionBudget`, which defaults
 | --- | --- | --- | --- |
 | `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries, and continues without keeping blocks that don't fit. Nothing waits. |
 
-Read, publication, fold, pin-fold, and bounded compaction memos reserve memory from this pool. A reservation covers:
+Read, publication, fold, and pin-fold memos reserve memory from this pool. A reservation covers:
 
 - decoded data blocks,
 - stored read-ahead bytes,

@@ -3999,7 +3999,7 @@
         "description": "Whether metadata maintenance is caught up, and the compaction units that the job published.",
         "properties": {
           "compaction_units": {
-            "description": "The compaction units that this run published. A unit is one bounded merge or one streaming\ncompaction of a family group.",
+            "description": "The compaction units that this run published. A unit merges one family group's window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -5438,7 +5438,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A streaming compaction can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
         "operationId": "run_maintenance",
         "parameters": [
           {

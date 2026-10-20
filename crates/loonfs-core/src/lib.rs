@@ -199,11 +199,11 @@ pub use error::{
 pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::ManifestLoadError;
 pub use manifest::{
-    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
-    CompactionStepOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataCompactionSpec, MetadataFamilyGroup, MetadataRunPolicy, PublicationReport,
-    PublishedManifest, RetentionTarget, SegmentBlockLoader, SegmentRowIterator,
+    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CompactionAdmission,
+    CompactionUnitOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
+    MetadataCompactionCancellation, MetadataCompactionPolicy, MetadataFamilyGroup,
+    MetadataRunPolicy, PublicationReport, PublishedManifest, RetentionTarget, SegmentBlockLoader,
+    SegmentRowIterator,
 };
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{

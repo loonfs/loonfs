@@ -796,7 +796,7 @@ A run that loses a race with another process, or whose work is superseded, repor
 
 A deleted namespace accepts only `gc` and `grep_gc` runs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
-A `metadata` run [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit is one bounded merge of a [family group](glossary.md#family-group)'s runs, or, when the group's window is too large for one bounded merge, one streaming compaction of the group. The run stops early after it publishes 16 units, after it loses three races in a row to another publisher, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A race that the run loses leaves the segments it wrote unreferenced, and a later GC pass can delete them.
+A `metadata` run [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit merges one [family group](glossary.md#family-group)'s oldest eligible window of at most eight runs and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The run stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later GC pass can delete them.
 
 The result's `outcome` has two values:
 
@@ -809,7 +809,7 @@ The result's `outcome` has two values:
 {"kind":"metadata","namespace_id":"demo","outcome":"caught_up","compaction_units":2}
 ```
 
-A streaming compaction can take minutes, so a `metadata` run can too. The reference server exempts maintenance runs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's sweep does for a namespace that's still due.
+A compaction unit can take minutes, so a `metadata` run can too. The reference server exempts maintenance runs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's sweep does for a namespace that's still due.
 
 In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
 
@@ -965,7 +965,7 @@ A namespace that nobody writes to through this server process (including forks a
 
 LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run the sweep runs GC itself, with `POST .../runs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`. It can use `next_reclamation_at_ms` to decide when to run GC again.
 
-When the server shuts down, its sweep doesn't start any new visits, and a streaming compaction in a visit stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
+When the server shuts down, its sweep doesn't start any new visits, and a compaction in a visit stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
 
 A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a namespace's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 

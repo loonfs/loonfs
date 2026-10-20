@@ -94,18 +94,20 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     namespace_id: &NamespaceId,
     selected: &crate::namespace::control::LoadedManifest,
 ) -> loonfs_types::format::control::ManifestRef {
-    let report = compaction_step(
+    let report = compact_unit(
         store,
+        None,
         namespace_id,
         selected.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("compact");
-    assert_matches!(report, CompactionStepOutcome::UnitPublished { .. });
+    assert_matches!(report, CompactionUnitOutcome::Published { .. });
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");

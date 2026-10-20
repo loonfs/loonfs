@@ -20,7 +20,7 @@ Folds start in several places. A writer's host folds its session's tail after a 
 | Commit (a WAL publication) | Writer | Writer epoch | The claim manifest and the WAL fence of a newer writer |
 | Namespace deletion | Writer | Writer epoch, for the tombstone (the fold before it is the maintainer's) | The same |
 | Compactor claim | Maintainer | Compactor epoch plus one | The numbered create |
-| Bounded and streaming compaction | Maintainer | Compactor epoch | A newer claim, found at the next check |
+| Compaction | Maintainer | Compactor epoch | A newer claim, found at the next check |
 | Fold | Maintainer | The current compactor epoch, copied from the predecessor | The numbered create |
 | Retention advance | Maintainer | The current compactor epoch, copied from the predecessor | The numbered create |
 | Garbage collection | Maintainer | None (it publishes nothing) | Nothing. Concurrent collectors are safe under the age rules, and an object that's already gone needs no cleanup |

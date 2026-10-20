@@ -116,15 +116,17 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut compacted = false;
     for _ in 0..16 {
         let report = engine
-            .metadata_compaction_step(
+            .compact_metadata_unit(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compact source");
         match report {
-            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
-            loonfs_core::CompactionStepOutcome::UnitPublished { .. } => compacted = true,
+            loonfs_core::CompactionUnitOutcome::NotNeeded => break,
+            loonfs_core::CompactionUnitOutcome::Published { .. } => compacted = true,
             other => panic!("expected bounded compaction, got {other:?}"),
         }
     }
@@ -759,15 +761,17 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let mut revisions_compacted = false;
     for _ in 0..16 {
         let report = engine
-            .metadata_compaction_step(
+            .compact_metadata_unit(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compact clone");
         match report {
-            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
-            loonfs_core::CompactionStepOutcome::UnitPublished { group, .. } => {
+            loonfs_core::CompactionUnitOutcome::NotNeeded => break,
+            loonfs_core::CompactionUnitOutcome::Published { group, .. } => {
                 revisions_compacted |= group == loonfs_types::MetadataFamilyGroup::Revisions;
             }
             other => panic!("expected bounded compaction, got {other:?}"),
@@ -849,15 +853,17 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut compacted = false;
     for _ in 0..16 {
         match engine
-            .metadata_compaction_step(
+            .compact_metadata_unit(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compact descendant")
         {
-            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
-            loonfs_core::CompactionStepOutcome::UnitPublished { .. } => compacted = true,
+            loonfs_core::CompactionUnitOutcome::NotNeeded => break,
+            loonfs_core::CompactionUnitOutcome::Published { .. } => compacted = true,
             other => panic!("expected compaction, got {other:?}"),
         }
     }

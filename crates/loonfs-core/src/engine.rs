@@ -126,11 +126,6 @@ pub struct NamespaceEngine<S, M> {
     authorization_head: Option<RuntimeReadContext>,
     run_policy: crate::manifest::MetadataRunPolicy,
     segment_cache: Option<Arc<MetadataSegmentCache>>,
-    /// A narrowed per-step row budget, so a test can reach a frozen base
-    /// without writing the hundred thousand rows the shipped budget admits.
-    /// See [`Self::starve_compaction_row_budget`].
-    #[cfg(any(test, feature = "test-support"))]
-    compaction_row_budget: Option<std::num::NonZeroUsize>,
     /// A narrowed per-segment row budget, so a test can get many compacted
     /// segments from a few thousand rows. See [`Self::narrow_segment_row_budget`].
     #[cfg(any(test, feature = "test-support"))]
@@ -374,7 +369,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
-            compaction_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
         }
@@ -426,33 +420,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let policy = self.run_policy;
         #[cfg(any(test, feature = "test-support"))]
         let policy = crate::manifest::MetadataRunPolicy {
-            max_decoded_input_rows_per_step: self
-                .compaction_row_budget
-                .unwrap_or(policy.max_decoded_input_rows_per_step),
             max_rows_per_segment: self
                 .segment_row_budget
                 .unwrap_or(policy.max_rows_per_segment),
             ..policy
         };
         policy
-    }
-
-    /// Narrows the rows one compaction step may decode, so a namespace a
-    /// test can build in seconds has a base run no step can compact.
-    ///
-    /// That state — a frozen base with delta runs piling up above it — is what
-    /// the streaming compaction exists for, and the shipped budget only
-    /// reaches it at a scale no test can write. Test-only, and the one budget
-    /// that has to move to get there: everything else about planning, running,
-    /// and publishing the job is the shipped path.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn starve_compaction_row_budget(
-        mut self,
-        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
-    ) -> Self {
-        self.compaction_row_budget = Some(max_decoded_input_rows_per_step);
-        self
     }
 
     /// Narrows the rows one compacted segment may hold, so a namespace a test
@@ -1401,38 +1374,25 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .await
     }
 
-    /// Merges one bounded run window under the claimed compactor epoch.
-    pub async fn metadata_compaction_step(
+    /// Runs one metadata compaction unit under the claimed compactor epoch.
+    ///
+    /// `admission` decides whether the unit may merge a window over the run
+    /// policy's row budget, and `cancellation` stops the merge between blocks.
+    pub async fn compact_metadata_unit(
         &self,
         compaction_policy: crate::manifest::MetadataCompactionPolicy,
+        admission: crate::manifest::CompactionAdmission,
         compactor_epoch: CompactorEpoch,
-    ) -> Result<crate::manifest::CompactionStepOutcome> {
-        crate::manifest::compaction_step(
+        cancellation: &crate::manifest::MetadataCompactionCancellation,
+    ) -> Result<crate::manifest::CompactionUnitOutcome> {
+        crate::manifest::compact_unit(
             &self.store,
+            self.segment_cache.as_deref(),
             &self.namespace_id,
             compactor_epoch,
             self.effective_run_policy(),
             compaction_policy,
-            self.segment_cache.as_deref(),
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Publishes a streaming merge while its epoch and elapsed time remain valid.
-    pub async fn run_metadata_compaction(
-        &self,
-        spec: &crate::manifest::MetadataCompactionSpec,
-        compactor_epoch: CompactorEpoch,
-        cancellation: &crate::manifest::MetadataCompactionCancellation,
-    ) -> Result<crate::manifest::MetadataCompactionJobOutcome> {
-        crate::manifest::run_metadata_compaction_job(
-            &self.store,
-            self.segment_cache.as_deref(),
-            &self.namespace_id,
-            compactor_epoch,
-            spec,
-            self.effective_run_policy(),
+            admission,
             cancellation,
             Arc::clone(&self.timer),
         )

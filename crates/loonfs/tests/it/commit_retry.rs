@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ByteStream, ChangeSeq, CommitId, CompactionStepOutcome, CreateDirectoryOptions,
-    DestinationBehavior, NamespaceId, PutFileOptions, RevisionNo,
+    ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, DestinationBehavior,
+    MetadataCompactionOutcome, NamespaceId, PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::first_page;
 use loonfs_types::ActorId;
@@ -112,7 +112,7 @@ async fn compact_receipt_past_horizon(
             .maintain_metadata(namespace_id)
             .await
             .expect("upkeep step");
-        if matches!(step.compaction, CompactionStepOutcome::NotNeeded {}) {
+        if matches!(step.compaction, MetadataCompactionOutcome::NotNeeded) {
             break;
         }
         folded = true;

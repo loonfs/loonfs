@@ -1234,19 +1234,21 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     let mut units = 0usize;
     let mut last_manifest_no = None;
     loop {
-        let report = super::compaction_step(
+        let report = super::compact_unit(
             &store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compaction step");
         match report {
-            super::CompactionStepOutcome::UnitPublished { manifest, .. } => {
+            super::CompactionUnitOutcome::Published { manifest, .. } => {
                 let manifest_no = manifest.manifest_no;
                 units += 1;
                 if let Some(previous) = last_manifest_no {
@@ -1254,13 +1256,8 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
                 }
                 last_manifest_no = Some(manifest_no);
             }
-            super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
-                panic!("no concurrent publisher exists in this test")
-            }
-            super::CompactionStepOutcome::NotNeeded { .. } => break,
-            super::CompactionStepOutcome::CompactionPlanned { .. } => {
-                panic!("test compaction budget should admit a progress-making subset")
-            }
+            super::CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("no concurrent publisher exists in this test, got {other:?}"),
         }
     }
     assert!(
@@ -1289,8 +1286,12 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     ));
 }
 
+/// Checks that a unit merges at most its run budget, that a unit within the
+/// row budget plans from descriptors and reads no segment when its window is
+/// too large, and that it reads only the selected runs' segments when it
+/// merges.
 #[tokio::test]
-async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
+async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -1316,36 +1317,41 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     }
 
     let manifest_before = current_manifest_no(&store, &namespace_id).await;
-    let tiny_byte_policy = MetadataRunPolicy {
+    let tiny_row_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::MIN,
         ..MetadataRunPolicy::default()
     };
     store.reset();
-    let blocked = super::compaction_step(
+    let blocked = super::compact_unit(
         &store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
-        tiny_byte_policy,
+        tiny_row_policy,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::WithinRowBudget,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
-    .expect("budgeted step");
-    let super::CompactionStepOutcome::CompactionPlanned { group, .. } = blocked else {
-        panic!("one byte must not admit a metadata run");
-    };
+    .expect("budgeted unit");
+    assert_matches!(
+        blocked,
+        super::CompactionUnitOutcome::TooLarge { .. },
+        "one row must not admit a window"
+    );
     assert_eq!(
         current_manifest_no(&store, &namespace_id).await,
         manifest_before,
-        "a step that plans a compaction must not publish"
+        "a unit whose window is too large must not publish"
     );
     assert_eq!(store.count(OperationSelector::Put), 0);
-    assert!(
-        store.count(OperationSelector::Read) <= group.families().len(),
-        "byte preflight should read only the oldest candidate's index sections"
+    assert_eq!(
+        store.count(OperationSelector::Read),
+        0,
+        "planning reads only descriptors"
     );
 
     let policy = MetadataRunPolicy {
@@ -1356,22 +1362,23 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         ..MetadataRunPolicy::default()
     };
     store.reset();
-    let published = super::compaction_step(
+    let published = super::compact_unit(
         &store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::WithinRowBudget,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
-    .expect("bounded step");
-    let super::CompactionStepOutcome::UnitPublished {
+    .expect("admitted unit");
+    let super::CompactionUnitOutcome::Published {
         group,
         input_runs,
-        decoded_input_rows,
-        decoded_input_bytes,
+        rows_read,
         ..
     } = published
     else {
@@ -1379,11 +1386,10 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     };
     assert_eq!(input_runs, 2);
     assert!(input_runs <= policy.max_input_runs_per_step.get());
-    assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
-    assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
+    assert!(rows_read <= policy.max_decoded_input_rows_per_step.get() as u64);
     assert!(
         store.count(OperationSelector::Read) <= input_runs * group.families().len() * 2,
-        "the step should read index and data sections only for selected-run family segments"
+        "the unit should read index and data sections only for selected-run family segments"
     );
 }
 
@@ -1429,24 +1435,26 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataRunPolicy::default()
     };
-    let first = super::compaction_step(
+    let first = super::compact_unit(
         &bounded_store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
-    .expect("first bounded step");
+    .expect("first compaction unit");
     assert_matches!(
         first,
-        super::CompactionStepOutcome::UnitPublished { input_runs: 2, .. }
+        super::CompactionUnitOutcome::Published { input_runs: 2, .. }
     );
     let visible_between = load_current_projection(&bounded_store, &namespace_id)
         .await
-        .expect("visible state between bounded steps");
+        .expect("visible state between compaction units");
     assert!(metadata_states_equivalent(
         &visible_before.metadata_state,
         &visible_between.metadata_state
@@ -1511,21 +1519,20 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     create_checkpoint(&bounded_store, &namespace_id, &context)
         .await
         .expect("checkpoint later file");
-    let below_trigger = super::compaction_step(
+    let below_trigger = super::compact_unit(
         &bounded_store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("below-trigger step");
-    assert_matches!(
-        below_trigger,
-        super::CompactionStepOutcome::NotNeeded { delta_runs: 1 }
-    );
+    assert_matches!(below_trigger, super::CompactionUnitOutcome::NotNeeded);
 }
 
 #[tokio::test]
@@ -1757,18 +1764,20 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
 
     // One unit runs, then the process "crashes": nothing is carried over
     // but the published manifest.
-    let first_report = super::compaction_step(
+    let first_report = super::compact_unit(
         &store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("first unit");
-    let super::CompactionStepOutcome::UnitPublished {
+    let super::CompactionUnitOutcome::Published {
         group: first_group, ..
     } = first_report
     else {
@@ -1782,28 +1791,25 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     // job, including the delta the interleaved checkpoint added.
     let mut merged_groups = vec![first_group];
     loop {
-        let report = super::compaction_step(
+        let report = super::compact_unit(
             &store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("resumed unit");
         match report {
-            super::CompactionStepOutcome::UnitPublished { group, .. } => {
+            super::CompactionUnitOutcome::Published { group, .. } => {
                 merged_groups.push(group);
             }
-            super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
-                panic!("no concurrent publisher exists in this test")
-            }
-            super::CompactionStepOutcome::NotNeeded { .. } => break,
-            super::CompactionStepOutcome::CompactionPlanned { .. } => {
-                panic!("test compaction budget should admit a progress-making subset")
-            }
+            super::CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("no concurrent publisher exists in this test, got {other:?}"),
         }
     }
     assert!(merged_groups.len() >= 2);
@@ -1969,15 +1975,16 @@ async fn over_budget_compaction_aborts_without_publishing() {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
-    let overrun = Deadline::start(Arc::new(ManualClock::stepping(20 * 60 * 1000)));
-    let error = super::compaction_step::compaction_step_with_deadline(
+    let error = super::compaction_step::compact_unit(
         &store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         merge_everything,
         MetadataCompactionPolicy::default(),
-        &overrun,
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
+        Arc::new(ManualClock::stepping(20 * 60 * 1000)),
     )
     .await
     .expect_err("over-budget compaction must abort");
@@ -1993,31 +2000,30 @@ async fn over_budget_compaction_aborts_without_publishing() {
         .state;
     assert_eq!(manifest_after, manifest_before);
 
-    let report = super::compaction_step::compaction_step(
+    let report = super::compaction_step::compact_unit(
         &store,
+        None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
         merge_everything,
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("in-budget retry merges the unit");
-    assert_matches!(report, super::CompactionStepOutcome::UnitPublished { .. });
+    assert_matches!(report, super::CompactionUnitOutcome::Published { .. });
 }
 
-/// Runs the selector exactly as a step runs it — same family group, same
-/// policy — and returns the group beside what the selector chose.
-async fn select_compaction_window<S: ObjectStore + ?Sized>(
+/// Plans the unit a compaction would run, with the same family group and
+/// policy, and returns the group beside the plan.
+async fn plan_window<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     policy: MetadataRunPolicy,
     requested_group: Option<MetadataFamilyGroup>,
-) -> (
-    MetadataFamilyGroup,
-    super::compaction_step::CompactionSelection,
-) {
+) -> (MetadataFamilyGroup, MetadataCompactionSpec) {
     let manifest_number = current_manifest_number(store, namespace_id).await;
     let segments =
         load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
@@ -2032,28 +2038,37 @@ async fn select_compaction_window<S: ObjectStore + ?Sized>(
         )
         .expect("a family group with delta rows to merge")
     });
-    let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
-    let selection = super::compaction_step::select_compaction_input(
-        &segments,
+    let spec = super::compaction_step::plan_group(
+        segments.manifest().payload(),
+        segments.scan_runs.as_ref(),
         group,
         policy,
-        frozen_floor_seq,
-        &super::compaction_step::MetadataCompactionPolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
-    .await
-    .expect("select a compaction input");
-    (group, selection)
+    .expect("plan the group");
+    (group, spec)
 }
 
-/// The bounded merge a selection chose, or `None` when it chose a streaming
-/// compaction instead.
-fn bounded_merge(
-    selection: super::compaction_step::CompactionSelection,
-) -> Option<super::compaction_step::CompactionInput> {
-    match selection.plan {
-        super::compaction_step::CompactionPlan::BoundedMerge(input) => Some(input),
-        _ => None,
-    }
+/// Runs one compaction unit with compactor epoch 0 and the given admission.
+async fn compact_with<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataRunPolicy,
+    admission: crate::manifest::CompactionAdmission,
+) -> super::CompactionUnitOutcome {
+    super::compact_unit(
+        store,
+        None,
+        namespace_id,
+        loonfs_types::CompactorEpoch(0),
+        policy,
+        MetadataCompactionPolicy::default(),
+        admission,
+        &crate::manifest::MetadataCompactionCancellation::default(),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("run a compaction unit")
 }
 
 /// Rows one run holds in one family group: the quantity the per-step row
@@ -2092,8 +2107,11 @@ fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataRunPolicy {
     }
 }
 
+/// Checks that a group whose base is over the row budget is too large for a
+/// unit within the row budget, and that a unit that admits any size rebuilds
+/// the whole group, base included, into one base run.
 #[tokio::test]
-async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
+async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2126,28 +2144,39 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     )
     .await
     .expect("load the parked manifest");
-    let (group, _) =
-        select_compaction_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
+    let (group, _) = plan_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
     let base = base_tier(&before.manifest);
     let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
     assert!(base_rows > 1, "the base run must hold rows in this group");
     let policy = policy_that_cannot_merge_the_base(base_rows);
 
-    let (_, selection) = select_compaction_window(&store, &namespace_id, policy, None).await;
-    let bottom = selection
-        .group_bottom_over_budget
-        .expect("a base run over the budget must raise the alarm");
-    let super::compaction_step::CompactionPlan::StreamingCompaction(spec) = selection.plan else {
-        panic!("comparable input sizes warrant a base rewrite");
-    };
-    assert_eq!(bottom.rows, base_rows);
-    assert_eq!(bottom.tier, RunTier::Base);
+    let (_, spec) = plan_window(&store, &namespace_id, policy, None).await;
     assert_eq!(
         spec.input_runs(),
-        group_runs(&before.manifest, group.families()).len()
+        group_runs(&before.manifest, group.families()).len(),
+        "comparable input sizes warrant a base rewrite"
     );
-    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+    assert_eq!(
+        compact_with(
+            &store,
+            &namespace_id,
+            policy,
+            crate::manifest::CompactionAdmission::WithinRowBudget
+        )
+        .await,
+        super::CompactionUnitOutcome::TooLarge { group }
+    );
+    assert_matches!(
+        compact_with(
+            &store,
+            &namespace_id,
+            policy,
+            crate::manifest::CompactionAdmission::AnySize
+        )
+        .await,
+        super::CompactionUnitOutcome::Published { group: merged, .. } if merged == group
+    );
 
     let after = load_manifest_materialization_for_inspection(
         &store,
@@ -2156,9 +2185,8 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     )
     .await
     .expect("load the drained manifest");
-    // The job rebuilt the group, so it is one base run and the frozen base's
-    // segments are gone. That is the whole point: they could not be rewritten
-    // by any step, and a run nothing rewrites is a run nothing reclaims.
+    // The unit rebuilt the group, so it is one base run and the frozen base's
+    // segments are gone. A run nothing rewrites is a run nothing reclaims.
     assert_eq!(
         group_runs(&after.manifest, group.families()).len(),
         1,
@@ -2268,10 +2296,17 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await
     .expect("load the manifest before the merge");
-    let (group, _) = select_compaction_window(
+    // No run counts as small, so the size ratio keeps the large base out of
+    // the window.
+    let policy = MetadataRunPolicy {
+        small_run_bytes: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    };
+    let (group, spec) = plan_window(
         &store,
         &namespace_id,
-        MetadataRunPolicy::default(),
+        policy,
         Some(MetadataFamilyGroup::Bindings),
     )
     .await;
@@ -2281,53 +2316,25 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
             .contains(&ApiMetadataRowFamily::DirentryBinds),
         "this test is about the binding families, got {group:?}"
     );
-    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
-    let policy = policy_that_cannot_merge_the_base(base_rows);
-
-    let (_, selection) = select_compaction_window(
-        &store,
-        &namespace_id,
-        policy,
-        Some(MetadataFamilyGroup::Bindings),
-    )
-    .await;
-    let input = bounded_merge(selection).expect("the delta runs must still merge");
-    let newest_input = input
-        .runs
+    let input_runs = runs_newest_first(before.manifest.payload())
+        .into_iter()
+        .filter(|run| spec.inputs().contains(&run.run_no))
+        .collect::<Vec<_>>();
+    let newest_input = input_runs
         .iter()
         .map(|run| run.run_seq)
         .max()
         .expect("the window holds runs");
     assert_eq!(
-        input.placement,
+        spec.placement(),
         super::compaction_step::MergePlacement::Delta {
             output_seq: newest_input
         },
         "a merge above the base writes a delta run at its newest input's sequence"
     );
-    assert!(input.runs.len() > 1);
+    assert!(input_runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, group.families());
-
-    // The same window also remains a delta when its execution needs a job.
-    let job_policy = MetadataRunPolicy {
-        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..policy
-    };
-    let (_, selection) = select_compaction_window(
-        &store,
-        &namespace_id,
-        job_policy,
-        Some(MetadataFamilyGroup::Bindings),
-    )
-    .await;
-    let super::compaction_step::CompactionPlan::StreamingCompaction(spec) = selection.plan else {
-        panic!("one byte cannot admit a synchronous merge");
-    };
-    assert_eq!(
-        spec.inputs(),
-        input.runs.iter().map(|run| run.run_no).collect::<Vec<_>>()
-    );
-    publish_planned_compaction(&store, &namespace_id, &context, job_policy, &spec).await;
+    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
 
     let after = load_manifest_materialization_for_inspection(
         &store,
@@ -2375,117 +2382,6 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         &projection.metadata_state,
         &after.metadata_state
     ));
-}
-
-#[tokio::test]
-async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-
-    write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
-    drain_compaction(
-        &store,
-        &namespace_id,
-        MetadataRunPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataRunPolicy::default()
-        },
-    )
-    .await;
-    // One wide delta run, then a narrow one above it.
-    for index in 2..=7 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{index}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write file");
-    }
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint the wide run");
-    write_file_and_checkpoint(&store, &namespace_id, &context, 8).await;
-
-    let before = load_manifest_materialization_for_inspection(
-        &store,
-        &namespace_id,
-        current_manifest_no(&store, &namespace_id).await,
-    )
-    .await
-    .expect("load the manifest");
-    let (group, _) =
-        select_compaction_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
-    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
-    let mut delta_rows = delta_runs(&before.manifest)
-        .iter()
-        .map(|run| group_run_rows(&run.segments, group.families()))
-        .collect::<Vec<_>>();
-    delta_rows.sort_unstable();
-    let (narrow, wide) = (delta_rows[0], delta_rows[1]);
-
-    // The budget admits the base run together with the narrow delta run,
-    // and rules out the wide one that sits between them. Reaching past the
-    // wide run is the illegal move this pins.
-    let row_budget = base_rows + narrow;
-    assert!(
-        row_budget < base_rows + wide && row_budget < wide,
-        "budget {row_budget} must exclude the wide run ({wide}) alone and beside the base ({base_rows})"
-    );
-    let policy = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_rows_per_step: NonZeroUsize::new(
-            usize::try_from(row_budget).expect("test row counts are small"),
-        )
-        .expect("test row budget should be nonzero"),
-        ..MetadataRunPolicy::default()
-    };
-
-    let (_, selection) = select_compaction_window(&store, &namespace_id, policy, None).await;
-    assert!(
-        selection.group_bottom_over_budget.is_none(),
-        "the base run fits here, so nothing should claim it does not"
-    );
-    assert!(
-        matches!(
-            selection.plan,
-            super::compaction_step::CompactionPlan::StreamingCompaction(_)
-        ),
-        "no legal window exists; the selector must hand the group to a streaming compaction \
-         rather than assemble one across the wide run"
-    );
-
-    let manifest_before = current_manifest_no(&store, &namespace_id).await;
-    let report = super::compaction_step(
-        &store,
-        &namespace_id,
-        loonfs_types::CompactorEpoch(0),
-        policy,
-        MetadataCompactionPolicy::default(),
-        None,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("compaction step");
-    assert_matches!(
-        report,
-        super::CompactionStepOutcome::CompactionPlanned { .. },
-        "expected a planned compaction, got {:?}",
-        report
-    );
-    assert_eq!(
-        current_manifest_no(&store, &namespace_id).await,
-        manifest_before,
-        "a step that plans a compaction must not publish"
-    );
 }
 
 #[tokio::test]
@@ -2551,17 +2447,13 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 
         let mut settled = false;
         for _step in 0..512 {
-            let report = super::compaction_step(
+            let report = compact_with(
                 &store,
                 &namespace_id,
-                loonfs_types::CompactorEpoch(0),
                 policy,
-                MetadataCompactionPolicy::default(),
-                None,
-                crate::test_support::std_timer(),
+                crate::manifest::CompactionAdmission::WithinRowBudget,
             )
-            .await
-            .expect("compaction step");
+            .await;
             let current = load_manifest_materialization_for_inspection(
                 &store,
                 &namespace_id,
@@ -2581,24 +2473,28 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 "cycle {cycle}: a step changed what a read answers"
             );
             match report {
-                super::CompactionStepOutcome::NotNeeded { .. } => {
+                super::CompactionUnitOutcome::NotNeeded => {
                     settled = true;
                     break;
                 }
-                // The group's bottom no longer fits one step and its delta
-                // runs are merged down to one. The step hands the group to a
-                // streaming compaction, which is what merges it. It runs
-                // inline here, so the steps that follow see what they would
-                // have seen once it landed.
-                super::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
-                    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec)
-                        .await;
+                // The group's window no longer fits the row budget, so a
+                // unit that admits any size merges it, as a metadata run's
+                // caller does after a window that's too large.
+                super::CompactionUnitOutcome::TooLarge { .. } => {
+                    assert_matches!(
+                        compact_with(
+                            &store,
+                            &namespace_id,
+                            policy,
+                            crate::manifest::CompactionAdmission::AnySize,
+                        )
+                        .await,
+                        super::CompactionUnitOutcome::Published { .. }
+                    );
                     compacted_groups += 1;
                 }
-                super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
-                    panic!("no concurrent publisher exists in this test")
-                }
-                super::CompactionStepOutcome::UnitPublished { .. } => {}
+                super::CompactionUnitOutcome::Published { .. } => {}
+                other => panic!("no concurrent publisher exists in this test, got {other:?}"),
             }
         }
         assert!(
@@ -2609,7 +2505,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 
     assert!(
         compacted_groups > 0,
-        "a group must have outgrown one step and been rebuilt by a streaming compaction"
+        "a group must have outgrown the row budget and been rebuilt by a unit of any size"
     );
     let final_manifest = load_manifest_materialization_for_inspection(
         &store,

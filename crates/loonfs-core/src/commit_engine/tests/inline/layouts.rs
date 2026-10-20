@@ -824,7 +824,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
 
 async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
     use crate::manifest::{
-        advance_retention_floor, compaction_step, MetadataCompactionPolicy, RetentionTarget,
+        advance_retention_floor, compact_unit, MetadataCompactionPolicy, RetentionTarget,
     };
     advance_retention_floor(
         store,
@@ -837,18 +837,20 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
     .expect("floor");
     for _ in 0..16 {
         if matches!(
-            compaction_step(
+            compact_unit(
                 store,
+                None,
                 namespace_id,
                 loonfs_types::CompactorEpoch(0),
                 Default::default(),
                 MetadataCompactionPolicy::CompactImmediately,
-                None,
-                crate::test_support::std_timer()
+                crate::manifest::CompactionAdmission::AnySize,
+                &crate::manifest::MetadataCompactionCancellation::default(),
+                crate::test_support::std_timer(),
             )
             .await
             .expect("compact"),
-            crate::manifest::CompactionStepOutcome::NotNeeded { .. }
+            crate::manifest::CompactionUnitOutcome::NotNeeded
         ) {
             break;
         }

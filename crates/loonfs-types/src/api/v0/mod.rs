@@ -18,7 +18,7 @@ pub use downloads::{
 pub use operations::{
     validate_access_precondition, validate_attributes_precondition, AdvanceRetentionRequest,
     AdvanceRetentionResponse, Checkpoint, CheckpointOwner, CommitPrecondition, CommitRequest,
-    CompactionStepOutcome, CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
+    CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
     DeleteCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
     DestinationPrecondition, DestinationPreconditionError, ErrorDetails, ErrorResponse,

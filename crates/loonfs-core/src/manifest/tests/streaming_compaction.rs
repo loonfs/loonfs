@@ -1,23 +1,24 @@
-//! Rebuilding a family group in one background job: the plan split, the
-//! oracle that says the job's orchestration and a maintenance pass's reach the
-//! same place, restart equivalence, and the resource bounds that make a merge
-//! independent of the size of what it merges.
+//! Rebuilding a family group in one compaction unit: the plan, the oracle
+//! that says a unit and its split pieces reach the same place, restart
+//! equivalence, and the resource bounds that make a merge independent of the
+//! size of what it merges.
 
 use super::super::compaction_step::{
-    group_run_descriptors, select_compaction_input, CompactionPlan, MetadataCompactionPolicy,
+    group_run_descriptors, plan_group, CompactionAdmission, MetadataCompactionPolicy,
 };
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataSegments;
 use super::super::streaming_compaction::{
-    finalize_metadata_compaction, input_segment_keys, merge_group_in_step, run_metadata_compaction,
-    CompactionPublication, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec, MetadataMergeReport,
+    finalize_metadata_compaction, input_segment_keys, run_metadata_compaction,
+    CompactionPublication, MetadataCompactionCancellation, MetadataCompactionSpec,
+    MetadataMergeReport,
 };
 use super::*;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
@@ -288,8 +289,8 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
 // Driving a job
 // -------------------------------------------------------------------------
 
-/// A budget that admits the whole group in one step, so the ordinary merge can
-/// rebuild in one unit whatever the streaming job did incrementally.
+/// A budget that admits the whole group in one unit, whatever the row budget
+/// of a `metadata` pass.
 fn merge_everything_policy() -> MetadataRunPolicy {
     MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -382,34 +383,25 @@ fn input_runs_for_group(
 }
 
 /// The spec a planner would produce for `group` against the current manifest:
-/// every run the group holds, the output at the manifest head, and the live
-/// retention floor.
+/// the group's oldest window of at most eight runs, the output at the
+/// manifest head, and the live retention floor.
 async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
 ) -> MetadataCompactionSpec {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
-    // One byte admits no run whole, so the planner has no window that makes
-    // progress and answers with the compaction plan for this group.
-    let selection = select_compaction_input(
-        &segments,
+    plan_group(
+        segments.manifest().payload(),
+        &segments.scan_runs,
         group,
         MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
             ..MetadataRunPolicy::default()
         },
-        frozen_floor_seq,
-        &MetadataCompactionPolicy::CompactImmediately,
+        MetadataCompactionPolicy::CompactImmediately,
     )
-    .await
-    .expect("plan the group");
-    match selection.plan {
-        CompactionPlan::StreamingCompaction(spec) => spec,
-        _ => panic!("a group no budget admits must plan as a streaming compaction"),
-    }
+    .expect("plan the group")
 }
 
 /// The claim a job holds while it runs, opened the way the job driver opens
@@ -422,7 +414,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome> {
+) -> std::result::Result<MetadataMergeReport, CompactionUnitOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
     run_metadata_compaction(&segments, None, namespace_id, spec, policy, cancellation)
         .await
@@ -451,7 +443,7 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
     result: &MetadataMergeReport,
-) -> MetadataCompactionJobOutcome {
+) -> CompactionUnitOutcome {
     finalize_streaming_compaction_under(
         store,
         namespace_id,
@@ -471,7 +463,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     input_keys: &BTreeSet<String>,
     result: &MetadataMergeReport,
     cancellation: &MetadataCompactionCancellation,
-) -> MetadataCompactionJobOutcome {
+) -> CompactionUnitOutcome {
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compactor_epoch: loonfs_types::CompactorEpoch(0),
@@ -500,7 +492,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &MetadataMergeReport,
 ) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, input_keys, result).await {
-        MetadataCompactionJobOutcome::Published { manifest, .. } => manifest.manifest_no,
+        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -587,18 +579,20 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
 ) {
-    let report = super::super::compaction_step(
+    let report = super::super::compact_unit(
         store,
+        None,
         namespace_id,
         loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
         MetadataCompactionPolicy::default(),
-        None,
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("merge the group whole");
-    let CompactionStepOutcome::UnitPublished { group: merged, .. } = report else {
+    let CompactionUnitOutcome::Published { group: merged, .. } = report else {
         panic!("the whole-group merge must publish a unit");
     };
     assert_eq!(
@@ -611,8 +605,11 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
 // The plan split
 // -------------------------------------------------------------------------
 
+/// Checks that a plan takes every run of the group, up to eight, which is
+/// what anchors it at the bottom, and judges rows against the manifest's
+/// retention floor.
 #[tokio::test]
-async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
+async fn the_planner_takes_the_groups_oldest_window_whole() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -621,164 +618,111 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
 
-    let generous = select_compaction_input(
-        &segments,
-        group,
-        merge_everything_policy(),
-        floor_seq,
-        &MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("plan under generous budgets");
-    assert!(
-        matches!(generous.plan, CompactionPlan::BoundedMerge(_)),
-        "a window that fits is a bounded merge"
-    );
-    assert!(generous.group_bottom_over_budget.is_none());
-
-    let starved = select_compaction_input(
-        &segments,
-        group,
-        MetadataRunPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-            ..MetadataRunPolicy::default()
-        },
-        floor_seq,
-        &MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("plan under budgets nothing fits");
-    let CompactionPlan::StreamingCompaction(spec) = starved.plan else {
-        panic!("a group no window fits must plan as a streaming compaction");
-    };
-    assert!(
-        starved.group_bottom_over_budget.is_some(),
-        "the operator still hears that the group's oldest run is over budget"
-    );
-    assert_eq!(spec.group(), group);
-    assert_eq!(spec.frozen_floor_seq(), floor_seq);
-    let input = input_runs_for_group(segments.manifest(), group);
-    assert_eq!(
-        spec.inputs().iter().copied().collect::<BTreeSet<_>>(),
-        input.iter().map(|run| run.run_no).collect::<BTreeSet<_>>(),
-        "a compaction takes every run the group holds, which is what anchors it at the bottom"
-    );
-    assert!(
-        input.len() > 1,
-        "this workload must leave a base under at least one delta run"
-    );
+    // A one-byte buffer and a one-row budget change nothing about the plan.
+    for policy in [merge_everything_policy(), starving_policy()] {
+        let spec = plan_group(
+            segments.manifest().payload(),
+            &segments.scan_runs,
+            group,
+            policy,
+            MetadataCompactionPolicy::default(),
+        )
+        .expect("plan the group");
+        assert_eq!(spec.group(), group);
+        assert_eq!(spec.frozen_floor_seq(), floor_seq);
+        let input = input_runs_for_group(segments.manifest(), group);
+        assert_eq!(
+            spec.inputs().iter().copied().collect::<BTreeSet<_>>(),
+            input.iter().map(|run| run.run_no).collect::<BTreeSet<_>>(),
+            "a unit takes every run in the group"
+        );
+        assert!(
+            input.len() > 1,
+            "this workload must leave a base under at least one delta run"
+        );
+    }
 }
 
+/// Checks that a unit that admits only windows within the row budget reports
+/// a larger window as too large, reads only the manifest, and publishes
+/// nothing, and that a unit that admits any size merges the same window
+/// whole.
 #[tokio::test]
-async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
+async fn a_window_over_the_row_budget_is_too_large_for_a_bounded_call() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
     let before = current_manifest_number(&store, &namespace_id).await;
 
     let store = loonfs_test_support::stores::RecordingStore::new(store, KeyPredicate::any());
-    let report = super::super::compaction_step(
+    let report = compact_unit_with(
         &store,
         &namespace_id,
-        loonfs_types::CompactorEpoch(0),
-        starving_policy(),
-        MetadataCompactionPolicy::default(),
-        None,
-        crate::test_support::std_timer(),
+        policy,
+        CompactionAdmission::WithinRowBudget,
     )
-    .await
-    .expect("budgeted step");
-    let CompactionStepOutcome::CompactionPlanned { group, spec } = report else {
-        panic!("a group no window fits must plan a streaming compaction");
-    };
-    assert_eq!(group, MetadataFamilyGroup::Bindings);
-    assert!(spec.input_rows() > 0, "the plan must report what it reads");
+    .await;
+    assert_eq!(report, CompactionUnitOutcome::TooLarge { group });
     assert_eq!(
         current_manifest_number(&store, &namespace_id).await,
         before,
-        "a step that plans a compaction publishes nothing"
+        "a window that's too large publishes nothing"
     );
-    assert_eq!(store.counts().puts, 0);
-}
-
-#[tokio::test]
-async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_one_wide_directory(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-
-    let mut delta_merges_over_the_frozen_base = 0u32;
-    let mut planned: Option<MetadataCompactionSpec> = None;
-    for round in 0..16u64 {
-        // A new delta run before every step, so the planner always has two
-        // runs above the base to merge.
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/wide/arrival-{round}.txt"),
-            b"arrival\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write a file");
-        create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("checkpoint the write");
-
-        let report = super::super::compaction_step(
-            &store,
-            &namespace_id,
-            loonfs_types::CompactorEpoch(0),
-            policy,
-            MetadataCompactionPolicy::SizeTiered,
-            None,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("maintenance pass");
-        match report {
-            CompactionStepOutcome::CompactionPlanned {
-                group: planned_group,
-                spec,
-            } => {
-                assert_eq!(planned_group, group);
-                planned = Some(spec);
-                break;
-            }
-            CompactionStepOutcome::UnitPublished {
-                group: merged,
-                bottom_anchored_merge_blocked,
-                ..
-            } if merged == group => {
-                assert!(
-                    bottom_anchored_merge_blocked,
-                    "this budget starves the group's base, so every merge of it runs above one"
-                );
-                delta_merges_over_the_frozen_base += 1;
-            }
-            _ => {}
-        }
-    }
-
     assert!(
-        planned.is_some(),
-        "the job must start while delta runs keep arriving"
+        store.take().iter().all(|operation| matches!(
+            parse_object_key(operation.key()).map(|key| key.family()),
+            Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
+        )),
+        "a unit that's too large reads only the manifest"
     );
-    assert_eq!(
-        delta_merges_over_the_frozen_base, 0,
-        "small runs are immediately eligible regardless of prior merge counts"
-    );
+
+    let report =
+        compact_unit_with(&store, &namespace_id, policy, CompactionAdmission::AnySize).await;
+    let CompactionUnitOutcome::Published {
+        group: merged,
+        input_runs,
+        ..
+    } = report
+    else {
+        panic!("a unit that admits any size merges the window, got {report:?}");
+    };
+    assert_eq!(merged, group);
+    assert!(input_runs > 1, "the window merges whole, base included");
+    let segments = load_current_manifest_segments(&store, &namespace_id).await;
+    let runs = input_runs_for_group(segments.manifest(), group);
+    assert_eq!(runs.len(), 1, "the group ends in one run");
+    assert_eq!(runs[0].tier, RunTier::Base);
 }
 
+/// Runs one compaction unit with compactor epoch 0 and the given admission.
+async fn compact_unit_with<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataRunPolicy,
+    admission: CompactionAdmission,
+) -> CompactionUnitOutcome {
+    super::super::compact_unit(
+        store,
+        None,
+        namespace_id,
+        loonfs_types::CompactorEpoch(0),
+        policy,
+        MetadataCompactionPolicy::default(),
+        admission,
+        &MetadataCompactionCancellation::default(),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("run a compaction unit")
+}
+
+/// Checks that a unit that admits only windows within the row budget merges
+/// small delta batches, and never reports one as too large.
 #[tokio::test]
-async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
+async fn small_delta_batches_merge_within_the_row_budget() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -790,43 +734,29 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         ..MetadataRunPolicy::default()
     };
 
-    // Budgets this group fits: every merge starts at the group's oldest run,
-    // so nothing is ever blocked and no merge over a frozen base is counted.
+    // Budgets this group fits, so every unit merges.
     let mut merges = 0usize;
     for _ in 0..16 {
-        let report = super::super::compaction_step(
+        let report = compact_unit_with(
             &store,
             &namespace_id,
-            loonfs_types::CompactorEpoch(0),
             policy,
-            MetadataCompactionPolicy::default(),
-            None,
-            crate::test_support::std_timer(),
+            CompactionAdmission::WithinRowBudget,
         )
-        .await
-        .expect("maintenance pass");
+        .await;
         match report {
-            CompactionStepOutcome::UnitPublished {
-                group: merged,
-                bottom_anchored_merge_blocked,
-                ..
-            } => {
+            CompactionUnitOutcome::Published { group: merged, .. } => {
                 if merged == group {
-                    assert!(
-                        !bottom_anchored_merge_blocked,
-                        "a group whose window fits is never merging over a frozen base"
-                    );
                     merges += 1;
                 }
             }
-            CompactionStepOutcome::NotNeeded { .. } => break,
-            other => panic!("unexpected outcome {other:?}"),
+            CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("a window within the row budget must merge, got {other:?}"),
         }
     }
     assert!(merges > 0, "the ordinary merge must do this group's work");
 
-    // A new delta batch can be handled by a normal merge without planning a
-    // streaming compaction job.
+    // A new delta batch merges within the row budget too.
     for round in 0..3u64 {
         write_file_bytes(
             &store,
@@ -843,21 +773,17 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             .expect("checkpoint the write");
     }
     for _ in 0..16 {
-        let report = super::super::compaction_step(
+        let report = compact_unit_with(
             &store,
             &namespace_id,
-            loonfs_types::CompactorEpoch(0),
             policy,
-            MetadataCompactionPolicy::default(),
-            None,
-            crate::test_support::std_timer(),
+            CompactionAdmission::WithinRowBudget,
         )
-        .await
-        .expect("maintenance pass");
+        .await;
         match report {
-            CompactionStepOutcome::UnitPublished { .. } => {}
-            CompactionStepOutcome::NotNeeded { .. } => break,
-            other => panic!("a group whose window fits must never plan a job, got {other:?}"),
+            CompactionUnitOutcome::Published { .. } => {}
+            CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("a window within the row budget must merge, got {other:?}"),
         }
     }
 }
@@ -866,8 +792,11 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
 // The oracle
 // -------------------------------------------------------------------------
 
+/// Checks that a whole unit and the plan, merge, and finalization run apart
+/// reach the same rows, drop only rows the floor covers, and leave the group
+/// in one base run.
 #[tokio::test]
-async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows() {
+async fn a_unit_and_its_split_pieces_reach_the_same_rows() {
     let job_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(job_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -914,7 +843,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
 
     assert_eq!(
         compacted, merged,
-        "a background compaction and a step-contained merge must keep the same rows"
+        "a unit and its split pieces must keep the same rows"
     );
     assert!(
         metadata_states_equivalent(
@@ -1250,36 +1179,6 @@ async fn a_repeated_revision_row_key_is_refused() {
     // Loading descriptors does not read the duplicate rows. The merge must
     // detect them before publishing its output.
     let keys_before = group_segment_keys(&store, &namespace_id, group).await;
-    let floor_seq = read_floor_seq(&store, &namespace_id).await;
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let CompactionPlan::BoundedMerge(input) = select_compaction_input(
-        &segments,
-        group,
-        merge_everything_policy(),
-        floor_seq,
-        &MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("plan the group")
-    .plan
-    else {
-        panic!("raised budgets must admit a bounded merge");
-    };
-    let step_error = merge_group_in_step(
-        &segments,
-        None,
-        None,
-        &namespace_id,
-        group,
-        &input.runs,
-        input.placement,
-        floor_seq,
-        merge_everything_policy(),
-    )
-    .await
-    .expect_err("a step-contained merge must refuse the duplicate");
-    assert_duplicate_row_key(&step_error, &duplicated_key);
-
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let job_error = run_metadata_compaction(
@@ -1291,14 +1190,14 @@ async fn a_repeated_revision_row_key_is_refused() {
         &MetadataCompactionCancellation::default(),
     )
     .await
-    .expect_err("a background compaction must refuse the duplicate");
+    .expect_err("a merge must refuse the duplicate");
     assert_duplicate_row_key(&job_error, &duplicated_key);
     drop(segments);
 
     assert_eq!(
         group_segment_keys(&store, &namespace_id, group).await,
         keys_before,
-        "neither path may publish a run built from a duplicated key"
+        "no run built from a duplicated key may be published"
     );
 }
 
@@ -1570,8 +1469,10 @@ async fn install_synthetic_bindings_base(
     .await;
 }
 
+/// Checks that a merge reads each input segment's index once, and that its
+/// requests follow the window's segments, not its rows.
 #[tokio::test]
-async fn a_step_contained_merge_reads_its_window_once() {
+async fn a_merge_reads_its_window_once() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1590,7 +1491,6 @@ async fn a_step_contained_merge_reads_its_window_once() {
         KeyPredicate::any(),
     );
     let group = MetadataFamilyGroup::Bindings;
-    let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let descriptors: Vec<MetadataSegmentRef> = segments
         .manifest()
@@ -1599,43 +1499,31 @@ async fn a_step_contained_merge_reads_its_window_once() {
         .iter()
         .flat_map(|run| run.segments.iter().cloned())
         .collect();
-    let CompactionPlan::BoundedMerge(input) = select_compaction_input(
-        &segments,
-        group,
-        merge_everything_policy(),
-        floor_seq,
-        &MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("plan the group")
-    .plan
-    else {
-        panic!("raised budgets must admit a bounded merge");
-    };
-    let window_segments = input
-        .runs
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    let window_segments = segments
+        .scan_runs
         .iter()
+        .filter(|run| spec.inputs().contains(&run.run_no))
         .flat_map(|run| group_run_descriptors(run, group))
         .count();
+    drop(segments);
     store.reset();
 
-    let merged = merge_group_in_step(
-        &segments,
-        None,
-        None,
+    let Ok(merged) = run_compaction(
+        &store,
         &namespace_id,
-        group,
-        &input.runs,
-        input.placement,
-        floor_seq,
+        &spec,
         merge_everything_policy(),
+        &MetadataCompactionCancellation::default(),
     )
     .await
-    .expect("merge the window");
+    else {
+        panic!("nothing cancelled this merge");
+    };
     let profile = classify_reads(&store.take(), &descriptors);
 
     // One index read and one span of data reads per segment. Data blocks are
-    // fetched two at a time, so a segment costs at most its block count; the
+    // fetched two at a time, so a segment costs at most its block count. The
     // bound that matters is that neither follows the row count.
     assert!(
         profile.index_reads <= window_segments,
@@ -1648,23 +1536,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         profile.requests(),
         merged.rows_read
     );
-
-    store.reset();
-    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let Ok(job) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        merge_everything_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job");
-    };
-    let profile = classify_reads(&store.take(), &descriptors);
-    assert!((profile.requests() as u64) < job.rows_read / 8);
-    assert!(job.peak_operator_rows <= 1);
+    assert!(merged.peak_operator_rows <= 1);
 }
 
 // -------------------------------------------------------------------------
@@ -1765,7 +1637,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             &cancellation,
         )
         .await;
-        if matches!(outcome, Err(MetadataCompactionJobOutcome::Cancelled)) {
+        if matches!(outcome, Err(CompactionUnitOutcome::Cancelled)) {
             cancelled_attempts += 1;
         }
         assert_eq!(
@@ -1955,21 +1827,30 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     );
     let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
     let segments = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
-    let result = merge_group_in_step(
-        &segments,
-        None,
-        None,
-        &namespace_id,
+    let spec = MetadataCompactionSpec::new(
         group,
-        &runs,
+        runs.iter().map(|run| run.run_no).collect(),
+        runs.iter()
+            .flat_map(|run| group_run_descriptors(run, group))
+            .map(|descriptor| descriptor.row_count)
+            .sum(),
         compaction_step::MergePlacement::Base {
             output_seq: ChangeSeq(3),
         },
         ChangeSeq(0),
+    );
+    let Ok(result) = run_metadata_compaction(
+        &segments,
+        None,
+        &namespace_id,
+        &spec,
         MetadataRunPolicy::default(),
+        &MetadataCompactionCancellation::default(),
     )
     .await
-    .expect("merge");
+    .expect("merge") else {
+        panic!("nothing cancelled this merge");
+    };
     let gets = store.inner().take_gets();
     let data_gets = gets
         .iter()
@@ -2103,60 +1984,6 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.peak_operator_rows <= 1,
         "a retention operator held {} rows",
         result.peak_operator_rows
-    );
-
-    // The same bounds hold for the same engine run inside a maintenance pass.
-    // Input budgets and measured merge residency must both hold.
-    let store = ConcurrencyWatchStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::metadata_segment(),
-    );
-    let floor_seq = read_floor_seq(&store, &namespace_id).await;
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let CompactionPlan::BoundedMerge(input) = select_compaction_input(
-        &segments,
-        group,
-        small_segment_policy(),
-        floor_seq,
-        &MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("plan the group")
-    .plan
-    else {
-        panic!("raised budgets must admit a bounded merge");
-    };
-    let merged = merge_group_in_step(
-        &segments,
-        None,
-        None,
-        &namespace_id,
-        group,
-        &input.runs,
-        input.placement,
-        floor_seq,
-        small_segment_policy(),
-    )
-    .await
-    .expect("merge the window inside a step");
-    assert!(
-        store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT,
-        "the step's merge overlapped {} reads at once",
-        store.reads().peak_in_flight
-    );
-    assert!(
-        merged.peak_resident_blocks <= input.runs.len() * 2 * 2,
-        "the step's merge held {} decoded blocks at once",
-        merged.peak_resident_blocks
-    );
-    assert!(
-        merged.peak_operator_rows <= 1,
-        "a retention operator held {} rows in the step's merge",
-        merged.peak_operator_rows
-    );
-    assert_eq!(
-        merged.rows_read, result.rows_read,
-        "both paths read the same window"
     );
 }
 
@@ -2318,19 +2145,15 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     let mut settled = false;
 
     for _step in 0..64 {
-        let report = super::super::compaction_step(
+        let report = compact_unit_with(
             &store,
             &namespace_id,
-            loonfs_types::CompactorEpoch(0),
             policy,
-            MetadataCompactionPolicy::default(),
-            None,
-            crate::test_support::std_timer(),
+            CompactionAdmission::WithinRowBudget,
         )
-        .await
-        .expect("maintenance pass");
+        .await;
         match report {
-            CompactionStepOutcome::UnitPublished { group: merged, .. } => {
+            CompactionUnitOutcome::Published { group: merged, .. } => {
                 if active.is_some() {
                     assert_ne!(
                         merged, group,
@@ -2338,14 +2161,14 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                     );
                 }
             }
-            CompactionStepOutcome::CompactionPlanned {
+            CompactionUnitOutcome::TooLarge {
                 group: planned_group,
-                ref spec,
             } => {
-                // One job at a time per namespace: a plan that arrives while
-                // one runs is reported and skipped.
+                // One long unit at a time per namespace: a report that
+                // arrives while one runs is skipped.
                 if active.is_none() {
                     assert_eq!(planned_group, group, "this budget starves this group first");
+                    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
                     active = Some(spec.clone());
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
@@ -2365,7 +2188,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                             .await
                             .expect("checkpoint it");
                         arrived_keys =
-                            group_segments_outside_the_job(&store, &namespace_id, spec, group)
+                            group_segments_outside_the_job(&store, &namespace_id, &spec, group)
                                 .await;
                         assert!(
                             !arrived_keys.is_empty(),
@@ -2375,14 +2198,16 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                     }
                 }
             }
-            CompactionStepOutcome::Superseded | CompactionStepOutcome::Fenced => {
+            CompactionUnitOutcome::Abandoned
+            | CompactionUnitOutcome::Fenced
+            | CompactionUnitOutcome::Cancelled => {
                 panic!("no concurrent publisher exists in this test")
             }
-            CompactionStepOutcome::NotNeeded { .. } if active.is_none() => {
+            CompactionUnitOutcome::NotNeeded if active.is_none() => {
                 settled = true;
                 break;
             }
-            CompactionStepOutcome::NotNeeded { .. } => {}
+            CompactionUnitOutcome::NotNeeded => {}
         }
 
         // Every step leaves a manifest the loader accepts and a read
@@ -2446,9 +2271,10 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     );
 }
 
-/// Runs steps until one hands a group to a job, and answers with that plan.
+/// Runs units that admit only windows within the row budget until one
+/// reports a group as too large, and returns that group's plan.
 ///
-/// A step merges the group with the most delta rows, so the starved group is
+/// A unit merges the group with the most delta rows, so the starved group is
 /// reached after the groups that still fit have merged.
 async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     store: &S,
@@ -2457,24 +2283,22 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
 ) -> MetadataCompactionSpec {
     for _step in 0..64 {
-        let report = super::super::compaction_step(
+        let report = compact_unit_with(
             store,
             namespace_id,
-            loonfs_types::CompactorEpoch(0),
             policy,
-            MetadataCompactionPolicy::default(),
-            None,
-            crate::test_support::std_timer(),
+            CompactionAdmission::WithinRowBudget,
         )
-        .await
-        .expect("maintenance pass");
+        .await;
         match report {
-            CompactionStepOutcome::CompactionPlanned { spec, .. } => return spec,
-            CompactionStepOutcome::UnitPublished { .. } => {}
-            other => panic!("expected a plan or a merge, got {other:?}"),
+            CompactionUnitOutcome::TooLarge { group } => {
+                return compaction_spec_for_group(store, namespace_id, group).await
+            }
+            CompactionUnitOutcome::Published { .. } => {}
+            other => panic!("expected a merge or a window too large, got {other:?}"),
         }
     }
-    panic!("no step handed a group to a job")
+    panic!("no unit found a window too large")
 }
 
 #[tokio::test]
@@ -2509,21 +2333,12 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             reads_before_cancel,
             reads: AtomicUsize::new(0),
         };
-        let outcome = run_metadata_compaction_job(
-            &dying_store,
-            None,
-            &namespace_id,
-            loonfs_types::CompactorEpoch(0),
-            &spec,
-            policy,
-            &cancellation,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("run the job");
+        let outcome =
+            run_planned_compaction_under(&dying_store, &namespace_id, policy, &spec, &cancellation)
+                .await;
         assert_eq!(
             outcome,
-            MetadataCompactionJobOutcome::Cancelled,
+            CompactionUnitOutcome::Cancelled,
             "the cancellation must land before the job finishes"
         );
         assert_eq!(
@@ -2663,7 +2478,7 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     )
     .await
     {
-        MetadataCompactionJobOutcome::Published { manifest, .. } => manifest.manifest_no,
+        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest_no,
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
@@ -2722,6 +2537,221 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     );
 }
 
+/// A publication another process makes just before a unit's first manifest
+/// put.
+#[derive(Debug, Clone, Copy)]
+enum RivalPublication {
+    Fold,
+    RetentionAdvance,
+    OtherGroup(MetadataFamilyGroup),
+    SameGroup(MetadataFamilyGroup),
+}
+
+/// Runs a rival publication from another process before the first manifest
+/// write it sees.
+#[derive(Debug)]
+struct RivalDuringPublication {
+    rival: LocalFsStore,
+    namespace_id: NamespaceId,
+    publication: RivalPublication,
+    published: AtomicUsize,
+}
+
+#[async_trait]
+impl Interceptor for RivalDuringPublication {
+    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+        let writes = OperationSelector::Put.matches(context.kind());
+        if !writes
+            || loonfs_objectstore::layout::manifest_no_of(context.key()).is_none()
+            || self.published.fetch_add(1, Ordering::SeqCst) != 0
+        {
+            return Intercept::Continue;
+        }
+        let (rival, namespace_id) = (&self.rival, &self.namespace_id);
+        match self.publication {
+            RivalPublication::Fold => {
+                write_file_bytes(
+                    rival,
+                    namespace_id,
+                    "/raced.txt",
+                    b"raced\n",
+                    &test_context(),
+                    None,
+                )
+                .await
+                .expect("the rival writes");
+                super::super::fold::fold_wal(rival, namespace_id)
+                    .await
+                    .expect("the rival folds");
+            }
+            RivalPublication::RetentionAdvance => {
+                advance_retention_floor(
+                    rival,
+                    None,
+                    namespace_id,
+                    RetentionTarget::Head,
+                    crate::test_support::std_timer(),
+                )
+                .await
+                .expect("the rival advances the floor");
+            }
+            RivalPublication::OtherGroup(group) | RivalPublication::SameGroup(group) => {
+                let spec = compaction_spec_for_group(rival, namespace_id, group).await;
+                publish_planned_compaction(
+                    rival,
+                    namespace_id,
+                    &test_context(),
+                    merge_everything_policy(),
+                    &spec,
+                )
+                .await;
+            }
+        }
+        Intercept::Continue
+    }
+}
+
+/// Checks that a unit whose put loses to a fold, a retention advance, or a
+/// compaction of another family group publishes its output over the manifest
+/// that won and keeps the rival's change, and that a unit whose inputs a
+/// compaction of its own group replaced abandons its output.
+#[tokio::test]
+async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_moved() {
+    let policy = MetadataRunPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    };
+    for case in 0..4 {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        seed_bindings_workload(&store, &namespace_id).await;
+        // A commit above the floor, so a retention advance has somewhere to go.
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/above-the-floor.txt",
+            b"above\n",
+            &test_context(),
+            None,
+        )
+        .await
+        .expect("write a file");
+        create_checkpoint(&store, &namespace_id, &test_context())
+            .await
+            .expect("fold the file");
+        let before = load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("current manifest");
+        let payload = before.state.envelope.payload().clone();
+        let runs = runs_newest_first(&payload);
+        let plan = super::super::compaction_step::plan_compaction(
+            &payload,
+            &runs,
+            policy,
+            MetadataCompactionPolicy::CompactImmediately,
+        )
+        .expect("the unit has a window");
+        let group = plan.group();
+        let input_keys = input_segment_keys(&runs, &plan).expect("the plan's inputs");
+        let other = MetadataFamilyGroup::ALL
+            .into_iter()
+            .filter(|candidate| *candidate != group)
+            .find(|candidate| {
+                plan_group(
+                    &payload,
+                    &runs,
+                    *candidate,
+                    policy,
+                    MetadataCompactionPolicy::CompactImmediately,
+                )
+                .is_some()
+            })
+            .expect("another group has a window");
+        let publication = [
+            RivalPublication::Fold,
+            RivalPublication::RetentionAdvance,
+            RivalPublication::OtherGroup(other),
+            RivalPublication::SameGroup(group),
+        ][case];
+        let intercepted = InterceptStore::with_interceptor(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            RivalDuringPublication {
+                rival: LocalFsStore::new(temp_dir.path()).expect("store"),
+                namespace_id: namespace_id.clone(),
+                publication,
+                published: AtomicUsize::new(0),
+            },
+        );
+        let outcome = super::super::compact_unit(
+            &intercepted,
+            None,
+            &namespace_id,
+            loonfs_types::CompactorEpoch(0),
+            policy,
+            MetadataCompactionPolicy::CompactImmediately,
+            CompactionAdmission::AnySize,
+            &MetadataCompactionCancellation::default(),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("run the unit");
+        // The put that lost, and the retry unless the inputs moved.
+        let puts = if matches!(publication, RivalPublication::SameGroup(_)) {
+            1
+        } else {
+            2
+        };
+        assert_eq!(
+            intercepted.interceptor().published.load(Ordering::SeqCst),
+            puts,
+            "{publication:?}: {outcome:?}"
+        );
+        let after = load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("current manifest");
+        let after_payload = after.state.envelope.payload();
+        let referenced = referenced_segment_keys(&store, &namespace_id).await;
+        if let RivalPublication::SameGroup(_) = publication {
+            assert_eq!(outcome, CompactionUnitOutcome::Abandoned, "{publication:?}");
+            continue;
+        }
+        let CompactionUnitOutcome::Published {
+            group: merged,
+            manifest,
+            ..
+        } = outcome
+        else {
+            panic!("{publication:?}: the unit must publish over the winner, got {outcome:?}");
+        };
+        assert_eq!(merged, group);
+        assert_eq!(manifest, after.state.manifest(), "{publication:?}");
+        assert!(
+            manifest.manifest_no.0 > before.state.manifest().manifest_no.0 + 1,
+            "{publication:?}: the unit's first put lost"
+        );
+        assert!(
+            input_keys.is_disjoint(&referenced),
+            "{publication:?}: the unit's output replaced its inputs"
+        );
+        match publication {
+            RivalPublication::Fold => assert!(after_payload.head_seq > payload.head_seq),
+            RivalPublication::RetentionAdvance => {
+                assert!(after_payload.retention_floor_seq > payload.retention_floor_seq)
+            }
+            RivalPublication::OtherGroup(other) => {
+                let other_runs = input_runs_for_group(after.state.envelope.as_ref(), other);
+                assert_eq!(
+                    other_runs.len(),
+                    1,
+                    "the rival's merge of {other:?} survives"
+                );
+            }
+            RivalPublication::SameGroup(_) => {}
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_cancellation_after_the_last_row_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2759,7 +2789,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
 
     assert_matches!(
         finalization,
-        MetadataCompactionJobOutcome::Cancelled,
+        CompactionUnitOutcome::Cancelled,
         "a cancelled finalization must publish nothing, got {finalization:?}"
     );
     assert_eq!(
@@ -2842,7 +2872,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
 
     assert_matches!(
         finalization,
-        MetadataCompactionJobOutcome::Cancelled,
+        CompactionUnitOutcome::Cancelled,
         "the cancelled attempt must not be retried, got {finalization:?}"
     );
     assert_eq!(recorded.counts().create_if_absent_puts, 1);
@@ -2968,7 +2998,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect("fenced");
-    assert_eq!(outcome, MetadataCompactionJobOutcome::Fenced);
+    assert_eq!(outcome, CompactionUnitOutcome::Fenced);
     assert_eq!(store.counts().puts, 0);
     let reads_only_manifests = |store: &RecordingStore<LocalFsStore>| {
         store.counts().puts == 0
@@ -2980,33 +3010,26 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             })
     };
     store.reset();
-    let bounded = super::super::compaction_step(
-        &store,
-        &namespace,
-        epoch,
-        merge_everything_policy(),
-        MetadataCompactionPolicy::CompactImmediately,
-        None,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("bounded fence");
-    assert_eq!(bounded, CompactionStepOutcome::Fenced);
-    assert!(reads_only_manifests(&store));
-    let job = run_metadata_compaction_job(
-        &store,
-        None,
-        &namespace,
-        epoch,
-        &spec,
-        small_segment_policy(),
-        &cancellation,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("job fence");
-    assert_eq!(job, MetadataCompactionJobOutcome::Fenced);
-    assert!(reads_only_manifests(&store));
+    for admission in [
+        CompactionAdmission::WithinRowBudget,
+        CompactionAdmission::AnySize,
+    ] {
+        let unit = super::super::compact_unit(
+            &store,
+            None,
+            &namespace,
+            epoch,
+            merge_everything_policy(),
+            MetadataCompactionPolicy::CompactImmediately,
+            admission,
+            &cancellation,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("unit fence");
+        assert_eq!(unit, CompactionUnitOutcome::Fenced);
+        assert!(reads_only_manifests(&store));
+    }
 
     publication.compactor_epoch = next_epoch;
     timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
@@ -3021,7 +3044,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect("elapsed bound");
-    assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
     assert_eq!(store.counts().puts, 0);
 
     timer.set_ms(0);
@@ -3052,7 +3075,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect("a deletion abandons the job");
-    assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
     assert_eq!(store.counts().puts, 0);
     let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace)
         .await
@@ -3164,11 +3187,11 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     );
     assert_matches!(
         second_outcome.expect("second publication"),
-        MetadataCompactionJobOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 1
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 1
     );
     assert_matches!(
         first_outcome.expect("retried publication"),
-        MetadataCompactionJobOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 2
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 2
     );
     assert_eq!(store.inner().counts().create_if_absent_puts, 3);
     assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
@@ -3235,6 +3258,53 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
     assert_eq!(operations.len(), 6, "{operations:?}");
 }
 
+/// Checks that a compaction unit loads the current manifest once to plan and
+/// once to publish, and raises the hint from the hint it loaded.
+#[tokio::test]
+async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("unit-requests").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let current = current_manifest_number(&store, &namespace).await;
+    assert_eq!(
+        crate::namespace::control::load_hint(&store, &namespace)
+            .await
+            .expect("hint")
+            .state
+            .manifest_no,
+        current,
+        "the hint points to the current manifest"
+    );
+    let next = current.successor().expect("next manifest number");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let outcome = compact_unit_with(
+        &store,
+        &namespace,
+        merge_everything_policy(),
+        CompactionAdmission::AnySize,
+    )
+    .await;
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no == next
+    );
+    let hint = hint(&namespace);
+    let manifest = |number| metadata_manifest_object(&namespace, &number);
+    let load = [
+        ("get", hint.clone()),
+        ("get", manifest(current)),
+        ("get", manifest(next)),
+        ("get", hint.clone()),
+    ];
+    let mut expected = load.to_vec();
+    expected.extend(load);
+    expected.extend([("put", manifest(next)), ("cas", hint)]);
+    assert_eq!(control_requests(&namespace, &store.take()), expected);
+}
+
 /// Checks that a finalization whose put loses to a compaction of the same
 /// group abandons its output at the next attempt, because its input runs are
 /// gone from the manifest that won.
@@ -3289,10 +3359,10 @@ async fn a_finalization_that_loses_to_its_own_group_abandons() {
     );
     assert_matches!(
         won,
-        MetadataCompactionJobOutcome::Published { manifest, .. }
+        CompactionUnitOutcome::Published { manifest, .. }
             if manifest.manifest_no == before.successor().expect("next number")
     );
-    assert_eq!(lost, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(lost, CompactionUnitOutcome::Abandoned);
     assert_eq!(store.inner().counts().create_if_absent_puts, 2);
     let referenced = referenced_segment_keys(&store, &namespace).await;
     assert!(winning
@@ -3322,16 +3392,16 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .await
     .expect("claim")
     .response;
-    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let outcome = run_metadata_compaction_job(
+    let outcome = super::super::compact_unit(
         &store,
         None,
         &namespace,
         epoch,
-        &spec,
         small_segment_policy(),
+        MetadataCompactionPolicy::CompactImmediately,
+        CompactionAdmission::AnySize,
         &MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
@@ -3339,7 +3409,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .expect("publish");
     assert_matches!(
         outcome,
-        MetadataCompactionJobOutcome::Published { manifest, .. }
+        CompactionUnitOutcome::Published { manifest, .. }
             if manifest.manifest_no == before.successor().expect("next number")
     );
     let puts = store
@@ -3380,7 +3450,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     create_checkpoint(&store, &namespace, &test_context())
         .await
         .expect("fold the later write");
-    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let current_keys = referenced_segment_keys(&store, &namespace).await;
     let before = current_manifest_number(&store, &namespace).await;
     let existing_orphans = orphan_segment_keys(&store, &namespace).await;
@@ -3393,18 +3462,19 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         InjectedError::PermissionDenied("publication stopped".to_owned()),
     );
     failing.fail_next(1);
-    run_metadata_compaction_job(
+    super::super::compact_unit(
         &failing,
         None,
         &namespace,
         epoch,
-        &spec,
         small_segment_policy(),
+        MetadataCompactionPolicy::CompactImmediately,
+        CompactionAdmission::AnySize,
         &MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
-    .expect_err("a stopped publication should fail the compaction job");
+    .expect_err("a stopped publication should fail the compaction unit");
     assert_eq!(current_manifest_number(&failing, &namespace).await, before);
     let orphans = orphan_segment_keys(&failing, &namespace)
         .await
@@ -3547,21 +3617,8 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
             }
         };
         store.reset();
-        let bounded = merge_group_in_step(
-            &basis,
-            None,
-            None,
-            &namespace_id,
-            group,
-            &runs,
-            placement,
-            head.seq,
-            policy,
-        )
-        .await
-        .expect("bounded merge");
         let spec = MetadataCompactionSpec::new(group, vec![RunNo(0)], 3, placement, head.seq);
-        let streamed = run_metadata_compaction(
+        let result = run_metadata_compaction(
             &basis,
             None,
             &namespace_id,
@@ -3570,7 +3627,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
             &MetadataCompactionCancellation::default(),
         )
         .await
-        .expect("streamed merge")
+        .expect("merge")
         .expect("not cancelled");
         assert_eq!(
             store
@@ -3578,9 +3635,9 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                 .iter()
                 .filter(|read| read.0 == revision_key)
                 .count(),
-            if bottom && !capped { 4 } else { 0 }
+            if bottom && !capped { 2 } else { 0 }
         );
-        for result in [bounded, streamed] {
+        {
             assert_eq!(result.rows_written, expected);
             let mut layouts = Vec::new();
             for descriptor in &result.output_segments {
