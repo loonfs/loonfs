@@ -395,7 +395,7 @@ mod tests {
     use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
     use crate::retry::{RetryWarnings, DEFAULT};
     use crate::test_support::{
-        gcs_fixture_service_account_key_file, request_timeout, stall, RequestFault, TokioTimer,
+        gcs_fixture_service_account_key_file, time_out, RequestFault, TokioTimer,
     };
     use crate::timing::MonotonicTimer;
     use crate::{ObjectStore, ObjectStoreError};
@@ -531,21 +531,17 @@ mod tests {
             if !partial_chunk {
                 return self.inner.call(request).await;
             }
-            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let body_bytes = request.body().content_length() as u64;
             match self.fault {
                 RequestFault::Status(status) => Ok(http::Response::builder()
                     .status(status)
                     .body(Bytes::from(format!(r#"{{"error":{{"code":{status}}}}}"#)))
                     .expect("fault response")
                     .map(object_store::client::HttpResponseBody::from)),
-                RequestFault::Timeout => {
-                    let body_bytes = request.body().content_length() as u64;
-                    stall(crate::provider_object_store::request_phase_bound(
-                        body_bytes,
-                    ))
-                    .await;
-                    Err(request_timeout())
-                }
+                RequestFault::Timeout => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout if attempt == 1 => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout => self.inner.call(request).await,
             }
         }
     }

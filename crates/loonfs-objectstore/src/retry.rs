@@ -1,9 +1,9 @@
 //! The one retry loop of the store layer, and the warnings it logs.
 //!
 //! The retrying provider client retries the requests it sends. LoonFS
-//! retries the requests it signs itself, and verified immutable writes,
-//! through [`with_transport_retry`]. A conditional publication is one
-//! attempt.
+//! retries the requests it signs itself, verified immutable writes, and a
+//! delete whose attempt timed out, through [`with_transport_retry`]. A
+//! conditional publication is one attempt.
 
 use crate::attempts::count_retry_attempt;
 use crate::timing::MonotonicTimer;

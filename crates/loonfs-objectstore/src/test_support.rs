@@ -56,30 +56,29 @@ impl MonotonicTimer for TokioTimer {
 pub(crate) enum RequestFault {
     /// The provider responds with this status and an error document.
     Status(u16),
-    /// No response arrives, so the request waits out its attempt bound and
+    /// No response arrives, so every attempt waits out its attempt bound and
     /// fails as the transfer timeout connector fails it.
     Timeout,
+    /// The first attempt times out, and later attempts reach the provider.
+    FirstTimeout,
 }
 
-/// Waits out `bound` on the test runtime's clock, as a request that gets no
-/// response waits for its attempt bound.
+/// Waits out the attempt bound of a request whose body is
+/// `request_body_bytes` long on the test runtime's clock, and returns the
+/// error the transfer timeout connector reports for it.
 #[expect(
     clippy::disallowed_methods,
     reason = "a stalled scripted request waits on the paused test clock"
 )]
-pub(crate) async fn stall(bound: std::time::Duration) {
+pub(crate) async fn time_out(request_body_bytes: u64) -> object_store::client::HttpError {
+    let bound = crate::provider_object_store::request_phase_bound(request_body_bytes);
     tokio::time::sleep(bound).await;
-}
-
-/// The error the transfer timeout connector reports for a request that got
-/// no response within its attempt bound.
-pub(crate) fn request_timeout() -> object_store::client::HttpError {
     object_store::client::HttpError::new(
         object_store::client::HttpErrorKind::Timeout,
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "request phase exceeded its transfer bound",
-        ),
+        crate::transfer_timeouts::TransferTimeoutError::RequestPhase {
+            request_body_bytes,
+            bound,
+        },
     )
 }
 

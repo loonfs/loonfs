@@ -794,8 +794,7 @@ mod tests {
     use crate::retry::{RetryWarnings, DEFAULT};
     use crate::signed_request::{classify_signed_response, SignedResponse};
     use crate::test_support::{
-        aws_environment_lock, isolated_aws_environment, request_timeout, stall, RequestFault,
-        TokioTimer,
+        aws_environment_lock, isolated_aws_environment, time_out, RequestFault, TokioTimer,
     };
     use crate::timing::MonotonicTimer;
     use crate::ByteRange;
@@ -1115,7 +1114,8 @@ mod tests {
             if s3_operation(&request) != self.operation {
                 return self.inner.call(request).await;
             }
-            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let body_bytes = request.body().content_length() as u64;
             match self.fault {
                 RequestFault::Status(status) => {
                     let code = match status {
@@ -1128,14 +1128,9 @@ mod tests {
                         .expect("fault response")
                         .map(HttpResponseBody::from))
                 }
-                RequestFault::Timeout => {
-                    let body_bytes = request.body().content_length() as u64;
-                    stall(crate::provider_object_store::request_phase_bound(
-                        body_bytes,
-                    ))
-                    .await;
-                    Err(request_timeout())
-                }
+                RequestFault::Timeout => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout if attempt == 1 => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout => self.inner.call(request).await,
             }
         }
     }
@@ -1145,33 +1140,36 @@ mod tests {
     /// bound, that a refused request fails at once wherever its status can
     /// be read, and that every failure is reported as non-retryable.
     ///
-    /// The retrying client retries a delete and LoonFS doesn't. LoonFS
-    /// retries a verified immutable write, a signed HEAD and a signed part.
-    /// A part that spends its budget fails the verified write around it, so
-    /// the multipart upload is created once.
+    /// The retrying client retries a delete's 5xx responses, and LoonFS
+    /// resends a delete whose attempt timed out. LoonFS retries a verified
+    /// immutable write, a signed HEAD and a signed part. A part that spends
+    /// its budget fails the verified write around it, so the multipart
+    /// upload is created once.
     #[tokio::test(start_paused = true)]
     async fn a_failing_request_is_attempted_under_one_retry_budget() {
         use crate::{ImmutableWriteError, ObjectStore};
         let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
         // Four 30 s attempts and their backoffs pass the 120 s deadline.
         let timed_out = 4;
-        for (operation, fault, attempts) in [
-            ("delete", RequestFault::Status(400), 1),
-            ("delete", RequestFault::Status(503), retried),
-            // The retrying client doesn't send a timed-out DELETE again,
-            // because it doesn't mark DELETE idempotent.
-            ("delete", RequestFault::Timeout, 1),
+        let failed = Some(ObjectStoreErrorKind::Other);
+        for (operation, fault, attempts, outcome) in [
+            ("delete", RequestFault::Status(400), 1, failed),
+            ("delete", RequestFault::Status(503), retried, failed),
+            // The retrying client doesn't resend a timed-out DELETE, because
+            // it doesn't mark DELETE idempotent, so LoonFS resends it.
+            ("delete", RequestFault::Timeout, timed_out, failed),
+            ("delete", RequestFault::FirstTimeout, 2, None),
             // The client that sends a conditional put once reports a 400 as
             // the same opaque error as a 503, so LoonFS retries both.
-            ("put", RequestFault::Status(400), retried),
-            ("put", RequestFault::Status(503), retried),
-            ("put", RequestFault::Timeout, timed_out),
-            ("head", RequestFault::Status(400), 1),
-            ("head", RequestFault::Status(503), retried),
-            ("head", RequestFault::Timeout, timed_out),
-            ("upload", RequestFault::Status(400), 1),
-            ("upload", RequestFault::Status(503), retried),
-            ("upload", RequestFault::Timeout, timed_out),
+            ("put", RequestFault::Status(400), retried, failed),
+            ("put", RequestFault::Status(503), retried, failed),
+            ("put", RequestFault::Timeout, timed_out, failed),
+            ("head", RequestFault::Status(400), 1, failed),
+            ("head", RequestFault::Status(503), retried, failed),
+            ("head", RequestFault::Timeout, timed_out, failed),
+            ("upload", RequestFault::Status(400), 1, failed),
+            ("upload", RequestFault::Status(503), retried, failed),
+            ("upload", RequestFault::Timeout, timed_out, failed),
         ] {
             let kind = ConfiguredObjectStoreKind::AwsS3;
             let provider = FaultyProvider {
@@ -1181,10 +1179,16 @@ mod tests {
                 attempts: Arc::default(),
             };
             let store = scripted_store(kind, &provider);
+            if operation == "delete" {
+                store
+                    .put_if_absent(KEY, Bytes::from_static(b"payload"))
+                    .await
+                    .expect("seed the deleted object");
+            }
             let clock = TokioTimer::start();
             let reported = match operation {
-                "delete" => store.delete(KEY).await.expect_err("delete").kind(),
-                "head" => store.head(KEY).await.expect_err("head").kind(),
+                "delete" => store.delete(KEY).await.err().map(|error| error.kind()),
+                "head" => store.head(KEY).await.err().map(|error| error.kind()),
                 _ => {
                     // A one-part upload, so the part's attempts are the only
                     // faulted requests.
@@ -1193,16 +1197,16 @@ mod tests {
                         _ => (store.multipart_geometry(3, 3), Bytes::from_static(b"one")),
                     };
                     match store.put_immutable_verified(KEY, payload).await {
-                        Err(ImmutableWriteError::Transport { source, .. }) => source.kind(),
-                        other => panic!("{operation} {fault:?} returned {other:?}"),
+                        Ok(_) => None,
+                        Err(ImmutableWriteError::Transport { source, .. }) => Some(source.kind()),
+                        Err(other) => panic!("{operation} {fault:?} returned {other:?}"),
                     }
                 }
             };
             let elapsed_ms = clock.monotonic_now_ms();
             assert_eq!(
-                reported,
-                ObjectStoreErrorKind::Other,
-                "{operation} {fault:?} is reported as non-retryable"
+                reported, outcome,
+                "{operation} {fault:?} outcome (a failure is reported as non-retryable)"
             );
             assert_eq!(
                 provider.attempts.load(Ordering::SeqCst),
@@ -1220,11 +1224,12 @@ mod tests {
                 usize::from(operation == "upload"),
                 "{operation} {fault:?} multipart creates"
             );
+            let bound = match outcome {
+                Some(_) => PROVIDER_OPERATION_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT,
+                None => PROVIDER_OPERATION_DEADLINE,
+            };
             assert!(
-                elapsed_ms
-                    <= saturating_duration_ms(
-                        PROVIDER_OPERATION_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT
-                    ),
+                elapsed_ms <= saturating_duration_ms(bound),
                 "{operation} {fault:?} took {elapsed_ms} ms"
             );
         }

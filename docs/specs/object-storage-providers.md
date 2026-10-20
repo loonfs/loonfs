@@ -35,7 +35,7 @@ Items marked *live* are documented behavior that only a run against the provider
 
 For an object that hasn't changed, the modification time in a listing and the modification time a HEAD request returns differ by less than one second. R2 and GCS listings keep fractional seconds, while HEAD reports whole seconds. The garbage collector uses listing times, without a HEAD request for each object. Its `GC_SAFETY_MARGIN_MS` is 180,000 milliseconds, and that allowance includes timestamp precision.
 
-Each request has one retry budget: the provider client retries the requests it sends, LoonFS retries the requests it signs itself (parts, part copies, resumable chunks, composes, reads, and HEAD requests) and its verified immutable writes, each up to 10 times within the 120-second `PROVIDER_OPERATION_DEADLINE_MS`, an exhausted budget is reported as a non-retryable error, and a conditional publication is one attempt.
+Each request has one retry budget: the provider client retries the requests it sends, LoonFS retries the requests it signs itself (parts, part copies, resumable chunks, composes, reads, and HEAD requests), its verified immutable writes, and a delete whose attempt timed out (which the provider client doesn't resend), each up to 10 times within the 120-second `PROVIDER_OPERATION_DEADLINE_MS`, an exhausted budget is reported as a non-retryable error, and a conditional publication is one attempt.
 
 AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. The chain checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a profile by its name.
 

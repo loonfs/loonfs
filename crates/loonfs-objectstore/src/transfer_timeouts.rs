@@ -50,6 +50,13 @@ pub(crate) enum TransferTimeoutError {
     },
 }
 
+/// Reports whether `error`, or an error it wraps, is a timeout this
+/// connector reported.
+pub(crate) fn is_transfer_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source())
+        .any(|error| error.is::<TransferTimeoutError>())
+}
+
 /// [`HttpConnector`] for provider clients: routes IO onto the store's own
 /// runtime (the [`SpawnedReqwestConnector`] behavior) and applies the
 /// transfer-aware timeout scheme above instead of the client options'

@@ -7,9 +7,10 @@ use crate::keyspace::{
     unscope_listed_key,
 };
 use crate::object_store::{unsupported_multipart, Result};
-use crate::retry::{RetryWarnings, DEFAULT};
+use crate::retry::{with_transport_retry, RetryWarnings, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
+use crate::transfer_timeouts::is_transfer_timeout;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
@@ -714,16 +715,31 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    /// Sends one delete through the retrying client, which retries it, so
-    /// LoonFS doesn't retry it again.
+    /// Sends a delete through the retrying client, and sends it again when
+    /// its attempt timed out.
+    ///
+    /// The retrying client retries a delete's connection failures and 5xx
+    /// responses, but it doesn't resend a DELETE that timed out, because it
+    /// doesn't mark DELETE idempotent. A delete is idempotent here (deleting
+    /// a missing object succeeds), so LoonFS resends a delete whose attempt
+    /// timed out, under one retry budget. Every other failure from the
+    /// retrying client returns at once.
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.to_path(key)?;
-        match self.inner.delete(&path).await {
-            Err(error) if provider_not_found(&error) => Ok(()),
-            result => {
-                result.map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))
+        with_transport_retry(&self.retry_warnings, key, "delete", 0, || async {
+            match self.inner.delete(&path).await {
+                Ok(()) => Ok(()),
+                Err(error) if provider_not_found(&error) => Ok(()),
+                Err(error) if is_transfer_timeout(&error) => {
+                    Err(ObjectStoreError::retryable_transport(
+                        key,
+                        sanitize_provider_message(&error.to_string()),
+                    ))
+                }
+                Err(error) => Err(map_provider_error(key, error, ProviderClient::Retrying)),
             }
-        }
+        })
+        .await
     }
 
     async fn assemble(
@@ -2187,8 +2203,8 @@ mod tests {
     }
 
     /// Checks that a delete is one call to the client that retries its own
-    /// requests, so a failure from that client returns at once and isn't
-    /// classified as retryable.
+    /// requests, so a failure from that client other than a timeout returns
+    /// at once and isn't classified as retryable.
     #[tokio::test]
     async fn a_delete_is_one_call_to_the_client_that_retries_it() {
         let flaky = Arc::new(FlakyStore::default());
