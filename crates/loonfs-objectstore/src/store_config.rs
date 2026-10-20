@@ -4,8 +4,9 @@
 //! (`[profiles.<name>.store]`) deserialize into [`StoreConfig`], validate it
 //! with [`StoreConfig::validate`], and construct the runtime store with
 //! [`StoreConfig::configured_object_store`]. The TOML shape is kind-tagged
-//! and snake_case. Each binary ships the examples that document it, in the
-//! `config/` directory of its own crate.
+//! and snake_case. Each provider variant wraps the settings struct that the
+//! provider's constructor takes. Each binary ships the examples that document
+//! it, in the `config/` directory of its own crate.
 
 use crate::configured::{
     endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
@@ -14,9 +15,7 @@ use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind, ObjectStoreError};
 use http::Uri;
-use loonfs_types::config::{
-    non_blank, validate_absolute_http_url, validate_non_empty, ConfigFieldError,
-};
+use loonfs_types::config::{validate_absolute_http_url, validate_non_empty, ConfigFieldError};
 use loonfs_types::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -93,47 +92,11 @@ pub enum StoreConfig {
         key_prefix: Option<String>,
     },
     /// Connects to AWS S3 or an explicitly configured S3-compatible endpoint.
-    AwsS3 {
-        /// Bucket that acts as the physical store root.
-        bucket: String,
-        /// SigV4 signing region.
-        region: String,
-        /// Service endpoint override, or `None` to derive the regional AWS endpoint.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint_url: Option<String>,
-        /// Credential source used by every provider request and presigned URL.
-        credentials: AwsS3Credentials,
-        /// Logical prefix applied inside the bucket, or `None` to expose its root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-        /// Uses path-style bucket addressing when `true`; defaults to virtual-hosted style.
-        #[serde(default)]
-        force_path_style: bool,
-    },
+    AwsS3(AwsS3StoreConfig),
     /// Connects to Cloudflare R2 through its S3-compatible endpoint.
-    CloudflareR2 {
-        /// R2 bucket that acts as the physical store root.
-        bucket: String,
-        /// Cloudflare account identity used to validate provider configuration.
-        account_id: String,
-        /// Account-level R2 S3 endpoint used with path-style bucket addressing.
-        endpoint_url: String,
-        /// Credential source resolved when the store is constructed.
-        credentials: CloudflareR2Credentials,
-        /// Logical prefix applied inside the bucket, or `None` to expose its root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
+    CloudflareR2(CloudflareR2StoreConfig),
     /// Connects to Google Cloud Storage through its native generation-aware API.
-    GcpGcs {
-        /// GCS bucket that acts as the physical store root.
-        bucket: String,
-        /// Credential source used for requests and direct-transfer signing.
-        credentials: GcpGcsCredentials,
-        /// Logical prefix applied inside the bucket, or `None` to expose its root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
+    GcpGcs(GcpGcsStoreConfig),
 }
 
 impl serde::Serialize for StoreConfig {
@@ -170,11 +133,11 @@ impl StoreConfig {
     pub fn credentials_kind(&self) -> Option<&'static str> {
         match self {
             StoreConfig::LocalFs { .. } => None,
-            StoreConfig::AwsS3 { credentials, .. } => Some(match credentials {
+            StoreConfig::AwsS3(config) => Some(match config.credentials {
                 AwsS3Credentials::Ambient {} => "ambient",
                 AwsS3Credentials::Static { .. } => "static",
             }),
-            StoreConfig::CloudflareR2 { credentials, .. } => Some(match credentials {
+            StoreConfig::CloudflareR2(config) => Some(match config.credentials {
                 CloudflareR2Credentials::Ambient {} => "ambient",
                 CloudflareR2Credentials::Static { .. } => "static",
             }),
@@ -194,52 +157,11 @@ impl StoreConfig {
             StoreConfig::LocalFs { root, key_prefix } => {
                 ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
             }
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                credentials,
-                key_prefix,
-                force_path_style,
-            } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
-                bucket: bucket.clone(),
-                region: region.clone(),
-                endpoint_url: endpoint_url.clone(),
-                credentials: credentials.clone(),
-                key_prefix: key_prefix.clone(),
-                force_path_style: *force_path_style,
-            }),
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                credentials,
-                key_prefix,
-            } => {
-                let (access_key_id, secret_access_key) =
-                    resolve_r2_credentials(credentials, |name| std::env::var(name).ok())?;
-                ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
-                    bucket: bucket.clone(),
-                    account_id: account_id.clone(),
-                    endpoint_url: endpoint_url.clone(),
-                    access_key_id,
-                    secret_access_key,
-                    key_prefix: key_prefix.clone(),
-                })
+            StoreConfig::AwsS3(config) => ConfiguredObjectStore::aws_s3(config.clone()),
+            StoreConfig::CloudflareR2(config) => {
+                ConfiguredObjectStore::cloudflare_r2(config.clone())
             }
-            StoreConfig::GcpGcs {
-                bucket,
-                credentials,
-                key_prefix,
-            } => match credentials {
-                GcpGcsCredentials::ServiceAccountFile { path } => {
-                    ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
-                        bucket: bucket.clone(),
-                        service_account_key_path: path.clone(),
-                        key_prefix: key_prefix.clone(),
-                    })
-                }
-            },
+            StoreConfig::GcpGcs(config) => ConfiguredObjectStore::gcp_gcs(config.clone()),
         }
     }
 
@@ -250,13 +172,13 @@ impl StoreConfig {
             StoreConfig::LocalFs { root, .. } => {
                 validate_non_empty("store.root", root)?;
             }
-            StoreConfig::AwsS3 {
+            StoreConfig::AwsS3(AwsS3StoreConfig {
                 bucket,
                 region,
                 endpoint_url,
                 credentials,
                 ..
-            } => {
+            }) => {
                 validate_non_empty("store.bucket", bucket)?;
                 validate_non_empty("store.region", region)?;
                 validate_aws_s3_credentials(credentials)?;
@@ -269,13 +191,13 @@ impl StoreConfig {
                     )?;
                 }
             }
-            StoreConfig::CloudflareR2 {
+            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket,
                 account_id,
                 endpoint_url,
                 credentials,
                 ..
-            } => {
+            }) => {
                 validate_non_empty("store.bucket", bucket)?;
                 validate_non_empty("store.account_id", account_id)?;
                 validate_r2_credentials(credentials)?;
@@ -286,17 +208,13 @@ impl StoreConfig {
                     CLOUDFLARE_R2_PROVEN_DOMAINS,
                 )?;
             }
-            StoreConfig::GcpGcs {
+            StoreConfig::GcpGcs(GcpGcsStoreConfig {
                 bucket,
-                credentials,
+                credentials: GcpGcsCredentials::ServiceAccountFile { path },
                 ..
-            } => {
+            }) => {
                 validate_non_empty("store.bucket", bucket)?;
-                match credentials {
-                    GcpGcsCredentials::ServiceAccountFile { path } => {
-                        validate_non_empty("store.credentials.path", path)?;
-                    }
-                }
+                validate_non_empty("store.credentials.path", path)?;
             }
         }
         Ok(())
@@ -308,7 +226,7 @@ impl StoreConfig {
         let mut redacted = self.clone();
         match &mut redacted {
             StoreConfig::LocalFs { .. } | StoreConfig::GcpGcs { .. } => {}
-            StoreConfig::AwsS3 { credentials, .. } => {
+            StoreConfig::AwsS3(AwsS3StoreConfig { credentials, .. }) => {
                 if let AwsS3Credentials::Static {
                     access_key_id,
                     secret_access_key,
@@ -320,7 +238,7 @@ impl StoreConfig {
                     *session_token = session_token.as_ref().map(SecretString::masked);
                 }
             }
-            StoreConfig::CloudflareR2 { credentials, .. } => {
+            StoreConfig::CloudflareR2(CloudflareR2StoreConfig { credentials, .. }) => {
                 if let CloudflareR2Credentials::Static {
                     access_key_id,
                     secret_access_key,
@@ -369,37 +287,6 @@ fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), 
     Ok(())
 }
 
-fn resolve_r2_credentials(
-    credentials: &CloudflareR2Credentials,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> crate::object_store::Result<(SecretString, SecretString)> {
-    match credentials {
-        CloudflareR2Credentials::Static {
-            access_key_id,
-            secret_access_key,
-        } => Ok((access_key_id.clone(), secret_access_key.clone())),
-        CloudflareR2Credentials::Ambient {} => {
-            let access_key_id = non_blank(lookup(ACCESS_KEY_ID_ENV));
-            let secret_access_key = non_blank(lookup(SECRET_ACCESS_KEY_ENV));
-            match (access_key_id, secret_access_key) {
-                (Some(access_key_id), Some(secret_access_key)) => Ok((
-                    SecretString::new(access_key_id),
-                    SecretString::new(secret_access_key),
-                )),
-                _ => Err(missing_r2_ambient_credentials()),
-            }
-        }
-    }
-}
-
-fn missing_r2_ambient_credentials() -> ObjectStoreError {
-    ObjectStoreError::Configuration(format!(
-        "cloudflare_r2 ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
-         `{SECRET_ACCESS_KEY_ENV}`; set them in the environment or configure \
-         `store.credentials.kind = \"static\"`"
-    ))
-}
-
 /// Refuses a provider's own domain addressed over plain `http`.
 ///
 /// Reaching one of these endpoints without TLS is a misconfiguration, not a
@@ -432,7 +319,8 @@ fn validate_tls_on_proven_domains(
 #[cfg(test)]
 mod tests {
 
-    use super::{resolve_r2_credentials, CloudflareR2Credentials, ConfigFieldError, StoreConfig};
+    use super::{CloudflareR2Credentials, ConfigFieldError, StoreConfig};
+    use crate::aws_credentials::resolve_r2_credentials;
     use crate::ConfiguredObjectStoreKind;
 
     fn parse(contents: &str) -> StoreConfig {
@@ -607,11 +495,11 @@ endpoint_url = "https://account.r2.cloudflarestorage.com"
 kind = "ambient"
 "#,
         );
-        let StoreConfig::CloudflareR2 { credentials, .. } = &r2 else {
+        let StoreConfig::CloudflareR2(config) = &r2 else {
             panic!("expected cloudflare-r2")
         };
         let (access_key_id, secret_access_key) =
-            resolve_r2_credentials(credentials, environment).expect("resolve ambient r2");
+            resolve_r2_credentials(&config.credentials, environment).expect("resolve ambient r2");
         assert_eq!(access_key_id.expose(), "env-access");
         assert_eq!(secret_access_key.expose(), "env-secret");
     }
@@ -769,6 +657,88 @@ secret_access_key = "plain-secret-access-key"
         assert!(!rendered.contains("plain-secret-access-key"));
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("account"));
+    }
+
+    /// Checks that each provider's store table, with every key set, serializes
+    /// back to the same keys and values and parses to the same config, and
+    /// that an unknown key in it fails the parse.
+    #[test]
+    fn every_store_table_round_trips_with_unchanged_keys() {
+        let tables = [
+            r#"
+kind = "local_fs"
+root = "/tmp/store"
+key_prefix = "demo"
+"#,
+            r#"
+kind = "aws_s3"
+bucket = "bucket"
+region = "us-east-1"
+endpoint_url = "https://bucket.s3.amazonaws.com"
+key_prefix = "demo"
+force_path_style = true
+
+[credentials]
+kind = "static"
+access_key_id = "access"
+secret_access_key = "secret"
+session_token = "session"
+"#,
+            r#"
+kind = "aws_s3"
+bucket = "bucket"
+region = "us-east-1"
+force_path_style = false
+
+[credentials]
+kind = "ambient"
+"#,
+            r#"
+kind = "cloudflare_r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+key_prefix = "demo"
+
+[credentials]
+kind = "static"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+            r#"
+kind = "cloudflare_r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+
+[credentials]
+kind = "ambient"
+"#,
+            r#"
+kind = "gcp_gcs"
+bucket = "bucket"
+key_prefix = "demo"
+
+[credentials]
+kind = "service_account_file"
+path = "/tmp/service-account.json"
+"#,
+        ];
+
+        for table in tables {
+            let config = parse(table);
+            let rendered = toml::to_string_pretty(&config).expect("serialize store config");
+            assert_eq!(
+                toml::from_str::<toml::Value>(&rendered).expect("rendered toml"),
+                toml::from_str::<toml::Value>(table).expect("fixture toml"),
+                "the serialized table has the fixture's keys:\n{rendered}"
+            );
+            assert_eq!(parse(&rendered), config);
+
+            let typo = format!("buckt = \"typo\"\n{table}");
+            let error = toml::from_str::<StoreConfig>(&typo).expect_err("typo'd key must fail");
+            assert!(error.to_string().contains("buckt"), "{error}");
+        }
     }
 
     #[test]

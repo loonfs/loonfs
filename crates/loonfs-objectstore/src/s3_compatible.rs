@@ -8,7 +8,7 @@
 mod assembly;
 
 use crate::aws_credentials::{
-    aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
+    aws_credentials_source, cloudflare_r2_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
 };
 use crate::checksum_header::decode_base64_checksum;
@@ -36,10 +36,10 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
-use loonfs_types::SecretString;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, OperationDeadline};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,37 +48,47 @@ use std::time::Duration;
 /// checksum head, each is issued immediately and never handed out.
 const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
 
-/// Supplies credentials, addressing, and key scoping for AWS S3.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Supplies a credential source, addressing, and key scoping for AWS S3.
+///
+/// Config files spell this as a store table with `kind = "aws_s3"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AwsS3StoreConfig {
     /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
     /// Signing region passed to the S3 client and presigner.
     pub region: String,
     /// S3-compatible endpoint override, or `None` for the regional AWS endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
     /// Credential source shared by provider requests and presigned URLs.
     pub credentials: crate::AwsS3Credentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
     /// Selects path-style bucket addressing for compatible endpoints that require it.
+    ///
+    /// The default is virtual-hosted style.
+    #[serde(default)]
     pub force_path_style: bool,
 }
 
-/// Supplies explicit S3 credentials and account addressing for Cloudflare R2.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Supplies a credential source and account addressing for Cloudflare R2.
+///
+/// Config files spell this as a store table with `kind = "cloudflare_r2"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CloudflareR2StoreConfig {
     /// R2 bucket that acts as the LoonFS object-store root.
     pub bucket: String,
     /// Cloudflare account identity, required even though requests use the explicit endpoint.
     pub account_id: String,
-    /// Account-level R2 S3 endpoint; this adapter always uses path-style bucket addressing.
+    /// Account-level R2 S3 endpoint. This adapter always uses path-style bucket addressing.
     pub endpoint_url: String,
-    /// S3-compatible access-key id used for request signing.
-    pub access_key_id: SecretString,
-    /// S3-compatible secret used for request signing.
-    pub secret_access_key: SecretString,
+    /// Credential source, resolved when the store is built.
+    pub credentials: crate::CloudflareR2Credentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
 }
 
@@ -130,11 +140,7 @@ pub(crate) fn aws_s3_with_credentials(
 
 /// Builds a Cloudflare R2 store with path-style addressing.
 pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<ProviderObjectStore> {
-    let credentials = static_aws_credentials_source(
-        config.access_key_id.clone(),
-        config.secret_access_key.clone(),
-        None,
-    );
+    let credentials = cloudflare_r2_credentials_source(&config.credentials)?;
     cloudflare_r2_with_credentials(config, credentials).map(|(store, _)| store)
 }
 
@@ -801,9 +807,9 @@ fn object_store_endpoint_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        aws_s3, checked_data, object_store_endpoint_url, static_aws_credentials_source,
-        AwsS3StoreConfig, S3RequestSigner,
+        aws_s3, checked_data, object_store_endpoint_url, AwsS3StoreConfig, S3RequestSigner,
     };
+    use crate::aws_credentials::static_aws_credentials_source;
     use crate::presign::{
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };

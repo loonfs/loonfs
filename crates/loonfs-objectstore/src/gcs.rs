@@ -19,7 +19,7 @@ use crate::signed_request::{
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    AssemblySource, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    AssemblySource, GcpGcsCredentials, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
@@ -29,6 +29,7 @@ use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, L
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Root of the JSON API object resources.
@@ -40,14 +41,18 @@ const GCS_JSON_UPLOADS: &str = "https://storage.googleapis.com/upload/storage/v1
 /// The header that carries an object's checksums, in requests and responses.
 const GCS_HASH_HEADER: &str = "x-goog-hash";
 
-/// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Supplies a credential source and key scoping for the native Google Cloud Storage adapter.
+///
+/// Config files spell this as a store table with `kind = "gcp_gcs"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcpGcsStoreConfig {
     /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
-    /// Filesystem path to the service-account JSON loaded by the provider client.
-    pub service_account_key_path: String,
+    /// Credential source used for requests and direct-transfer signing.
+    pub credentials: GcpGcsCredentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
 }
 
@@ -72,6 +77,9 @@ pub(crate) fn gcp_gcs_with_issuers(
 ) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
     let request_signer = Arc::new(GcsV4Presigner::new(&config)?);
     let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
+    let GcpGcsCredentials::ServiceAccountFile {
+        path: service_account_key_path,
+    } = &config.credentials;
 
     let io_runtime = StoreIoRuntime::new()?;
     let http = io_runtime
@@ -83,7 +91,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         .with_client_options(crate::provider_object_store::provider_client_options())
         .with_retry(crate::provider_object_store::provider_retry_config())
         .with_bucket_name(config.bucket.clone())
-        .with_service_account_path(config.service_account_key_path);
+        .with_service_account_path(service_account_key_path);
 
     let provider = Arc::new(
         builder
@@ -367,6 +375,7 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
 mod tests {
     use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
     use crate::test_support::gcs_fixture_service_account_key_file;
+    use crate::GcpGcsCredentials;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
     use loonfs_types::Checksum;
@@ -461,7 +470,9 @@ mod tests {
                 request_signer: Arc::new(
                     GcsV4Presigner::new(&GcpGcsStoreConfig {
                         bucket: "bucket".to_owned(),
-                        service_account_key_path: path.display().to_string(),
+                        credentials: GcpGcsCredentials::ServiceAccountFile {
+                            path: path.display().to_string(),
+                        },
                         key_prefix: None,
                     })
                     .expect("signer"),
@@ -519,7 +530,9 @@ mod tests {
             request_signer: Arc::new(
                 GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
-                    service_account_key_path: path.display().to_string(),
+                    credentials: GcpGcsCredentials::ServiceAccountFile {
+                        path: path.display().to_string(),
+                    },
                     key_prefix: None,
                 })
                 .expect("signer"),
@@ -580,7 +593,9 @@ mod tests {
             gcs_fixture_service_account_key_file("gcs-invalid-key");
         let store = gcp_gcs(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: service_account_key_path.display().to_string(),
+            credentials: GcpGcsCredentials::ServiceAccountFile {
+                path: service_account_key_path.display().to_string(),
+            },
             key_prefix: None,
         })
         .expect("construct gcs store");
@@ -599,7 +614,9 @@ mod tests {
             gcs_fixture_service_account_key_file("gcs-streamed-cas");
         let store = gcp_gcs(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: service_account_key_path.display().to_string(),
+            credentials: GcpGcsCredentials::ServiceAccountFile {
+                path: service_account_key_path.display().to_string(),
+            },
             key_prefix: None,
         })
         .expect("construct gcs store");
@@ -620,7 +637,9 @@ mod tests {
         assert_matches!(
             gcp_gcs(GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
-                service_account_key_path: " ".to_owned(),
+                credentials: GcpGcsCredentials::ServiceAccountFile {
+                    path: " ".to_owned(),
+                },
                 key_prefix: None,
             }),
             Err(ObjectStoreError::Configuration(_))
@@ -640,7 +659,9 @@ mod tests {
         assert_matches!(
             gcp_gcs(GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
-                service_account_key_path: unsignable.display().to_string(),
+                credentials: GcpGcsCredentials::ServiceAccountFile {
+                    path: unsignable.display().to_string(),
+                },
                 key_prefix: None,
             }),
             Err(ObjectStoreError::Configuration(_))

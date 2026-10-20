@@ -4,6 +4,8 @@ use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_client::{Client, ClientError, DownloadOptions, NamespacePath, PayloadSource};
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
 };
@@ -88,7 +90,7 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
     direct_put_round_trip(
         S3_SIGNED_WRITE,
         test_config(
-            StoreConfig::AwsS3 {
+            StoreConfig::AwsS3(AwsS3StoreConfig {
                 bucket: config.bucket,
                 region: config.region,
                 endpoint_url: config.endpoint,
@@ -99,7 +101,7 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
                 },
                 key_prefix: Some(config.prefix),
                 force_path_style: false,
-            },
+            }),
             AUTH_TOKEN,
             CONTENT_TOKEN_SECRET,
             "direct-put-aws-s3",
@@ -116,7 +118,7 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
     direct_put_round_trip(
         S3_SIGNED_WRITE,
         test_config(
-            StoreConfig::CloudflareR2 {
+            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket: config.bucket,
                 account_id: config.account_id,
                 endpoint_url: config.endpoint,
@@ -125,7 +127,7 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
                     secret_access_key: config.secret_access_key.into(),
                 },
                 key_prefix: Some(config.prefix),
-            },
+            }),
             AUTH_TOKEN,
             CONTENT_TOKEN_SECRET,
             "direct-put-r2",
@@ -573,13 +575,13 @@ impl GcpGcsDirectPutConfig {
     }
 
     fn store(self) -> StoreConfig {
-        StoreConfig::GcpGcs {
+        StoreConfig::GcpGcs(GcpGcsStoreConfig {
             bucket: self.bucket,
             credentials: GcpGcsCredentials::ServiceAccountFile {
                 path: self.service_account_key_path,
             },
             key_prefix: Some(self.prefix),
-        }
+        })
     }
 }
 
@@ -837,9 +839,9 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
     let ObjectTransferAccess::PresignedUrl { url, .. } = access;
-    let StoreConfig::GcpGcs {
+    let StoreConfig::GcpGcs(GcpGcsStoreConfig {
         bucket, key_prefix, ..
-    } = store_config
+    }) = store_config
     else {
         panic!("this proof runs on GCS")
     };
@@ -948,7 +950,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
 async fn aws_s3_direct_multipart_real_provider_round_trip() {
     let config = AwsS3DirectPutConfig::from_env().expect("load AWS S3 direct-put environment");
     direct_multipart_round_trip(test_config(
-        StoreConfig::AwsS3 {
+        StoreConfig::AwsS3(AwsS3StoreConfig {
             bucket: config.bucket,
             region: config.region,
             endpoint_url: config.endpoint,
@@ -959,7 +961,7 @@ async fn aws_s3_direct_multipart_real_provider_round_trip() {
             },
             key_prefix: Some(config.prefix),
             force_path_style: false,
-        },
+        }),
         AUTH_TOKEN,
         CONTENT_TOKEN_SECRET,
         "direct-multipart-aws-s3",
@@ -973,7 +975,7 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
     let config =
         CloudflareR2DirectPutConfig::from_env().expect("load Cloudflare R2 direct-put environment");
     direct_multipart_round_trip(test_config(
-        StoreConfig::CloudflareR2 {
+        StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
             bucket: config.bucket,
             account_id: config.account_id,
             endpoint_url: config.endpoint,
@@ -982,7 +984,7 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
                 secret_access_key: config.secret_access_key.into(),
             },
             key_prefix: Some(config.prefix),
-        },
+        }),
         AUTH_TOKEN,
         CONTENT_TOKEN_SECRET,
         "direct-multipart-r2",

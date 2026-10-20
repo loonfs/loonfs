@@ -15,7 +15,7 @@ use crate::presign::v4::{
     percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
     V4RequestParts, V4Scheme,
 };
-use crate::ObjectStoreError;
+use crate::{GcpGcsCredentials, ObjectStoreError};
 use async_trait::async_trait;
 use base64::Engine as _;
 use loonfs_types::format::hex::hex_encode_bytes;
@@ -93,7 +93,8 @@ impl GcsV4Presigner {
     /// malformed key file, or a private key that is not an RSA key in PKCS#8
     /// form.
     pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
-        let raw = std::fs::read(&config.service_account_key_path).map_err(|err| {
+        let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials;
+        let raw = std::fs::read(path).map_err(|err| {
             ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
         })?;
         // The parse error is not quoted: a malformed key file's contents are
@@ -299,6 +300,7 @@ mod tests {
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
+    use crate::GcpGcsCredentials;
     use crate::{ByteRange, ObjectStoreError};
     use loonfs_types::ChecksumAlgorithm;
     use std::assert_matches;
@@ -342,7 +344,9 @@ mod tests {
             gcs_fixture_service_account_key_file("gcs-presign");
         GcsV4Presigner::new(&GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: service_account_key_path.display().to_string(),
+            credentials: GcpGcsCredentials::ServiceAccountFile {
+                path: service_account_key_path.display().to_string(),
+            },
             key_prefix: key_prefix.map(ToOwned::to_owned),
         })
         .expect("signer")
@@ -492,7 +496,9 @@ mod tests {
             assert_matches!(
                 GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
-                    service_account_key_path: service_account_key_path.display().to_string(),
+                    credentials: GcpGcsCredentials::ServiceAccountFile {
+                        path: service_account_key_path.display().to_string(),
+                    },
                     key_prefix: Some(raw_prefix.to_owned()),
                 }),
                 Err(ObjectStoreError::InvalidKey { .. })
@@ -588,7 +594,9 @@ mod tests {
             assert_matches!(
                 GcsV4Presigner::new(&GcpGcsStoreConfig {
                     bucket: "bucket".to_owned(),
-                    service_account_key_path: path.display().to_string(),
+                    credentials: GcpGcsCredentials::ServiceAccountFile {
+                        path: path.display().to_string(),
+                    },
                     key_prefix: None,
                 }),
                 Err(ObjectStoreError::Configuration(_)),

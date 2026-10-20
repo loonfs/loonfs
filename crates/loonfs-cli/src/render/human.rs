@@ -5,6 +5,8 @@ use super::*;
 use crate::commands::{TrashListing, TreeTransferFailures};
 use crate::config::{CliConfig, ProfileConfig};
 use crate::profiles::ProfileSummary;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::StoreConfig;
 use loonfs_types::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 
@@ -200,15 +202,15 @@ fn profile_location(profile: &ProfileConfig) -> String {
     let kind = store.kind().as_str();
     let (location, key_prefix) = match store {
         StoreConfig::LocalFs { root, .. } => return format!("{kind}, root {root}"),
-        StoreConfig::AwsS3 {
+        StoreConfig::AwsS3(AwsS3StoreConfig {
             bucket, key_prefix, ..
-        }
-        | StoreConfig::CloudflareR2 {
+        })
+        | StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
             bucket, key_prefix, ..
-        }
-        | StoreConfig::GcpGcs {
+        })
+        | StoreConfig::GcpGcs(GcpGcsStoreConfig {
             bucket, key_prefix, ..
-        } => (format!("bucket {bucket}"), key_prefix),
+        }) => (format!("bucket {bucket}"), key_prefix),
     };
     let prefix = key_prefix
         .as_deref()

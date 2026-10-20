@@ -1,7 +1,7 @@
 //! [`ConfiguredObjectStore`]: one provider client built from configuration,
 //! paired with the direct transfers that provider can authorize.
 
-use crate::aws_credentials::{aws_credentials_source, static_aws_credentials_source};
+use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_source};
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
 use crate::object_store::{Result, SharedObjectStore};
@@ -17,12 +17,6 @@ use std::sync::Arc;
 /// Provider domains covered by live direct-transfer tests.
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
-
-/// Whether live provider tests have validated GCS direct transfers.
-///
-/// Enable this only after the credentialed tests confirm create-only writes
-/// and stored CRC-32C checksums.
-const GCS_DIRECT_TRANSFERS_PROVEN: bool = true;
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,13 +86,11 @@ impl ConfiguredObjectStore {
     /// Builds a Cloudflare R2 store, and the direct transfers it can
     /// authorize on a proven endpoint.
     ///
-    /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
+    /// Construction fails when ambient credentials are missing from the
+    /// environment, or when signing, provider, runtime, or key-prefix
+    /// configuration is invalid.
     pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
-        let credentials = static_aws_credentials_source(
-            config.access_key_id.clone(),
-            config.secret_access_key.clone(),
-            None,
-        );
+        let credentials = cloudflare_r2_credentials_source(&config.credentials)?;
         let direct_transfers_enabled = endpoint_is_proven(
             Some(config.endpoint_url.as_str()),
             CLOUDFLARE_R2_PROVEN_DOMAINS,
@@ -111,37 +103,20 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native GCS store.
-    ///
-    /// Direct reads and whole-object writes are enabled only after live
-    /// validation sets `GCS_DIRECT_TRANSFERS_PROVEN` to confirm that the
-    /// provider enforces them.
+    /// Builds a native GCS store, and the direct transfers it can authorize.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
-    /// multipart slot stays empty rather than holding a signer that would
-    /// fail. It needs no endpoint-trust decision either: the configuration
-    /// carries no endpoint override, so every capability is `https` to
-    /// Google's own host.
+    /// multipart slot stays empty instead of containing a signer that would
+    /// fail. It needs no endpoint-trust decision either. The configuration
+    /// has no endpoint override, so every capability is `https` to Google's
+    /// own host.
     ///
     /// Construction fails when the key file, provider, runtime, or key prefix is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
-        Self::gcp_gcs_proven(config, GCS_DIRECT_TRANSFERS_PROVEN)
-    }
-
-    /// The same store with the live-conformance verdict passed in, so a test
-    /// can show what the flip turns on without waiting for it.
-    ///
-    /// The signer is built either way. It is the credential path the store's
-    /// own checksum readback needs, and building it is what makes an
-    /// unusable service-account key a startup failure rather than a surprise
-    /// at the first transfer — so `proven` decides only whether the bundle is
-    /// handed out, never whether it exists.
-    fn gcp_gcs_proven(config: GcpGcsStoreConfig, proven: bool) -> Result<Self> {
         let (store, issuers) = gcp_gcs_with_issuers(config)?;
-        let direct_transfers = proven.then_some(issuers);
         Ok(Self {
             inner: Arc::new(store),
-            direct_transfers,
+            direct_transfers: Some(issuers),
         })
     }
 
@@ -209,7 +184,7 @@ mod tests {
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
     use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::ObjectStoreError;
-    use crate::{AwsS3Credentials, ObjectStore};
+    use crate::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore};
     use bytes::Bytes;
     use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
@@ -246,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn a_proven_gcs_deployment_signs_puts_and_gets_and_offers_no_multipart() {
-        let transfers = proven_gcs_store()
+    fn a_gcs_store_signs_puts_and_gets_and_offers_no_multipart() {
+        let transfers = gcs_store()
             .direct_transfers()
             .expect("gcs signs its native scheme");
         let put = transfers.put.expect("gcs signs whole-object writes");
@@ -261,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_gcs_bundle_signs_native_generation_preconditions() {
-        let issuer = proven_gcs_store()
+        let issuer = gcs_store()
             .direct_transfers()
             .and_then(|transfers| transfers.put)
             .expect("gcs presigner");
@@ -321,9 +296,8 @@ mod tests {
             .direct_transfers()
             .is_none());
 
-        // GCS has no endpoint override to judge, so what gates it is the
-        // live-conformance flag instead — and that run is recorded on the
-        // flag.
+        // GCS has no endpoint override to judge, so every GCS store offers
+        // direct transfers.
         assert!(gcs_store().direct_transfers().is_some());
     }
 
@@ -387,13 +361,6 @@ mod tests {
         ConfiguredObjectStore::gcp_gcs(config).expect("construct gcs store")
     }
 
-    /// The same deployment as it will be once a credentialed conformance run
-    /// has flipped [`GCS_DIRECT_TRANSFERS_PROVEN`].
-    fn proven_gcs_store() -> ConfiguredObjectStore {
-        let (_key_dir, config) = gcs_config();
-        ConfiguredObjectStore::gcp_gcs_proven(config, true).expect("construct gcs store")
-    }
-
     fn gcs_config() -> (tempfile::TempDir, GcpGcsStoreConfig) {
         let (key_dir, service_account_key_path) =
             gcs_fixture_service_account_key_file("configured-store-gcs");
@@ -401,7 +368,9 @@ mod tests {
             key_dir,
             GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
-                service_account_key_path: service_account_key_path.display().to_string(),
+                credentials: GcpGcsCredentials::ServiceAccountFile {
+                    path: service_account_key_path.display().to_string(),
+                },
                 key_prefix: Some("tenant-a".to_owned()),
             },
         )
@@ -412,8 +381,10 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: endpoint_url.to_owned(),
-            access_key_id: "access".into(),
-            secret_access_key: "secret".into(),
+            credentials: CloudflareR2Credentials::Static {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+            },
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store")
@@ -425,8 +396,10 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".into(),
-            secret_access_key: "secret".into(),
+            credentials: CloudflareR2Credentials::Static {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+            },
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
@@ -458,8 +431,10 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: FIXTURE_ACCESS_KEY_ID.into(),
-            secret_access_key: FIXTURE_SECRET_ACCESS_KEY.into(),
+            credentials: CloudflareR2Credentials::Static {
+                access_key_id: FIXTURE_ACCESS_KEY_ID.into(),
+                secret_access_key: FIXTURE_SECRET_ACCESS_KEY.into(),
+            },
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");

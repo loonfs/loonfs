@@ -995,14 +995,16 @@ secret_access_key = "secret"
 
     #[test]
     fn the_loader_preserves_the_serialized_credential_source() {
-        let store = loonfs_objectstore::StoreConfig::AwsS3 {
-            bucket: "bucket".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint_url: None,
-            credentials: loonfs_objectstore::AwsS3Credentials::Ambient {},
-            key_prefix: None,
-            force_path_style: false,
-        };
+        let store = loonfs_objectstore::StoreConfig::AwsS3(
+            loonfs_objectstore::s3_compatible::AwsS3StoreConfig {
+                bucket: "bucket".to_owned(),
+                region: "us-east-1".to_owned(),
+                endpoint_url: None,
+                credentials: loonfs_objectstore::AwsS3Credentials::Ambient {},
+                key_prefix: None,
+                force_path_style: false,
+            },
+        );
         let serialized = toml::to_string_pretty(&store).expect("serialize shared store");
         let qualified = format!(
             "[profiles.parity.store]\n{}",

@@ -1,10 +1,13 @@
 //! AWS credential sources shared by provider requests and presigners.
 
-use crate::store_config::AwsS3Credentials;
+use crate::store_config::{
+    AwsS3Credentials, CloudflareR2Credentials, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+};
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_credential_types::provider::SharedCredentialsProvider;
+use loonfs_types::config::non_blank;
 use loonfs_types::{SecretString, REDACTED};
 use object_store::aws::AwsCredential;
 use object_store::client::CredentialProvider;
@@ -74,6 +77,55 @@ pub(crate) fn aws_credentials_source(
             },
         ))),
     }
+}
+
+/// Builds the source selected by the Cloudflare R2 configuration.
+///
+/// Ambient keys are read from the process environment once, when the store
+/// is built.
+pub(crate) fn cloudflare_r2_credentials_source(
+    credentials: &CloudflareR2Credentials,
+) -> Result<SharedAwsCredentialsSource, ObjectStoreError> {
+    let (access_key_id, secret_access_key) =
+        resolve_r2_credentials(credentials, |name| std::env::var(name).ok())?;
+    Ok(static_aws_credentials_source(
+        access_key_id,
+        secret_access_key,
+        None,
+    ))
+}
+
+/// Resolves an R2 credential source to an access-key pair, reading ambient
+/// keys through `lookup`.
+pub(crate) fn resolve_r2_credentials(
+    credentials: &CloudflareR2Credentials,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(SecretString, SecretString), ObjectStoreError> {
+    match credentials {
+        CloudflareR2Credentials::Static {
+            access_key_id,
+            secret_access_key,
+        } => Ok((access_key_id.clone(), secret_access_key.clone())),
+        CloudflareR2Credentials::Ambient {} => {
+            let access_key_id = non_blank(lookup(ACCESS_KEY_ID_ENV));
+            let secret_access_key = non_blank(lookup(SECRET_ACCESS_KEY_ENV));
+            match (access_key_id, secret_access_key) {
+                (Some(access_key_id), Some(secret_access_key)) => Ok((
+                    SecretString::new(access_key_id),
+                    SecretString::new(secret_access_key),
+                )),
+                _ => Err(missing_r2_ambient_credentials()),
+            }
+        }
+    }
+}
+
+fn missing_r2_ambient_credentials() -> ObjectStoreError {
+    ObjectStoreError::Configuration(format!(
+        "cloudflare_r2 ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
+         `{SECRET_ACCESS_KEY_ENV}`; set them in the environment or configure \
+         `store.credentials.kind = \"static\"`"
+    ))
 }
 
 /// Builds a source for an already resolved S3-compatible credential set.
