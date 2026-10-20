@@ -1,7 +1,6 @@
 //! Publication through the next immutable manifest number.
 
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::namespace::control::{
     load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
     raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
@@ -10,7 +9,9 @@ use crate::time::Deadline;
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::control::{
+    encode_control_state, ControlObjectKind, HintPayload, ManifestRef,
+};
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -42,24 +43,36 @@ pub(crate) enum ManifestChange<T> {
     Again,
 }
 
+/// Publishes the next manifest after the current one, and tries again after
+/// a lost put.
+///
+/// Each attempt loads the current manifest and the hint, and passes the
+/// manifest to `change`. A `Next` payload is published at the next manifest
+/// number with put-if-absent, and the hint is raised from the hint that the
+/// attempt loaded. After a lost put, the next attempt loads the manifest that
+/// won. The call returns `store_contention` once `attempts` attempts have
+/// each lost their put or returned `Again`. The caller starts `deadline`
+/// before the call, so `METADATA_PUBLICATION_BUDGET_MS` covers every attempt,
+/// from the first load to the last put.
 pub(crate) async fn update_manifest<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
+    attempts: usize,
     mut change: F,
 ) -> Result<(T, LoadedManifest, LoadedHint)>
 where
     S: ObjectStore + ?Sized,
-    F: FnMut(NamespaceManifestPayload) -> Fut,
+    F: FnMut(LoadedManifest) -> Fut,
     Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
 {
-    let mut attempts = 0;
+    let mut attempt = 0;
     loop {
-        attempts += 1;
+        attempt += 1;
         let (current, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
         let built_on = current.object_key.clone();
         let predecessor = current.state.envelope.payload().manifest_no;
-        match change(current.state.envelope.payload().clone()).await? {
+        match change(current.clone()).await? {
             ManifestChange::Next(payload, result) => {
                 let mut payload = *payload;
                 payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
@@ -73,23 +86,73 @@ where
                     Some(hint.clone()),
                 )
                 .await?;
-                if let ManifestPublicationOutcome::Published(state) = outcome {
-                    let loaded = LoadedManifest {
-                        object_key: metadata_manifest_object(
-                            namespace_id,
-                            &state.manifest().manifest_no,
-                        ),
-                        manifest_bytes,
-                        state,
-                    };
-                    return Ok((result, loaded, raised.unwrap_or(hint)));
-                }
+                let lost_to = match outcome {
+                    ManifestPublicationOutcome::Published(state) => {
+                        let loaded = LoadedManifest {
+                            object_key: metadata_manifest_object(
+                                namespace_id,
+                                &state.manifest().manifest_no,
+                            ),
+                            manifest_bytes,
+                            state,
+                        };
+                        return Ok((result, loaded, raised.unwrap_or(hint)));
+                    }
+                    ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
+                    ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
+                };
+                tracing::debug!(
+                    namespace_id = namespace_id.as_str(),
+                    attempt,
+                    attempts,
+                    lost_to,
+                    "a manifest publication lost its put"
+                );
             }
             ManifestChange::Finished(result) => return Ok((result, current, hint)),
             ManifestChange::Again => {}
         }
-        if attempts == MAX_CONTENTION_ATTEMPTS {
+        if attempt >= attempts {
             return Err(CoreError::contention_exhausted(&built_on));
+        }
+    }
+}
+
+/// Publishes manifest 1 of a new namespace, after the hint that points to it.
+///
+/// Both objects are created with put-if-absent, so an existing namespace
+/// keeps its objects. The caller checks that the namespace is absent first
+/// (format spec, "Creating a namespace"). If manifest 1 exists, the call
+/// returns `namespace_exists`, or `namespace_deleted` when the current
+/// manifest is a tombstone.
+pub(crate) async fn create_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    payload: NamespaceManifestPayload,
+    deadline: &Deadline,
+) -> Result<()> {
+    let namespace_id = payload.namespace_id.clone();
+    let first = HintPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_no: ManifestNo(1),
+    };
+    let object_key = loonfs_objectstore::keys::hint(&namespace_id);
+    let bytes = encode_control_state(ControlObjectKind::Hint, &first)
+        .expect("a namespace hint should encode");
+    match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+        Err(error) => return Err(CoreError::store(&object_key, &error)),
+    }
+    let (outcome, _) =
+        publish_manifest_from(store, encode_manifest(payload), deadline, None, None).await?;
+    match outcome {
+        ManifestPublicationOutcome::Published(_) => Ok(()),
+        ManifestPublicationOutcome::CoveredByCurrent(current)
+        | ManifestPublicationOutcome::PredecessorChanged(current) => {
+            Err(if current.envelope.payload().status.is_deleted() {
+                CoreError::NamespaceDeleted { namespace_id }
+            } else {
+                CoreError::NamespaceExists { namespace_id }
+            })
         }
     }
 }
@@ -101,26 +164,12 @@ where
     skip_all,
     fields(phase = "publish_manifest", key_class = "manifest")
 )]
-pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
-    store: &S,
-    manifest: EncodedEnvelope<NamespaceManifestPayload>,
-    deadline: &Deadline,
-) -> Result<ManifestPublicationOutcome> {
-    let namespace_id = &manifest.envelope().payload().namespace_id;
-    let current = load_current_manifest_if_present(store, namespace_id).await?;
-    Ok(
-        publish_manifest_from(store, manifest, deadline, current, None)
-            .await?
-            .0,
-    )
-}
-
-async fn publish_manifest_from<S: ObjectStore + ?Sized>(
+pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
     deadline: &Deadline,
     current: Option<LoadedManifest>,
-    mut hint: Option<LoadedHint>,
+    hint: Option<LoadedHint>,
 ) -> Result<(ManifestPublicationOutcome, Option<LoadedHint>)> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
@@ -259,24 +308,30 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             return Err(CoreError::store(&object_key, &error));
         }
     };
-    if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
-        // Publication is already durable; a failed hint update cannot undo it.
-        match raise_hint(
-            store,
-            namespace_id,
-            candidate.manifest().manifest_no,
-            hint.clone(),
-            deadline,
-        )
-        .await
-        {
-            Ok(raised) => hint = Some(raised),
-            Err(error) => {
-                tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
+    // A successor raises the hint that its attempt loaded. Creation writes the
+    // hint at 1 before manifest 1, so a first manifest needs no raise.
+    let raised = match (&outcome, hint) {
+        (ManifestPublicationOutcome::Published(_), Some(known)) => {
+            // Publication is already durable, so a failed hint update can't undo it.
+            match raise_hint(
+                store,
+                namespace_id,
+                candidate.manifest().manifest_no,
+                known,
+                deadline,
+            )
+            .await
+            {
+                Ok(raised) => Some(raised),
+                Err(error) => {
+                    tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
+                    None
+                }
             }
         }
-    }
-    Ok((outcome, hint))
+        _ => None,
+    };
+    Ok((outcome, raised))
 }
 
 fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result<()> {

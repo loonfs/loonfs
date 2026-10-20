@@ -389,6 +389,110 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
     assert_eq!(folded.response.manifest_head_seq, head.seq);
 }
 
+/// Checks that a fold whose put loses to a fold of the same tail finishes on
+/// its next attempt, without writing segments, content, or another manifest.
+#[tokio::test]
+async fn a_fold_that_loses_to_a_fold_of_its_tail_finishes() {
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let same = writer.engine.wal_fold_input().expect("tail");
+    let basis = same.basis.manifest_no();
+    let folded = writer
+        .fold_against(&[Rival::Fold(Box::new(same))])
+        .await
+        .expect("fold");
+    let after_park = writer.store.take();
+    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
+    assert_eq!(
+        folded.response.manifest_no,
+        basis.successor().expect("next manifest number")
+    );
+    assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
+    // The one write is the put that lost.
+    let writes = after_park
+        .iter()
+        .filter(|operation| {
+            !matches!(
+                operation,
+                RecordedOperation::Head { .. }
+                    | RecordedOperation::Get { .. }
+                    | RecordedOperation::GetWithMetadata { .. }
+            )
+        })
+        .map(RecordedOperation::key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writes,
+        vec![metadata_manifest_object(
+            &writer.namespace_id,
+            &basis.successor().expect("next manifest number")
+        )]
+    );
+}
+
+/// Checks that a fold whose tail another process already folded finishes at
+/// its first attempt and writes nothing.
+#[tokio::test]
+async fn a_fold_whose_tail_is_already_folded_writes_nothing() {
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let same = writer.engine.wal_fold_input().expect("tail");
+    let basis = same.basis.manifest_no();
+    Rival::Fold(Box::new(same))
+        .publish(&writer.other_process(), &writer.namespace_id)
+        .await;
+    writer.store.reset();
+    let folded = writer.fold().await;
+    let operations = writer.store.take();
+    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
+    assert_eq!(
+        folded.response.manifest_no,
+        basis.successor().expect("next manifest number")
+    );
+    assert!(
+        operations.iter().all(|operation| matches!(
+            operation,
+            RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+        )),
+        "{operations:?}"
+    );
+    assert!(writer.wal_reads(&operations).is_empty(), "{operations:?}");
+}
+
+/// Checks that a fold's publication reads the hint only to load the current
+/// manifest, and raises the hint from the hint it loaded.
+#[tokio::test]
+async fn a_fold_publication_reads_the_hint_once_per_load() {
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let basis = writer
+        .engine
+        .wal_fold_input()
+        .expect("tail")
+        .basis
+        .manifest_no();
+    let next = basis.successor().expect("next manifest number");
+    writer.store.reset();
+    let folded = writer.fold().await;
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+    let hint = hint(&writer.namespace_id);
+    let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
+    assert_eq!(
+        control_requests(&writer.namespace_id, &writer.store.take()),
+        vec![
+            // The session's basis, for its segments.
+            ("get", manifest(basis)),
+            // The attempt's load of the current manifest.
+            ("get", hint.clone()),
+            ("get", manifest(basis)),
+            ("get", manifest(next)),
+            ("get", hint.clone()),
+            ("put", manifest(next)),
+            ("cas", hint),
+        ]
+    );
+}
+
 /// Checks that a fold keeps the tail it read through a claim at each
 /// attempt, and that a fold whose every attempt loses stops at the
 /// contention limit and leaves the session's position where it was.

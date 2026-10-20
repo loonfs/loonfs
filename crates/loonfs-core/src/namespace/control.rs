@@ -55,6 +55,26 @@ pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::
     Ok(())
 }
 
+/// Returns `namespace_exists`, or `namespace_deleted` for a tombstone, when
+/// the namespace has a current manifest.
+pub(crate) async fn ensure_namespace_absent<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<()> {
+    let Some(current) = load_current_manifest_if_present(store, namespace_id).await? else {
+        return Ok(());
+    };
+    Err(if current.state.envelope.payload().status.is_deleted() {
+        CoreError::NamespaceDeleted {
+            namespace_id: namespace_id.clone(),
+        }
+    } else {
+        CoreError::NamespaceExists {
+            namespace_id: namespace_id.clone(),
+        }
+    })
+}
+
 pub type LoadedHint = LoadedControl<HintPayload>;
 
 pub(crate) async fn load_namespace_hint<S: ObjectStore + ?Sized>(
@@ -88,14 +108,11 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_types::ManifestNo,
-    known: Option<LoadedHint>,
+    known: LoadedHint,
     deadline: &Deadline,
 ) -> crate::error::Result<LoadedHint> {
     let object_key = hint(namespace_id);
-    let mut current = match known {
-        Some(known) => known,
-        None => load_namespace_hint(store, namespace_id).await?,
-    };
+    let mut current = known;
     while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
         let raised = HintPayload {
             namespace_id: namespace_id.clone(),
@@ -320,7 +337,7 @@ mod tests {
             KeyPredicate::any(),
         );
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let error = raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline)
+        let error = raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline)
             .await
             .expect_err("etag required");
         assert_matches!(error, CoreError::Store { .. });
@@ -356,7 +373,7 @@ mod tests {
             &store,
             &namespace_id,
             ManifestNo(2),
-            Some(known.clone()),
+            known.clone(),
             &Deadline::start(clock),
         )
         .await

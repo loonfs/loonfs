@@ -53,11 +53,14 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         load_current_manifest_with_hint(&blocked, &namespace_id),
         async {
             blocked.wait_until_blocked().await;
+            let known = crate::namespace::control::load_hint(blocked.inner(), &namespace_id)
+                .await
+                .expect("hint");
             crate::namespace::control::raise_hint(
                 blocked.inner(),
                 &namespace_id,
                 expected.state.manifest().manifest_no,
-                None,
+                known,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -168,14 +171,14 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     let deadline = Deadline::start(timer.clone());
     blocked.block_next();
     let (outcome, ()) = tokio::join!(
-        crate::manifest::publish::publish_manifest(&blocked, manifest.clone(), &deadline),
+        publish_once_within(&blocked, manifest.clone(), &deadline),
         async {
             blocked.wait_until_blocked().await;
-            publish_manifest(&store, manifest.clone())
+            publish_once(&store, manifest.clone())
                 .await
                 .expect("publish manifest two");
             payload.manifest_no = ManifestNo(3);
-            publish_manifest(&store, encode_manifest(payload))
+            publish_once(&store, encode_manifest(payload))
                 .await
                 .expect("publish manifest three");
             let options = crate::gc::GcOptions::default();

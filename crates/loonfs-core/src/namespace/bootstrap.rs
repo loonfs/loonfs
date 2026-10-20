@@ -1,8 +1,9 @@
 //! Creates namespaces.
 
-use super::create::publish_namespace;
+use super::control::ensure_namespace_absent;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::create_manifest;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
 use crate::time::{Deadline, MonotonicTimer};
@@ -29,12 +30,17 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         options.access.clone(),
         options.naming,
     );
-    match publish_namespace(store, &start, &deadline).await {
-        Ok(()) => {}
-        Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {}
-        Err(error) => return Err(error),
+    let created = async {
+        ensure_namespace_absent(store, namespace_id).await?;
+        create_manifest(store, start.clone(), &deadline).await
+    };
+    match created.await {
+        Ok(()) => Ok(super::status::created_namespace(&start)),
+        Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
+            super::status::load_namespace(store, namespace_id, timer).await
+        }
+        Err(error) => Err(error),
     }
-    super::status::load_namespace(store, namespace_id, timer).await
 }
 
 pub(crate) fn bootstrap_metadata_state(

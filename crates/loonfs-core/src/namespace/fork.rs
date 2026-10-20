@@ -1,11 +1,11 @@
 //! Fork installation pins a source manifest and lists its run references in
 //! a new namespace's first manifest; no segment or content object is copied.
 
-use super::control::load_current_manifest_if_present;
-use super::create::publish_namespace;
+use super::control::{ensure_namespace_absent, load_current_manifest_if_present};
 use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::create_manifest;
 use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy};
 use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
 use crate::pin::{classify_live_snapshot, create_pin};
@@ -33,18 +33,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(Arc::clone(&timer));
-    let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
-    if let Some(target) = target {
-        return Err(if target.state.envelope.payload().status.is_deleted() {
-            CoreError::NamespaceDeleted {
-                namespace_id: new_namespace_id.clone(),
-            }
-        } else {
-            CoreError::NamespaceExists {
-                namespace_id: new_namespace_id.clone(),
-            }
-        });
-    }
+    ensure_namespace_absent(store, new_namespace_id).await?;
     let owner = PinOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
     };
@@ -104,7 +93,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    if let Err(error) = publish_namespace(store, &manifest, &deadline).await {
+    if let Err(error) = create_manifest(store, manifest.clone(), &deadline).await {
         if matches!(
             error,
             CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
@@ -126,7 +115,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
         return Err(error);
     }
-    crate::namespace::status::load_namespace(store, new_namespace_id, timer).await
+    Ok(crate::namespace::status::created_namespace(&manifest))
 }
 
 async fn create_snapshot_fork_pin<S: ObjectStore + ?Sized>(

@@ -14,7 +14,7 @@ use super::error::ManifestLoadError;
 use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::index_block_load::{load_segment_index_for_compaction, segment_object_bytes};
 use super::load::load_manifest_segments;
-use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use super::publish::{update_manifest, ManifestChange};
 use super::runs::{
     delta_run_count, runs_in_merge_order, runs_newest_first, MetadataFamilyGroup,
     MetadataRunManifest, MetadataRunPolicy,
@@ -23,15 +23,13 @@ use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::load_current_manifest;
+use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
-    MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
-    RunTier,
+    MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
 use loonfs_types::CompactorEpoch;
 use loonfs_types::{ChangeSeq, NamespaceId, RunNo};
@@ -186,7 +184,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     )
     .await?;
 
-    let surviving = previous
+    let surviving: Vec<_> = previous
         .payload()
         .runs
         .iter()
@@ -199,40 +197,64 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
             (!run.segments.is_empty()).then_some(run)
         })
         .collect();
-    let manifest = build_replacement_manifest(
-        namespace_id,
-        previous,
-        surviving,
-        ReplacementOutput {
-            segments: merged.output_segments,
-            placement: input.placement,
-        },
-        floor_seq,
-    )?;
-
+    let output = ReplacementOutput {
+        segments: merged.output_segments,
+        placement: input.placement,
+    };
+    let basis_no = previous.payload().manifest_no;
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    match publish_manifest(store, manifest, deadline).await? {
-        ManifestPublicationOutcome::Published(current) => {
-            Ok(CompactionStepOutcome::UnitPublished {
-                group,
-                merged_delta_rows: input.merged_delta_rows,
-                input_runs: input.runs.len(),
-                decoded_input_rows: input.decoded_rows,
-                decoded_input_bytes: input.decoded_bytes,
-                manifest: current.manifest(),
-                bottom_anchored_merge_blocked,
-            })
-        }
-        ManifestPublicationOutcome::CoveredByCurrent(current)
-        | ManifestPublicationOutcome::PredecessorChanged(current)
-            if current.compactor_epoch() != compactor_epoch =>
-        {
-            Ok(CompactionStepOutcome::Fenced)
-        }
-        ManifestPublicationOutcome::CoveredByCurrent(_)
-        | ManifestPublicationOutcome::PredecessorChanged(_) => {
-            Ok(CompactionStepOutcome::Superseded)
-        }
+    // A step makes one publication attempt, over the manifest it merged from.
+    // `None` stands for the publication, and `Some` for every other outcome.
+    let published = update_manifest(
+        store,
+        namespace_id,
+        deadline,
+        1,
+        |current: LoadedManifest| {
+            let (surviving, output) = (&surviving, &output);
+            async move {
+                let payload = current.state.envelope.payload();
+                if payload.status.is_deleted() {
+                    return Err(CoreError::NamespaceDeleted {
+                        namespace_id: namespace_id.clone(),
+                    });
+                }
+                if payload.compactor_epoch != compactor_epoch {
+                    return Ok(ManifestChange::Finished(Some(
+                        CompactionStepOutcome::Fenced,
+                    )));
+                }
+                if payload.manifest_no != basis_no {
+                    return Ok(ManifestChange::Finished(Some(
+                        CompactionStepOutcome::Superseded,
+                    )));
+                }
+                let manifest = build_replacement_manifest(
+                    namespace_id,
+                    payload,
+                    surviving.clone(),
+                    output.clone(),
+                    floor_seq,
+                )?;
+                Ok(ManifestChange::Next(Box::new(manifest), None))
+            }
+        },
+    )
+    .await;
+    match published {
+        Ok((Some(outcome), _, _)) => Ok(outcome),
+        Ok((None, manifest, _)) => Ok(CompactionStepOutcome::UnitPublished {
+            group,
+            merged_delta_rows: input.merged_delta_rows,
+            input_runs: input.runs.len(),
+            decoded_input_rows: input.decoded_rows,
+            decoded_input_bytes: input.decoded_bytes,
+            manifest: manifest.state.manifest(),
+            bottom_anchored_merge_blocked,
+        }),
+        // The put lost to another publication.
+        Err(CoreError::StoreContention { .. }) => Ok(CompactionStepOutcome::Superseded),
+        Err(error) => Err(error),
     }
 }
 
@@ -750,6 +772,7 @@ fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGro
         .sum()
 }
 
+#[derive(Clone)]
 pub(super) struct ReplacementOutput {
     pub(super) segments: Vec<MetadataSegmentRef>,
     pub(super) placement: MergePlacement,
@@ -758,39 +781,39 @@ pub(super) struct ReplacementOutput {
 /// The surviving and new runs determine the base sequence and next run number.
 pub(super) fn build_replacement_manifest(
     namespace_id: &NamespaceId,
-    previous: &NamespaceManifestEnvelope,
+    previous: &NamespaceManifestPayload,
     surviving: Vec<MetadataRunRef>,
     output: ReplacementOutput,
     floor_seq: ChangeSeq,
-) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
+) -> Result<NamespaceManifestPayload> {
     let next_run_no = if output.segments.is_empty() {
-        previous.payload().next_run_no
+        previous.next_run_no
     } else {
-        next_run_no_after(previous.payload().next_run_no)?
+        next_run_no_after(previous.next_run_no)?
     };
     let mut runs = surviving;
     if !output.segments.is_empty() {
         runs.push(MetadataRunRef {
-            run_no: previous.payload().next_run_no,
+            run_no: previous.next_run_no,
             run_seq: output.placement.output_seq(),
             tier: output.placement.output_tier(),
             segments: output.segments,
         });
     }
-    let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
-    let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
-    Ok(encode_manifest(NamespaceManifestPayload {
-        compactor_epoch: previous.payload().compactor_epoch,
+    let retention_floor_seq = previous.retention_floor_seq.max(floor_seq);
+    let manifest_no = next_manifest_no_after(previous.manifest_no)?;
+    Ok(NamespaceManifestPayload {
+        compactor_epoch: previous.compactor_epoch,
         namespace_id: namespace_id.clone(),
         manifest_no,
-        head_seq: previous.payload().head_seq,
-        writer_epoch: previous.payload().writer_epoch,
-        next_inode_id: previous.payload().next_inode_id,
+        head_seq: previous.head_seq,
+        writer_epoch: previous.writer_epoch,
+        next_inode_id: previous.next_inode_id,
         next_run_no,
         retention_floor_seq,
         runs,
-        ..previous.payload().clone()
-    }))
+        ..previous.clone()
+    })
 }
 
 #[cfg(test)]

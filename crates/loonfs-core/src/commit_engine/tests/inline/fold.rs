@@ -449,6 +449,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let first_input = first.wal_fold_input().expect("first tail");
     let second_input = second.wal_fold_input().expect("second tail");
     assert_eq!(first_input.tail_state, second_input.tail_state);
+    let basis = second_input.basis.manifest_no();
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
@@ -494,6 +495,8 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let keys = content_assemblies(&store);
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
+    // The first fold's put loses to the second fold's manifest, and its next
+    // attempt finds the tail folded.
     assert_eq!(
         store
             .snapshot()
@@ -503,7 +506,16 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
                     && family(operation) == Some(DurableObjectFamily::MetadataManifest)
             )
             .count(),
-        1
+        2
+    );
+    assert_eq!(
+        crate::namespace::control::load_current_manifest(&store, &first.namespace_id)
+            .await
+            .expect("current manifest")
+            .state
+            .manifest()
+            .manifest_no,
+        basis.successor().expect("next manifest number")
     );
 }
 

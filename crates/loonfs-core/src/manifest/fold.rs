@@ -2,10 +2,8 @@
 
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
-use super::load::load_basis_metadata_segments;
-use super::publish::{
-    encode_manifest, manifest_ref_for, publish_manifest, ManifestPublicationOutcome,
-};
+use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::publish::{manifest_ref_for, update_manifest, ManifestChange};
 use super::published::PublishedManifest;
 use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
@@ -17,6 +15,7 @@ use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
@@ -124,28 +123,9 @@ fn keeps_held_tail(basis: &NamespaceManifestPayload, winner: &NamespaceManifestP
             }
 }
 
-async fn publish_fold<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    projection: &ManifestProjection<'_, S>,
-    layouts: &HashMap<ContentId, ContentLayoutRecord>,
-    deadline: &Deadline,
-    policy: MetadataRunPolicy,
-) -> Result<ManifestPublicationOutcome> {
-    deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
-    let manifest = build_namespace_manifest_for_projection(
-        store,
-        namespace_id,
-        projection,
-        layouts,
-        manifest_no,
-        policy,
-    )
-    .await?;
-    // Written segments may outlive the GC grace if publication exceeds its budget.
-    deadline.ensure_metadata_publication_budget(namespace_id)?;
-    publish_manifest(store, encode_manifest(manifest), deadline).await
+/// Whether `current` already folds the WAL tail that ends at `head`.
+fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) -> bool {
+    current.folded_wal_no >= head.wal_no && current.head_seq >= head.seq
 }
 
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
@@ -233,11 +213,13 @@ impl FoldedWalTail {
 /// The manifest copies both epochs from its predecessor (format spec,
 /// "Publishing a materialized file set"). A writer session passes the tail
 /// it holds as `held`, and every other caller passes `None`, which loads the
-/// tail from the store. A fold whose manifest put loses to a manifest that
-/// doesn't cover its tail rebuilds against that manifest. It keeps the tail
-/// it read when the manifest is at the same head (see `keeps_held_tail`),
-/// and loads the tail again otherwise, which folds a new writer's log after
-/// the writer's claim. A namespace tombstone stops the fold.
+/// tail from the store. Each publication attempt loads the current manifest.
+/// A current manifest that folds the tail finishes the fold, and any other
+/// manifest after the fold's own predecessor makes the fold rebuild against
+/// it. The rebuild keeps the tail it read when the manifest is at the same
+/// head (see `keeps_held_tail`), and loads the tail again otherwise, which
+/// folds a new writer's log after the writer's claim. A namespace tombstone
+/// stops the fold.
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -247,7 +229,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
-    let mut projection = match held {
+    let projection = match held {
         Some(held) => ManifestProjection {
             manifest_segments: load_basis_metadata_segments(store, segment_cache, &held.basis)
                 .await?
@@ -260,68 +242,132 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?
         }
     };
-    let mut layouts = None;
-    for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
-        let basis = projection.manifest_segments.manifest();
-        if basis.payload().folded_wal_no == projection.head.wal_no {
-            return Ok(FoldedWalTail::new(
-                namespace_id,
-                projection.head.seq,
-                basis,
-                FoldWalOutcome::AlreadyCurrent,
-            ));
-        }
-        let tail_layouts = match layouts.take() {
-            Some(layouts) => layouts,
-            None => materialize_tail_content(store, &projection, content_writes).await?,
-        };
-        let (current, outcome) = match publish_fold(
-            store,
-            namespace_id,
-            &projection,
-            &tail_layouts,
-            deadline,
-            policy,
-        )
-        .await?
-        {
-            ManifestPublicationOutcome::Published(current) => (current, FoldWalOutcome::Published),
-            ManifestPublicationOutcome::CoveredByCurrent(current) => {
-                (current, FoldWalOutcome::AlreadyCurrent)
-            }
-            // Another manifest took the fold's number without folding its
-            // tail, such as a compaction or a new writer's claim.
-            ManifestPublicationOutcome::PredecessorChanged(winner) => {
-                if keeps_held_tail(
-                    projection.manifest_segments.manifest().payload(),
-                    winner.envelope.payload(),
-                ) {
-                    projection.basis = MetadataBasis(winner.manifest());
-                    projection.manifest_segments =
-                        load_basis_metadata_segments(store, segment_cache, &projection.basis)
-                            .await?
-                            .segments;
-                    layouts = Some(tail_layouts);
-                } else {
-                    projection = load_fold_projection(
-                        store,
-                        namespace_id,
-                        segment_cache,
-                        deadline.observe(),
-                    )
-                    .await?;
-                }
-                continue;
-            }
-        };
+    let basis = projection.manifest_segments.manifest();
+    if basis.payload().folded_wal_no == projection.head.wal_no {
         return Ok(FoldedWalTail::new(
             namespace_id,
             projection.head.seq,
-            &current.envelope,
-            outcome,
+            basis,
+            FoldWalOutcome::AlreadyCurrent,
         ));
     }
-    Err(CoreError::WalPublish(WalPublishError::NumberTaken))
+    // Each attempt's future borrows the fold through this lock, because a
+    // future that a closure returns can't borrow the closure's own state.
+    let fold = tokio::sync::Mutex::new(FoldAttempts {
+        store,
+        segment_cache,
+        namespace_id,
+        deadline,
+        policy,
+        content_writes,
+        projection,
+        layouts: None,
+    });
+    let folded = update_manifest(
+        store,
+        namespace_id,
+        deadline,
+        MAX_CONTENTION_ATTEMPTS,
+        |current: LoadedManifest| {
+            let fold = &fold;
+            async move { fold.lock().await.attempt(current).await }
+        },
+    )
+    .await;
+    let (outcome, manifest, _) = match folded {
+        Ok(folded) => folded,
+        // Every attempt lost its manifest number to another publication.
+        Err(CoreError::StoreContention { .. }) => {
+            return Err(CoreError::WalPublish(WalPublishError::NumberTaken))
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(FoldedWalTail::new(
+        namespace_id,
+        fold.into_inner().projection.head.seq,
+        &manifest.state.envelope,
+        outcome,
+    ))
+}
+
+/// One fold's state across its publication attempts.
+struct FoldAttempts<'a, S: ObjectStore + ?Sized> {
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    namespace_id: &'a NamespaceId,
+    deadline: &'a Deadline,
+    policy: MetadataRunPolicy,
+    content_writes: &'a tokio::sync::Semaphore,
+    projection: ManifestProjection<'a, S>,
+    /// The content objects written for the projection's tail, which a
+    /// rebuild over a manifest at the same head uses again.
+    layouts: Option<HashMap<ContentId, ContentLayoutRecord>>,
+}
+
+impl<S: ObjectStore + ?Sized> FoldAttempts<'_, S> {
+    /// Returns the next manifest over `current`, or `Finished` when `current`
+    /// already folds the tail.
+    async fn attempt(&mut self, current: LoadedManifest) -> Result<ManifestChange<FoldWalOutcome>> {
+        let payload = current.state.envelope.payload();
+        if payload.status.is_deleted() {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: self.namespace_id.clone(),
+            });
+        }
+        if covers_tail(payload, &self.projection.head) {
+            return Ok(ManifestChange::Finished(FoldWalOutcome::AlreadyCurrent));
+        }
+        // Another manifest followed the fold's own predecessor without
+        // folding its tail, such as a compaction or a new writer's claim.
+        if payload.manifest_no != self.projection.basis.manifest_no() {
+            if keeps_held_tail(
+                self.projection.manifest_segments.manifest().payload(),
+                payload,
+            ) {
+                self.projection.basis = MetadataBasis(current.state.manifest());
+                self.projection.manifest_segments =
+                    metadata_basis_from_manifest(self.store, self.segment_cache, &current).segments;
+            } else {
+                self.projection = load_fold_projection(
+                    self.store,
+                    self.namespace_id,
+                    self.segment_cache,
+                    self.deadline.observe(),
+                )
+                .await?;
+                self.layouts = None;
+                // The tail was read above a manifest newer than `current`.
+                if self.projection.basis.manifest_no() != payload.manifest_no {
+                    return Ok(ManifestChange::Again);
+                }
+                if covers_tail(payload, &self.projection.head) {
+                    return Ok(ManifestChange::Finished(FoldWalOutcome::AlreadyCurrent));
+                }
+            }
+        }
+        let layouts = match self.layouts.take() {
+            Some(layouts) => layouts,
+            None => {
+                materialize_tail_content(self.store, &self.projection, self.content_writes).await?
+            }
+        };
+        self.deadline
+            .ensure_metadata_publication_budget(self.namespace_id)?;
+        let manifest = build_namespace_manifest_for_projection(
+            self.store,
+            self.namespace_id,
+            &self.projection,
+            &layouts,
+            next_manifest_no_after(payload.manifest_no)?,
+            self.policy,
+        )
+        .await?;
+        self.layouts = Some(layouts);
+        Ok(ManifestChange::Next(
+            Box::new(manifest),
+            FoldWalOutcome::Published,
+        ))
+    }
 }
 
 pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {

@@ -907,7 +907,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     .await
     .expect("build manifest");
     let manifest_checksum = manifest_without_checkpoint.payload_checksum().to_owned();
-    publish_manifest(
+    publish_once(
         &store,
         encode_manifest(manifest_without_checkpoint.into_payload()),
     )
