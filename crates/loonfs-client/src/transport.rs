@@ -127,12 +127,9 @@ impl Client {
         serde_json::from_slice(&bytes).map_err(|err| ClientError::Json(err.to_string()))
     }
 
-    pub(crate) async fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
+    pub(crate) async fn request_bytes(&self, url: &str, policy: SendPolicy) -> Result<Vec<u8>> {
         let request = self.get(url);
-        Ok(self
-            .call(&request, None, SendPolicy::RetryWithoutDeadline)
-            .await?
-            .bytes)
+        Ok(self.call(&request, None, policy).await?.bytes)
     }
 
     /// Sends a streaming request body exactly once.

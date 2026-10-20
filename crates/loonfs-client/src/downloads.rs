@@ -1,6 +1,7 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
 use super::*;
+use crate::operations;
 use crate::transport::SendPolicy;
 use futures::future::BoxFuture;
 use futures::stream::Fuse;
@@ -276,7 +277,7 @@ impl Client {
         self.request_json::<_, CreateDownloadResponse>(
             self.post(&url),
             Some(&request),
-            SendPolicy::Retry,
+            operations::CREATE_DOWNLOAD,
         )
         .await
     }
@@ -312,6 +313,7 @@ impl Client {
                 self.base_url
             ),
             options,
+            operations::CREATE_DOWNLOAD_BY_INODE,
         )
         .await
     }
@@ -351,6 +353,7 @@ impl Client {
                 self.base_url
             ),
             options,
+            operations::CREATE_REVISION_DOWNLOAD_BY_INODE,
         )
         .await
     }
@@ -359,6 +362,7 @@ impl Client {
         &self,
         url: String,
         options: &DownloadOptions,
+        policy: SendPolicy,
     ) -> Result<CreateDownloadByInodeResponse> {
         let request = CreateDownloadByInodeRequest {
             snapshot_id: options.snapshot_id.clone(),
@@ -367,7 +371,7 @@ impl Client {
         self.request_json::<_, CreateDownloadByInodeResponse>(
             self.post(&url),
             Some(&request),
-            SendPolicy::Retry,
+            policy,
         )
         .await
     }

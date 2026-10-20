@@ -22,6 +22,7 @@ mod maintenance;
 mod mutations;
 mod mutations_by_inode;
 mod namespace_path;
+mod operations;
 mod payload;
 mod query;
 mod reads;
@@ -71,7 +72,7 @@ pub use reads::{
     ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager,
     ListChangesOptions, PathEntriesPager, ReadFileOptions, SnapshotsPager, TrashPager,
 };
-use transport::{SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
+use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
 pub use transport_error::TransportError;
 
 /// Per-operation options, defined once in `loonfs-types` and shared with the
@@ -195,7 +196,7 @@ impl Client {
         }
         let url = format!("{}/v0/capabilities", self.base_url);
         let mut document: CapabilityDocument = self
-            .request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+            .request_json::<(), _>(self.get(&url), None, operations::GET_CAPABILITIES)
             .await?;
         document.retain_well_formed();
         // If a racing clone fetched first, keep its copy; both came from the
@@ -211,7 +212,8 @@ impl Client {
     /// Checks the server's health endpoint.
     pub async fn get_health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        self.call(&self.get(&url), None, SendPolicy::Retry).await?;
+        self.call(&self.get(&url), None, operations::GET_HEALTH)
+            .await?;
         Ok(())
     }
 }

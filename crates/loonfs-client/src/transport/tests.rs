@@ -128,6 +128,36 @@ async fn pin_deletes_send_once_after_transport_failure() {
     }
 }
 
+/// Checks that the client retries the codes that clear on their own, and sends a request that
+/// fails with `store_contention` once, because the server already retried its compare-and-swap.
+#[tokio::test]
+async fn store_contention_is_not_retried_by_the_client() {
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+    let upload_id =
+        loonfs_types::UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+    for (code, attempts) in [
+        (ErrorCode::CommitQueueFull, 4),
+        (ErrorCode::ServerBusy, 4),
+        (ErrorCode::ShuttingDown, 4),
+        (ErrorCode::StoreContention, 1),
+    ] {
+        let transport = scripted_transport::refusals(code, 4);
+        let mut client = deadline_client(&transport);
+        client.transport_retry = TransportRetryPolicy {
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            ..DEFAULT
+        };
+        client.timer = Arc::new(StdMonotonicTimer::default());
+        let error = client
+            .abort_upload(&namespace_id, &upload_id)
+            .await
+            .expect_err("every attempt is refused");
+        assert_eq!(error.code(), Some(code));
+        assert_eq!(transport.attempts(), attempts, "{code}");
+    }
+}
+
 #[tokio::test]
 async fn transport_retries_stop_when_the_operation_deadline_is_spent() {
     let transport = scripted_transport::failures(1);

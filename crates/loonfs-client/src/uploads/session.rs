@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::staging::presigned_put_request;
+use crate::operations;
 use crate::transport::SendPolicy;
 
 impl Client {
@@ -13,8 +14,12 @@ impl Client {
     ) -> Result<UploadSession> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
         // Do not retry automatically because each request creates a session.
-        self.request_json::<_, UploadSession>(self.post(&url), Some(request), SendPolicy::Once)
-            .await
+        self.request_json::<_, UploadSession>(
+            self.post(&url),
+            Some(request),
+            operations::CREATE_UPLOAD,
+        )
+        .await
     }
 
     /// Starts a direct upload of bytes the caller already has.
@@ -79,7 +84,7 @@ impl Client {
         self.request_json::<_, SignUploadPartsResponse>(
             self.post(&url),
             Some(&SignUploadPartsRequest { parts }),
-            SendPolicy::Retry,
+            operations::SIGN_UPLOAD_PARTS,
         )
         .await
     }
@@ -166,7 +171,7 @@ impl Client {
             .call(
                 &request,
                 Some(&Bytes::copy_from_slice(bytes)),
-                SendPolicy::RetryWithoutDeadline,
+                operations::PUT_UPLOAD_CONTENT,
             )
             .await?;
         serde_json::from_slice(&response.bytes).map_err(|err| ClientError::Json(err.to_string()))
@@ -226,7 +231,7 @@ impl Client {
             self.base_url
         );
         // Aborting is idempotent: a repeat reports the abort that stands.
-        self.request_json::<(), UploadSession>(self.post(&url), None, SendPolicy::Retry)
+        self.request_json::<(), UploadSession>(self.post(&url), None, operations::ABORT_UPLOAD)
             .await
     }
 
@@ -244,7 +249,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
             self.base_url
         );
-        self.request_json::<(), UploadSession>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), UploadSession>(self.get(&url), None, operations::GET_UPLOAD)
             .await
     }
 
@@ -262,7 +267,11 @@ impl Client {
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, UploadSession>(self.post(&url), Some(request), SendPolicy::Retry)
-            .await
+        self.request_json::<_, UploadSession>(
+            self.post(&url),
+            Some(request),
+            operations::COMPLETE_UPLOAD,
+        )
+        .await
     }
 }

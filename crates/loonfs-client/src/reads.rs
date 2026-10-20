@@ -1,7 +1,8 @@
 //! Namespace lifecycle, path reads, revision history, trash, and change feeds.
 
 use super::*;
-use crate::transport::{QueryBuilder, SendPolicy};
+use crate::operations;
+use crate::transport::QueryBuilder;
 use loonfs_types::options::Consistency;
 use loonfs_types::PageRequest;
 
@@ -104,7 +105,7 @@ impl Client {
                 name: name.to_owned(),
                 ttl_ms,
             }),
-            SendPolicy::Once,
+            operations::CREATE_SNAPSHOT,
         )
         .await
     }
@@ -131,8 +132,12 @@ impl Client {
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), ListSnapshotsResponse>(
+            self.get(&url),
+            None,
+            operations::LIST_SNAPSHOTS,
+        )
+        .await
     }
 
     /// Returns one live snapshot.
@@ -148,7 +153,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             self.base_url
         );
-        self.request_json::<(), Snapshot>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), Snapshot>(self.get(&url), None, operations::GET_SNAPSHOT)
             .await
     }
 
@@ -168,7 +173,7 @@ impl Client {
         self.request_json(
             self.post(&url),
             Some(&ExtendSnapshotRequest { ttl_ms }),
-            SendPolicy::Retry,
+            operations::EXTEND_SNAPSHOT,
         )
         .await
     }
@@ -185,8 +190,12 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             self.base_url
         );
-        self.request_json::<(), DeleteSnapshotResponse>(self.delete(&url), None, SendPolicy::Once)
-            .await
+        self.request_json::<(), DeleteSnapshotResponse>(
+            self.delete(&url),
+            None,
+            operations::DELETE_SNAPSHOT,
+        )
+        .await
     }
 
     /// Creates an empty unrestricted, case-insensitive namespace with the
@@ -217,7 +226,7 @@ impl Client {
                 naming: options.naming,
                 namespace_id: namespace_id.clone(),
             }),
-            SendPolicy::Once,
+            operations::CREATE_NAMESPACE,
         )
         .await
     }
@@ -227,7 +236,7 @@ impl Client {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
-        self.request_json::<(), NamespaceMetadata>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), NamespaceMetadata>(self.get(&url), None, operations::GET_NAMESPACE)
             .await
     }
 
@@ -248,8 +257,12 @@ impl Client {
         }
         let url = query.build();
         // The expected head is a precondition, not an idempotency key for an ambiguous delete.
-        self.request_json::<(), DeleteNamespaceResponse>(self.delete(&url), None, SendPolicy::Once)
-            .await
+        self.request_json::<(), DeleteNamespaceResponse>(
+            self.delete(&url),
+            None,
+            operations::DELETE_NAMESPACE,
+        )
+        .await
     }
 
     /// Creates a new namespace from the source's current head and returns the
@@ -289,7 +302,7 @@ impl Client {
                 new_namespace_id: new_namespace_id.clone(),
                 snapshot_id: options.snapshot_id.clone(),
             }),
-            SendPolicy::Once,
+            operations::FORK_NAMESPACE,
         )
         .await
     }
@@ -336,7 +349,7 @@ impl Client {
         }
         push_consistency(&mut query, options.consistency);
         let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), _>(self.get(&url), None, operations::LIST_PATH_ENTRIES)
             .await
     }
 
@@ -363,7 +376,7 @@ impl Client {
         }
         push_consistency(&mut query, options.consistency);
         let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), _>(self.get(&url), None, operations::GET_PATH_ENTRY)
             .await
     }
 
@@ -396,7 +409,7 @@ impl Client {
         }
         push_consistency(&mut query, options.consistency);
         let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), _>(self.get(&url), None, operations::GET_INODE)
             .await
     }
 
@@ -451,7 +464,7 @@ impl Client {
         }
         push_consistency(&mut query, options.consistency);
         let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), _>(self.get(&url), None, operations::LIST_INODE_CHILDREN)
             .await
     }
 
@@ -479,8 +492,12 @@ impl Client {
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), ListFileRevisionsResponse>(
+            self.get(&url),
+            None,
+            operations::LIST_FILE_REVISIONS,
+        )
+        .await
     }
 
     /// Lists the retained revisions of a file inode.
@@ -515,8 +532,12 @@ impl Client {
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), ListFileRevisionsResponse>(
+            self.get(&url),
+            None,
+            operations::LIST_FILE_REVISIONS_BY_INODE,
+        )
+        .await
     }
 
     /// Lists the namespace's recoverable deletions.
@@ -542,7 +563,7 @@ impl Client {
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), ListTrashResponse>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), ListTrashResponse>(self.get(&url), None, operations::LIST_TRASH)
             .await
     }
 
@@ -597,7 +618,7 @@ impl Client {
         }
         push_consistency(&mut query, options.consistency);
         let url = query.build();
-        self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), ListChangesResponse>(self.get(&url), None, operations::LIST_CHANGES)
             .await
     }
 
@@ -614,8 +635,11 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.file_content_url(spec, None, options))
-            .await
+        self.request_bytes(
+            &self.file_content_url(spec, None, options),
+            operations::GET_FILE_CONTENT,
+        )
+        .await
     }
 
     /// Returns the bytes of one retained revision of a file.
@@ -624,11 +648,10 @@ impl Client {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.file_content_url(
-            spec,
-            Some(revision_no),
-            &ReadFileOptions::default(),
-        ))
+        self.request_bytes(
+            &self.file_content_url(spec, Some(revision_no), &ReadFileOptions::default()),
+            operations::GET_FILE_CONTENT,
+        )
         .await
     }
 
@@ -712,8 +735,11 @@ impl Client {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, options))
-            .await
+        self.request_bytes(
+            &self.inode_content_url(namespace_id, inode_id, options),
+            operations::GET_FILE_CONTENT_BY_INODE,
+        )
+        .await
     }
 
     /// Streams the current content of a visible file inode through the server,
@@ -761,8 +787,11 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.inode_revision_content_url(namespace_id, inode_id, revision_no))
-            .await
+        self.request_bytes(
+            &self.inode_revision_content_url(namespace_id, inode_id, revision_no),
+            operations::GET_FILE_REVISION_CONTENT_BY_INODE,
+        )
+        .await
     }
 
     /// Streams one retained file revision by inode identity through the server.

@@ -235,19 +235,19 @@ impl ErrorCode {
         }
     }
 
-    /// Returns whether this condition can clear without caller or operator action.
+    /// Returns whether a client retries this condition without caller or operator action.
     ///
     /// This predicate is deliberately narrower than [`ErrorKind::Unavailable`]:
-    /// it includes only admission pressure, store contention, and shutdown
-    /// handoff, which settle on their own. Transport failures are classified separately by clients.
+    /// it includes only admission pressure and shutdown handoff, which settle
+    /// on their own. It excludes store contention, because LoonFS returns
+    /// `store_contention` only after the write used every compare-and-swap
+    /// attempt it's allowed, and a client retry would repeat those attempts.
+    /// Transport failures are classified separately by clients.
     /// Reconciliation, request changes, and maintenance are caller or operator
     /// actions and therefore return `false` here.
     pub fn retryable_without_operator_action(self) -> bool {
         match self {
-            ErrorCode::CommitQueueFull
-            | ErrorCode::ServerBusy
-            | ErrorCode::ShuttingDown
-            | ErrorCode::StoreContention => true,
+            ErrorCode::CommitQueueFull | ErrorCode::ServerBusy | ErrorCode::ShuttingDown => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
             | ErrorCode::Forbidden
@@ -282,6 +282,7 @@ impl ErrorCode {
             | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
+            | ErrorCode::StoreContention
             | ErrorCode::DeadlineExceeded
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::ContentNotMaterialized
@@ -334,7 +335,6 @@ mod tests {
                 ErrorCode::CommitQueueFull,
                 ErrorCode::ServerBusy,
                 ErrorCode::ShuttingDown,
-                ErrorCode::StoreContention,
             ]
         );
     }

@@ -963,7 +963,7 @@ mod tests {
         let contended = CoreError::contention_exhausted("namespaces/demo/pins/p");
         assert_eq!(contended.code(), ErrorCode::StoreContention);
         assert_eq!(contended.kind(), ErrorKind::Unavailable);
-        assert!(contended.code().retryable_without_operator_action());
+        assert!(!contended.code().retryable_without_operator_action());
     }
 
     #[test]

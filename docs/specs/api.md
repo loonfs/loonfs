@@ -264,7 +264,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `writer_session_closed` | 503 | This node has no open writer session for the namespace. The request wasn't admitted. Retry on the node that the namespace is assigned to. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for requests, proxied upload bodies, or proxied content reads. Back off and retry. |
 | `shutting_down` | 503 | The serving process stopped admitting requests because it's shutting down. Work that was admitted earlier still finishes. Retry against a live instance. |
-| `store_contention` | 503 | A write to one of the namespace's control objects used every compare-and-swap attempt it was allowed, usually because concurrent writers changed the object, so retry the request. |
+| `store_contention` | 503 | A write to one of the namespace's control objects used every compare-and-swap attempt it was allowed, usually because concurrent writers changed the object. Back off before retrying the request. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit might still take effect after this response, so reconcile it by commit ID before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but this deployment can't write its pending content pieces for a direct download. Read through the proxied content route, or retry after a fold writes the pieces. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the pin exists but its manifest is gone, pin creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
@@ -279,11 +279,12 @@ The reference server admits at most `max_in_flight_requests` requests at once (2
 
 The reference server also limits accepted connections with `max_connections` (1,024 by default). When all connection slots are in use, it waits before accepting more TCP connections. Pending connections stay in the OS backlog. A client can connect and then receive no HTTP response until a slot is available, or it can time out or fail if the backlog is full. TLS handshakes and idle keep-alive connections occupy slots. The connection limit applies to every route, including probes.
 
-Automatic retry is narrower than the HTTP status suggests. Raw transport failures can be retried. Of the registered error codes, clients automatically retry only `commit_queue_full`, `server_busy`, `shutting_down`, and `store_contention`, and responses with one of these four codes include `Retry-After: 1`. Generated SDKs retry a response that includes `Retry-After`, and they don't retry on status alone.
+Automatic retry is narrower than the HTTP status suggests. Raw transport failures can be retried. Of the registered error codes, clients automatically retry only `commit_queue_full`, `server_busy`, and `shutting_down`, and responses with one of these three codes include `Retry-After: 1`. Generated SDKs retry a response that includes `Retry-After`, and they don't retry on status alone.
 
 These codes need another action before a retry:
 
 - `writer_session_closed` requires routing to the node that the namespace is assigned to. It can also occur on that node while a fenced session finishes its work, and a later request can open a new session after that work ends. It has no `Retry-After` header, and clients don't retry it automatically.
+- `store_contention` requires the caller to decide when to retry, because LoonFS returns it only after the write used every compare-and-swap attempt it's allowed. It has no `Retry-After` header, and clients don't retry it automatically.
 - `checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require maintenance.
 - `storage_permission_denied` requires the operator to fix the storage credentials or bucket policy.
 - `commit_outcome_unknown`, `outcome_unknown`, and `deadline_exceeded` require the caller to determine whether a mutation completed before retrying it.
@@ -618,15 +619,7 @@ For reliable retries, a client uses the preparation methods above and keeps the 
 
 At the WAL write-stop threshold, new commits wait in the writer's queue for a fold to free room. A commit that's still waiting when the write-stop wait passes returns `maintenance_required` and isn't committed. (The reference server sets the write-stop wait to half of `request_deadline_ms`, so a commit that waits for the whole write-stop wait returns `maintenance_required` before the server's deadline would return `deadline_exceeded`.) Retries of retained commits can still return their original commits, including after `commit_outcome_unknown` or `deadline_exceeded`. Writer-session, availability, and corruption checks still apply.
 
-The blocking Rust client automatically retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`:
-
-- namespace create, fork, and delete
-- upload-session begin
-- checkpoint create
-- maintenance
-- grep index collection
-
-The client also makes one attempt for a presigned direct PUT.
+The Rust client automatically retries operations labeled `idempotent` or `replayable`, and it makes one attempt for operations labeled `not_idempotent` in [Operations and retry classes](#operations-and-retry-classes). It also makes one attempt for a presigned direct PUT, and for a request or response body that it streams, because a stream can't be replayed.
 
 ### 5.3 Writer topology and fencing
 
@@ -752,6 +745,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `checkpoint_not_found`) |
 | Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin, and a missing ID, or the ID of a snapshot or fork pin, returns `checkpoint_not_found`) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`. The body identifies one job with `kind`. |
+| Probe the store contract | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe`. The body contains the probe options, and `{}` uses the defaults. |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`. Requires the `query.grep` feature and an active index. |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
