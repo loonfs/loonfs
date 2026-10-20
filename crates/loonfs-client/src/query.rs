@@ -1,7 +1,8 @@
 //! Query API operations.
 
 use super::*;
-use crate::transport::{QueryBuilder, SendPolicy};
+use crate::operations;
+use crate::transport::QueryBuilder;
 
 /// A pager over grep matches.
 pub type GrepPager = loonfs_types::Pager<GrepResponse, ClientError>;
@@ -53,7 +54,7 @@ impl Client {
         query.push("allow_stale", request.allow_stale);
         query.pagination(Some(page.limit.get()), page.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), _>(self.get(&url), None, operations::GREP)
             .await
     }
 }

@@ -5,6 +5,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
+use loonfs_types::{ErrorCode, ErrorResponse};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -14,6 +15,8 @@ pub(crate) enum Outcome {
     TransportFailure,
     Success(Vec<u8>),
     PartAccepted(String),
+    /// A 503 error envelope with this code.
+    Refused(ErrorCode),
 }
 
 struct State {
@@ -69,6 +72,10 @@ impl ScriptedTransport {
 
 pub(crate) fn failures(count: usize) -> ScriptedTransport {
     script(std::iter::repeat_with(|| Outcome::TransportFailure).take(count))
+}
+
+pub(crate) fn refusals(code: ErrorCode, count: usize) -> ScriptedTransport {
+    script(std::iter::repeat_with(|| Outcome::Refused(code)).take(count))
 }
 
 pub(crate) fn failure_then_success(body: Vec<u8>) -> ScriptedTransport {
@@ -139,6 +146,21 @@ impl Service<Request<Body>> for ScriptedTransport {
                     .header(http::header::ETAG, etag)
                     .body(Body::empty())
                     .expect("etag should be a valid header value")),
+                Outcome::Refused(code) => {
+                    let body = serde_json::to_vec(&ErrorResponse {
+                        code: code.as_str().to_owned(),
+                        feature: None,
+                        message: "scripted refusal".to_owned(),
+                        param: None,
+                        request_id: None,
+                        details: None,
+                    })
+                    .expect("serialize error envelope");
+                    Ok(Response::builder()
+                        .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::from(Bytes::from(body)))
+                        .expect("a 503 response should build"))
+                }
             }
         })
     }

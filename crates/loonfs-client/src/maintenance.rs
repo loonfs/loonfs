@@ -1,7 +1,8 @@
 //! Checkpoints, maintenance, store probes, and grep maintenance.
 
 use super::*;
-use crate::transport::{QueryBuilder, SendPolicy};
+use crate::operations;
+use crate::transport::QueryBuilder;
 use loonfs_types::{ActorId, PageRequest};
 
 /// A pager over existing checkpoints.
@@ -17,8 +18,12 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/diagnostics",
             self.base_url
         );
-        self.request_json::<(), NamespaceDiagnostics>(self.get(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), NamespaceDiagnostics>(
+            self.get(&url),
+            None,
+            operations::GET_NAMESPACE_DIAGNOSTICS,
+        )
+        .await
     }
 
     /// Creates a user-owned checkpoint pinning the namespace's current view
@@ -38,8 +43,12 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
-            .await
+        self.request_json(
+            self.post(&url),
+            Some(request),
+            operations::CREATE_CHECKPOINT,
+        )
+        .await
     }
 
     /// Lists existing checkpoints, including expired checkpoints that garbage
@@ -65,8 +74,12 @@ impl Client {
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.build();
-        self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), ListCheckpointsResponse>(
+            self.get(&url),
+            None,
+            operations::LIST_CHECKPOINTS,
+        )
+        .await
     }
 
     /// Returns one existing checkpoint, as the listing returns it, through
@@ -80,7 +93,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             self.base_url
         );
-        self.request_json::<(), Checkpoint>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), Checkpoint>(self.get(&url), None, operations::GET_CHECKPOINT)
             .await
     }
 
@@ -95,8 +108,12 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             self.base_url
         );
-        self.request_json::<(), DeleteCheckpointResponse>(self.delete(&url), None, SendPolicy::Once)
-            .await
+        self.request_json::<(), DeleteCheckpointResponse>(
+            self.delete(&url),
+            None,
+            operations::DELETE_CHECKPOINT,
+        )
+        .await
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).
@@ -117,7 +134,7 @@ impl Client {
         if let Some(actor_id) = actor_id {
             wire_request = wire_request.header("Loonfs-Actor", actor_id.as_str());
         }
-        self.request_json(wire_request, Some(request), SendPolicy::Once)
+        self.request_json(wire_request, Some(request), operations::RUN_MAINTENANCE)
             .await
     }
 
@@ -131,7 +148,7 @@ impl Client {
     /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/maintenance/store/probe", self.base_url);
-        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+        self.request_json(self.post(&url), Some(request), operations::PROBE_STORE)
             .await
     }
 
@@ -144,7 +161,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), GrepIndex>(self.get(&url), None, operations::GET_GREP_INDEX)
             .await
     }
 
@@ -157,7 +174,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
+        self.request_json::<(), GrepIndex>(self.post(&url), None, operations::ENABLE_GREP_INDEX)
             .await
     }
 
@@ -170,7 +187,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
+        self.request_json::<(), GrepIndex>(self.post(&url), None, operations::DISABLE_GREP_INDEX)
             .await
     }
 }

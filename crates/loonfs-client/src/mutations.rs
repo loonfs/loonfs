@@ -1,7 +1,7 @@
 //! Commit submission and path-oriented filesystem mutations.
 
 use super::*;
-use crate::transport::SendPolicy;
+use crate::operations;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use loonfs_types::options::{AccessState, AttributeChanges};
 use loonfs_types::ActorId;
@@ -40,7 +40,7 @@ impl Client {
         self.request_json::<_, Commit>(
             self.post(&url).header("Loonfs-Actor", actor.as_str()),
             Some(request),
-            SendPolicy::Retry,
+            operations::CREATE_COMMIT,
         )
         .await
     }

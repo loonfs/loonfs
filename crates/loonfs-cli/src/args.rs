@@ -118,7 +118,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
     /// Disable bounded retry of `server_busy`, `commit_queue_full`,
-    /// `store_contention`, `shutting_down`, and transport errors.
+    /// `shutting_down`, and transport errors.
     #[arg(long, global = true)]
     pub(crate) no_retry: bool,
     /// Never prompt. Fail instead when input would be required.
