@@ -14,8 +14,7 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::BufferWatchStore;
+use loonfs_test_support::stores::{replace_object, BufferWatchStore};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
@@ -160,8 +159,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     let key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     let mut corrupted = payload.clone();
     corrupted[0] ^= 0xff;
-    store(temp_dir.path())
-        .put_overwrite(&key, corrupted.into())
+    replace_object(&store(temp_dir.path()), &key, corrupted.into())
         .await
         .expect("overwrite content object");
 

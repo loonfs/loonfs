@@ -18,7 +18,6 @@ macro_rules! delegate_object_store {
             get_with_metadata,
             put,
             put_streamed,
-            put_overwrite,
             put_if_absent,
             put_immutable_verified,
             assemble,
@@ -343,28 +342,6 @@ macro_rules! __delegate_object_store_method {
             Result<::loonfs_objectstore::ListedObject, ::loonfs_objectstore::ObjectStoreError>,
         > {
             $inner.list_entries_from_stream(prefix, start_after)
-        }
-    };
-    (put_overwrite, $receiver:ident, $inner:expr) => {
-        fn put_overwrite<'store, 'key, 'future>(
-            &'store $receiver,
-            key: &'key str,
-            bytes: ::bytes::Bytes,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = Result<
-                        ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move { $inner.put_overwrite(key, bytes).await })
         }
     };
     (put_if_absent, $receiver:ident, $inner:expr) => {

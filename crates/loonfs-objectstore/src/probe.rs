@@ -10,7 +10,7 @@
 
 use crate::object_store::Result as StoreResult;
 use crate::{
-    ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
+    ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
@@ -104,10 +104,6 @@ pub async fn run_store_contract_probe(
         check(
             "compare_and_swap_missing_object_rejected",
             compare_and_swap_missing_object_rejected(store, &run).await,
-        ),
-        check(
-            "overwrite_updates_head_and_body",
-            overwrite_updates_head_and_body(store, &run).await,
         ),
         check(
             "get_with_metadata_round_trip",
@@ -336,54 +332,6 @@ async fn compare_and_swap_missing_object_rejected(
     )
 }
 
-/// An overwrite must be immediately authoritative in both what the object
-/// says and what its metadata says, because readers decide from the head
-/// and writers decide from the body.
-async fn overwrite_updates_head_and_body(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
-    let key = run.key("overwrite");
-
-    let first = ok(
-        "first overwrite",
-        store
-            .put_overwrite(&key, Bytes::from_static(br#"{"seq":41}"#))
-            .await,
-    )?;
-    let second = ok(
-        "second overwrite",
-        store
-            .put_overwrite(&key, Bytes::from_static(br#"{"seq":42}"#))
-            .await,
-    )?;
-
-    let body = present(
-        "the overwritten object",
-        ok("read", store.get(&key, None).await)?,
-    )?;
-    if body.as_ref() != br#"{"seq":42}"# {
-        return Err(wrong("a read after overwrite returned the previous bytes"));
-    }
-    let head = present(
-        "the overwritten object's metadata",
-        ok("head", store.head(&key).await)?,
-    )?;
-    if head.etag != second.etag || head.size_bytes != second.size_bytes {
-        return Err(wrong(
-            "the object's metadata disagrees with the overwrite that just wrote it",
-        ));
-    }
-    if first == second {
-        return Err(wrong(
-            "an overwrite left the object's visible metadata unchanged",
-        ));
-    }
-
-    ok("delete", store.delete(&key).await)?;
-    if ok("head after delete", store.head(&key).await)?.is_some() {
-        return Err(wrong("a deleted object is still visible to head"));
-    }
-    Ok(())
-}
-
 /// Reading bytes and identity from one observation is what lets a caller
 /// trust that the metadata describes the bytes it just read, rather than a
 /// version that replaced them between two requests.
@@ -394,7 +342,7 @@ async fn get_with_metadata_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -
     let written = ok(
         "write",
         store
-            .put_overwrite(&key, Bytes::copy_from_slice(bytes))
+            .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await,
     )?;
     let loaded = present(
@@ -636,25 +584,28 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     Ok(())
 }
 
-/// A write past the multipart threshold goes through the provider's own
-/// multipart rules — non-final part sizes, completion, assembly — and must
-/// read back byte-identical. Cloudflare R2's fixed non-final part size is
-/// the rule this geometry exists to satisfy.
+/// Checks the multipart path that every large content object and segment
+/// write takes.
+///
+/// A verified immutable write past the multipart threshold goes through the
+/// provider's own multipart rules: non-final part sizes, a create-only
+/// completion, and the stored full-object checksum. The object must read
+/// back byte-identical with the checksum of those bytes stored, and a second
+/// write of different bytes to the same key must leave it unchanged.
+/// Cloudflare R2 requires every non-final part to have the same size, and
+/// this geometry exists to satisfy that rule.
 async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let key = run.key("multipart");
 
     // The smallest payload with a middle part, which is where a provider's
-    // own rules about non-final part sizes bite.
+    // own rules about non-final part sizes apply.
     let payload_len = PROVIDER_MULTIPART_THRESHOLD_BYTES + PROVIDER_MULTIPART_PART_BYTES + 4096;
-    let payload: Vec<u8> = (0..251_u8)
-        .cycle()
-        .take(loonfs_types::usize_from_u64(payload_len))
-        .collect();
+    let payload = multipart_payload(payload_len, 0);
 
-    let metadata = ok_optional(
-        "multipart overwrite",
+    let metadata = ok_immutable(
+        "multipart immutable write",
         store
-            .put_overwrite(&key, Bytes::from(payload.clone()))
+            .put_immutable_verified(&key, Bytes::from(payload.clone()))
             .await,
     )?;
     if metadata.size_bytes != payload_len {
@@ -663,17 +614,83 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
             metadata.size_bytes
         )));
     }
+    let stored = present(
+        "the assembled object's metadata",
+        ok("head", store.head(&key).await)?,
+    )?;
+    if stored.checksum != Some(Checksum::compute(store.checksum_algorithm(), &payload)) {
+        return Err(wrong(
+            "the stored checksum of an object assembled from parts does not describe its bytes",
+        ));
+    }
 
+    match store
+        .put_immutable_verified(&key, Bytes::from(multipart_payload(payload_len, 1)))
+        .await
+    {
+        Err(ImmutableWriteError::DifferentObject { .. }) => {}
+        Ok(_) => {
+            return Err(wrong(
+                "a create-only multipart write over an existing object was accepted",
+            ))
+        }
+        Err(error) => {
+            return Err(wrong(format!(
+                "a create-only multipart write over an existing object should have been \
+                 refused as a different object, but failed differently: {}",
+                immutable_write_message(&error)
+            )))
+        }
+    }
     let read_back = present(
         "the assembled object",
-        ok_optional("read", store.get(&key, None).await)?,
+        ok("read", store.get(&key, None).await)?,
     )?;
     if read_back.as_ref() != payload.as_slice() {
         return Err(wrong(
-            "an object assembled from parts does not read back as the bytes written",
+            "an object assembled from parts does not read back as the bytes first written",
         ));
     }
     Ok(())
+}
+
+/// Builds `len` bytes of a repeating pattern, rotated by `offset` so that
+/// two payloads of one length differ.
+fn multipart_payload(len: u64, offset: usize) -> Vec<u8> {
+    (0..251_u8)
+        .cycle()
+        .skip(offset)
+        .take(loonfs_types::usize_from_u64(len))
+        .collect()
+}
+
+/// Unwraps a verified immutable write to a new key, attributing any
+/// failure to `operation`.
+fn ok_immutable<T>(
+    operation: &str,
+    result: std::result::Result<T, ImmutableWriteError>,
+) -> std::result::Result<T, CheckFailure> {
+    result.map_err(|error| match error {
+        ImmutableWriteError::Transport { source, .. } => failed(operation, &source),
+        error => wrong(format!(
+            "{operation} to a new key failed: {}",
+            immutable_write_message(&error)
+        )),
+    })
+}
+
+/// Describes a failed immutable write without exposing provider or object
+/// identity.
+fn immutable_write_message(error: &ImmutableWriteError) -> String {
+    match error {
+        ImmutableWriteError::Transport { source, .. } => source.public_message().into_owned(),
+        ImmutableWriteError::DifferentObject { .. } => {
+            "the key already contains different bytes".to_owned()
+        }
+        ImmutableWriteError::StoredChecksumMissing { .. } => {
+            "the key's existing object reports no stored checksum".to_owned()
+        }
+    }
 }
 
 async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
@@ -908,7 +925,6 @@ mod tests {
             "create_if_absent_enforced",
             "compare_and_swap_rejects_stale",
             "compare_and_swap_missing_object_rejected",
-            "overwrite_updates_head_and_body",
             "get_with_metadata_round_trip",
             "head_reports_last_modified",
             "visibility_after_write",
@@ -998,13 +1014,11 @@ mod tests {
         }
 
         async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> StoreResult<ObjectMetadata> {
-            let mode = match mode {
-                PutMode::CompareAndSwap { .. } => {
-                    self.accepted_a_stale_swap.store(true, Ordering::SeqCst);
-                    PutMode::Overwrite
-                }
-                mode => mode,
-            };
+            if let PutMode::CompareAndSwap { .. } = mode {
+                self.accepted_a_stale_swap.store(true, Ordering::SeqCst);
+                self.inner.delete(key).await?;
+                return self.inner.put_if_absent(key, bytes).await;
+            }
             self.inner.put(key, bytes, mode).await
         }
 

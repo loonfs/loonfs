@@ -14,7 +14,7 @@ This section lists the provider data points that come up most often in LoonFS de
 
 ## 2. Provider matrix
 
-This section compares the providers feature by feature. The paragraphs after the table describe listing timestamps and ambient AWS credentials.
+This section compares the providers feature by feature. The paragraphs after the table describe listing timestamps, retries, and ambient AWS credentials.
 
 | Feature | AWS S3 | Google Cloud Storage | Cloudflare R2 | Azure Blob Storage (not yet supported) | S3-Compatible |
 | ----- | ----- | ----- | ----- | ----- | ----- |
@@ -34,6 +34,8 @@ This section compares the providers feature by feature. The paragraphs after the
 Items marked *live* are documented behavior that only a run against the provider confirms. The ignored tests in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` exercise them.
 
 For an object that hasn't changed, the modification time in a listing and the modification time a HEAD request returns differ by less than one second. R2 and GCS listings keep fractional seconds, while HEAD reports whole seconds. The garbage collector uses listing times, without a HEAD request for each object. Its `GC_SAFETY_MARGIN_MS` is 180,000 milliseconds, and that allowance includes timestamp precision.
+
+Each request has one retry budget: the provider client retries the requests it sends, LoonFS retries the requests it signs itself (parts, part copies, resumable chunks, composes, reads, and HEAD requests), its verified immutable writes, and a delete whose attempt timed out (which the provider client doesn't resend), each up to 10 times within the 120-second `PROVIDER_OPERATION_DEADLINE_MS`, an exhausted budget is reported as a non-retryable error, and a conditional publication is one attempt.
 
 AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. The chain checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a profile by its name.
 
@@ -107,7 +109,7 @@ The server doesn't keep a proxied upload's whole body in memory. It hashes the p
 | AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
 | Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
 | Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
-| Google Cloud Storage | Yes, a resumable upload for a create, and provider multipart otherwise | One part, whatever the object's size |
+| Google Cloud Storage | Yes, a resumable upload | One part, whatever the object's size |
 | Azure Blob Storage | Not yet supported | n/a |
 | Local filesystem | Yes, a staging file for uploads and assemblies | One chunk, and assembly reads are at most 8 MiB |
 

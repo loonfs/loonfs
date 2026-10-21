@@ -2,13 +2,13 @@
 
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{plan_parts, source_range, verify_expected, PartSizing, READ_BYTES};
+use crate::presign::CompletionCondition;
 use crate::provider_object_store::{
     StoredChecksumReader, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use crate::signed_request::signing_time;
 use crate::{
-    AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError,
-    PutMode, Result,
+    AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError, Result,
 };
 use bytes::Bytes;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
@@ -117,7 +117,7 @@ impl S3RequestSigner {
                 &upload_id,
                 &parts,
                 Some(expected),
-                &PutMode::CreateIfAbsent,
+                CompletionCondition::CreateOnly,
             )
             .await?;
         abort_on_drop.disarm();

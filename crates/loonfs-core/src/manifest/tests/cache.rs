@@ -2,6 +2,7 @@
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::*;
+use loonfs_test_support::stores::replace_object;
 use std::assert_matches;
 
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
@@ -1130,13 +1131,13 @@ async fn multi_block_direntry_segment() -> (
             .expect("rebuilt rows should encode");
     }
     let built = builder.build().expect("rebuilt segment");
-    store
-        .put_overwrite(
-            &metadata_segment_object_key(&descriptor),
-            Bytes::from(built.bytes.clone()),
-        )
-        .await
-        .expect("overwrite segment");
+    replace_object(
+        &store,
+        &metadata_segment_object_key(&descriptor),
+        Bytes::from(built.bytes.clone()),
+    )
+    .await
+    .expect("overwrite segment");
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;

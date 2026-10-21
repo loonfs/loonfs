@@ -15,7 +15,9 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, OperationKind};
+use loonfs_test_support::stores::{
+    replace_object, FailStore, InjectedError, OperationContext, OperationKind,
+};
 use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
@@ -314,10 +316,13 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
 
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
-    store
-        .put_overwrite(&wal_keys[0], Bytes::from_static(b"not a WAL object"))
-        .await
-        .expect("corrupt wal");
+    replace_object(
+        &store,
+        &wal_keys[0],
+        Bytes::from_static(b"not a WAL object"),
+    )
+    .await
+    .expect("corrupt wal");
 
     resolve_path(&store, &namespace_id, "/docs")
         .await
@@ -961,13 +966,13 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
     // Corrupt the original WAL so the checks below can only use the commit metadata.
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
-    store
-        .put_overwrite(
-            &wal_keys[0],
-            Bytes::from_static(b"compacted WAL must not be read"),
-        )
-        .await
-        .expect("poison compacted WAL");
+    replace_object(
+        &store,
+        &wal_keys[0],
+        Bytes::from_static(b"compacted WAL must not be read"),
+    )
+    .await
+    .expect("poison compacted WAL");
 
     let later_context = MutationContext {
         writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),

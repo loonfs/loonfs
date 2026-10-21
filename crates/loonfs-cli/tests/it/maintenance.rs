@@ -1074,7 +1074,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(probe_data["kind"], "store_probed");
         assert_eq!(
             probe_data["checks"].as_array().expect("checks array").len(),
-            14
+            13
         );
 
         shapes_by_mode.push((

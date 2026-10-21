@@ -21,8 +21,6 @@ pub enum OperationSelector {
     Read,
     /// Any `put` mode.
     Put,
-    /// Overwriting puts.
-    PutOverwrite,
     /// Create-if-absent puts.
     PutCreateIfAbsent,
     /// Compare-and-swap calls and CAS-mode puts.
@@ -50,15 +48,6 @@ impl OperationSelector {
                 OperationKind::Put { .. }
                     | OperationKind::PutStreamed { .. }
                     | OperationKind::Assemble { .. }
-            ),
-            Self::PutOverwrite => matches!(
-                kind,
-                OperationKind::Put {
-                    mode: PutMode::Overwrite,
-                    ..
-                } | OperationKind::PutStreamed {
-                    mode: PutMode::Overwrite,
-                }
             ),
             Self::PutCreateIfAbsent => matches!(
                 kind,
@@ -275,16 +264,6 @@ impl RecordedOperation {
                     | Self::PutStreamed { .. }
                     | Self::Assemble { .. }
                     | Self::CompareAndSwap { .. }
-            ),
-            OperationSelector::PutOverwrite => matches!(
-                self,
-                Self::Put {
-                    mode: PutMode::Overwrite,
-                    ..
-                } | Self::PutStreamed {
-                    mode: PutMode::Overwrite,
-                    ..
-                }
             ),
             OperationSelector::PutCreateIfAbsent => matches!(
                 self,

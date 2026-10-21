@@ -16,31 +16,30 @@ use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
 use crate::presign::{
-    base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
-    PresignedGetRequest, PresignedPartRequest, PresignedUrl, S3CompatiblePresigner,
-    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
+    base64_crc64nvme, CompletionCondition, DirectGetIssuer, DirectMultipartIssuer,
+    DirectTransferIssuers, PresignedGetRequest, PresignedPartRequest, PresignedUrl,
+    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };
 use crate::provider_object_store::{
     AbortUploadOnDrop, CompareToken, MultipartController, PartReader, StoredChecksumReader,
     PROVIDER_MAX_MULTIPART_PARTS,
 };
-use crate::retry::{with_transport_retry, RetryWarnings, StoreRetry, DEFAULT};
+use crate::retry::{with_transport_retry, RetryWarnings};
 use crate::signed_request::{classify_signed_response, send_signed, signing_time, SignedResponse};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
-    ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
+    ProviderObjectStore, ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, OperationDeadline};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,7 +232,6 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
-        Arc::clone(&provider) as Arc<dyn object_store::multipart::MultipartStore>,
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
@@ -292,17 +290,20 @@ impl SignedResponse {
 #[async_trait]
 impl StoredChecksumReader for S3RequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let signed = self
-            .request_signer
-            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
-            .await?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        crate::signed_request::metadata_from_signed_head(
-            key,
-            &response,
-            "x-amz-version-id",
-            s3_stored_checksum,
-        )
+        with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
+            let signed = self
+                .request_signer
+                .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
+                .await?;
+            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+            crate::signed_request::metadata_from_signed_head(
+                key,
+                &response,
+                "x-amz-version-id",
+                s3_stored_checksum,
+            )
+        })
+        .await
     }
 }
 
@@ -341,7 +342,7 @@ impl MultipartController for S3RequestSigner {
             provider_upload_id,
             &parts,
             Some(checksum),
-            &PutMode::Overwrite,
+            CompletionCondition::Unconditional,
         )
         .await
         .map(|_| ())
@@ -420,7 +421,7 @@ impl MultipartController for S3RequestSigner {
                 &upload_id,
                 &parts,
                 Some(&crc),
-                &PutMode::CreateIfAbsent,
+                CompletionCondition::CreateOnly,
             )
             .await?;
         abort_on_drop.disarm();
@@ -472,8 +473,12 @@ impl S3RequestSigner {
         payload: Bytes,
     ) -> Result<UploadedPart> {
         let checksum = Checksum::crc64nvme(&payload);
-        let etag = self
-            .retry_part(key, "put_part", payload.len() as u64, || async {
+        let etag = with_transport_retry(
+            &self.retry_warnings,
+            key,
+            "put_part",
+            payload.len() as u64,
+            || async {
                 let signed = self
                     .request_signer
                     .presign_multipart_part(
@@ -496,8 +501,9 @@ impl S3RequestSigner {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned)
                     .ok_or_else(|| ObjectStoreError::transport(key, "part upload returned no etag"))
-            })
-            .await?;
+            },
+        )
+        .await?;
         Ok(UploadedPart {
             part_number,
             etag,
@@ -516,25 +522,24 @@ impl S3RequestSigner {
     ) -> Result<UploadedPart> {
         let source_etag =
             (self.kind != ConfiguredObjectStoreKind::CloudflareR2).then_some(source_etag);
-        let response = self
-            .retry_part(key, "copy_part", 0, || async {
-                let signed = self
-                    .request_signer
-                    .presign_copy_part(
-                        key,
-                        upload_id,
-                        part_number,
-                        source_key,
-                        source,
-                        source_etag,
-                        MULTIPART_CONTROL_TTL,
-                        signing_time(),
-                    )
-                    .await?;
-                self.send_checked(key, signed, HttpRequestBody::empty())
-                    .await
-            })
-            .await?;
+        let response = with_transport_retry(&self.retry_warnings, key, "copy_part", 0, || async {
+            let signed = self
+                .request_signer
+                .presign_copy_part(
+                    key,
+                    upload_id,
+                    part_number,
+                    source_key,
+                    source,
+                    source_etag,
+                    MULTIPART_CONTROL_TTL,
+                    signing_time(),
+                )
+                .await?;
+            self.send_checked(key, signed, HttpRequestBody::empty())
+                .await
+        })
+        .await?;
         let text = response.text();
         let etag = xml_etag(&text)
             .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no etag"))?;
@@ -554,22 +559,25 @@ impl S3RequestSigner {
     }
 
     async fn get_range(&self, key: &str, range: &ByteRange, etag: &str) -> Result<Bytes> {
-        let mut signed = self
-            .request_signer
-            .presign_get(
-                PresignedGetRequest {
-                    object_key: key,
-                    range: range.clone(),
-                    ttl: MULTIPART_CONTROL_TTL,
-                },
-                signing_time(),
-            )
-            .await?;
-        signed
-            .headers
-            .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        checked_data(key, response).map(|response| response.body)
+        with_transport_retry(&self.retry_warnings, key, "get_range", 0, || async {
+            let mut signed = self
+                .request_signer
+                .presign_get(
+                    PresignedGetRequest {
+                        object_key: key,
+                        range: range.clone(),
+                        ttl: MULTIPART_CONTROL_TTL,
+                    },
+                    signing_time(),
+                )
+                .await?;
+            signed
+                .headers
+                .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
+            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+            checked_data(key, response).map(|response| response.body)
+        })
+        .await
     }
 
     /// Sends one signed request and fails on any provider error, including
@@ -588,15 +596,15 @@ impl S3RequestSigner {
         }
     }
 
-    /// Sends `CompleteMultipartUpload` under `mode`'s condition, answering
-    /// `None` when the provider no longer knows the upload.
+    /// Sends `CompleteMultipartUpload` under `condition`, answering `None`
+    /// when the provider no longer knows the upload.
     async fn complete_upload(
         &self,
         key: &str,
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        mode: &PutMode,
+        condition: CompletionCondition,
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
@@ -604,7 +612,7 @@ impl S3RequestSigner {
                 key,
                 upload_id,
                 checksum,
-                mode,
+                condition,
                 MULTIPART_CONTROL_TTL,
                 signing_time(),
             )
@@ -633,10 +641,10 @@ impl S3RequestSigner {
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        mode: &PutMode,
+        condition: CompletionCondition,
     ) -> Result<String> {
         let response = self
-            .complete_upload(key, upload_id, parts, checksum, mode)
+            .complete_upload(key, upload_id, parts, checksum, condition)
             .await?
             .ok_or_else(|| {
                 ObjectStoreError::retryable_transport(
@@ -658,34 +666,6 @@ impl S3RequestSigner {
                 .await
         };
         AbortUploadOnDrop::new(key, self.io_runtime.clone(), abort.boxed())
-    }
-
-    /// Retries one replay-safe part request under its own operation deadline.
-    async fn retry_part<T, Fut>(
-        &self,
-        key: &str,
-        operation: &'static str,
-        payload_bytes: u64,
-        attempt: impl FnMut() -> Fut,
-    ) -> Result<T>
-    where
-        Fut: Future<Output = Result<T>>,
-    {
-        let timer = StdMonotonicTimer::default();
-        let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
-        with_transport_retry(
-            StoreRetry {
-                policy: &DEFAULT,
-                warnings: &self.retry_warnings,
-            },
-            key,
-            operation,
-            payload_bytes,
-            Some(&deadline),
-            |error: &ObjectStoreError| error.kind() == ObjectStoreErrorKind::RetryableTransport,
-            attempt,
-        )
-        .await
     }
 }
 
@@ -813,11 +793,16 @@ mod tests {
     use crate::presign::{
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
-    use crate::provider_object_store::MultipartController;
-    use crate::retry::RetryWarnings;
+    use crate::provider_object_store::{
+        provider_retry_config, MultipartController, PROVIDER_ATTEMPT_TIMEOUT,
+        PROVIDER_OPERATION_DEADLINE,
+    };
+    use crate::retry::{RetryWarnings, DEFAULT};
     use crate::signed_request::{classify_signed_response, SignedResponse};
-    use crate::test_support::{aws_environment_lock, isolated_aws_environment};
-    use crate::timing::StdMonotonicTimer;
+    use crate::test_support::{
+        aws_environment_lock, isolated_aws_environment, time_out, RequestFault, TokioTimer,
+    };
+    use crate::timing::MonotonicTimer;
     use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
@@ -825,11 +810,12 @@ mod tests {
     };
     use async_trait::async_trait;
     use bytes::Bytes;
-    use loonfs_types::{Checksum, SecretString};
+    use loonfs_types::{saturating_duration_ms, Checksum, SecretString};
     use object_store::client::{
         HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
     };
     use std::assert_matches;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
@@ -1007,9 +993,9 @@ mod tests {
         }
     }
 
-    fn scripted_signer(
+    fn scripted_signer<P: HttpService + Clone>(
         kind: ConfiguredObjectStoreKind,
-        provider: &ScriptedProvider,
+        provider: &P,
     ) -> S3RequestSigner {
         let request_signer = S3CompatiblePresigner::with_credentials(
             S3PresignerConfig {
@@ -1032,32 +1018,50 @@ mod tests {
             http: HttpClient::new(provider.clone()),
             io_runtime: tokio::runtime::Handle::current(),
             kind,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default()))),
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioTimer::start()))),
         }
     }
 
-    fn scripted_store(
+    /// Builds a store over `provider` as the provider constructor does: a
+    /// client that retries under the provider retry configuration, the same
+    /// client with no retries for conditional puts, and the signer sharing
+    /// the store's retry warnings and their clock.
+    fn scripted_store<P>(
         kind: ConfiguredObjectStoreKind,
-        provider: &ScriptedProvider,
-    ) -> crate::ProviderObjectStore {
+        provider: &P,
+    ) -> crate::ProviderObjectStore
+    where
+        P: object_store::client::HttpConnector + HttpService + Clone,
+    {
+        let builder = object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name("bucket")
+            .with_region("us-east-1")
+            .with_access_key_id("test-access")
+            .with_secret_access_key("test-secret")
+            .with_endpoint("http://provider.invalid")
+            .with_allow_http(true)
+            .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
+            .with_disable_bulk_delete(true)
+            .with_http_connector(provider.clone());
         let client = Arc::new(
-            object_store::aws::AmazonS3Builder::new()
-                .with_bucket_name("bucket")
-                .with_region("us-east-1")
-                .with_access_key_id("test-access")
-                .with_secret_access_key("test-secret")
-                .with_endpoint("http://provider.invalid")
-                .with_allow_http(true)
-                .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
-                .with_http_connector(provider.clone())
+            builder
+                .clone()
+                .with_retry(provider_retry_config())
                 .build()
                 .expect("client"),
         );
+        let one_attempt = builder
+            .with_retry(object_store::RetryConfig {
+                max_retries: 0,
+                ..provider_retry_config()
+            })
+            .build()
+            .expect("client");
         let signer = Arc::new(scripted_signer(kind, provider));
+        let retry_warnings = Arc::clone(&signer.retry_warnings);
         crate::ProviderObjectStore::new(
             client.clone(),
-            client.clone(),
-            client.clone(),
+            Arc::new(one_attempt),
             client,
             crate::ProviderObjectStoreConfig { key_prefix: None },
             kind,
@@ -1067,6 +1071,174 @@ mod tests {
             signer,
         )
         .expect("store")
+        .retry_warnings(retry_warnings)
+    }
+
+    fn scripted_provider(kind: ConfiguredObjectStoreKind) -> ScriptedProvider {
+        ScriptedProvider {
+            kind,
+            base: Arc::new(b"source".to_vec()),
+            operations: Arc::default(),
+            aborted: Arc::default(),
+            objects: Arc::default(),
+            parts: Arc::default(),
+        }
+    }
+
+    /// Fails every request of one operation with one fault and counts the
+    /// attempts, and sends every other request to the scripted provider.
+    #[derive(Debug, Clone)]
+    struct FaultyProvider {
+        inner: ScriptedProvider,
+        operation: &'static str,
+        fault: RequestFault,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl object_store::client::HttpConnector for FaultyProvider {
+        fn connect(&self, _: &object_store::ClientOptions) -> object_store::Result<HttpClient> {
+            Ok(HttpClient::new(self.clone()))
+        }
+    }
+
+    /// The scripted provider's name for the operation `request` performs.
+    fn s3_operation(request: &HttpRequest) -> &'static str {
+        let query = request.uri().query().unwrap_or_default();
+        match *request.method() {
+            http::Method::HEAD => "head",
+            http::Method::DELETE if !query.contains("uploadId") => "delete",
+            http::Method::PUT if request.headers().contains_key("x-amz-copy-source") => "copy",
+            http::Method::PUT if query.contains("partNumber") => "upload",
+            http::Method::PUT => "put",
+            _ => "other",
+        }
+    }
+
+    #[async_trait]
+    impl HttpService for FaultyProvider {
+        async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+            if s3_operation(&request) != self.operation {
+                return self.inner.call(request).await;
+            }
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let body_bytes = request.body().content_length() as u64;
+            match self.fault {
+                RequestFault::Status(status) => {
+                    let code = match status {
+                        503 => "ServiceUnavailable",
+                        _ => "InvalidRequest",
+                    };
+                    Ok(http::Response::builder()
+                        .status(status)
+                        .body(Bytes::from(format!("<Error><Code>{code}</Code></Error>")))
+                        .expect("fault response")
+                        .map(HttpResponseBody::from))
+                }
+                RequestFault::Timeout => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout if attempt == 1 => Err(time_out(body_bytes).await),
+                RequestFault::FirstTimeout => self.inner.call(request).await,
+            }
+        }
+    }
+
+    /// Checks that each failing request is attempted at most once more than
+    /// the retry count, within one operation deadline and one attempt
+    /// bound, that a refused request fails at once wherever its status can
+    /// be read, and that every failure is reported as non-retryable.
+    ///
+    /// The retrying client retries a delete's 5xx responses, and LoonFS
+    /// resends a delete whose attempt timed out. LoonFS retries a verified
+    /// immutable write, a signed HEAD and a signed part. A part that spends
+    /// its budget fails the verified write around it, so the multipart
+    /// upload is created once.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_request_is_attempted_under_one_retry_budget() {
+        use crate::{ImmutableWriteError, ObjectStore};
+        let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
+        // Four 30 s attempts and their backoffs pass the 120 s deadline.
+        let timed_out = 4;
+        let failed = Some(ObjectStoreErrorKind::Other);
+        for (operation, fault, attempts, outcome) in [
+            ("delete", RequestFault::Status(400), 1, failed),
+            ("delete", RequestFault::Status(503), retried, failed),
+            // The retrying client doesn't resend a timed-out DELETE, because
+            // it doesn't mark DELETE idempotent, so LoonFS resends it.
+            ("delete", RequestFault::Timeout, timed_out, failed),
+            ("delete", RequestFault::FirstTimeout, 2, None),
+            // The client that sends a conditional put once reports a 400 as
+            // the same opaque error as a 503, so LoonFS retries both.
+            ("put", RequestFault::Status(400), retried, failed),
+            ("put", RequestFault::Status(503), retried, failed),
+            ("put", RequestFault::Timeout, timed_out, failed),
+            ("head", RequestFault::Status(400), 1, failed),
+            ("head", RequestFault::Status(503), retried, failed),
+            ("head", RequestFault::Timeout, timed_out, failed),
+            ("upload", RequestFault::Status(400), 1, failed),
+            ("upload", RequestFault::Status(503), retried, failed),
+            ("upload", RequestFault::Timeout, timed_out, failed),
+        ] {
+            let kind = ConfiguredObjectStoreKind::AwsS3;
+            let provider = FaultyProvider {
+                inner: scripted_provider(kind),
+                operation,
+                fault,
+                attempts: Arc::default(),
+            };
+            let store = scripted_store(kind, &provider);
+            if operation == "delete" {
+                store
+                    .put_if_absent(KEY, Bytes::from_static(b"payload"))
+                    .await
+                    .expect("seed the deleted object");
+            }
+            let clock = TokioTimer::start();
+            let reported = match operation {
+                "delete" => store.delete(KEY).await.err().map(|error| error.kind()),
+                "head" => store.head(KEY).await.err().map(|error| error.kind()),
+                _ => {
+                    // A one-part upload, so the part's attempts are the only
+                    // faulted requests.
+                    let (store, payload) = match operation {
+                        "put" => (store, Bytes::from_static(b"payload")),
+                        _ => (store.multipart_geometry(3, 3), Bytes::from_static(b"one")),
+                    };
+                    match store.put_immutable_verified(KEY, payload).await {
+                        Ok(_) => None,
+                        Err(ImmutableWriteError::Transport { source, .. }) => Some(source.kind()),
+                        Err(other) => panic!("{operation} {fault:?} returned {other:?}"),
+                    }
+                }
+            };
+            let elapsed_ms = clock.monotonic_now_ms();
+            assert_eq!(
+                reported, outcome,
+                "{operation} {fault:?} outcome (a failure is reported as non-retryable)"
+            );
+            assert_eq!(
+                provider.attempts.load(Ordering::SeqCst),
+                attempts,
+                "{operation} {fault:?} attempts"
+            );
+            let creates = provider
+                .inner
+                .operations()
+                .iter()
+                .filter(|recorded| **recorded == "create")
+                .count();
+            assert_eq!(
+                creates,
+                usize::from(operation == "upload"),
+                "{operation} {fault:?} multipart creates"
+            );
+            let bound = match outcome {
+                Some(_) => PROVIDER_OPERATION_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT,
+                None => PROVIDER_OPERATION_DEADLINE,
+            };
+            assert!(
+                elapsed_ms <= saturating_duration_ms(bound),
+                "{operation} {fault:?} took {elapsed_ms} ms"
+            );
+        }
     }
 
     /// The base object as a caller's HEAD reports it to the scripted provider.

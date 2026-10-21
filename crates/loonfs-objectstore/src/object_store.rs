@@ -93,8 +93,6 @@ pub struct ObjectBody {
 /// Controls the write semantics of a `put` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutMode {
-    /// Unconditionally overwrite any existing object.
-    Overwrite,
     /// Write only if the key does not already exist. Returns `PreconditionFailed` if it does.
     CreateIfAbsent,
     /// Write only if the current etag matches. Returns `PreconditionFailed` on mismatch.
@@ -292,6 +290,21 @@ impl ObjectStoreError {
         }
     }
 
+    /// Marks a retryable transport failure as one whose retry budget is
+    /// spent, so that no outer retry loop sends the request again.
+    ///
+    /// Every other error is returned unchanged.
+    pub(crate) fn exhausted(self) -> Self {
+        match self {
+            Self::Transport {
+                object_key,
+                message,
+                retryable: true,
+            } => Self::transport(object_key, message),
+            error => error,
+        }
+    }
+
     /// Returns this error's provider-independent category.
     pub fn kind(&self) -> ObjectStoreErrorKind {
         match self {
@@ -451,7 +464,8 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// never answers in its place.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>>;
 
-    /// Writes bytes under the requested overwrite or provider-enforced precondition.
+    /// Writes bytes under the precondition that `mode` requests, which the
+    /// provider enforces.
     ///
     /// Successful completion is immediately authoritative. A create-if-absent
     /// write sends the store's checksum for the provider to verify and store.
@@ -544,13 +558,6 @@ pub trait ObjectStore: Send + Sync + Debug {
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>>;
 
-    /// Writes bytes unconditionally, replacing any existing object at `key`.
-    ///
-    /// Invalid keys, permission failures, and ambiguous transport failures are returned.
-    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        self.put(key, bytes, PutMode::Overwrite).await
-    }
-
     /// Creates `key` only when no object is present.
     ///
     /// Existing objects return [`ObjectStoreError::PreconditionFailed`];
@@ -560,8 +567,9 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Creates an immutable object and accepts an occupied key only when its stored
-    /// checksum equals the checksum of `bytes`. Transport failures retry under
-    /// one operation deadline. Missing stored checksums fail verification.
+    /// checksum equals the checksum of `bytes`. Retryable transport failures
+    /// retry under one operation deadline. Missing stored checksums fail
+    /// verification.
     async fn put_immutable_verified(
         &self,
         key: &str,
@@ -688,10 +696,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
             .await
     }
 
-    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        self.as_ref().put_overwrite(key, bytes).await
-    }
-
     async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.as_ref().put_if_absent(key, bytes).await
     }
@@ -803,10 +807,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self)
             .list_child_prefixes(prefix, start_after, limit)
             .await
-    }
-
-    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        (*self).put_overwrite(key, bytes).await
     }
 
     async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {

@@ -938,7 +938,7 @@ mod tests {
             item_count: None,
             key_class,
             range_class: None,
-            put_mode: Some(PutModeKind::Overwrite),
+            put_mode: Some(PutModeKind::CreateIfAbsent),
             store_kind: None,
         }
     }

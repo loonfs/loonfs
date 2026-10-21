@@ -3,7 +3,7 @@
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::super::build::write_manifest_segment;
 use super::*;
-use loonfs_test_support::stores::ConcurrencyWatchStore;
+use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore};
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
 
@@ -388,8 +388,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         .expect("object exists")
         .to_vec();
     bytes[loonfs_types::usize_from_u64(index[64].block.offset)] ^= 1;
-    store
-        .put_overwrite(&key, Bytes::from(bytes))
+    replace_object(&store, &key, Bytes::from(bytes))
         .await
         .expect("corrupt fixture");
     // Unrequested, non-read-ahead data need not be eagerly validated.
@@ -471,8 +470,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
             .expect("segment")
             .to_vec();
         bytes[loonfs_types::usize_from_u64(index[2].block.offset)] ^= 1;
-        store
-            .put_overwrite(&key, Bytes::from(bytes))
+        replace_object(&store, &key, Bytes::from(bytes))
             .await
             .expect("corrupt unrequested block");
         let memo = load::SessionBlockMemo::default();

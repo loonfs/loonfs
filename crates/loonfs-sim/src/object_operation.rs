@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub enum ObjectOperationKind {
     Head,
     Get,
-    Put,
     PutIfAbsent,
     CompareAndSwap,
     Delete,

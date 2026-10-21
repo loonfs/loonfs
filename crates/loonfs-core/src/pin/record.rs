@@ -210,6 +210,7 @@ mod tests {
     use super::*;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::stores::replace_object;
     use loonfs_types::ChangeSeq;
     use std::assert_matches;
     use tempfile::{tempdir, TempDir};
@@ -302,8 +303,7 @@ mod tests {
 
         for (label, forged, expected) in cases {
             let bytes = encode_pin(&forged);
-            store
-                .put_overwrite(&object_key, bytes)
+            replace_object(&store, &object_key, bytes)
                 .await
                 .expect("write record");
 

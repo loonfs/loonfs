@@ -863,7 +863,7 @@ mod tests {
 
             let key = &keys[0];
             store
-                .put_overwrite(key.as_str(), Bytes::from_static(b"block"))
+                .put_if_absent(key.as_str(), Bytes::from_static(b"block"))
                 .await
                 .expect("write block");
             let load = || {

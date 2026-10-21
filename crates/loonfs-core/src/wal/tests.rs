@@ -15,8 +15,8 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_object, wal_p
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
-    OperationSelector, RecordingStore,
+    replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
+    MetadataMapStore, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::{
@@ -61,8 +61,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         let bytes = encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
-        store
-            .put_overwrite(&key, bytes.into())
+        replace_object(&store, &key, bytes.into())
             .await
             .expect("corrupt fixture");
         let error = load_current_metadata_view(&store, &namespace_id)
@@ -547,13 +546,13 @@ async fn the_object_cache_keeps_only_wal_objects_that_decode() {
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("fence");
-    store
-        .put_overwrite(
-            &wal_object(&namespace_id, &WalNo(2)),
-            bytes::Bytes::from_static(b"corrupt"),
-        )
-        .await
-        .expect("corrupt WAL object");
+    replace_object(
+        &store,
+        &wal_object(&namespace_id, &WalNo(2)),
+        bytes::Bytes::from_static(b"corrupt"),
+    )
+    .await
+    .expect("corrupt WAL object");
     let cache = crate::cache::ObjectCache::unshared(usize::MAX, 0);
     for (wal_no, outcome, store_gets) in [(1, "decoded", 1), (2, "corrupt", 2), (3, "absent", 2)] {
         store.reset();

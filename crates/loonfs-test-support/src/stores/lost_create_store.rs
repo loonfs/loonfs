@@ -45,7 +45,7 @@ impl<S: ObjectStore> ObjectStore for LostCreateStore<S> {
             && !self.lost.swap(true, Ordering::SeqCst)
         {
             self.inner
-                .put_overwrite(key, self.winner_bytes.clone())
+                .put_if_absent(key, self.winner_bytes.clone())
                 .await?;
             return Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),

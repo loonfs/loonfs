@@ -95,7 +95,7 @@ pub enum ObjectStoreOperation {
     GetWithMetadata,
     /// Measures a full or ranged byte read.
     Get,
-    /// Measures an overwrite or conditional write.
+    /// Measures a conditional write.
     Put,
     /// Measures a write whose payload arrived as a stream.
     PutStreamed,
@@ -264,8 +264,6 @@ pub enum RangeClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PutModeKind {
-    /// Indicates an unconditional replacement.
-    Overwrite,
     /// Indicates creation only while the key is absent.
     CreateIfAbsent,
     /// Indicates replacement only while an opaque compare token matches.
@@ -891,7 +889,6 @@ fn classify_range(range: Option<&ByteRange>) -> RangeClass {
 
 fn classify_put_mode(mode: &PutMode) -> PutModeKind {
     match mode {
-        PutMode::Overwrite => PutModeKind::Overwrite,
         PutMode::CreateIfAbsent => PutModeKind::CreateIfAbsent,
         PutMode::CompareAndSwap { .. } => PutModeKind::CompareAndSwap,
     }

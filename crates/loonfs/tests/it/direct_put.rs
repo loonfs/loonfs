@@ -22,7 +22,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
+    replace_object, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use std::assert_matches;
 use std::path::Path;
@@ -44,7 +44,7 @@ fn fail_content_blob_puts_store(root: &Path) -> FailStore<LocalFsStore> {
         LocalFsStore::new(root).expect("create local-fs store"),
         KeyPredicate::content_blob(),
         OperationSelector::Put,
-        InjectedError::Transport("injected content write failure".to_owned()),
+        InjectedError::RetryableTransport("injected content write failure".to_owned()),
     )
 }
 
@@ -731,8 +731,12 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&head_bad, &loonfs_test_support::test_actor())
         .expect("create head-bad namespace");
-    block_on(raw_store.put_overwrite(&hint(&head_bad), Bytes::from_static(br#"{"not":"a head"}"#)))
-        .expect("corrupt head");
+    block_on(replace_object(
+        &raw_store,
+        &hint(&head_bad),
+        Bytes::from_static(br#"{"not":"a head"}"#),
+    ))
+    .expect("corrupt head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&head_bad),
         ErrorCode::NamespaceCorrupt,

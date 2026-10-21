@@ -10,7 +10,9 @@ use loonfs::{
     RevisionNo, SharedObjectStore, StoreConfig,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_test_support::stores::{
+    replace_object, KeyPredicate, OperationSelector, RecordingStore,
+};
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -893,10 +895,13 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         &content_ref.owner_namespace_id,
         &content_ref.content_id,
     );
-    store
-        .put_overwrite(&object_key, bytes::Bytes::from_static(b"other bytes"))
-        .await
-        .expect("corrupt the stored content object");
+    replace_object(
+        &store,
+        &object_key,
+        bytes::Bytes::from_static(b"other bytes"),
+    )
+    .await
+    .expect("corrupt the stored content object");
 
     let error = namespace
         .read_content(&content_ref, content_ref.size_bytes)

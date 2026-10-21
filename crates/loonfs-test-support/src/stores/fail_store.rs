@@ -21,6 +21,9 @@ pub enum InjectedError {
     PermissionDenied(String),
     /// A transport failure carrying the supplied message.
     Transport(String),
+    /// A retryable transport failure carrying the supplied message, which a
+    /// store retry loop sends again.
+    RetryableTransport(String),
 }
 
 impl InjectedError {
@@ -34,6 +37,9 @@ impl InjectedError {
                 message: message.clone(),
             },
             Self::Transport(message) => ObjectStoreError::transport(key, message),
+            Self::RetryableTransport(message) => {
+                ObjectStoreError::retryable_transport(key, message)
+            }
         }
     }
 }
