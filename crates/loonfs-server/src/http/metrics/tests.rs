@@ -133,7 +133,6 @@ fn scrape_time_gauges_carry_permit_levels() {
     let mut rendered = String::new();
     render_scrape_gauges(
         &mut rendered,
-        None,
         Some(GrepStepBudgetStats {
             running: 1,
             waiting: 3,
@@ -162,7 +161,7 @@ fn scrape_time_gauges_carry_permit_levels() {
 #[test]
 fn a_scrape_reports_positive_process_resident_bytes() {
     let mut rendered = String::new();
-    render_scrape_gauges(&mut rendered, None, None, 0, 0, 0);
+    render_scrape_gauges(&mut rendered, None, 0, 0, 0);
 
     let resident_bytes = rendered
         .lines()

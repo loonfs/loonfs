@@ -14,12 +14,8 @@ name = "loonfs-server"
 path = "src/main.rs"
 
 [dependencies]
-async-trait.workspace = true
 axum.workspace = true
-bytes.workspace = true
 clap.workspace = true
-foyer.workspace = true
-fs4.workspace = true
 futures.workspace = true
 http-body.workspace = true
 http.workspace = true
@@ -28,11 +24,8 @@ loonfs.workspace = true
 loonfs-grep.workspace = true
 loonfs-http.workspace = true
 loonfs-objectstore.workspace = true
-mixtrics.workspace = true
 rustls.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls.workspace = true
@@ -41,12 +34,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+bytes.workspace = true
 form_urlencoded.workspace = true
 http-body-util.workspace = true
 loonfs-client.workspace = true
 loonfs-core.workspace = true
 loonfs-test-support.workspace = true
 rcgen.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 tower.workspace = true
 tokio = { workspace = true, features = ["io-util", "test-util"] }
 ureq.workspace = true

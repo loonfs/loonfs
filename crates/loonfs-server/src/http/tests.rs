@@ -9,10 +9,7 @@ use crate::config::MetadataCacheConfig;
 use crate::{ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
-use loonfs::{
-    ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
-    Writable,
-};
+use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode, Writable};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -39,7 +36,6 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
             store,
             &HttpMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
-            None,
         )
         .await
         .expect("build handles");
@@ -68,20 +64,6 @@ async fn app_validates_directly_built_configs() {
         Err(other) => panic!("expected invalid field error, got {other:?}"),
         Ok(_) => panic!("app must reject a zero upload size"),
     }
-}
-
-#[tokio::test]
-async fn a_server_without_the_table_builds_no_local_cache() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let config = test_config(temp_dir.path(), "no-local-cache-writer");
-
-    let (_router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    assert!(state.local_cache.is_none());
-    let rendered = super::metrics::render(&state);
-    assert!(!rendered.contains("loonfs_local_cache_"));
 }
 
 /// Checks that a scrape renders every counter and gauge of the metadata
@@ -154,70 +136,6 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     assert!(!rendered.contains("loonfs_runtime_cache_"));
 }
 
-#[tokio::test]
-async fn a_configured_local_cache_is_built_and_scraped() {
-    let temp_dir = tempdir().expect("tempdir");
-    let cache_dir = tempdir().expect("cache tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let mut config = test_config(temp_dir.path(), "local-cache-writer");
-    config.local_cache = Some(test_local_cache_config(cache_dir.path()));
-
-    let (_router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    let local_cache = state.local_cache.clone().expect("a local cache");
-    let rendered = super::metrics::render(&state);
-    assert!(rendered.contains("loonfs_local_cache_memory_capacity_bytes 4194304\n"));
-    assert!(rendered.contains("loonfs_local_cache_disk_capacity_bytes 134217728\n"));
-    assert!(rendered.contains("loonfs_local_cache_queue_buffer_overflows 0\n"));
-    assert!(rendered.contains("loonfs_local_cache_queue_channel_overflows 0\n"));
-
-    local_cache.close().await.expect("close local cache");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graceful_shutdown_closes_the_local_cache() {
-    let temp_dir = tempdir().expect("tempdir");
-    let cache_dir = tempdir().expect("cache tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let mut config = test_config(temp_dir.path(), "shutdown-local-cache-writer");
-    config.local_cache = Some(test_local_cache_config(cache_dir.path()));
-    let shutdown_deadline_ms = config.shutdown_deadline_ms;
-
-    let (router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    let local_cache = state.local_cache.clone().expect("a local cache");
-    assert!(!local_cache.is_closed());
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(super::serve::serve_and_settle(
-        listener,
-        router,
-        state.runtime.clone(),
-        state.sweep.clone(),
-        state.local_cache.clone(),
-        shutdown_deadline_ms,
-        async move {
-            let _ = shutdown_rx.await;
-        },
-    ));
-
-    shutdown_tx.send(()).expect("trigger shutdown");
-    server
-        .await
-        .expect("join server task")
-        .expect("graceful shutdown settles background work");
-
-    assert!(
-        local_cache.is_closed(),
-        "the graceful path closes the cache before it returns"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::disallowed_methods)]
 // The sleeping handler keeps one connection in flight past the drain budget.
@@ -250,7 +168,6 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         listener,
         router,
         writer.clone(),
-        None,
         None,
         shutdown_deadline_ms,
         async move {
@@ -291,14 +208,6 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
     assert!(writer.is_shutting_down(), "writer shutdown completed");
 
     client.abort();
-}
-
-fn test_local_cache_config(root: &Path) -> crate::config::LocalCacheConfig {
-    crate::config::LocalCacheConfig {
-        path: root.display().to_string(),
-        memory_bytes: 4 * 1024 * 1024,
-        disk_bytes: 128 * 1024 * 1024,
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -400,7 +309,6 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         router,
         state.runtime.clone(),
         state.sweep.clone(),
-        None,
         60_000,
         async move {
             let _ = shutdown_rx.await;
@@ -473,7 +381,6 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
         router,
         state.runtime.clone(),
         state.sweep.clone(),
-        None,
         shutdown_deadline_ms,
         async move {
             let _ = shutdown_rx.await;
@@ -747,7 +654,6 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         router,
         state.runtime.clone(),
         state.sweep.clone(),
-        None,
         shutdown_deadline_ms,
         async move {
             let _ = shutdown_rx.await;
@@ -847,7 +753,6 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
-        local_cache: None,
         grep: crate::config::GrepConfig {
             mode: crate::config::JobMode::ServeAndMaintain,
             ..crate::config::GrepConfig::default()

@@ -826,10 +826,15 @@ async fn merged_rows<S: ObjectStore + ?Sized>(
                 .await
                 .expect("load the output index");
         for entry in index.iter() {
-            let block =
-                data_block_load::load_segment_data_block(store, None, None, descriptor, entry)
-                    .await
-                    .expect("load an output block");
+            let block = data_block_load::load_segment_data_block_with_readahead(
+                store,
+                None,
+                None,
+                descriptor,
+                std::slice::from_ref(entry),
+            )
+            .await
+            .expect("load an output block");
             rows.extend(block.rows.iter().cloned());
         }
     }

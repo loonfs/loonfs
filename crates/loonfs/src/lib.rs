@@ -68,10 +68,6 @@ mod options;
 mod publisher;
 mod trace;
 
-pub use loonfs_core::cache::{
-    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-    StoredMetadataBlockKind,
-};
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST,

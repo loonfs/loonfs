@@ -2,7 +2,7 @@
 
 This guide describes how to run `loonfs-server` on your own infrastructure, with Docker or Kubernetes, and how to size, monitor, upgrade, and maintain it.
 
-A LoonFS deployment is one server connected to an object store. All durable data is stored in the object store, and the server keeps only temporary state, in memory and in its optional local cache.
+A LoonFS deployment is one server connected to an object store. All durable data is stored in the object store, and the server keeps only temporary state in memory.
 
 Run one active server per deployment, and don't run two active servers against the same LoonFS data. LoonFS doesn't support automatic failover or horizontal scaling. A restart or an upgrade makes the API unavailable until the server starts again.
 
@@ -82,12 +82,11 @@ fixed = 128 MiB
       + (max_concurrent_folds + max_concurrent_compactions) x 32 MiB
       + max_concurrent_content_writes x 16 MiB (72 MiB on R2)
       + 32 MiB
-      + local_cache.memory_bytes + 320 MiB, with a [local_cache] table
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
 ```
 
-`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between passes, and the local cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The local cache's term is its memory tier plus 64 MiB of write buffers and up to 256 MiB of inserts waiting for its disk tier.
+`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, and the completed upload sessions that garbage collection keeps between passes. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB.
 
 The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
 
@@ -138,7 +137,7 @@ docker run --rm \
 
 Replace `X.Y.Z` with the release version you're deploying. If you use cloud storage, remove the local store volume, and pass any provider credentials that your config requires.
 
-This command validates the config, the TLS files, and the local cache, but it doesn't contact the object store. Check object-store access after the server starts (see [4. Verify the deployment](#4-verify-the-deployment)).
+This command validates the config and the TLS files, but it doesn't contact the object store. Check object-store access after the server starts (see [4. Verify the deployment](#4-verify-the-deployment)).
 
 ## 3. Deploy
 
@@ -285,7 +284,6 @@ Before you run a server in production, check this list:
 - Keep a `local_fs` store on durable storage that uid 10001 can write to.
 - Configure cloud buckets to remove incomplete multipart uploads.
 - Allow at least 660 seconds for graceful shutdown.
-- Set memory and open-file limits before you enable the local cache.
 - Monitor health, readiness, metrics, and repeated error logs.
 - Run the smoke test after installation and after every upgrade.
 - Check the release notes for format compatibility before an upgrade. A copy of a namespace prefix, or a fork, isn't a complete backup.
@@ -413,7 +411,7 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, a local cache, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
+Without a memory limit, grep, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -447,9 +445,7 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk tier, and up to 256 MiB of inserts waiting for the disk tier. There's no setting for the last two, and the sizing formula counts all three.
-
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 291 MiB of managed memory, and the smallest limit that passes is 2,004 MiB. A local cache takes its `memory_bytes` plus 320 MiB from the same limit, so with a local cache the smallest limit is 2,324 MiB plus `memory_bytes`. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,796 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 291 MiB of managed memory, and the smallest limit that passes is 2,004 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,796 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 
@@ -504,21 +500,6 @@ The tail limit uses the tail size from the session's position. A session has no 
 Explicit metadata maintenance and the maintenance sweep fold at the same `inline_content_fold_at_bytes` as the writer session, when the server's session for the namespace knows the tail's inline bytes. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
-
-## Optional local cache
-
-The local cache stores replaceable copies of metadata blocks. It isn't durable, and you can delete it while the server is stopped.
-
-```toml
-[local_cache]
-path = "/var/lib/loonfs/cache"
-memory_bytes = 67108864
-disk_bytes = 107374182400
-```
-
-`disk_bytes` must be at least 96 MiB. The cache allocates 16 MiB files up to that limit and keeps them open, so set the process's open-file limit higher than `disk_bytes / 16 MiB`.
-
-On Kubernetes, set `localCache.enabled=true`, set `localCache.sizeLimit` higher than `disk_bytes`, and use `/var/cache/loonfs` as the cache `path` in the config. The chart uses an `emptyDir`, so a replacement pod starts with an empty cache.
 
 ## Shutdown and upgrades
 

@@ -1,28 +1,21 @@
 //! Loading, decoding, and cache publication for segment index and filter blocks.
 //!
-//! Index, filter, and point data loads consult the per-view memo, the decoded
-//! block cache, and the node-local cache of stored bytes. Their fetched
-//! sections, including whole-small-segment loads, are offered to the local
-//! tier. Wide data spans skip that tier because its awaited point reads lose
-//! the coalescing provided by ranged store GETs.
+//! Index and filter loads consult the per-view memo and the decoded block
+//! cache before they fetch from object storage.
 
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::decoded_data_cache_block;
 use super::error::ManifestLoadError;
-use super::stored_block_cache::{
-    StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
-};
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::index_block_heap_bytes;
-use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::manifest::MetadataSegmentRef;
 use loonfs_types::format::segment_blocks::{
-    decode_data_block, decode_filter_block, decode_index_block, BlockHandle,
-    SegmentBlockCodecError, SegmentFilter, SegmentIndexEntry,
+    decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
+    SegmentIndexEntry,
 };
 use std::sync::Arc;
 
@@ -36,98 +29,6 @@ pub(super) fn segment_block_cache_key(
         block_kind,
         block_offset,
     }
-}
-
-fn stored_block_key(
-    descriptor: &MetadataSegmentRef,
-    kind: StoredMetadataBlockKind,
-    handle: &BlockHandle,
-) -> StoredMetadataBlockKey {
-    StoredMetadataBlockKey {
-        owner_namespace_id: descriptor.owner_namespace_id.clone(),
-        segment_id: descriptor.segment_id.clone(),
-        kind,
-        offset: handle.offset,
-    }
-}
-
-/// Returns the stored-block cache associated with the decoded segment cache.
-/// A compaction reads its input with no segment cache, so it uses neither cache.
-fn stored_block_cache(
-    segment_cache: Option<&MetadataSegmentCache>,
-) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
-    segment_cache?.stored_block_cache()
-}
-
-/// Answers one section from the local stored-block cache, when it holds
-/// bytes for it that decode.
-///
-/// The bytes go to the same decoder the store's bytes go to, so a hit is
-/// checksummed and structure-checked exactly as a fetch is. A hit that does
-/// not decode says nothing about the segment — object storage still holds
-/// the authority — so the entry is dropped and the caller falls through to
-/// one ordinary fetch, which reports corruption if the store's bytes fail
-/// too. Nothing retries the local tier.
-pub(super) async fn stored_block_section<T>(
-    segment_cache: Option<&MetadataSegmentCache>,
-    descriptor: &MetadataSegmentRef,
-    kind: StoredMetadataBlockKind,
-    handle: &BlockHandle,
-    decode: impl FnOnce(&[u8], &BlockHandle) -> Result<T, SegmentBlockCodecError>,
-) -> Option<T> {
-    let cache = stored_block_cache(segment_cache)?;
-    let key = stored_block_key(descriptor, kind, handle);
-    let bytes = cache.get(&key).await?;
-    // The decoder checks the stored length too; checking it first keeps a
-    // truncated entry from reaching the decompressor at all.
-    let decoded = if bytes.len() == handle.stored_bytes as usize {
-        decode(&bytes, handle).map_err(|error| error.to_string())
-    } else {
-        Err(format!(
-            "entry holds {} bytes, expected {}",
-            bytes.len(),
-            handle.stored_bytes
-        ))
-    };
-    match decoded {
-        Ok(decoded) => Some(decoded),
-        Err(reason) => {
-            // The read still succeeds from the store, but bytes this tier
-            // wrote and read back no longer decode: the local disk is
-            // returning something other than what it was given. That is a
-            // hardware or filesystem problem an operator has to know about,
-            // so it is a warning rather than a debug line.
-            tracing::warn!(
-                object_key = %metadata_segment_object_key(descriptor),
-                error = %reason,
-                "local block cache entry did not decode, refetching from the store"
-            );
-            cache.invalidate(&key);
-            None
-        }
-    }
-}
-
-/// Offers one section's stored bytes to the local stored-block cache.
-///
-/// Every section a fetch produced is offered under its own key, so a later
-/// read of any one of them needs no GET. The bytes are copied rather than
-/// sliced out of the fetch buffer: a slice would keep the whole fetched span
-/// alive for as long as the cache held any one section of it.
-pub(super) fn offer_stored_block(
-    segment_cache: Option<&MetadataSegmentCache>,
-    descriptor: &MetadataSegmentRef,
-    kind: StoredMetadataBlockKind,
-    handle: &BlockHandle,
-    stored: &[u8],
-) {
-    let Some(cache) = stored_block_cache(segment_cache) else {
-        return;
-    };
-    cache.insert(
-        stored_block_key(descriptor, kind, handle),
-        Bytes::copy_from_slice(stored),
-    );
 }
 
 /// Fetches exactly the byte range a handle names.
@@ -243,10 +144,10 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
 }
 
 /// Inserts the sections of a segment that this process wrote into
-/// `segment_cache`, and offers them to its node-local tier. These are the
-/// sections that the first fetch of the segment would insert: the index and
-/// filter blocks, and the data blocks of a segment small enough to fetch whole.
-/// Returns an error if a section of the segment doesn't decode.
+/// `segment_cache`. These are the sections that the first fetch of the
+/// segment would insert: the index and filter blocks, and the data blocks of
+/// a segment small enough to fetch whole. Returns an error if a section of
+/// the segment doesn't decode.
 pub(super) fn insert_written_segment(
     segment_cache: &MetadataSegmentCache,
     descriptor: &MetadataSegmentRef,
@@ -285,13 +186,6 @@ fn publish_segment_sections(
 
     let index_entries = match section(&index_handle) {
         Some(stored) => {
-            offer_stored_block(
-                segment_cache,
-                descriptor,
-                StoredMetadataBlockKind::Index,
-                &index_handle,
-                stored,
-            );
             let block = index_cache_block(
                 decode_index_block(stored, &index_handle)
                     .map_err(|err| segment_codec_error(&object_key, err))?,
@@ -308,13 +202,6 @@ fn publish_segment_sections(
     };
     let filter_block = match section(&filter_handle) {
         Some(stored) => {
-            offer_stored_block(
-                segment_cache,
-                descriptor,
-                StoredMetadataBlockKind::Filter,
-                &filter_handle,
-                stored,
-            );
             let filter = decode_filter_block(stored, &filter_handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?;
             let block = filter_cache_block(filter);
@@ -337,13 +224,6 @@ fn publish_segment_sections(
                         "data block outside the segment object bounds",
                     ));
                 };
-                offer_stored_block(
-                    segment_cache,
-                    descriptor,
-                    StoredMetadataBlockKind::Data,
-                    &entry.block,
-                    stored,
-                );
                 if let Some(memo) = memo {
                     memo.record_stored(
                         &segment_block_cache_key(
@@ -435,21 +315,6 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         return Ok(entries);
     }
     let fetch = || async {
-        // Between the decoded cache above and the store below: a local copy
-        // of the same stored bytes. A hit answers this section and nothing
-        // else, so the sibling sections a fetch would have published are
-        // published only when a fetch happens.
-        if let Some(entries) = stored_block_section(
-            segment_cache,
-            descriptor,
-            StoredMetadataBlockKind::Index,
-            &handle,
-            decode_index_block,
-        )
-        .await
-        {
-            return Ok(index_cache_block(entries));
-        }
         if load_small_segment_whole {
             load_and_publish_segment_sections(
                 store,
@@ -485,11 +350,10 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
 
 /// Loads a segment's bloom filter block: the cheap pre-index check a lookup
 /// consults to skip the segment entirely. A copy inlined in the manifest
-/// descriptor answers without any object fetch; otherwise the local
-/// stored-block cache answers if it holds the section, and only failing that
-/// does one ranged GET cover the filter together with the adjacent index
-/// block (and the whole object when it is small), so an admitted lookup does
-/// not pay a second round-trip for the index.
+/// descriptor answers without any object fetch; otherwise one ranged GET
+/// covers the filter together with the adjacent index block (and the whole
+/// object when it is small), so an admitted lookup does not pay a second
+/// round-trip for the index.
 pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -514,20 +378,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         publish_segment_block(segment_cache, Some(memo), cache_key, &block);
         return block.into_filter(&object_key);
     }
-    let fetch = || async {
-        // Reached only when the descriptor carried no inline copy: an
-        // inlined filter is answered above and never touches this tier.
-        if let Some(filter) = stored_block_section(
-            segment_cache,
-            descriptor,
-            StoredMetadataBlockKind::Filter,
-            &handle,
-            decode_filter_block,
-        )
-        .await
-        {
-            return Ok(filter_cache_block(filter));
-        }
+    let fetch = || {
         load_and_publish_segment_sections(
             store,
             segment_cache,
@@ -535,7 +386,6 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
             descriptor,
             SegmentBlockKind::Filter,
         )
-        .await
     };
     let block = match segment_cache {
         Some(cache) => cache.get_or_load(&cache_key, fetch).await?,

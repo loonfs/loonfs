@@ -1,6 +1,5 @@
 //! Checkpoint metadata cache, scan sharing, filters, and lookup behavior.
 
-use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::*;
 use loonfs_test_support::stores::replace_object;
 use std::assert_matches;
@@ -545,7 +544,6 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
         Arc::new(SharedSegmentBlocks::new(0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
-        None,
     );
     let read_view = super::load_manifest_segments_for_inspection(
         &store,
@@ -829,72 +827,16 @@ async fn checkpointed_direntry_segment() -> (
     (temp_dir, store, descriptor)
 }
 
-/// A decoded block cache with `blocks` beneath it, which is what a runtime
-/// built with a local cache hands the read paths. A fresh one stands for a
-/// fresh process: only the local tier carries anything over.
-fn segment_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataSegmentCache {
-    MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(usize::MAX)),
-        ObjectStoreScope::new(0),
-        Arc::default(),
-        Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
-    )
-}
-
-fn stored_key(
-    descriptor: &MetadataSegmentRef,
-    kind: StoredMetadataBlockKind,
-    offset: u64,
-) -> StoredMetadataBlockKey {
-    StoredMetadataBlockKey {
-        owner_namespace_id: descriptor.owner_namespace_id.clone(),
-        segment_id: descriptor.segment_id.clone(),
-        kind,
-        offset,
-    }
-}
-
-/// Fills `blocks` the way one cold read fills it, and returns the index that
-/// read decoded.
-async fn warm_local_block_cache(
-    store: &RecordingStore<LocalFsStore>,
-    descriptor: &MetadataSegmentRef,
-    blocks: &Arc<RecordingStoredMetadataBlockCache>,
-) -> Arc<Vec<SegmentIndexEntry>> {
-    let cache = segment_cache_over(blocks);
-    let memo = load::SessionBlockMemo::default();
-    load::load_segment_filter(store, Some(&cache), &memo, descriptor)
-        .await
-        .expect("warm the filter");
-    index_block_load::load_segment_index(store, Some(&cache), &memo, descriptor)
-        .await
-        .expect("warm the index")
-}
-
 #[tokio::test]
-async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
+async fn a_cold_filter_load_fetches_the_index_in_the_same_read() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cache = segment_cache_over(&blocks);
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let memo = load::SessionBlockMemo::default();
 
     store.reset();
     load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("load filter");
-
-    assert_eq!(
-        blocks.calls().first(),
-        Some(&RecordedStoredMetadataBlockCall::Get {
-            key: stored_key(
-                &descriptor,
-                StoredMetadataBlockKind::Filter,
-                descriptor.filter_block.offset
-            ),
-            hit: false,
-        }),
-        "a filter load probes the local cache before it asks the store"
-    );
     assert_eq!(
         store.count(OperationSelector::Read),
         1,
@@ -902,184 +844,20 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
     );
 
     // That fetch published the index into the view memo, so asking for it
-    // costs nothing and tells this test which data blocks the segment holds.
+    // costs nothing.
     let index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("load index");
     assert_eq!(store.count(OperationSelector::Read), 1);
     assert!(!index.is_empty(), "a segment holds at least one data block");
-
-    let offered: Vec<_> = blocks
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            RecordedStoredMetadataBlockCall::Insert { key, .. } => Some(key),
-            RecordedStoredMetadataBlockCall::Get { .. }
-            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
-        })
-        .collect();
-    let mut expected = vec![
-        stored_key(
-            &descriptor,
-            StoredMetadataBlockKind::Index,
-            descriptor.index_block.offset,
-        ),
-        stored_key(
-            &descriptor,
-            StoredMetadataBlockKind::Filter,
-            descriptor.filter_block.offset,
-        ),
-    ];
-    expected.extend(index.iter().map(|entry| {
-        stored_key(
-            &descriptor,
-            StoredMetadataBlockKind::Data,
-            entry.block.offset,
-        )
-    }));
-    assert_eq!(offered, expected);
-}
-
-#[tokio::test]
-async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
-    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
-
-    let cache = segment_cache_over(&blocks);
-    let memo = load::SessionBlockMemo::default();
-    store.reset();
-    let warm_index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
-        .await
-        .expect("index from the local cache");
-    load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
-        .await
-        .expect("filter from the local cache");
-
-    assert_eq!(warm_index, cold_index);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        0,
-        "a warm index and filter should read no segment bytes"
-    );
-    for (kind, offset) in [
-        (
-            StoredMetadataBlockKind::Index,
-            descriptor.index_block.offset,
-        ),
-        (
-            StoredMetadataBlockKind::Filter,
-            descriptor.filter_block.offset,
-        ),
-    ] {
-        assert!(
-            blocks
-                .calls()
-                .contains(&RecordedStoredMetadataBlockCall::Get {
-                    key: stored_key(&descriptor, kind, offset),
-                    hit: true,
-                }),
-            "the {kind:?} section should have been served by the local cache"
-        );
-    }
-
-    let mut other_owner = descriptor.clone();
-    other_owner.owner_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
-    let mut other_segment = descriptor.clone();
-    other_segment.segment_id = loonfs_types::MetadataSegmentId::generate();
-    for missing in [other_owner, other_segment] {
-        let error = index_block_load::load_segment_index(&store, Some(&cache), &memo, &missing)
-            .await
-            .expect_err("another object should miss every cache");
-        match error {
-            ManifestLoadError::MissingSegment { object_key } => {
-                assert_eq!(object_key, metadata_segment_object_key(&missing));
-            }
-            other => panic!("expected a missing segment, got {other:?}"),
-        }
-        assert!(blocks
-            .calls()
-            .contains(&RecordedStoredMetadataBlockCall::Get {
-                key: stored_key(
-                    &missing,
-                    StoredMetadataBlockKind::Index,
-                    missing.index_block.offset,
-                ),
-                hit: false,
-            }));
-    }
-    assert_eq!(store.count(OperationSelector::Read), 2);
-}
-
-#[tokio::test]
-async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched() {
-    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
-    let index_key = stored_key(
-        &descriptor,
-        StoredMetadataBlockKind::Index,
-        descriptor.index_block.offset,
-    );
-    blocks.corrupt(&index_key);
-
-    let cache = segment_cache_over(&blocks);
-    let memo = load::SessionBlockMemo::default();
-    store.reset();
-    let repaired = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
-        .await
-        .expect("a local entry that does not decode must not fail the read");
-
-    assert_eq!(repaired, cold_index);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        1,
-        "the bad entry costs one refetch and no retry loop"
-    );
-    assert_eq!(
-        blocks
-            .calls()
-            .iter()
-            .filter(|call| **call
-                == RecordedStoredMetadataBlockCall::Invalidate {
-                    key: index_key.clone()
-                })
-            .count(),
-        1,
-        "the entry that did not decode should have been dropped once"
-    );
-}
-
-#[tokio::test]
-async fn a_closed_local_block_cache_reads_as_a_miss() {
-    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
-    blocks.close().await.expect("close the local cache");
-    let calls_before = blocks.call_count();
-
-    let cache = segment_cache_over(&blocks);
-    let memo = load::SessionBlockMemo::default();
-    store.reset();
-    let index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
-        .await
-        .expect("a closed local cache must not fail the read");
-
-    assert_eq!(index, cold_index);
-    assert_eq!(store.count(OperationSelector::Read), 1);
-    assert_eq!(
-        blocks.call_count(),
-        calls_before,
-        "a closed cache neither serves nor records"
-    );
 }
 
 /// One checkpointed direntry segment rebuilt with a one-byte block target,
 /// so every row lands in its own data block. A handful of test rows would
 /// otherwise fit in one block, and the coalescing span path only says
 /// anything with several. Returns the segment's index, read with no caches,
-/// so a test can drive the span path without an index load filling either
-/// cache first.
+/// so a test can drive the span path without an index load filling the
+/// decoded cache first.
 async fn multi_block_direntry_segment() -> (
     tempfile::TempDir,
     RecordingStore<LocalFsStore>,
@@ -1170,7 +948,7 @@ async fn multi_block_direntry_segment() -> (
 }
 
 /// Every row of one segment, in row-key order, read straight through with
-/// no caches of either kind.
+/// no caches.
 async fn segment_rows(
     store: &RecordingStore<LocalFsStore>,
     descriptor: &MetadataSegmentRef,
@@ -1224,24 +1002,6 @@ fn seed_decoded_blocks(
                 handle.offset,
             ),
             data_block_load::decoded_data_cache_block(decoded),
-        );
-    }
-}
-
-/// Puts the named blocks into the local stored-block cache, as an earlier
-/// process's reads would have left them.
-fn seed_local_blocks(
-    blocks: &RecordingStoredMetadataBlockCache,
-    object: &Bytes,
-    descriptor: &MetadataSegmentRef,
-    index: &[SegmentIndexEntry],
-    positions: &[usize],
-) {
-    for position in positions {
-        let handle = index[*position].block;
-        blocks.insert(
-            stored_key(descriptor, StoredMetadataBlockKind::Data, handle.offset),
-            stored_block_bytes(object, &handle),
         );
     }
 }
@@ -1323,77 +1083,6 @@ async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
 }
 
 #[tokio::test]
-async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it() {
-    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let entry = &index[0];
-    let data_key = stored_key(
-        &descriptor,
-        StoredMetadataBlockKind::Data,
-        entry.block.offset,
-    );
-
-    let cold_cache = segment_cache_over(&blocks);
-    store.reset();
-    let cold = data_block_load::load_segment_data_block(
-        &store,
-        Some(&cold_cache),
-        Some(&load::SessionBlockMemo::default()),
-        &descriptor,
-        entry,
-    )
-    .await
-    .expect("cold data block load");
-
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        1,
-        "a cold data block costs exactly one fetch"
-    );
-    assert_eq!(
-        blocks.calls(),
-        vec![
-            RecordedStoredMetadataBlockCall::Get {
-                key: data_key.clone(),
-                hit: false,
-            },
-            RecordedStoredMetadataBlockCall::Insert {
-                key: data_key.clone(),
-                bytes: entry.block.stored_bytes as usize,
-            },
-        ],
-        "a cold load probes the local cache, misses, and offers what it fetched"
-    );
-
-    let warm_cache = segment_cache_over(&blocks);
-    store.reset();
-    let warm = data_block_load::load_segment_data_block(
-        &store,
-        Some(&warm_cache),
-        Some(&load::SessionBlockMemo::default()),
-        &descriptor,
-        entry,
-    )
-    .await
-    .expect("warm data block load");
-
-    assert_eq!(warm, cold);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        0,
-        "a warm data block reads no segment bytes"
-    );
-    assert_eq!(
-        blocks.calls().last(),
-        Some(&RecordedStoredMetadataBlockCall::Get {
-            key: data_key,
-            hit: true,
-        }),
-        "the warm load was served by the local cache"
-    );
-}
-
-#[tokio::test]
 async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
@@ -1409,150 +1098,6 @@ async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     assert_eq!(
         gets, 2,
         "one ranged GET per run of consecutive blocks nothing answered"
-    );
-}
-
-#[tokio::test]
-async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
-    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
-
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let object = segment_object_bytes(&store, &descriptor).await;
-    let every_block: Vec<usize> = (0..index.len()).collect();
-    seed_local_blocks(&blocks, &object, &descriptor, &index, &every_block);
-    let calls_before = blocks.call_count();
-    let cache = segment_cache_over(&blocks);
-
-    let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
-
-    assert_eq!(read, expected);
-    assert_eq!(gets, 1, "the unresolved selection should stay one span");
-    assert_eq!(
-        blocks.call_count(),
-        calls_before,
-        "a span load must perform no local-cache gets or inserts"
-    );
-}
-
-#[tokio::test]
-async fn deferred_lookup_reads_never_read_or_write_local_data_blocks() {
-    let (_temp_dir, store, descriptor, _) = multi_block_direntry_segment().await;
-    let expected = segment_rows(&store, &descriptor).await;
-    for retain_local_data in [true, false] {
-        let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-        let index = warm_local_block_cache(&store, &descriptor, &blocks).await;
-        if !retain_local_data {
-            for entry in index.iter() {
-                blocks.invalidate(&stored_key(
-                    &descriptor,
-                    StoredMetadataBlockKind::Data,
-                    entry.block.offset,
-                ));
-            }
-        }
-        let cache = segment_cache_over(&blocks);
-        let memo = load::SessionBlockMemo::default();
-        let calls_before = blocks.call_count();
-        store.reset();
-        load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
-            .await
-            .expect("cached filter");
-        for row in &expected[..2] {
-            let loaded = load_manifest_segment_rows_in_key_range_with_cache(
-                &store,
-                Some(&cache),
-                &memo,
-                &descriptor,
-                ChangeSeq(u64::MAX),
-                &row.row_key_for_family(descriptor.family),
-                None,
-                1,
-                scan::Readahead::Stored,
-            )
-            .await
-            .expect("lookup rows");
-            assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![row]);
-        }
-        assert_eq!(store.count(OperationSelector::Read), 1);
-        assert_eq!(
-            &blocks.calls()[calls_before..],
-            &[
-                RecordedStoredMetadataBlockCall::Get {
-                    key: stored_key(
-                        &descriptor,
-                        StoredMetadataBlockKind::Filter,
-                        descriptor.filter_block.offset,
-                    ),
-                    hit: true,
-                },
-                RecordedStoredMetadataBlockCall::Get {
-                    key: stored_key(
-                        &descriptor,
-                        StoredMetadataBlockKind::Index,
-                        descriptor.index_block.offset,
-                    ),
-                    hit: true,
-                },
-            ]
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
-    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let object = segment_object_bytes(&store, &descriptor).await;
-    let corrupt = 5usize;
-    let entry = &index[corrupt];
-    let expected = decode_data_block(&stored_block_bytes(&object, &entry.block), &entry.block)
-        .expect("authoritative block should decode");
-    seed_local_blocks(&blocks, &object, &descriptor, &index, &[corrupt]);
-    let corrupt_key = stored_key(
-        &descriptor,
-        StoredMetadataBlockKind::Data,
-        entry.block.offset,
-    );
-    blocks.corrupt(&corrupt_key);
-
-    let cache = segment_cache_over(&blocks);
-    let calls_before = blocks.call_count();
-    store.reset();
-    let read = data_block_load::load_segment_data_block(
-        &store,
-        Some(&cache),
-        Some(&load::SessionBlockMemo::default()),
-        &descriptor,
-        entry,
-    )
-    .await
-    .expect("narrow load should recover from a corrupt local copy");
-    let calls = blocks.calls();
-    let during = &calls[calls_before..];
-
-    assert_eq!(read.as_ref(), &expected);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        1,
-        "the bad entry costs one point fetch and no retry loop"
-    );
-    assert_eq!(
-        during,
-        [
-            RecordedStoredMetadataBlockCall::Get {
-                key: corrupt_key.clone(),
-                hit: true,
-            },
-            RecordedStoredMetadataBlockCall::Invalidate {
-                key: corrupt_key.clone(),
-            },
-            RecordedStoredMetadataBlockCall::Insert {
-                key: corrupt_key,
-                bytes: entry.block.stored_bytes as usize,
-            },
-        ],
-        "the narrow load should drop the bad copy and offer the fetched bytes"
     );
 }
 
@@ -1622,7 +1167,6 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             Arc::new(SharedSegmentBlocks::new(0)),
             ObjectStoreScope::new(0),
             pool,
-            None,
         )
     };
     let probe_pool = Arc::new(ReadWorkingMemory::default());

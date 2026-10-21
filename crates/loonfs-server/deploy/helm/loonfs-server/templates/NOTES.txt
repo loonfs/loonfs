@@ -9,6 +9,6 @@ Reach the API from your workstation:
   kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "loonfs-server.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
   curl http://127.0.0.1:{{ .Values.service.port }}/health
 
-The config, the probes, and the local cache are covered in the self-hosting
-guide at crates/loonfs-server/docs/self-hosting.md, and the chart's own
-values are covered in its README.
+The config and the probes are covered in the self-hosting guide at
+crates/loonfs-server/docs/self-hosting.md, and the chart's own values are
+covered in its README.

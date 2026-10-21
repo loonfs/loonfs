@@ -10,13 +10,8 @@
 //! runtime's [`CacheScope`] to every key, so no runtime reads the namespace
 //! heads or WAL-tail projections of another runtime. Eviction runs across
 //! every scope.
-//!
-//! The segment view also carries the handle to the optional node-local
-//! cache of the same blocks in their encoded form; see
-//! [`stored_block_cache`](super::stored_block_cache).
 
 use super::runs::MetadataRunManifest;
-use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
     CheckStart, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
     DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
@@ -171,15 +166,11 @@ impl SharedSegmentBlocks {
 }
 
 /// One runtime's view of shared segment blocks, under the scope of the
-/// runtime's object store, with the runtime's shared read working memory and
-/// node-local encoded tier.
+/// runtime's object store, with the runtime's shared read working memory.
 pub struct MetadataSegmentCache {
     blocks: Arc<SharedSegmentBlocks>,
     scope: ObjectStoreScope,
     read_working_memory: Arc<ReadWorkingMemory>,
-    /// Optional node-local cache for encoded blocks. Keeping it with the
-    /// decoded cache ensures callers use both cache tiers or neither tier.
-    stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
 }
 
 impl std::fmt::Debug for MetadataSegmentCache {
@@ -188,7 +179,6 @@ impl std::fmt::Debug for MetadataSegmentCache {
             .debug_struct("MetadataSegmentCache")
             .field("scope", &self.scope)
             .field("read_working_memory", &self.read_working_memory)
-            .field("stored_block_cache", &self.stored_block_cache)
             .finish_non_exhaustive()
     }
 }
@@ -198,31 +188,23 @@ impl MetadataSegmentCache {
         blocks: Arc<SharedSegmentBlocks>,
         scope: ObjectStoreScope,
         read_working_memory: Arc<ReadWorkingMemory>,
-        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     ) -> Self {
         Self {
             blocks,
             scope,
             read_working_memory,
-            stored_block_cache,
         }
     }
 
     /// A view over blocks no other view reads, with the default block memo
-    /// budget and no encoded tier.
+    /// budget.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
             Arc::new(SharedSegmentBlocks::new(max_decoded_bytes)),
             ObjectStoreScope::new(0),
             Arc::default(),
-            None,
         )
-    }
-
-    /// Returns the node-local encoded-block cache, if one was configured.
-    pub fn stored_block_cache(&self) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
-        self.stored_block_cache.as_ref()
     }
 
     /// Resolves one block access through a single-flight cell.
@@ -676,7 +658,6 @@ mod tests {
                 Arc::clone(&shared),
                 ObjectStoreScope::new(scope),
                 Arc::default(),
-                None,
             )
         };
         let (first, second, first_again) = (view(1), view(2), view(1));

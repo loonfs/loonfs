@@ -4,7 +4,7 @@ use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
     CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache,
     ObjectCache, ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions,
-    SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks, StoredMetadataBlockCache,
+    SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -159,7 +159,6 @@ impl MetadataCache {
         &self,
         store: &SharedObjectStore,
         read_working_memory: Arc<ReadWorkingMemory>,
-        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     ) -> MetadataCacheBinding {
         let object_store_scope = self
             .inner
@@ -175,7 +174,6 @@ impl MetadataCache {
                 Arc::clone(&self.inner.segment_blocks),
                 object_store_scope,
                 read_working_memory,
-                stored_block_cache,
             ),
             heads_and_wal_tails: HeadAndWalTailCache::new(
                 Arc::clone(&self.inner.heads_and_wal_tails),

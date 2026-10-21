@@ -1,9 +1,6 @@
 //! Server configuration: strict TOML decoding of the listen address,
 //! store, metadata cache limits, and runtime overrides.
 
-use crate::local_cache::{
-    DISK_BLOCK_BYTES, DISK_BUFFER_POOL_BYTES, DISK_SUBMIT_QUEUE_THRESHOLD_BYTES, MIN_DISK_BYTES,
-};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{ExecutionBudget, MetadataCache};
@@ -185,12 +182,6 @@ pub struct ServerConfig {
     /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
     pub metadata_cache: MetadataCacheConfig,
-    /// The node-local cache of encoded metadata blocks, if this deployment
-    /// keeps one. Absent means no local cache: every metadata block read
-    /// that misses the decoded cache goes to object storage, which is the
-    /// behavior of a server that never had this table.
-    #[serde(default)]
-    pub local_cache: Option<LocalCacheConfig>,
     /// What this server does about grep, plus the bounded-step budgets its
     /// index maintenance runs under. A config with no `[grep]` table
     /// composes no grep at all; a present table must name its `mode`.
@@ -433,37 +424,6 @@ fn default_idle_fold_after_ms() -> u64 {
     loonfs::DEFAULT_IDLE_FOLD_AFTER_MS
 }
 
-/// The server's `[local_cache]` table: where the node-local cache of encoded
-/// metadata blocks lives, and how much memory and disk it may use.
-///
-/// The directory is this process's alone while it runs, and it holds nothing
-/// durable. Object storage remains the authority for every block the cache
-/// answers, so the directory can be deleted whenever the process is not
-/// running and the only cost is a cold cache.
-///
-/// Everything else about the tier — its on-disk layout, how many flushers
-/// write it, how large its write buffers are — is fixed in the
-/// implementation. Those are engine-tuning numbers, not deployment
-/// decisions, and they stay out of configuration until measurement says
-/// otherwise.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalCacheConfig {
-    /// Directory the cache owns. Created if missing; locked while this
-    /// process runs, so two servers cannot share one.
-    pub path: String,
-    /// Bytes of memory the cache's in-memory tier may hold. The disk tier's
-    /// write buffers and queued inserts are not counted here.
-    pub memory_bytes: u64,
-    /// Bytes of disk the cache's disk tier may hold. The tier claims this
-    /// much space up front, in whole blocks, one file per block under
-    /// `path`; six blocks is the smallest tier that may be configured.
-    /// Raising this across a restart keeps what the directory holds, and
-    /// lowering it starts the directory empty rather than leaving the
-    /// blocks it no longer claims behind.
-    pub disk_bytes: u64,
-}
-
 /// The server's `[metadata_cache]` table: the limits of the one metadata
 /// cache the server builds at startup.
 ///
@@ -668,29 +628,6 @@ impl ServerConfig {
                 Some("set `maintenance = \"serve_only\"` to turn the maintenance sweep off"),
             )?;
         }
-        if let Some(local_cache) = &self.local_cache {
-            validate_non_empty("local_cache.path", &local_cache.path)?;
-            validate_positive(
-                "local_cache.memory_bytes",
-                local_cache.memory_bytes,
-                Some("omit the `[local_cache]` table to run without a local cache"),
-            )?;
-            // The disk tier allocates whole blocks and never a partial one,
-            // so a capacity under the floor is a cache that starts, holds
-            // nothing on disk, and says nothing about it. Refuse it here
-            // instead.
-            if local_cache.disk_bytes < MIN_DISK_BYTES {
-                return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
-                    field: "local_cache.disk_bytes",
-                    reason: format!(
-                        "must be at least {MIN_DISK_BYTES}; the disk tier allocates whole \
-                         blocks of {DISK_BLOCK_BYTES} bytes, and six blocks is the floor \
-                         for stable operation. Omit the `[local_cache]` table to run \
-                         without a local cache"
-                    ),
-                }));
-            }
-        }
         if let Err(error) = self.grep.worker_config().validate() {
             return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "grep",
@@ -800,7 +737,7 @@ impl MemoryTerm {
 #[derive(Debug)]
 pub(crate) struct MemorySizing {
     limit: Option<MemoryTerm>,
-    fixed: [(&'static str, u128); 7],
+    fixed: [(&'static str, u128); 6],
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
@@ -934,13 +871,6 @@ impl ServerConfig {
             (
                 "completed upload sessions",
                 loonfs::DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES as u128,
-            ),
-            (
-                "local cache (`local_cache.memory_bytes` + 320 MiB of disk-tier buffers)",
-                self.local_cache.as_ref().map_or(0, |cache| {
-                    u128::from(cache.memory_bytes)
-                        + (DISK_BUFFER_POOL_BYTES + DISK_SUBMIT_QUEUE_THRESHOLD_BYTES) as u128
-                }),
             ),
         ];
         let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
@@ -1122,8 +1052,7 @@ mod tests {
 
     use super::{
         load_server_config, ConfigFieldError, InlineContentConfig, PublicationLimitsConfig,
-        ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES,
-        MIN_DISK_BYTES, READ_REVALIDATION_BOUND_MS,
+        ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, READ_REVALIDATION_BOUND_MS,
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
@@ -1163,8 +1092,7 @@ root = "unused"
                     201_326_592,
                     134_217_728,
                     536_870_912,
-                    33_554_432,
-                    0
+                    33_554_432
                 ]
             );
             assert_eq!(memory.headroom, 719_742_566);
@@ -1261,8 +1189,7 @@ max_cache_bytes = 0
                 67_108_864,
                 201_326_592,
                 134_217_728,
-                33_554_432,
-                0
+                33_554_432
             ]
         );
         assert_eq!(
@@ -1288,7 +1215,7 @@ max_cache_bytes = 0
     }
 
     /// The terms that the error for a failed memory check lists.
-    const EVERY_MEMORY_TERM: [&str; 23] = [
+    const EVERY_MEMORY_TERM: [&str; 22] = [
         "memory_limit_bytes",
         "process",
         "max_connections",
@@ -1298,7 +1225,6 @@ max_cache_bytes = 0
         "max_concurrent_compactions",
         "max_concurrent_content_writes",
         "completed upload sessions",
-        "local_cache.memory_bytes",
         "headroom",
         "managed",
         "268435456",
@@ -1330,7 +1256,7 @@ max_cache_bytes = 0
     }
 
     #[test]
-    fn two_gib_fits_the_default_counts_without_a_local_cache() {
+    fn two_gib_fits_the_default_counts() {
         let memory = memory_config("memory_limit_bytes = 2147483648")
             .validate()
             .expect("2 GiB fits the default counts");
@@ -1362,30 +1288,6 @@ secret_access_key = "secret"
             assert!(name.contains("max_concurrent_content_writes"), "{name}");
             assert_eq!(bytes, 4 * write_bytes as u128);
         }
-    }
-
-    #[test]
-    fn two_gib_with_a_local_cache_fails_and_lists_every_term() {
-        let config = memory_config(
-            r#"
-memory_limit_bytes = 2147483648
-[local_cache]
-path = "unused-cache"
-memory_bytes = 268435456
-disk_bytes = 107374182400
-"#,
-        );
-        let error = config
-            .validate()
-            .expect_err("the local cache leaves less than 256 MiB of managed memory");
-        let message = error.to_string();
-        for term in EVERY_MEMORY_TERM {
-            assert!(message.contains(term), "missing {term}: {message}");
-        }
-        for value in ["disk-tier buffers) = 603979776", "managed = 0,"] {
-            assert!(message.contains(value), "missing {value}: {message}");
-        }
-        assert_invalid_field(error, "memory_limit_bytes");
     }
 
     #[test]
@@ -2583,169 +2485,6 @@ root = "/tmp/loonfs-server"
                 max_content_object_bytes: Some(0),
             }
         );
-    }
-
-    #[test]
-    fn an_omitted_local_cache_table_asks_for_no_local_cache() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let config = load_server_config(&path).expect("valid config");
-        assert!(
-            config.local_cache.is_none(),
-            "a server without the table reads every metadata block from object storage"
-        );
-    }
-
-    #[test]
-    fn load_reads_the_local_cache_table() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[local_cache]
-path = "/var/lib/loonfs/cache"
-memory_bytes = 67108864
-disk_bytes = 107374182400
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let local_cache = load_server_config(&path)
-            .expect("valid config")
-            .local_cache
-            .expect("a local cache table");
-        assert_eq!(local_cache.path, "/var/lib/loonfs/cache");
-        assert_eq!(local_cache.memory_bytes, 67_108_864);
-        assert_eq!(local_cache.disk_bytes, 107_374_182_400);
-    }
-
-    #[test]
-    fn a_local_cache_table_needs_a_path_and_two_sizes() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[local_cache]
-path = "   "
-memory_bytes = 67108864
-disk_bytes = 107374182400
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-        let error = load_server_config(&path).expect_err("a blank path must be rejected");
-        assert_missing_field(error, "local_cache.path");
-
-        for (field, memory_bytes, disk_bytes) in [
-            ("local_cache.memory_bytes", 0, 107_374_182_400_u64),
-            ("local_cache.disk_bytes", 67_108_864, 0),
-        ] {
-            let path = write_config(&format!(
-                r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[local_cache]
-path = "/var/lib/loonfs/cache"
-memory_bytes = {memory_bytes}
-disk_bytes = {disk_bytes}
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#
-            ));
-            let error = load_server_config(&path).expect_err("a zero size must be rejected");
-            assert_invalid_field(error, field);
-        }
-    }
-
-    #[test]
-    fn a_local_cache_disk_tier_has_a_floor() {
-        let with_disk_bytes = |disk_bytes: u64| {
-            write_config(&format!(
-                r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[local_cache]
-path = "/var/lib/loonfs/cache"
-memory_bytes = 67108864
-disk_bytes = {disk_bytes}
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#
-            ))
-        };
-
-        // Eight megabytes is a plausible value that would have started a
-        // server whose disk tier holds nothing at all.
-        let error = load_server_config(with_disk_bytes(8 * 1024 * 1024))
-            .expect_err("a disk tier under one block must be rejected");
-        let message = error.to_string();
-        assert!(message.contains(&MIN_DISK_BYTES.to_string()), "{message}");
-        assert!(message.contains(&DISK_BLOCK_BYTES.to_string()), "{message}");
-        assert_invalid_field(error, "local_cache.disk_bytes");
-
-        let error = load_server_config(with_disk_bytes(MIN_DISK_BYTES - 1))
-            .expect_err("one byte under the floor is still under it");
-        assert_invalid_field(error, "local_cache.disk_bytes");
-
-        let local_cache = load_server_config(with_disk_bytes(MIN_DISK_BYTES))
-            .expect("the floor itself is a valid disk tier")
-            .local_cache
-            .expect("a local cache table");
-        assert_eq!(local_cache.disk_bytes, MIN_DISK_BYTES);
-    }
-
-    #[test]
-    fn the_local_cache_table_takes_no_engine_settings() {
-        // The disk engine's geometry is fixed in the implementation. A
-        // deployment reaching for it fails through strict decoding like any
-        // other unknown key.
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[local_cache]
-path = "/var/lib/loonfs/cache"
-memory_bytes = 67108864
-disk_bytes = 107374182400
-block_bytes = 65536
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let error = load_server_config(&path).expect_err("an engine key must not load");
-        assert!(error.to_string().contains("block_bytes"), "{error}");
     }
 
     #[test]

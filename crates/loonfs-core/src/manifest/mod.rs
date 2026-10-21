@@ -17,10 +17,9 @@
 //!   cache after the segment's PUT succeeds, and before the manifest that
 //!   lists the segment is published. These are the blocks that the first
 //!   fetch of the segment would insert: the index and filter blocks, and the
-//!   data blocks of a segment of 256 KiB or less. LoonFS also offers the same
-//!   blocks to the node-local block cache when one is configured. The first
-//!   read after a fold or a compaction then finds those blocks in the cache
-//!   instead of reading them from object storage.
+//!   data blocks of a segment of 256 KiB or less. The first read after a
+//!   fold or a compaction then finds those blocks in the cache instead of
+//!   reading them from object storage.
 
 mod block_load;
 mod build;
@@ -43,7 +42,6 @@ mod runs;
 mod scan;
 mod scan_load;
 mod statistics;
-mod stored_block_cache;
 mod streaming_compaction;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -69,10 +67,6 @@ pub use self::retention::RetentionTarget;
 pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
-};
-pub use self::stored_block_cache::{
-    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-    StoredMetadataBlockKind,
 };
 pub use self::streaming_compaction::MetadataCompactionCancellation;
 

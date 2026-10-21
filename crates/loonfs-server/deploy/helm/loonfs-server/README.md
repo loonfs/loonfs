@@ -72,25 +72,6 @@ extraEnvFrom:
 
 Use the same two lists for provider credentials, `RUST_LOG`, and any other environment variable the process reads.
 
-## The local cache
-
-Setting `localCache.enabled` mounts an `emptyDir` at `/var/cache/loonfs`. The chart doesn't write anything into your config, so your config's `[local_cache]` table has to use that same directory:
-
-```toml
-[local_cache]
-path = "/var/cache/loonfs"
-memory_bytes = 67108864
-disk_bytes = 107374182400
-```
-
-Three numbers have to be consistent, and the server enforces the first of them:
-
-- **The minimum disk size.** `disk_bytes` has a minimum of 100663296 bytes (96 MiB). A smaller value makes the process fail at startup, instead of starting a cache that can't store anything.
-- **The `emptyDir` size limit.** The disk tier claims all of `disk_bytes` up front, as 16 MiB files, and it keeps every one of them open. The chart requires `localCache.sizeLimit` when the cache is enabled, and the limit must comfortably exceed `disk_bytes`, because the kubelet evicts a pod whose `emptyDir` grows past its limit.
-- **The open-file limit.** The container's open-file limit has to be above `disk_bytes` divided by 16 MiB, because every claimed file stays open. For example, the 100 GiB config above needs 6400 files.
-
-You can safely grow or shrink `disk_bytes` across a restart. Growing it keeps what the directory already contains, and shrinking it starts the directory empty. Nothing in the cache is durable, so deleting it is always safe. A process restart with the same directory keeps the cache entries, but a replacement pod gets a new `emptyDir` and starts with an empty cache.
-
 ## Values
 
 | Value | Default | What it does |
@@ -105,8 +86,6 @@ You can safely grow or shrink `disk_bytes` across a restart. Growing it keeps wh
 | `service.port` | `9400` | The port the Service publishes and the probes call. |
 | `service.annotations` | `{}` | Annotations for the Service. |
 | `terminationGracePeriodSeconds` | `660` | How long the kubelet waits after SIGTERM before it sends SIGKILL. |
-| `localCache.enabled` | `false` | Mounts an `emptyDir` at `/var/cache/loonfs`. |
-| `localCache.sizeLimit` | `""` | The size limit of that `emptyDir`. Required when the cache is enabled, and it must comfortably exceed `disk_bytes`. |
 | `extraEnv` | `[]` | Environment variables for the container, as Kubernetes `EnvVar` entries. |
 | `extraEnvFrom` | `[]` | Environment sources for the container, as Kubernetes `EnvFromSource` entries. |
 | `podAnnotations` | `{}` | Annotations for the pod. |
@@ -144,6 +123,6 @@ Why reject unknown values? A value that's quietly ignored is worse than one that
 
 This section describes how the server shuts down, and why `terminationGracePeriodSeconds` defaults to 660.
 
-When the server shuts down, it stops accepting new requests, drains the requests in flight, and settles its background work. It abandons requests that are still running after `shutdown_deadline_ms` (600 seconds by default), and it drops maintenance sweep visits that are still running at the same deadline. The extra minute in the grace period lets the server finish settling its writers and caches before the kubelet sends SIGKILL.
+When the server shuts down, it stops accepting new requests, drains the requests in flight, and settles its background work. It abandons requests that are still running after `shutdown_deadline_ms` (600 seconds by default), and it drops maintenance sweep visits that are still running at the same deadline. The extra minute in the grace period lets the server finish settling its writers before the kubelet sends SIGKILL.
 
 The kubelet sends SIGKILL when the grace period runs out. A killed process doesn't corrupt anything, because writer-epoch fencing limits the effect of whatever it leaves behind. But the process doesn't get to settle cleanly, and work that the server had already accepted can be lost. Lower this value only if you'd rather have a faster rollout.

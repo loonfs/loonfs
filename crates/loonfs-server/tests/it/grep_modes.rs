@@ -802,7 +802,6 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
-        local_cache: None,
         grep: GrepConfig {
             mode,
             ..GrepConfig::default()

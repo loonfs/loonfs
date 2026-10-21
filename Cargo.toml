@@ -33,9 +33,7 @@ aws-credential-types = "1.2.3"
 aws-types = "1.3.7"
 axum = "0.8"
 base64 = "0.22"
-# `serde` because the server's local block cache stores `Bytes` values through
-# foyer, whose `serde` feature encodes values through their serde impls.
-bytes = { version = "1", features = ["serde"] }
+bytes = "1"
 # CBOR, the encoding of WAL payloads and segment rows.
 ciborium = "0.2"
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -58,11 +56,6 @@ hyper-util = "0.1"
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
 libc = "0.2"
-# The `serde` feature makes foyer encode keys and values through their serde
-# impls, which is how the server's cache key reaches foyer's storage traits.
-# Pinned exactly: the cache-directory geometry code reads foyer's block-file
-# naming, so a version bump is a deliberate change with its own review.
-foyer = { version = "=0.22.3", features = ["serde"] }
 # Named directly, though axum already carries both: the server decodes query
 # strings itself so that an unknown parameter is reported the same way an
 # unknown JSON body field is. `form_urlencoded` splits the query string into
@@ -70,8 +63,8 @@ foyer = { version = "=0.22.3", features = ["serde"] }
 # values with `form_urlencoded` too.
 form_urlencoded = "1"
 futures = "0.3"
-# Cross-process file locks for the local store, the CLI's config and upload
-# journal, and the server's cache directory.
+# Cross-process file locks for the local store and the CLI's config and upload
+# journal.
 fs4 = "0.13"
 getrandom = "0.3"
 object_store = { version = "0.14.2", default-features = false, features = ["aws", "gcp"] }
@@ -113,11 +106,6 @@ loonfs-grep = { path = "crates/loonfs-grep", version = "0.4.0" }
 loonfs-http = { path = "crates/loonfs-http", version = "0.4.0" }
 loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.4.0" }
 loonfs-types = { path = "crates/loonfs-types", version = "0.4.0" }
-# foyer reports its internal counters through this registry trait and does not
-# re-export it, so a host that wants to read them names the crate itself. The
-# version must stay the one foyer resolves, or the trait this workspace
-# implements is a different trait than the one foyer accepts.
-mixtrics = "0.2"
 tempfile = "3"
 thiserror = "2"
 tokio = "1"

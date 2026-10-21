@@ -225,21 +225,11 @@ jobs:
       - name: render every value combination
         run: |
           helm template rel "$CHART" --set config.existingSecret=test >/dev/null
-          helm template rel "$CHART" --set config.existingSecret=test \
-            --set localCache.enabled=true --set localCache.sizeLimit=100Gi >/dev/null
           helm template rel "$CHART" --set config.existingSecret=test --set image.tag=9.9.9 >/dev/null
           helm template rel "$CHART" --set config.existingSecret=test \
             --set image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null
           helm template rel "$CHART" --set config.existingSecret=test \
             --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets' >/dev/null
-      - name: reject an unbounded local cache
-        run: |
-          if output="$(helm template rel "$CHART" --set config.existingSecret=test \
-            --set localCache.enabled=true 2>&1)"; then
-            echo "FAIL: enabled cache without localCache.sizeLimit rendered" >&2
-            exit 1
-          fi
-          grep -q 'localCache.sizeLimit.*cache emptyDir.*disk_bytes' <<<"$output"
       - name: assert the single-writer settings
         run: |
           rendered="$(helm template rel "$CHART" --set config.existingSecret=test)"

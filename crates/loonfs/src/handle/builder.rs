@@ -11,7 +11,6 @@ use crate::{
     Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, ReadConsistency,
     Result, SharedObjectStore, StoreConfig, TraceMode,
 };
-use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
@@ -54,7 +53,6 @@ struct CoreConfig {
     execution_budget: Option<ExecutionBudget>,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
-    stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     trace_mode: TraceMode,
     store_kind: Option<ConfiguredObjectStoreKind>,
     object_store_metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
@@ -92,7 +90,6 @@ impl<M> LoonFsBuilder<M> {
                 execution_budget: None,
                 timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
-                stored_metadata_block_cache: None,
                 trace_mode: TraceMode::Embedded,
                 store_kind: None,
                 object_store_metrics_recorder: None,
@@ -211,21 +208,6 @@ impl<M> LoonFsBuilder<M> {
     /// and a server sets it to its download limit.
     pub fn max_read_content_bytes(mut self, max_read_content_bytes: u64) -> Self {
         self.core.max_read_content_bytes = max_read_content_bytes;
-        self
-    }
-
-    /// Installs a node-local encoded-block cache beneath the metadata cache.
-    ///
-    /// Its keys carry no runtime scope, so one tier serves the runtimes over
-    /// one store, one after another across restarts. It must not be given to
-    /// runtimes over different stores. The read-only view of this runtime
-    /// uses it too. The host owns and closes it; object storage remains
-    /// authoritative.
-    pub fn stored_metadata_block_cache(
-        mut self,
-        stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,
-    ) -> Self {
-        self.core.stored_metadata_block_cache = Some(stored_metadata_block_cache);
         self
     }
 
@@ -456,11 +438,7 @@ impl CoreConfig {
         // Bind the cache to the store the caller supplied, not to the metrics
         // wrapper below. Each runtime builds its own wrapper, so runtimes over
         // clones of one store would otherwise read under separate scopes.
-        let metadata_cache = metadata_cache.bind(
-            &store,
-            execution_budget.read_working_memory(),
-            self.stored_metadata_block_cache,
-        );
+        let metadata_cache = metadata_cache.bind(&store, execution_budget.read_working_memory());
         let instruments = RuntimeInstruments::new(self.metrics_recorder);
         let recorder = fan_out_object_store_recorder(
             self.object_store_metrics_recorder,

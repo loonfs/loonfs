@@ -1894,10 +1894,15 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
                 .await
                 .expect("output index");
         for entry in index.iter() {
-            let block =
-                data_block_load::load_segment_data_block(local, None, None, descriptor, entry)
-                    .await
-                    .expect("output block");
+            let block = data_block_load::load_segment_data_block_with_readahead(
+                local,
+                None,
+                None,
+                descriptor,
+                std::slice::from_ref(entry),
+            )
+            .await
+            .expect("output block");
             actual.extend(block.rows.iter().cloned());
         }
     }
@@ -3779,8 +3784,12 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                 .await
                 .expect("index");
                 for entry in index.iter() {
-                    let block = data_block_load::load_segment_data_block(
-                        &store, None, None, descriptor, entry,
+                    let block = data_block_load::load_segment_data_block_with_readahead(
+                        &store,
+                        None,
+                        None,
+                        descriptor,
+                        std::slice::from_ref(entry),
                     )
                     .await
                     .expect("block");
