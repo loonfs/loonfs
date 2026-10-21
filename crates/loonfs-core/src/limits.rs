@@ -23,6 +23,14 @@ pub(crate) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 /// Caps each Bloom filter used by compaction and content collection.
 pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 
+/// Most encoded segment bytes that one fold or compaction keeps in memory
+/// while the segments' puts run.
+///
+/// The `STORE_WRITES_IN_FLIGHT` count alone allows 128 MiB of 8 MiB segments,
+/// and 32 MiB is about four such segments and still admits a fold's usual
+/// seven small segments at once.
+pub const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
 /// materialization.

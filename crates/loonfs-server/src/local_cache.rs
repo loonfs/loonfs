@@ -71,10 +71,10 @@ const DISK_FLUSHERS: usize = 2;
 /// Total flush buffer pool, split evenly among the flushers. Each flusher
 /// holds two buffers of its share, so this is also the tier's steady write
 /// memory.
-const DISK_BUFFER_POOL_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DISK_BUFFER_POOL_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes of queued inserts the disk tier accepts before it drops further
 /// ones. A drop is counted, never surfaced.
-const DISK_SUBMIT_QUEUE_THRESHOLD_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const DISK_SUBMIT_QUEUE_THRESHOLD_BYTES: usize = 256 * 1024 * 1024;
 
 /// Minimum supported disk capacity.
 ///

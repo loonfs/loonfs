@@ -79,11 +79,18 @@ From the limit, the server calculates the managed memory that it divides among i
 fixed = 128 MiB
       + max_connections x 472 KiB
       + (max_concurrent_uploads + max_concurrent_downloads) x 8 MiB
-headroom = 10% of memory_limit_bytes
+      + (max_concurrent_folds + max_concurrent_compactions) x 32 MiB
+      + 32 MiB
+      + local_cache.memory_bytes + 320 MiB, with a [local_cache] table
+headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
 ```
 
-The fixed terms cover the process's own cost, response data that the HTTP transport retains, and transfer chunks. The headroom covers memory that the allocator retains. The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of managed memory, because the memory that namespace heads need depends on the namespaces that the server reads, not on the host. It's 16 MiB unless you set it, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus the fixed costs and headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
+`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the completed upload sessions that garbage collection keeps between passes, and the local cache. The local cache's term is its memory tier plus 64 MiB of write buffers and up to 256 MiB of inserts waiting for its disk tier.
+
+The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
+
+The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of managed memory, because the memory that namespace heads need depends on the namespaces that the server reads, not on the host. It's 16 MiB unless you set it, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
 
 | Pool | Share of managed memory | Setting |
 | --- | ---: | --- |
@@ -97,7 +104,15 @@ The fixed terms cover the process's own cost, response data that the HTTP transp
 
 You can still set each pool's setting to override its share. The sum check uses the final values, including one merge input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
 
-Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection and transfer counts, and it divides merge input by the final compaction count.
+Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, and compaction counts, and it divides merge input by the final compaction count.
+
+Why is the headroom 200 MiB plus a quarter of the pools? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
+
+- `MALLOC_ARENA_MAX=2` limits glibc to two arenas (separate heaps), instead of up to eight for each CPU core.
+- `MALLOC_TRIM_THRESHOLD_=131072` makes glibc return free memory at the top of a heap to the kernel once it's more than 128 KiB.
+- `MALLOC_MMAP_THRESHOLD_=131072` makes glibc allocate each block of 128 KiB or more with `mmap`, so freeing the block returns its memory to the kernel.
+
+Why doesn't the formula include grep queries or the WAL tails of open writer sessions? Neither has a process-wide limit that the formula could add. One query reads up to 256 MiB at once, and only the request cap limits how many queries run. The write stop and the inline tail limit bound each session's tail, but nothing limits the number of open sessions.
 
 ## 2. Validate the config
 
@@ -426,9 +441,9 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk tier, and up to 256 MiB of inserts waiting for the disk tier. There's no setting for the last two.
+The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk tier, and up to 256 MiB of inserts waiting for the disk tier. There's no setting for the last two, and the sizing formula counts all three.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after the fixed costs and headroom. With the default counts, a 2 GiB limit leaves about 1,051 MiB of managed memory. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 701 MiB of managed memory, and the smallest limit that passes is 1,492 MiB. A local cache takes its `memory_bytes` plus 320 MiB from the same limit, so a 2 GiB limit fails the check when `memory_bytes` is more than 236 MiB. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 

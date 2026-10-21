@@ -7,6 +7,7 @@ use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, w
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
+use crate::limits::MAX_PENDING_SEGMENT_BYTES;
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
@@ -22,12 +23,6 @@ use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuil
 use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
-
-/// Most encoded segment bytes one fold or compaction holds while their puts
-/// run. The `STORE_WRITES_IN_FLIGHT` count alone allows 128 MiB of 8 MiB segments;
-/// 32 MiB is about four such segments and still admits a fold's usual seven
-/// small segments at once.
-const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,

@@ -1,7 +1,9 @@
 //! Server configuration: strict TOML decoding of the listen address,
 //! store, metadata cache limits, and runtime overrides.
 
-use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
+use crate::local_cache::{
+    DISK_BLOCK_BYTES, DISK_BUFFER_POOL_BYTES, DISK_SUBMIT_QUEUE_THRESHOLD_BYTES, MIN_DISK_BYTES,
+};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{ExecutionBudget, MetadataCache};
@@ -801,6 +803,20 @@ impl ServerConfig {
 
 const MIB: usize = 1024 * 1024;
 
+/// The memory that glibc keeps on Linux in a quiet phase beyond what the same
+/// workload uses on macOS.
+///
+/// The value is for `MALLOC_ARENA_MAX=2`, `MALLOC_TRIM_THRESHOLD_=131072`, and
+/// `MALLOC_MMAP_THRESHOLD_=131072`, which the server image sets. In the lab's
+/// `local-workloads-10k` run with those settings (`20261020T052717Z`), the app
+/// drive's quiet phase stayed at 266 MiB against 76 MiB on macOS, and the
+/// peaks were 10% to 32% above macOS (122 MiB against 111 MiB for sessions
+/// turns, 323 MiB against 256 MiB for the app drive, and 298 MiB against
+/// 226 MiB for the sandbox). With glibc's defaults (`20261020T024314Z`), those
+/// four phases reached 307, 153, 769, and 715 MiB. The headroom is this floor
+/// plus a quarter of the pools, which covers each of those peaks.
+const ALLOCATOR_HEADROOM_FLOOR: usize = 200 * MIB;
+
 #[derive(Debug)]
 pub(crate) struct MemoryTerm {
     name: &'static str,
@@ -831,7 +847,7 @@ impl MemoryTerm {
 #[derive(Debug)]
 pub(crate) struct MemorySizing {
     limit: Option<MemoryTerm>,
-    fixed: [(&'static str, u128); 3],
+    fixed: [(&'static str, u128); 6],
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
@@ -948,8 +964,32 @@ impl ServerConfig {
                     + self.max_concurrent_downloads.get() as u128)
                     * (8 * MIB) as u128,
             ),
+            (
+                "segment output ((`max_concurrent_folds` + `max_concurrent_compactions`) x 32 MiB)",
+                (self.max_concurrent_folds as u128 + self.max_concurrent_compactions as u128)
+                    * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
+            ),
+            (
+                "completed upload sessions",
+                loonfs::DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES as u128,
+            ),
+            (
+                "local cache (`local_cache.memory_bytes` + 320 MiB of disk-tier buffers)",
+                self.local_cache.as_ref().map_or(0, |cache| {
+                    u128::from(cache.memory_bytes)
+                        + (DISK_BUFFER_POOL_BYTES + DISK_SUBMIT_QUEUE_THRESHOLD_BYTES) as u128
+                }),
+            ),
         ];
-        let headroom = limit.unwrap_or(0) / 10;
+        let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
+        // The pools share four fifths of what the limit has left after
+        // `fixed` and the floor, so the fifth that the headroom takes is a
+        // quarter of the pools.
+        let headroom = limit.map_or(0, |limit| {
+            let rest =
+                (limit as u128).saturating_sub(fixed_bytes + ALLOCATOR_HEADROOM_FLOOR as u128);
+            ALLOCATOR_HEADROOM_FLOOR + (rest / 5) as usize
+        });
         // The head cache's budget isn't a share of managed memory, because a
         // head's size depends on the namespace, not on the host.
         let head = MemoryTerm::new(
@@ -958,7 +998,6 @@ impl ServerConfig {
             None,
             loonfs::DEFAULT_MAX_HEAD_BYTES,
         );
-        let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
         let managed = (limit.unwrap_or(0) as u128)
             .saturating_sub(fixed_bytes + headroom as u128 + head.bytes as u128)
             as usize;
@@ -1150,32 +1189,39 @@ root = "unused"
             let memory = config.memory_sizing(Some(1)).expect("explicit limit wins");
             assert_eq!(
                 memory.fixed.map(|(_, bytes)| bytes),
-                [134_217_728, 494_927_872, 201_326_592]
+                [
+                    134_217_728,
+                    494_927_872,
+                    201_326_592,
+                    134_217_728,
+                    33_554_432,
+                    0
+                ]
             );
-            assert_eq!(memory.headroom, 429_496_729);
+            assert_eq!(memory.headroom, 827_116_748);
             assert_eq!(
                 (memory.head.bytes, memory.head.source),
                 (16_777_216, "default"),
                 "the head budget isn't derived"
             );
-            assert_eq!(memory.managed, 3_018_221_159);
+            assert_eq!(memory.managed, 2_452_828_980);
             assert_eq!(
                 memory.segment.bytes,
                 if mode.serves() {
-                    905_466_347
+                    735_848_694
                 } else {
-                    1_207_288_463
+                    981_131_592
                 }
             );
-            assert_eq!(memory.head_state.bytes, 301_822_115);
-            assert_eq!(memory.object.bytes, 301_822_115);
+            assert_eq!(memory.head_state.bytes, 245_282_898);
+            assert_eq!(memory.object.bytes, 245_282_898);
             assert_eq!(
                 memory.grep.bytes,
-                if mode.serves() { 301_822_115 } else { 0 }
+                if mode.serves() { 245_282_898 } else { 0 }
             );
-            assert_eq!(memory.read_working.bytes, 603_644_231);
-            assert_eq!(memory.publication.bytes, 301_822_115);
-            assert_eq!(memory.merge_input.bytes, 150_911_057);
+            assert_eq!(memory.read_working.bytes, 490_565_796);
+            assert_eq!(memory.publication.bytes, 245_282_898);
+            assert_eq!(memory.merge_input.bytes, 122_641_449);
             for (term, _) in memory.terms() {
                 if term.name != memory.head.name {
                     assert_eq!(term.source, "derived");
@@ -1204,7 +1250,7 @@ max_segment_bytes = 67108864
         let memory = config.validate().expect("smaller segment cache fits");
         assert_eq!(memory.segment.bytes, 67_108_864);
         assert_eq!(memory.segment.source, "set");
-        assert_eq!(memory.head_state.bytes, 301_822_115);
+        assert_eq!(memory.head_state.bytes, 245_282_898);
         config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
         let error = config.validate().expect_err("overrides must fit");
         assert!(error
@@ -1236,7 +1282,14 @@ max_cache_bytes = 0
         let memory = config.validate().expect("explicit pools fit");
         assert_eq!(
             memory.fixed.map(|(_, bytes)| bytes),
-            [134_217_728, 247_463_936, 67_108_864]
+            [
+                134_217_728,
+                247_463_936,
+                67_108_864,
+                201_326_592,
+                33_554_432,
+                0
+            ]
         );
         assert_eq!(
             memory.terms().map(|(term, count)| (term.bytes, count)),
@@ -1259,6 +1312,31 @@ max_cache_bytes = 0
         );
     }
 
+    /// The terms that the error for a failed memory check lists.
+    const EVERY_MEMORY_TERM: [&str; 21] = [
+        "memory_limit_bytes",
+        "process",
+        "max_connections",
+        "max_concurrent_uploads",
+        "max_concurrent_downloads",
+        "max_concurrent_folds",
+        "max_concurrent_compactions",
+        "completed upload sessions",
+        "local_cache.memory_bytes",
+        "headroom",
+        "managed",
+        "268435456",
+        "metadata_cache.max_segment_bytes",
+        "metadata_cache.max_head_bytes",
+        "metadata_cache.max_head_state_bytes",
+        "metadata_cache.max_object_bytes",
+        "grep.max_cache_bytes",
+        "max_read_working_bytes",
+        "publication.max_estimated_bytes",
+        "max_merge_input_bytes",
+        "total",
+    ];
+
     #[test]
     fn insufficient_memory_names_every_term_before_startup() {
         for limit in [512 * super::MIB, 1024 * super::MIB] {
@@ -1267,28 +1345,44 @@ max_cache_bytes = 0
                 .validate()
                 .expect_err("managed memory is below 256 MiB");
             let message = error.to_string();
-            for term in [
-                "memory_limit_bytes",
-                "process",
-                "max_connections",
-                "max_concurrent_uploads",
-                "max_concurrent_downloads",
-                "headroom",
-                "managed",
-                "268435456",
-                "metadata_cache.max_segment_bytes",
-                "metadata_cache.max_head_bytes",
-                "metadata_cache.max_head_state_bytes",
-                "metadata_cache.max_object_bytes",
-                "grep.max_cache_bytes",
-                "max_read_working_bytes",
-                "publication.max_estimated_bytes",
-                "max_merge_input_bytes",
-            ] {
+            for term in EVERY_MEMORY_TERM {
                 assert!(message.contains(term), "missing {term}: {message}");
             }
             assert_invalid_field(error, "memory_limit_bytes");
         }
+    }
+
+    #[test]
+    fn two_gib_fits_the_default_counts_without_a_local_cache() {
+        let memory = memory_config("memory_limit_bytes = 2147483648")
+            .validate()
+            .expect("2 GiB fits the default counts");
+        assert_eq!(memory.headroom, 397_620_019);
+        assert_eq!(memory.managed, 734_842_061);
+    }
+
+    #[test]
+    fn two_gib_with_a_local_cache_fails_and_lists_every_term() {
+        let config = memory_config(
+            r#"
+memory_limit_bytes = 2147483648
+[local_cache]
+path = "unused-cache"
+memory_bytes = 268435456
+disk_bytes = 107374182400
+"#,
+        );
+        let error = config
+            .validate()
+            .expect_err("the local cache leaves less than 256 MiB of managed memory");
+        let message = error.to_string();
+        for term in EVERY_MEMORY_TERM {
+            assert!(message.contains(term), "missing {term}: {message}");
+        }
+        for value in ["disk-tier buffers) = 603979776", "managed = 251658240"] {
+            assert!(message.contains(value), "missing {value}: {message}");
+        }
+        assert_invalid_field(error, "memory_limit_bytes");
     }
 
     #[test]
@@ -1340,7 +1434,7 @@ max_cache_bytes = 0
         let memory = memory_config("")
             .memory_sizing(limit)
             .expect("cgroup sizes config");
-        assert_eq!(memory.managed, 3_018_221_159);
+        assert_eq!(memory.managed, 2_452_828_980);
         assert_eq!(memory.limit.expect("cgroup limit").source, "derived");
     }
 
