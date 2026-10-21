@@ -698,10 +698,10 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("build writer");
     // The test deletes bravo's content object after a healthy query, so the
-    // reader must not keep that object in its object cache, or the second
+    // reader must not keep that object in its cache, or the second
     // query would read the cached bytes instead of failing.
     let host = GrepHost::with_reader(&store, "grams-fault-maintenance", |builder| {
-        builder.metadata_cache(MetadataCache::builder().max_object_bytes(0).build())
+        builder.metadata_cache(MetadataCache::builder().max_content_object_bytes(0).build())
     })
     .await;
 
@@ -817,9 +817,10 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("build writer");
     // The test counts content GETs at the store, so the reader runs without
-    // the object cache, which would otherwise serve the small candidates.
+    // a content object cache, which would otherwise serve the small
+    // candidates.
     let host = GrepHost::with_reader(&store, "grams-oversized-maintenance", |builder| {
-        builder.metadata_cache(MetadataCache::builder().max_object_bytes(0).build())
+        builder.metadata_cache(MetadataCache::builder().max_content_object_bytes(0).build())
     })
     .await;
 

@@ -419,7 +419,7 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     write_counter(
         rendered,
         "loonfs_object_cache_evictions",
-        "WAL objects and content objects evicted to stay within the object budget",
+        "WAL objects and content objects evicted to stay within their budgets",
         &[(NO_LABELS, object_evictions)],
     );
     write_gauge(

@@ -123,7 +123,7 @@ pub mod cache {
         DecodedBlockKey, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
-    pub use crate::object_cache::{ObjectCache, ObjectCacheStats, SharedObjects};
+    pub use crate::object_cache::{ObjectCache, SharedObjects};
     pub use crate::read_working_memory::{ReadWorkingMemory, ReadWorkingMemoryObserver};
     pub use crate::recency::Recency;
     pub use crate::shared_check::SharedCheck;

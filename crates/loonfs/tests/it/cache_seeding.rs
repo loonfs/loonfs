@@ -287,7 +287,8 @@ fn a_cache_with_zero_limits_keeps_nothing() {
             MetadataCache::builder()
                 .max_segment_bytes(0)
                 .max_head_state_bytes(0)
-                .max_object_bytes(0)
+                .max_wal_object_bytes(0)
+                .max_content_object_bytes(0)
                 .build(),
         )
     });
@@ -373,13 +374,13 @@ fn head_state_evicts_by_bytes_anchors_included() {
         &namespace_id("first"),
     ));
     let (first, other) = two_namespaces_with_one_file(raw_store.store());
-    // Without the object cache, a reload reads the WAL tail from the store.
+    // Without cached WAL objects, a reload reads the WAL tail from the store.
     let fs = open_runtime_with(raw_store.store(), "head-state-budget", |builder| {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_head_bytes(head_budget)
                 .max_head_state_bytes(budget)
-                .max_object_bytes(0)
+                .max_wal_object_bytes(0)
                 .build(),
         )
     });
@@ -494,7 +495,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             .metadata_cache(
                 MetadataCache::builder()
                     .max_head_state_bytes(budget)
-                    .max_object_bytes(0)
+                    .max_wal_object_bytes(0)
                     .build(),
             )
             .build(),
