@@ -11,9 +11,9 @@ use crate::error::{CoreError, Result};
 use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
-    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
-    DirentryBindingRecord, InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath,
-    RevisionRecord, SubtreeTombstoneRecord,
+    ActiveDeletionRange, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, MetadataState, RecoverableDeletion,
+    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::ProjectedWalTail;
@@ -21,7 +21,6 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
@@ -220,6 +219,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// How the namespace compares sibling names.
     pub(crate) fn naming(&self) -> NamespaceNaming {
         self.naming
+    }
+
+    /// The retention floor of the view's manifest. A view without a
+    /// manifest, which only tests build, reads every row it has as at or
+    /// below its floor.
+    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
+        self.sources.manifest.map_or(self.visible_seq, |segments| {
+            segments.manifest().payload().retention_floor_seq
+        })
     }
 
     /// Attaches a cache for durable lookups performed during one batch.
@@ -854,9 +862,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions
     }
 
-    /// One page of the namespace's recoverable deletions, oldest deletion
-    /// first, resuming strictly after `start_after` and leaving out every
-    /// deletion at or below `after_seq`.
+    /// One page of the namespace's recoverable deletions in `range`, oldest
+    /// deletion first.
     ///
     /// Manifest rows merge with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
@@ -866,22 +873,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// entry. Reads stop as soon as `limit` entries are in hand.
     pub(super) async fn active_deletions_page(
         &self,
-        after_seq: ChangeSeq,
-        start_after: Option<(ChangeSeq, InodeId)>,
+        range: &ActiveDeletionRange,
         limit: usize,
     ) -> Result<Vec<RecoverableDeletion>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
-        let lower_bound = lookup_keys::active_deletion_key_after_seq(after_seq);
-        let lower_bound = match start_after {
-            Some((deletion_seq, root_inode_id)) => {
-                lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id).max(lower_bound)
-            }
-            None => lower_bound,
-        };
-        let upper_bound = string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX);
 
         let mut tail: Vec<(String, ActiveDeletionRecord)> = Vec::new();
         for tombstone in self
@@ -900,13 +898,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 })?;
             let record = active_deletion_from_tombstone(tombstone, inode.inode_kind);
             let row_key = record.row_key();
-            if row_key >= lower_bound {
+            if range.contains(&row_key) {
                 tail.push((row_key, record));
             }
         }
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_segments().is_none());
+        let mut durable = ActiveDeletionScan::new(
+            range.lower_bound.clone(),
+            self.manifest_segments().is_none(),
+        );
         let mut tail_index = 0usize;
         let mut entries = Vec::with_capacity(limit);
         let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
@@ -920,7 +921,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 let page = manifest_index::active_deletions_page(
                     segments,
                     &durable.lower_bound,
-                    upper_bound.as_deref(),
+                    range.upper_bound.as_deref(),
                     raw_limit,
                 )
                 .await?;

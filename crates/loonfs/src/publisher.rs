@@ -21,6 +21,7 @@
 //! writable [`Namespace`](crate::Namespace).
 
 mod admission;
+mod deletion_expiry;
 mod fold_trigger;
 mod inline_content;
 
@@ -34,6 +35,7 @@ use crate::{
     MaintenanceCancellation, MetadataMaintenanceOutcome,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
+use deletion_expiry::{ExpiryTurn, WorkerUnit};
 pub(crate) use fold_trigger::FoldTrigger;
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -718,6 +720,9 @@ struct NamespacePublisherState {
     last_publish: Option<Observation>,
     last_published: Option<LastPublish>,
     metadata_caught_up: bool,
+    /// Whether the engine had deletions to expire when it was last released
+    /// (see [`NamespaceCommitEngine::expiry_due`]).
+    expiry_due: bool,
 }
 
 /// The newest commit this session published, and when it published it.
@@ -898,6 +903,7 @@ impl NamespacePublisher {
                 last_publish: None,
                 last_published: None,
                 metadata_caught_up: true,
+                expiry_due: false,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
@@ -1034,7 +1040,8 @@ impl NamespacePublisher {
     /// Until then, reads keep the position they have. A position on a
     /// manifest that this runtime has replaced still reads correctly,
     /// because garbage collection keeps that manifest's objects for at least
-    /// one grace.
+    /// one grace. A move onto a higher retention floor starts the worker when
+    /// the engine is released (see [`Self::release_engine`]).
     async fn change_position(&self, change: PositionChange) {
         let mut slot = self.lock_engine().await;
         if let Some(engine) = slot.engine.as_mut() {
@@ -1049,7 +1056,13 @@ impl NamespacePublisher {
         }
     }
 
-    /// Stores the engine's position for reads, and releases the engine.
+    /// Stores the engine's position for reads, records whether the engine
+    /// has deletions to expire, and releases the engine.
+    ///
+    /// Every task that changes the engine releases it here, so a position
+    /// move onto a higher retention floor, by a publish, a fold, a
+    /// maintenance call, or a read, starts a worker for the expiry through
+    /// [`Self::record_expiry_due`].
     fn release_engine(&self, slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
@@ -1074,6 +1087,11 @@ impl NamespacePublisher {
                 }
             }
         }
+        let expiry_due = slot
+            .engine
+            .as_ref()
+            .is_some_and(NamespaceCommitEngine::expiry_due);
+        self.record_expiry_due(expiry_due);
         drop(slot);
     }
 
@@ -1279,8 +1297,11 @@ impl NamespacePublisher {
         });
     }
 
-    /// Drains the queue in admission order, then exits.
+    /// Drains the queue in admission order, with a step of the session's
+    /// expiry between items while the session has deletions to expire, then
+    /// exits.
     async fn run_worker(self) {
+        let mut expiry_turn = ExpiryTurn::BeforeItem;
         loop {
             let collect_started = self.timer.monotonic_now_ms();
             let queue_depth_start = queued_candidates(&self.lock_state());
@@ -1291,9 +1312,19 @@ impl NamespacePublisher {
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is held.
             let publication = self.admission.publication_permit().await;
-            let Some(item) = self.take_next_item() else {
-                self.forget_if_ended();
-                return;
+            let item = match self.take_next_unit(expiry_turn) {
+                None => {
+                    self.forget_if_ended();
+                    return;
+                }
+                Some(WorkerUnit::Expiry) => {
+                    expiry_turn = self.publish_expiry_step().await;
+                    continue;
+                }
+                Some(WorkerUnit::Item(item)) => {
+                    expiry_turn = expiry_turn.after_item();
+                    item
+                }
             };
 
             match item {
@@ -1346,25 +1377,40 @@ impl NamespacePublisher {
 
     /// Takes the next unit of work, or releases the worker slot.
     ///
-    /// Ownership is released under the same lock that finds the queue empty,
-    /// so a racing admission either queued before this check and is taken
-    /// here, or finds no worker and spawns one.
-    fn take_next_item(&self) -> Option<WorkItem> {
+    /// Ownership is released under the same lock that finds the queue empty
+    /// and no expiry due, so a racing admission or engine release either
+    /// changed the state before this check, or finds no worker and spawns
+    /// one.
+    fn take_next_unit(&self, expiry_turn: ExpiryTurn) -> Option<WorkerUnit> {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
         // before its worker returned, so nothing may be taken afterwards.
-        if matches!(state.admission, PublisherAdmissionStatus::Deleted) || state.queue.is_empty() {
+        if matches!(state.admission, PublisherAdmissionStatus::Deleted) {
             state.worker = None;
             return None;
         }
-        let item = state.queue.pop_front();
+        // Like its compaction, a session that no longer admits work expires
+        // nothing more, so a close or a shutdown doesn't wait for a large
+        // trash.
+        let expiry_due = expiry_turn != ExpiryTurn::Paused
+            && state.expiry_due
+            && matches!(state.admission, PublisherAdmissionStatus::Open);
+        let unit =
+            if expiry_due && (expiry_turn == ExpiryTurn::BeforeItem || state.queue.is_empty()) {
+                WorkerUnit::Expiry
+            } else if let Some(item) = state.queue.pop_front() {
+                WorkerUnit::Item(item)
+            } else {
+                state.worker = None;
+                return None;
+            };
         self.reserve_next_publish_slot(&mut state);
         let queue_depth = queued_candidates(&state);
         drop(state);
         self.runtime_core
             .instruments()
             .publisher_queue_depth(queue_depth);
-        item
+        Some(unit)
     }
 
     /// Keeps the commits that the engine refused at the write stop at the
@@ -1649,12 +1695,6 @@ impl NamespacePublisher {
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
         let publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
-        if publish
-            .wal_tail
-            .is_some_and(|tail| tail.source == TailSource::Store)
-        {
-            self.runtime_core.instruments().publisher_tail_replay();
-        }
         if !publish.results.iter().any(is_retryable_wal_publish) {
             for (permit, result) in permits.iter().zip(&publish.results) {
                 // A commit refused at the write stop publishes later, so its
@@ -1663,6 +1703,28 @@ impl NamespacePublisher {
                     permit.release_inline();
                 }
             }
+        }
+        let fold_start = self.record_publication(&publish);
+        drop(slot);
+        if let Some(start) = fold_start {
+            let _ = start.send(());
+        }
+        publish.results
+    }
+
+    /// Records the newest commit that `publish` published, and starts a fold
+    /// when the tail it left is over the fold trigger or reached the write
+    /// stop. The caller sends the returned start once it releases the
+    /// engine.
+    fn record_publication(
+        &self,
+        publish: &loonfs_core::publish::NamespaceCommitEnginePublishResult,
+    ) -> Option<oneshot::Sender<()>> {
+        if publish
+            .wal_tail
+            .is_some_and(|tail| tail.source == TailSource::Store)
+        {
+            self.runtime_core.instruments().publisher_tail_replay();
         }
         let write_stopped = publish.results.iter().any(is_maintenance_required);
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
@@ -1691,11 +1753,7 @@ impl NamespacePublisher {
             });
             state.metadata_caught_up = false;
         }
-        drop(slot);
-        if let Some(start) = fold_start {
-            let _ = start.send(());
-        }
-        publish.results
+        fold_start
     }
 
     /// Returns the publisher's lazily created commit engine.

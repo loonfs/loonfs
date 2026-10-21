@@ -2,6 +2,8 @@
 //! candidates as one numbered WAL put, then returns
 //! one result per candidate.
 
+mod deletion_expiry;
+
 use crate::authorize::CommitAuthority;
 use crate::commit::{CommitFingerprint, DeletionExpiry};
 use crate::context::MutationContext;
@@ -20,6 +22,7 @@ use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
 use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
+use deletion_expiry::DeletionExpiryState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{
@@ -764,6 +767,9 @@ pub struct NamespaceCommitEngine {
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
     /// keyed by segment digest. Successor probes verify that the view is current.
     segment_cache: Option<Arc<MetadataSegmentCache>>,
+    /// How far this session has expired the deletions that the retention
+    /// floor reaches. It stays with the session when the position drops.
+    deletion_expiry: DeletionExpiryState,
 }
 
 impl NamespaceCommitEngine {
@@ -778,6 +784,7 @@ impl NamespaceCommitEngine {
             session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
+            deletion_expiry: DeletionExpiryState::new(),
         }
     }
 
@@ -966,6 +973,7 @@ impl NamespaceCommitEngine {
         }
         let (acquired_writer, anchor) =
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
+        self.deletion_expiry.open_session(&anchor.read_state);
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
@@ -1030,11 +1038,46 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         batch: &Deadline,
     ) -> NamespaceCommitEnginePublishResult {
+        let segment_cache = self.segment_cache.clone();
+        match self
+            .load_publish_view(store, segment_cache.as_deref(), context, batch)
+            .await
+        {
+            Ok(loaded) => {
+                self.publish_expiry_against(store, loaded, commit_id, deletions, context, batch)
+                    .await
+            }
+            Err(error) => failed_publication(1, error),
+        }
+    }
+
+    /// Publishes the writer's commit that expires `deletions` against
+    /// `loaded`, in a batch of its own (see [`Self::publish_expiry`]).
+    async fn publish_expiry_against<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        loaded: LoadedPublishView<'_, S>,
+        commit_id: CommitId,
+        deletions: Vec<ExpiredDeletion>,
+        context: &MutationContext,
+        batch: &Deadline,
+    ) -> NamespaceCommitEnginePublishResult {
         let candidate = CommitCandidate::expiry(DeletionExpiry::new(commit_id, deletions));
-        self.publish_batch(store, [candidate], context, batch).await
+        self.publish_against(
+            store,
+            loaded,
+            std::slice::from_ref(&candidate),
+            context,
+            batch,
+        )
+        .await
     }
 
     /// Retries share `batch` so content evidence continues aging.
+    ///
+    /// In a fork, a new session first expires every deletion at or below the
+    /// fork point, so the outcome of its first request doesn't depend on
+    /// timing ([Retention window](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#recoverable-and-expired-deletions)).
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -1043,24 +1086,54 @@ impl NamespaceCommitEngine {
         batch: &Deadline,
     ) -> NamespaceCommitEnginePublishResult {
         let candidates = candidates.as_ref();
-        let attempt = batch.observe();
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
                 wal_tail: None,
             };
         }
-
-        let candidate_count = candidates.len();
-        let acquired_writer = match self.session_writer_epoch(store, context).await {
-            Ok(value) => value,
-            Err(error) => {
-                return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, error),
-                    wal_tail: None,
-                };
+        let segment_cache = self.segment_cache.clone();
+        // Each pass that doesn't publish the batch expires at least one
+        // inherited deletion, so the loop runs once for each
+        // `MAX_EXPIRED_DELETIONS_PER_COMMIT` inherited deletions, plus once.
+        loop {
+            let loaded = match self
+                .load_publish_view(store, segment_cache.as_deref(), context, batch)
+                .await
+            {
+                Ok(loaded) => loaded,
+                Err(error) => return failed_publication(candidates.len(), error),
+            };
+            match self
+                .expire_inherited_deletions(store, loaded, context, batch)
+                .await
+            {
+                Ok(Some(loaded)) => {
+                    return self
+                        .publish_against(store, loaded, candidates, context, batch)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => return failed_publication(candidates.len(), error),
             }
-        };
+        }
+    }
+
+    /// Loads the view that one publication unit plans against: the
+    /// position, once the store shows that it's still current, or the
+    /// namespace's current manifest and WAL tail.
+    ///
+    /// The view borrows `segment_cache` rather than the engine, so the
+    /// caller can read the view and then publish against it.
+    async fn load_publish_view<'a, S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        context: &MutationContext,
+        batch: &Deadline,
+    ) -> Result<LoadedPublishView<'a, S>> {
+        let attempt = batch.observe();
+        let acquired_writer = self.session_writer_epoch(store, context).await?;
 
         let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
@@ -1106,7 +1179,7 @@ impl NamespaceCommitEngine {
         };
         let loaded = load_publish_metadata_view(
             store,
-            self.segment_cache.as_deref(),
+            segment_cache,
             &self.namespace_id,
             acquired_writer,
             cached_position,
@@ -1114,21 +1187,17 @@ impl NamespaceCommitEngine {
             Arc::clone(&self.timer),
         )
         .await;
-        let publish_view = match loaded {
+        let view = match loaded {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
                     *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
                 }
-                return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, error),
-                    wal_tail: None,
-                };
+                return Err(error);
             }
         };
-        let wal_tail_discovered = publish_view.tail_discovered;
-        let projection_observed = if wal_tail_discovered {
+        let projection_observed = if view.tail_discovered {
             // Discovery confirmed the basis and observed the tip no earlier
             // than this attempt began.
             self.basis_checked = Some(attempt.clone());
@@ -1138,7 +1207,29 @@ impl NamespaceCommitEngine {
                 .clone()
                 .unwrap_or_else(|| attempt.clone())
         };
+        Ok(LoadedPublishView {
+            view,
+            attempt,
+            projection_observed,
+        })
+    }
 
+    /// Publishes `candidates` against `loaded` as one batch, and keeps the
+    /// position that the batch leaves.
+    async fn publish_against<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        loaded: LoadedPublishView<'_, S>,
+        candidates: &[CommitCandidate],
+        context: &MutationContext,
+        batch: &Deadline,
+    ) -> NamespaceCommitEnginePublishResult {
+        let LoadedPublishView {
+            view: publish_view,
+            attempt,
+            projection_observed,
+        } = loaded;
+        let wal_tail_discovered = publish_view.tail_discovered;
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
             store,
             &self.namespace_id,
@@ -1173,6 +1264,16 @@ impl NamespaceCommitEngine {
                 },
             }),
         }
+    }
+
+    /// Keeps the position that `loaded` planned against, for a unit that
+    /// published nothing.
+    fn keep_loaded_position<S: ObjectStore + ?Sized>(&mut self, loaded: LoadedPublishView<'_, S>) {
+        self.projection_observed = Some(loaded.projection_observed);
+        self.update_publish_tail_projection(
+            loaded.view.into_position(),
+            PublishViewEffect::Unchanged,
+        );
     }
 
     /// Folds one batch's effect into the unit's position and its tail, keeps
@@ -1225,6 +1326,16 @@ impl NamespaceCommitEngine {
     }
 }
 
+/// The view that one publication unit plans against, with the
+/// observations that its publication clock starts from.
+struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
+    view: crate::protocol::PublishMetadataView<'a, S>,
+    /// When the unit began.
+    attempt: Observation,
+    /// When the store last showed the view's WAL tip current.
+    projection_observed: Observation,
+}
+
 /// What folding one batch into the tail projection left: the WAL-tail length
 /// the caller schedules maintenance on, and whether the batch's put landed
 /// and moved the position.
@@ -1236,6 +1347,14 @@ struct TailProjectionUpdate {
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {
     (0..count).map(|_| Err(error.clone())).collect()
+}
+
+/// The result of a unit that failed before it published anything.
+fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePublishResult {
+    NamespaceCommitEnginePublishResult {
+        results: repeated_error(count, error),
+        wal_tail: None,
+    }
 }
 
 /// Publishes one batch through a fresh commit engine, which keeps its

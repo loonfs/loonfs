@@ -1199,7 +1199,7 @@ Every commit adds metadata rows, and without a limit, old revisions, bindings, a
 
 ### 10.1 Advancing the retention floor
 
-The retention floor limits how far back these kinds of history are kept: incremental replay, superseded bindings, file revisions, old attribute states, and commit receipts. Above the floor, every file's history is complete, and at or below it, each file keeps its newest revision. The floor doesn't expire layout rows, and it doesn't keep WAL objects (garbage collection removes them once they're folded).
+The retention floor limits how far back these kinds of history are kept: incremental replay, superseded bindings, file revisions, old attribute states, and commit receipts. Above the floor, every file's history is complete. At or below it, each file that's visible or under a recoverable deletion keeps its newest revision, and a file that an expired deletion hides keeps none (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). The floor doesn't expire layout rows, and it doesn't keep WAL objects (garbage collection removes them once they're folded).
 
 The floor only moves when it's explicitly advanced, and automatic folds don't advance it. Its initial value is 0 for a new namespace, and the fork point for a fork. The change feed returns only commits above the floor, so the commit row at the floor is kept, but it's never replayed. That's also why a fork's floor is its fork point, so that the source's commit at that sequence stays out of the fork's change feed.
 
@@ -1215,7 +1215,20 @@ The advance loads the current manifest. A target at or below the manifest's floo
 
 A pin below the new floor still protects its own manifest and runs.
 
+The floor also bounds how long a deletion stays recoverable. Once the floor is at or above a deletion's sequence, the namespace's writer expires the deletion by committing an `expire` event for it (see [File and subtree deletion](#16-file-and-subtree-deletion)). The advance doesn't change any deletion itself, so a deletion at or below the floor stays recoverable until its `expire` is committed. A [writer session](glossary.md#writer-session) keeps the last floor whose deletions it has finished expiring, which is 0 in a new session. Whenever the session's [writer position](glossary.md#writer-position) is on a manifest with a higher floor than the last one it finished, the session repeats these steps until no `listed` row at or below the new floor remains:
+
+1. Scans its view of `active_deletions` for the next `listed` rows at or below the new floor, at most 1,000 of them. The first scan starts above the last finished floor, and each later scan starts after the last deletion that the step before it expired.
+2. Commits an `expire` event for each deletion that the scan found, in one commit that's attributed to the actor `loonfs`. The session MUST NOT commit anything else between a scan and this commit.
+
+Between one `expire` commit and the next scan, the session can commit other requests. For example, if 2,500 deletions are at or below a new floor, the writer expires them in three commits of 1,000, 1,000, and 500 deletions, and it can commit requests in between. (The 1,000 is an implementation limit, `MAX_EXPIRED_DELETIONS_PER_COMMIT`, not a format requirement.) In a fork, a new writer session expires every deletion at or below the fork point before it commits its first request, so an undelete of an inherited deletion returns `not_deleted` even as the fork's first request.
+
+Validation MUST reject an `expire` whose deletion is above the floor of the manifest that the commit is validated against. The rejected commit fails with a server error (`server_error`), and none of its events are committed. A fork's inherited deletions pass this check, because a fork's floor starts at its fork point and never decreases.
+
 Why check that the segments exist first? Advancing the floor ends the guarantee that older history can be replayed, so LoonFS first makes sure the history it's keeping is readable. The check isn't a transaction across objects, and it doesn't replace garbage collection's reference rules. Reads still verify checksums.
+
+Why does validation check the floor when the scan already ends at it? A base compaction removes every row of an inode that an expired deletion hides, which is safe only because the floor is at or above every expired deletion. The check keeps that rule true even if a scan were wrong.
+
+Why doesn't the advance expire the deletions itself? An advance is a manifest publication and an undelete is a writer commit, so LoonFS can't order an advance against an undelete. An `expire` is a writer commit, so the WAL orders it against every undelete. The session also commits nothing between a scan and its `expire` commit, so every deletion that the scan found is still recoverable when LoonFS validates that commit.
 
 ### 10.2 Compaction windows
 

@@ -16,7 +16,7 @@ use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{CommitId, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
@@ -46,6 +46,11 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         self.position
     }
 
+    /// The retention floor of the manifest that the view plans against.
+    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
+        self.position.retention_floor_seq()
+    }
+
     pub(super) fn write_stop(&self) -> Option<u64> {
         self.write_stop
     }
@@ -64,6 +69,8 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PublishTailPosition {
     basis: MetadataBasis,
+    /// The basis manifest's `retention_floor_seq`.
+    retention_floor_seq: ChangeSeq,
     pub(crate) head: NamespaceReadState,
     pub(crate) tail: Arc<ProjectedWalTail>,
 }
@@ -71,6 +78,10 @@ pub(crate) struct PublishTailPosition {
 impl PublishTailPosition {
     pub(crate) fn basis(&self) -> &MetadataBasis {
         &self.basis
+    }
+
+    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
+        self.retention_floor_seq
     }
 
     /// Inline content bytes in the position's WAL tail.
@@ -96,6 +107,10 @@ impl PublishTailPosition {
     /// that replay adds above a manifest without runs. A manifest at the
     /// basis's head keeps that directory, which is why it keeps the tail
     /// instead of cutting it.
+    ///
+    /// A position that moves takes the manifest's retention floor, which is
+    /// how the session finds that a retention advance raised the floor (see
+    /// `NamespaceCommitEngine::expiry_due`).
     ///
     /// The rule doesn't depend on whether this runtime or another process
     /// published the manifest, or on the order in which manifests arrive.
@@ -130,6 +145,7 @@ impl PublishTailPosition {
             self.tail = Arc::new(after);
         }
         self.basis = MetadataBasis(manifest.manifest.clone());
+        self.retention_floor_seq = manifest.retention_floor_seq;
         true
     }
 
@@ -214,6 +230,11 @@ fn load_publish_tail_position<S: ObjectStore + ?Sized>(
         .map_err(CoreError::MetadataProjection)?;
     Ok(PublishTailPosition {
         basis,
+        retention_floor_seq: loaded_basis
+            .segments
+            .manifest()
+            .payload()
+            .retention_floor_seq,
         head: head.clone(),
         tail: Arc::new(replayed.projected_tail),
     })

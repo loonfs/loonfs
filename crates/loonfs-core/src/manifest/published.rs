@@ -8,7 +8,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::time::Observation;
 use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
-use loonfs_types::{WalNo, WriterEpoch};
+use loonfs_types::{ChangeSeq, WalNo, WriterEpoch};
 
 /// A manifest above a writer session's position, with the fields that
 /// decide whether the position can move onto it.
@@ -23,6 +23,9 @@ pub struct PublishedManifest {
     pub status: NamespaceStatus,
     /// The WAL number that the manifest folds through.
     pub folded_wal_no: WalNo,
+    /// The manifest's retention floor, which a position takes when it moves
+    /// onto the manifest.
+    pub retention_floor_seq: ChangeSeq,
     /// When this runtime started the call that published the manifest, or
     /// that found it current. No manifest followed it then, so a position
     /// that moves onto it takes this as its last successor check. `None`
@@ -39,6 +42,7 @@ impl PublishedManifest {
             writer_epoch: payload.writer_epoch,
             status: payload.status,
             folded_wal_no: payload.folded_wal_no,
+            retention_floor_seq: payload.retention_floor_seq,
             started,
         }
     }

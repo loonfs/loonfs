@@ -316,7 +316,8 @@ async fn undelete<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Commits the writer's expiry of one deletion.
+/// Commits the writer's expiry of one deletion, once the deletion is folded
+/// and the retention floor reaches it, as the writer's own expiry requires.
 pub(super) async fn expire<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -324,6 +325,26 @@ pub(super) async fn expire<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     context: &MutationContext,
 ) -> Result<loonfs_types::Commit, CoreError> {
+    crate::manifest::fold_wal_tail(
+        store,
+        None,
+        namespace_id,
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        MetadataRunPolicy::default(),
+        &crate::test_support::content_writes(),
+    )
+    .await
+    .expect("fold the deletion");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Seq(deletion_seq),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor to the deletion");
     NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(crate::test_support::content_writes()),

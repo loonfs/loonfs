@@ -24,6 +24,7 @@ mod common;
 mod concurrent_folds;
 mod content_ref_import_access;
 mod content_request_accounting;
+mod deletion_expiry;
 mod derived_paths;
 mod direct_put;
 mod directory_page_reads;

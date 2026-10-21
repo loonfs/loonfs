@@ -141,6 +141,15 @@ pub enum CommitValidationError {
         active_seq: ChangeSeq,
     },
     #[error(
+        "{operand} inode `{inode_id}` targets the deletion at seq `{deletion_seq}`, which is above the retention floor `{retention_floor_seq}`"
+    )]
+    DeletionAboveRetentionFloor {
+        operand: CommitOperand,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
+    #[error(
         "cannot restore inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
     )]
     RestoreRevisionOverflow {
@@ -212,7 +221,10 @@ impl CommitValidationError {
             | Self::TargetDeletedInCurrentCommit { .. }
             | Self::DeletionSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-            Self::RestoreRevisionOverflow { .. }
+            // Only the namespace's writer commits an expiry, so an expiry
+            // above the floor is a fault in the writer, not in a request.
+            Self::DeletionAboveRetentionFloor { .. }
+            | Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
             | Self::OperationIndexOverflow
             | Self::DeltaIndexOverflow => ErrorCode::ServerError,
