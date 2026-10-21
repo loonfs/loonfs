@@ -1,4 +1,4 @@
-//! Writes the full OpenAPI document and the browser proxy document.
+//! Writes the OpenAPI document.
 
 use std::path::Path;
 
@@ -6,15 +6,11 @@ mod openapi_postprocess;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
-    let (Some(full_path), Some(proxy_path), None) =
-        (arguments.next(), arguments.next(), arguments.next())
-    else {
-        return Err("usage: loonfs-openapi <openapi.json> <openapi-proxy.json>".into());
+    let (Some(path), None) = (arguments.next(), arguments.next()) else {
+        return Err("usage: loonfs-openapi <openapi.json>".into());
     };
-    let (full, proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())?;
-    write_json(Path::new(&full_path), full)?;
-    write_json(Path::new(&proxy_path), proxy)?;
+    let json = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())?;
+    write_json(Path::new(&path), json)?;
     Ok(())
 }
 

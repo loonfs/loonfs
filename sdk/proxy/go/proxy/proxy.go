@@ -11,10 +11,9 @@ import (
 )
 
 type RouteContext struct {
-	Method         string
-	Template       string
-	NamespaceAlias string // Empty for routes without an alias.
-	NamespaceID    string
+	Method      string
+	Template    string
+	NamespaceID string // Empty for /v0/capabilities.
 }
 
 type Authorization struct {
@@ -37,21 +36,20 @@ func (r *Refusal) Error() string {
 
 // Config defines a proxy handler.
 type Config struct {
-	ServerBaseURL    string
-	Token            string
-	NamespaceAliases map[string]string
+	ServerBaseURL string
+	Token         string
 	// Authorize runs before every forwarded request. A *Refusal error is sent
 	// back as the response; any other error answers 500.
 	// Authorize is required; an empty authorization forwards as the token holder.
+	// The proxy forwards any namespace ID in the path, so check c.NamespaceID here.
 	Authorize func(r *http.Request, c RouteContext) (Authorization, error)
 }
 
 type handler struct {
-	namespaceAliases map[string]string
-	target           *url.URL
-	token            string
-	transport        http.RoundTripper
-	authorize        func(*http.Request, RouteContext) (Authorization, error)
+	target    *url.URL
+	token     string
+	transport http.RoundTripper
+	authorize func(*http.Request, RouteContext) (Authorization, error)
 }
 
 type route struct {
@@ -59,29 +57,30 @@ type route struct {
 	pattern string
 }
 
-// These routes must match docs/specs/openapi-proxy.json.
+// These routes must match the `routes` list in
+// crates/loonfs-conformance/cases/proxy.json.
 var routes = []route{
 	{method: http.MethodGet, pattern: "/v0/capabilities"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/changes"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/commits"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/content"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/entries"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/entry"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/trash"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/grep"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"},
-	{method: http.MethodDelete, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads"},
-	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete"},
-	{method: http.MethodPut, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/changes"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/commits"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/filesystem/content"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/filesystem/downloads"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/filesystem/entries"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/filesystem/entry"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/filesystem/revisions"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/filesystem/trash"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/grep"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/snapshots"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/snapshots"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}"},
+	{method: http.MethodDelete, pattern: "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/uploads"},
+	{method: http.MethodGet, pattern: "/v0/namespaces/{namespace_id}/uploads/{upload_id}"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete"},
+	{method: http.MethodPut, pattern: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content"},
+	{method: http.MethodPost, pattern: "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts"},
 }
 
 var hopByHopHeaders = []string{
@@ -109,16 +108,6 @@ func NewHandler(config Config) (http.Handler, error) {
 		return nil, fmt.Errorf("proxy: authorize is required")
 	}
 
-	namespaceAliases := make(map[string]string, len(config.NamespaceAliases))
-	for namespaceAlias, namespaceID := range config.NamespaceAliases {
-		if namespaceAlias == "" || strings.Contains(namespaceAlias, "/") {
-			return nil, fmt.Errorf("proxy: namespace alias %q must be one non-empty path segment", namespaceAlias)
-		}
-		if !validNamespaceID(namespaceID) {
-			return nil, fmt.Errorf("proxy: namespace id %q for namespace alias %q is invalid", namespaceID, namespaceAlias)
-		}
-		namespaceAliases[namespaceAlias] = namespaceID
-	}
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("proxy: default HTTP transport has unexpected type %T", http.DefaultTransport)
@@ -127,11 +116,10 @@ func NewHandler(config Config) (http.Handler, error) {
 	transport.DisableCompression = true
 
 	return &handler{
-		namespaceAliases: namespaceAliases,
-		target:           target,
-		token:            config.Token,
-		transport:        transport,
-		authorize:        config.Authorize,
+		target:    target,
+		token:     config.Token,
+		transport: transport,
+		authorize: config.Authorize,
 	}, nil
 }
 
@@ -152,25 +140,8 @@ func validateTarget(serverBaseURL string) (*url.URL, error) {
 	return target, nil
 }
 
-func validNamespaceID(namespaceID string) bool {
-	if len(namespaceID) == 0 || len(namespaceID) > 128 {
-		return false
-	}
-	for index := 0; index < len(namespaceID); index++ {
-		character := namespaceID[index]
-		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
-			continue
-		}
-		if index > 0 && (character == '.' || character == '_' || character == '-') {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
-	rewrittenPath, routeContext, ok := h.resolveRoute(request.Method, request.URL.Path)
+	routeContext, ok := resolveRoute(request.Method, request.URL.Path)
 	if !ok {
 		responseWriter.WriteHeader(http.StatusNotFound)
 		return
@@ -194,7 +165,7 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	outgoing := request.Clone(request.Context())
 	outgoing.URL.Scheme = h.target.Scheme
 	outgoing.URL.Host = h.target.Host
-	outgoing.URL.Path = joinPath(h.target.Path, rewrittenPath)
+	outgoing.URL.Path = joinPath(h.target.Path, request.URL.Path)
 	outgoing.URL.RawPath = ""
 	outgoing.URL.RawQuery = request.URL.RawQuery
 	outgoing.URL.Fragment = ""
@@ -254,28 +225,18 @@ func (r *Refusal) write(responseWriter http.ResponseWriter) {
 	_, _ = responseWriter.Write(r.Body)
 }
 
-func (h *handler) resolveRoute(method, path string) (string, RouteContext, bool) {
+func resolveRoute(method, path string) (RouteContext, bool) {
 	for _, candidate := range routes {
 		if candidate.method != method {
 			continue
 		}
-		namespaceAlias, ok := matchPattern(candidate.pattern, path)
+		namespaceID, ok := matchPattern(candidate.pattern, path)
 		if !ok {
 			continue
 		}
-		context := RouteContext{Method: method, Template: candidate.pattern, NamespaceAlias: namespaceAlias}
-		if namespaceAlias == "" {
-			return path, context, true
-		}
-		namespaceID, ok := h.namespaceAliases[namespaceAlias]
-		if !ok {
-			return "", RouteContext{}, false
-		}
-		context.NamespaceID = namespaceID
-		prefix := "/v0/namespace-aliases/" + namespaceAlias
-		return "/v0/namespaces/" + namespaceID + strings.TrimPrefix(path, prefix), context, true
+		return RouteContext{Method: method, Template: candidate.pattern, NamespaceID: namespaceID}, true
 	}
-	return "", RouteContext{}, false
+	return RouteContext{}, false
 }
 
 func matchPattern(pattern, path string) (string, bool) {
@@ -285,14 +246,14 @@ func matchPattern(pattern, path string) (string, bool) {
 		return "", false
 	}
 
-	var namespaceAlias string
+	var namespaceID string
 	for index, patternSegment := range patternSegments {
 		pathSegment := pathSegments[index]
-		if patternSegment == "{namespace_alias}" {
+		if patternSegment == "{namespace_id}" {
 			if pathSegment == "" {
 				return "", false
 			}
-			namespaceAlias = pathSegment
+			namespaceID = pathSegment
 		} else if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
 			if pathSegment == "" {
 				return "", false
@@ -303,7 +264,7 @@ func matchPattern(pattern, path string) (string, bool) {
 			}
 		}
 	}
-	return namespaceAlias, true
+	return namespaceID, true
 }
 
 func joinPath(basePath, requestPath string) string {

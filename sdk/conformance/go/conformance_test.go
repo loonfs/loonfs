@@ -2499,22 +2499,19 @@ func equalStrings(left, right []string) bool {
 }
 
 type proxyCaseRequest struct {
-	NamespaceAlias        string         `json:"namespace_alias"`
-	NamespaceID           string         `json:"namespace_id"`
-	UnknownNamespaceAlias string         `json:"unknown_namespace_alias"`
-	ActorID               loonfs.ActorID `json:"actor_id"`
-	Directory             string         `json:"directory"`
-	ProxiedPath           string         `json:"proxied_path"`
-	DirectPath            string         `json:"direct_path"`
-	CommitIDs             proxyCommitIDs `json:"commit_ids"`
-	ContentUTF8           string         `json:"content_utf8"`
-	DisallowedPathSuffix  string         `json:"disallowed_path_suffix"`
-	Authorize             proxyAuthorize `json:"authorize"`
-	ACL                   proxyACL       `json:"acl"`
+	NamespaceID          string         `json:"namespace_id"`
+	ActorID              loonfs.ActorID `json:"actor_id"`
+	Directory            string         `json:"directory"`
+	ProxiedPath          string         `json:"proxied_path"`
+	DirectPath           string         `json:"direct_path"`
+	CommitIDs            proxyCommitIDs `json:"commit_ids"`
+	ContentUTF8          string         `json:"content_utf8"`
+	DisallowedPathSuffix string         `json:"disallowed_path_suffix"`
+	Authorize            proxyAuthorize `json:"authorize"`
+	ACL                  proxyACL       `json:"acl"`
 }
 
 type proxyACL struct {
-	NamespaceAlias    string `json:"namespace_alias"`
 	NamespaceID       string `json:"namespace_id"`
 	PrincipalScope    string `json:"principal_scope"`
 	Administrator     string `json:"administrator"`
@@ -2526,12 +2523,13 @@ type proxyACL struct {
 }
 
 type proxyAuthorize struct {
-	ActorID        loonfs.ActorID `json:"actor_id"`
-	BrowserActorID loonfs.ActorID `json:"browser_actor_id"`
-	CommitID       string         `json:"commit_id"`
-	Directory      string         `json:"directory"`
-	RefuseHeader   string         `json:"refuse_header"`
-	RefusedStatus  int            `json:"refused_status"`
+	ActorID             loonfs.ActorID `json:"actor_id"`
+	BrowserActorID      loonfs.ActorID `json:"browser_actor_id"`
+	CommitID            string         `json:"commit_id"`
+	Directory           string         `json:"directory"`
+	RefuseHeader        string         `json:"refuse_header"`
+	RefusedStatus       int            `json:"refused_status"`
+	UnlistedNamespaceID string         `json:"unlisted_namespace_id"`
 }
 
 type proxyCommitIDs struct {
@@ -2541,26 +2539,25 @@ type proxyCommitIDs struct {
 }
 
 type proxyExpected struct {
-	MkdirCommittedSeq           int64          `json:"mkdir_committed_seq"`
-	ProxiedCommittedSeq         int64          `json:"proxied_committed_seq"`
-	DirectCommittedSeq          int64          `json:"direct_committed_seq"`
-	EntryCount                  int            `json:"entry_count"`
-	UnknownNamespaceAliasStatus int            `json:"unknown_namespace_alias_status"`
-	DisallowedStatus            int            `json:"disallowed_route_status"`
-	StampedCommittedBy          loonfs.ActorID `json:"stamped_committed_by"`
-	StampedCommittedSeq         int64          `json:"stamped_committed_seq"`
-	RefusedStatus               int            `json:"refused_status"`
-	ACLStampedCommittedSeq      int64          `json:"acl_stamped_committed_seq"`
-	ACLForbiddenStatus          int            `json:"acl_forbidden_status"`
+	MkdirCommittedSeq      int64          `json:"mkdir_committed_seq"`
+	ProxiedCommittedSeq    int64          `json:"proxied_committed_seq"`
+	DirectCommittedSeq     int64          `json:"direct_committed_seq"`
+	EntryCount             int            `json:"entry_count"`
+	DisallowedStatus       int            `json:"disallowed_route_status"`
+	StampedCommittedBy     loonfs.ActorID `json:"stamped_committed_by"`
+	StampedCommittedSeq    int64          `json:"stamped_committed_seq"`
+	RefusedStatus          int            `json:"refused_status"`
+	ACLStampedCommittedSeq int64          `json:"acl_stamped_committed_seq"`
+	ACLForbiddenStatus     int            `json:"acl_forbidden_status"`
+	Routes                 []string       `json:"routes"`
 }
 
 func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[proxyCaseRequest, proxyExpected](t, testCase)
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
-		ServerBaseURL:    h.serverBaseURL,
-		Token:            h.serverToken,
-		NamespaceAliases: map[string]string{request.NamespaceAlias: request.NamespaceID},
+		ServerBaseURL: h.serverBaseURL,
+		Token:         h.serverToken,
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{ActorID: string(request.ActorID)}, nil
 		},
@@ -2572,11 +2569,11 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	defer proxyServer.Close()
 
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
-	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
+	namespaceBaseURL := proxyServer.URL + "/v0/namespaces/" + url.PathEscape(request.NamespaceID)
 	mkdir := proxyCreateCommit(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		createDirectoryCommit(request.NamespaceID, request.CommitIDs.Directory, request.Directory, nil),
 		request.ActorID,
 	)
@@ -2585,7 +2582,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	payload := []byte(request.ContentUTF8)
-	proxiedBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.CreateUploadBody{
+	proxiedBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceBaseURL, &loonfs.CreateUploadBody{
 		ServiceProxied: &loonfs.CreateUploadBodyServiceProxied{},
 	})
 	if proxiedBegin.Open == nil {
@@ -2596,7 +2593,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodPut,
-		namespaceAliasBaseURL+"/uploads/"+url.PathEscape(proxiedUploadID)+"/content",
+		namespaceBaseURL+"/uploads/"+url.PathEscape(proxiedUploadID)+"/content",
 		bytes.NewReader(payload),
 		"application/octet-stream",
 	)
@@ -2607,7 +2604,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxiedCompletion := proxyCompleteUpload(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		proxiedUploadID,
 		&loonfs.CompleteUploadBody{
 			ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{},
@@ -2618,7 +2615,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxiedCommit := proxyCommitCompletedFile(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		request.NamespaceID,
 		request.ProxiedPath,
 		request.CommitIDs.Proxied,
@@ -2631,7 +2628,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	sizeBytes := int64(len(payload))
-	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.CreateUploadBody{
+	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceBaseURL, &loonfs.CreateUploadBody{
 		DirectPut: &loonfs.CreateUploadBodyDirectPut{SizeBytes: &sizeBytes},
 	})
 	if directBegin.Open == nil {
@@ -2650,7 +2647,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	directCompletion := proxyCompleteUpload(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		directUploadID,
 		&loonfs.CompleteUploadBody{
 			DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: directClaim},
@@ -2660,7 +2657,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	directCommit := proxyCommitCompletedFile(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		request.NamespaceID,
 		request.DirectPath,
 		request.CommitIDs.Direct,
@@ -2677,7 +2674,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodGet,
-		namespaceAliasBaseURL+"/filesystem/entries?"+listingQuery.Encode(),
+		namespaceBaseURL+"/filesystem/entries?"+listingQuery.Encode(),
 		nil,
 	)
 	if len(listing.Entries) != expected.EntryCount {
@@ -2689,7 +2686,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodGet,
-		namespaceAliasBaseURL+"/filesystem/content?"+readQuery.Encode(),
+		namespaceBaseURL+"/filesystem/content?"+readQuery.Encode(),
 		nil,
 		"",
 	)
@@ -2703,18 +2700,10 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Error("proxied file readback did not match payload")
 	}
 
-	unknownStatus := proxyResponseStatus(
-		t,
-		proxyServer.Client(),
-		proxyServer.URL+"/v0/namespace-aliases/"+url.PathEscape(request.UnknownNamespaceAlias)+"/filesystem/entries",
-	)
-	if unknownStatus != expected.UnknownNamespaceAliasStatus {
-		t.Errorf("unknown namespace alias status = %d, want %d", unknownStatus, expected.UnknownNamespaceAliasStatus)
-	}
 	disallowedStatus := proxyResponseStatus(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL+request.DisallowedPathSuffix,
+		namespaceBaseURL+request.DisallowedPathSuffix,
 	)
 	if disallowedStatus != expected.DisallowedStatus {
 		t.Errorf("disallowed route status = %d, want %d", disallowedStatus, expected.DisallowedStatus)
@@ -2726,11 +2715,11 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	t.Helper()
 	refusalBody := []byte(`{"code":"unauthorized","message":"refused by the conformance hook"}`)
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
-		ServerBaseURL:    h.serverBaseURL,
-		Token:            h.serverToken,
-		NamespaceAliases: map[string]string{request.NamespaceAlias: request.NamespaceID},
-		Authorize: func(incoming *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
-			if _, present := incoming.Header[http.CanonicalHeaderKey(request.Authorize.RefuseHeader)]; present {
+		ServerBaseURL: h.serverBaseURL,
+		Token:         h.serverToken,
+		Authorize: func(incoming *http.Request, route loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			_, refuse := incoming.Header[http.CanonicalHeaderKey(request.Authorize.RefuseHeader)]
+			if refuse || (route.NamespaceID != "" && route.NamespaceID != request.NamespaceID) {
 				return loonfsproxy.Authorization{}, &loonfsproxy.Refusal{
 					Status:      request.Authorize.RefusedStatus,
 					ContentType: "application/json",
@@ -2745,11 +2734,11 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	}
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
-	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
+	namespaceBaseURL := proxyServer.URL + "/v0/namespaces/" + url.PathEscape(request.NamespaceID)
 	stamped := proxyCreateCommit(
 		t,
 		proxyServer.Client(),
-		namespaceAliasBaseURL,
+		namespaceBaseURL,
 		createDirectoryCommit(request.NamespaceID, request.Authorize.CommitID, request.Authorize.Directory, nil),
 		request.Authorize.BrowserActorID,
 	)
@@ -2770,23 +2759,28 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	if string(change.CommitID) != request.Authorize.CommitID || change.CommittedBy != expected.StampedCommittedBy {
 		t.Errorf("stamped change = (%q, %q), want (%q, %q)", change.CommitID, change.CommittedBy, request.Authorize.CommitID, expected.StampedCommittedBy)
 	}
-	refusedRequest, err := http.NewRequestWithContext(context.Background(), http.MethodGet, namespaceAliasBaseURL+"/filesystem/entry?path=/", nil)
-	if err != nil {
-		t.Fatalf("build refused request: %v", err)
+	assertRefused := func(label, baseURL string, header http.Header) {
+		t.Helper()
+		refusedRequest, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+"/filesystem/entry?path=/", nil)
+		if err != nil {
+			t.Fatalf("build %s request: %v", label, err)
+		}
+		refusedRequest.Header = header
+		refused, err := proxyServer.Client().Do(refusedRequest)
+		if err != nil {
+			t.Fatalf("send %s request: %v", label, err)
+		}
+		defer refused.Body.Close()
+		actualBody, err := io.ReadAll(refused.Body)
+		if err != nil {
+			t.Fatalf("read %s response: %v", label, err)
+		}
+		if refused.StatusCode != expected.RefusedStatus || refused.Header.Get("Content-Type") != "application/json" || !bytes.Equal(actualBody, refusalBody) {
+			t.Errorf("%s response = (%d, %q, %s)", label, refused.StatusCode, refused.Header.Get("Content-Type"), actualBody)
+		}
 	}
-	refusedRequest.Header.Set(request.Authorize.RefuseHeader, "1")
-	refused, err := proxyServer.Client().Do(refusedRequest)
-	if err != nil {
-		t.Fatalf("send refused request: %v", err)
-	}
-	defer refused.Body.Close()
-	actualBody, err := io.ReadAll(refused.Body)
-	if err != nil {
-		t.Fatalf("read refused response: %v", err)
-	}
-	if refused.StatusCode != expected.RefusedStatus || refused.Header.Get("Content-Type") != "application/json" || !bytes.Equal(actualBody, refusalBody) {
-		t.Errorf("refused response = (%d, %q, %s)", refused.StatusCode, refused.Header.Get("Content-Type"), actualBody)
-	}
+	assertRefused("refused", namespaceBaseURL, http.Header{http.CanonicalHeaderKey(request.Authorize.RefuseHeader): {"1"}})
+	assertRefused("unlisted namespace", proxyServer.URL+"/v0/namespaces/"+url.PathEscape(request.Authorize.UnlistedNamespaceID), http.Header{})
 
 	runProxyACL(t, h, request, expected)
 }
@@ -2809,9 +2803,8 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 		"Loonfs-Actor":  []string{string(request.ActorID)},
 	})
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
-		ServerBaseURL:    h.serverBaseURL,
-		Token:            h.serverToken,
-		NamespaceAliases: map[string]string{acl.NamespaceAlias: acl.NamespaceID},
+		ServerBaseURL: h.serverBaseURL,
+		Token:         h.serverToken,
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{
 				ActorID:        string(request.ActorID),
@@ -2826,12 +2819,12 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 	}
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
-	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(acl.NamespaceAlias)
+	namespaceBaseURL := proxyServer.URL + "/v0/namespaces/" + url.PathEscape(acl.NamespaceID)
 	headers := http.Header{
 		"Loonfs-Principal-Scope": []string{acl.PrincipalScope},
 		"Loonfs-Principals":      []string{acl.BrowserPrincipals},
 	}
-	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL,
+	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceBaseURL,
 		createDirectoryCommit(acl.NamespaceID, acl.CommitID, acl.Directory, nil), request.ActorID, headers)
 	if int64(stamped.CommittedSeq) != expected.ACLStampedCommittedSeq {
 		t.Errorf("ACL stamped sequence = %d, want %d", stamped.CommittedSeq, expected.ACLStampedCommittedSeq)
@@ -2846,7 +2839,7 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 		t.Fatalf("encode forbidden ACL commit: %v", err)
 	}
 	response := sendProxyRequest(t, proxyServer.Client(), http.MethodPost,
-		namespaceAliasBaseURL+"/commits", bytes.NewReader(body), "application/json", headers)
+		namespaceBaseURL+"/commits", bytes.NewReader(body), "application/json", headers)
 	defer response.Body.Close()
 	var failure struct {
 		Code string `json:"code"`
@@ -2862,7 +2855,7 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 func proxyCreateUpload(
 	t *testing.T,
 	httpClient *http.Client,
-	namespaceAliasBaseURL string,
+	namespaceBaseURL string,
 	request *loonfs.CreateUploadBody,
 ) *loonfs.UploadSession {
 	t.Helper()
@@ -2870,7 +2863,7 @@ func proxyCreateUpload(
 		t,
 		httpClient,
 		http.MethodPost,
-		namespaceAliasBaseURL+"/uploads",
+		namespaceBaseURL+"/uploads",
 		request,
 	)
 }
@@ -2878,7 +2871,7 @@ func proxyCreateUpload(
 func proxyCompleteUpload(
 	t *testing.T,
 	httpClient *http.Client,
-	namespaceAliasBaseURL string,
+	namespaceBaseURL string,
 	uploadID string,
 	request *loonfs.CompleteUploadBody,
 ) *loonfs.UploadSession {
@@ -2887,7 +2880,7 @@ func proxyCompleteUpload(
 		t,
 		httpClient,
 		http.MethodPost,
-		namespaceAliasBaseURL+"/uploads/"+url.PathEscape(uploadID)+"/complete",
+		namespaceBaseURL+"/uploads/"+url.PathEscape(uploadID)+"/complete",
 		request,
 	)
 }
@@ -2895,7 +2888,7 @@ func proxyCompleteUpload(
 func proxyCommitCompletedFile(
 	t *testing.T,
 	httpClient *http.Client,
-	namespaceAliasBaseURL string,
+	namespaceBaseURL string,
 	namespaceID string,
 	path string,
 	commitID string,
@@ -2909,7 +2902,7 @@ func proxyCommitCompletedFile(
 	if contentToken != nil {
 		contentTokens = []*loonfs.ContentToken{contentToken}
 	}
-	return proxyCreateCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
+	return proxyCreateCommit(t, httpClient, namespaceBaseURL, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
 		CommitID:      loonfs.CommitID(commitID),
 		ContentTokens: contentTokens,
@@ -2928,7 +2921,7 @@ func proxyCommitCompletedFile(
 func proxyCreateCommit(
 	t *testing.T,
 	httpClient *http.Client,
-	namespaceAliasBaseURL string,
+	namespaceBaseURL string,
 	request *loonfs.CommitRequest,
 	actor loonfs.ActorID,
 	headers ...http.Header,
@@ -2938,7 +2931,7 @@ func proxyCreateCommit(
 		t,
 		httpClient,
 		http.MethodPost,
-		namespaceAliasBaseURL+"/commits",
+		namespaceBaseURL+"/commits",
 		request,
 		append([]http.Header{{"Loonfs-Actor": []string{string(actor)}}}, headers...)...,
 	)
@@ -3488,25 +3481,16 @@ func createDirectoryCommit(namespaceID string, commitID string, path string, mes
 	}
 }
 
-func instantiateDocumentPath(template, namespaceAlias string) string {
+func instantiateDocumentPath(template, namespaceID string) string {
 	segments := strings.Split(template, "/")
 	for index, segment := range segments {
-		if segment == "{namespace_alias}" {
-			segments[index] = namespaceAlias
+		if segment == "{namespace_id}" {
+			segments[index] = namespaceID
 		} else if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
 			segments[index] = "x"
 		}
 	}
 	return strings.Join(segments, "/")
-}
-
-func proxyTemplateForServer(template string) string {
-	const serverNamespacePrefix = "/v0/namespaces/{namespace_id}"
-	const proxyNamespaceAliasPrefix = "/v0/namespace-aliases/{namespace_alias}"
-	if template == serverNamespacePrefix || strings.HasPrefix(template, serverNamespacePrefix+"/") {
-		return proxyNamespaceAliasPrefix + strings.TrimPrefix(template, serverNamespacePrefix)
-	}
-	return template
 }
 
 func TestProxyRequiresAuthorize(t *testing.T) {
@@ -3522,16 +3506,12 @@ func TestProxyRequiresAuthorize(t *testing.T) {
 	}
 }
 
-// Every proxy route must reach the server.
-// Every excluded server route must stop at the proxy.
-func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
-	proxyDocumentPath := os.Getenv("LOONFS_PROXY_DOCUMENT")
-	if proxyDocumentPath == "" {
-		t.Skip("run scripts/run-sdk-conformance.sh go")
-	}
+// Every route in the proxy case must reach the server unchanged.
+// Every other server route must stop at the proxy.
+func TestProxyForwardsEveryListedRoute(t *testing.T) {
 	serverDocumentPath := os.Getenv("LOONFS_SERVER_DOCUMENT")
 	if serverDocumentPath == "" {
-		t.Fatal("LOONFS_SERVER_DOCUMENT is not set")
+		t.Skip("run scripts/run-sdk-conformance.sh go")
 	}
 	casesDirectory := os.Getenv("LOONFS_CONFORMANCE_CASES")
 	if casesDirectory == "" {
@@ -3551,19 +3531,9 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	if proxyCase == nil {
 		t.Fatal("proxy conformance case is missing")
 	}
-	fixture, _ := decodeCaseValues[proxyCaseRequest, proxyExpected](t, *proxyCase)
+	fixture, caseExpected := decodeCaseValues[proxyCaseRequest, proxyExpected](t, *proxyCase)
 
-	data, err := os.ReadFile(proxyDocumentPath)
-	if err != nil {
-		t.Fatalf("read proxy document: %v", err)
-	}
-	var proxyDocument struct {
-		Paths map[string]map[string]json.RawMessage `json:"paths"`
-	}
-	if err := json.Unmarshal(data, &proxyDocument); err != nil {
-		t.Fatalf("decode proxy document: %v", err)
-	}
-	data, err = os.ReadFile(serverDocumentPath)
+	data, err := os.ReadFile(serverDocumentPath)
 	if err != nil {
 		t.Fatalf("read server document: %v", err)
 	}
@@ -3589,9 +3559,6 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
 		ServerBaseURL: stub.URL,
 		Token:         "recording-stub-token",
-		NamespaceAliases: map[string]string{
-			fixture.NamespaceAlias: fixture.NamespaceID,
-		},
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{}, nil
 		},
@@ -3602,94 +3569,51 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 
+	listed := map[string]bool{}
+	for _, route := range caseExpected.Routes {
+		listed[route] = true
+	}
 	expected := map[string]int{}
-	proxyRoutes := map[string]bool{}
-	for template, item := range proxyDocument.Paths {
+	for template, item := range serverDocument.Paths {
 		for documentedMethod := range item {
 			method := strings.ToUpper(documentedMethod)
-			proxyRoutes[method+" "+template] = true
-			path := instantiateDocumentPath(template, fixture.NamespaceAlias)
-			forwardedTemplate := strings.Replace(
-				template,
-				"/v0/namespace-aliases/{namespace_alias}",
-				"/v0/namespaces/"+fixture.NamespaceID,
-				1,
-			)
-			forwardedPath := instantiateDocumentPath(forwardedTemplate, fixture.NamespaceAlias)
-			expected[method+" "+forwardedPath]++
-
-			forwardRequest, err := http.NewRequest(method, proxyServer.URL+path, nil)
-			if err != nil {
-				t.Fatalf("create request for %s %s: %v", method, path, err)
-			}
-			response, err := proxyServer.Client().Do(forwardRequest)
-			if err != nil {
-				t.Fatalf("send request for %s %s: %v", method, path, err)
-			}
-			_ = response.Body.Close()
-			if response.StatusCode != http.StatusOK {
-				t.Errorf("%s %s status = %d, want %d", method, path, response.StatusCode, http.StatusOK)
-			}
-		}
-	}
-
-	observedMu.Lock()
-	recorded := make(map[string]int, len(observed))
-	for key, count := range observed {
-		recorded[key] = count
-	}
-	observedMu.Unlock()
-	for key, count := range expected {
-		if recorded[key] != count {
-			t.Errorf("stub observed %q %d times, want %d", key, recorded[key], count)
-		}
-	}
-	for key, count := range recorded {
-		if _, ok := expected[key]; !ok {
-			t.Errorf("stub observed unexpected request %q %d times", key, count)
-		}
-	}
-
-	observedBefore := 0
-	for _, count := range recorded {
-		observedBefore += count
-	}
-	for serverTemplate, item := range serverDocument.Paths {
-		proxyTemplate := proxyTemplateForServer(serverTemplate)
-		for documentedMethod := range item {
-			method := strings.ToUpper(documentedMethod)
-			if proxyRoutes[method+" "+proxyTemplate] {
-				continue
-			}
-			path := instantiateDocumentPath(proxyTemplate, fixture.NamespaceAlias)
+			route := method + " " + template
+			path := instantiateDocumentPath(template, fixture.NamespaceID)
 			request, err := http.NewRequest(method, proxyServer.URL+path, nil)
 			if err != nil {
-				t.Fatalf("create excluded request for %s %s: %v", method, path, err)
+				t.Fatalf("create request for %s: %v", route, err)
 			}
 			response, err := proxyServer.Client().Do(request)
 			if err != nil {
-				t.Fatalf("send excluded request for %s %s: %v", method, path, err)
+				t.Fatalf("send request for %s: %v", route, err)
 			}
 			_ = response.Body.Close()
-			if response.StatusCode != http.StatusNotFound {
-				t.Errorf(
-					"excluded route %s %s status = %d, want %d",
-					method,
-					path,
-					response.StatusCode,
-					http.StatusNotFound,
-				)
+			wantStatus := http.StatusNotFound
+			if listed[route] {
+				wantStatus = http.StatusOK
+				expected[method+" "+path]++
+				delete(listed, route)
+			}
+			if response.StatusCode != wantStatus {
+				t.Errorf("%s status = %d, want %d", route, response.StatusCode, wantStatus)
 			}
 		}
 	}
-	observedMu.Lock()
-	observedAfter := 0
-	for _, count := range observed {
-		observedAfter += count
+	for route := range listed {
+		t.Errorf("listed proxy route %s is not in the server document", route)
 	}
-	observedMu.Unlock()
-	if observedAfter != observedBefore {
-		t.Errorf("stub observed %d requests for excluded server routes", observedAfter-observedBefore)
+
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	for key, count := range expected {
+		if observed[key] != count {
+			t.Errorf("stub observed %q %d times, want %d", key, observed[key], count)
+		}
+	}
+	for key, count := range observed {
+		if _, ok := expected[key]; !ok {
+			t.Errorf("stub observed unexpected request %q %d times", key, count)
+		}
 	}
 }
 
@@ -3703,7 +3627,7 @@ func TestProxyPreservesAnAbortedUpstreamBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 	handler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
-		ServerBaseURL: upstream.URL, Token: "test-token", NamespaceAliases: map[string]string{"app": "demo"},
+		ServerBaseURL: upstream.URL, Token: "test-token",
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{}, nil
 		},
@@ -3713,7 +3637,7 @@ func TestProxyPreservesAnAbortedUpstreamBody(t *testing.T) {
 	}
 	proxy := httptest.NewServer(handler)
 	defer proxy.Close()
-	response, err := http.Get(proxy.URL + "/v0/namespace-aliases/app/filesystem/content?path=%2Ffile")
+	response, err := http.Get(proxy.URL + "/v0/namespaces/demo/filesystem/content?path=%2Ffile")
 	if err != nil {
 		t.Fatalf("read response headers: %v", err)
 	}

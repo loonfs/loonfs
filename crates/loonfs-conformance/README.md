@@ -21,7 +21,7 @@ The sixteen cases cover:
 - snapshot creation, reads, extension, and deletion (`snapshots`)
 - change feed identity fields
 - an end-to-end filesystem workflow
-- namespace-alias-scoped requests through a proxy
+- requests through a proxy, the routes it forwards, and its authorization hook
 
 Two cases don't run in every harness:
 

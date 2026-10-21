@@ -29,11 +29,10 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
 	proxy, err := NewHandler(Config{
-		ServerBaseURL:    "http://upstream.invalid",
-		Token:            "server-token",
-		NamespaceAliases: map[string]string{"team-files": "namespace-id"},
+		ServerBaseURL: "http://upstream.invalid",
+		Token:         "server-token",
 		Authorize: func(r *http.Request, c RouteContext) (Authorization, error) {
-			expected := RouteContext{http.MethodPost, "/v0/namespace-aliases/{namespace_alias}/commits", "team-files", "namespace-id"}
+			expected := RouteContext{http.MethodPost, "/v0/namespaces/{namespace_id}/commits", "namespace-id"}
 			if c != expected {
 				t.Errorf("route context = %#v, want %#v", c, expected)
 			}
@@ -58,7 +57,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		{"stamped", `{"expected_head_seq":9007199254740993}`, false, http.StatusAccepted, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/v0/namespace-aliases/team-files/commits", strings.NewReader(testCase.body))
+			request := httptest.NewRequest(http.MethodPost, "/v0/namespaces/namespace-id/commits", strings.NewReader(testCase.body))
 			request.Header.Set("Content-Type", "text/plain")
 			request.Header.Set("Loonfs-Actor", "browser-actor")
 			request.Header.Set("Loonfs-Subject", "browser-subject")

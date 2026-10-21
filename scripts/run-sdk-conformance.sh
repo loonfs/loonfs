@@ -18,10 +18,6 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 if [ ! -d "$REPO_ROOT/sdk/generated/$LANGUAGE" ]; then
     "$REPO_ROOT/scripts/generate-sdks.sh" "$LANGUAGE"
 fi
-# The TypeScript harness also compiles the browser client and its transfers.
-if [ "$LANGUAGE" = "typescript" ] && [ ! -d "$REPO_ROOT/sdk/generated/typescript-client" ]; then
-    "$REPO_ROOT/scripts/generate-sdks.sh" typescript-client
-fi
 
 cd "$REPO_ROOT"
 # CI builds the server once and hands each language leg the binary.
@@ -69,10 +65,9 @@ LOONFS_CONFORMANCE_URL=$(printf '%s\n' "$SERVER_LINE" | \
 LOONFS_CONFORMANCE_TOKEN=$(printf '%s\n' "$SERVER_LINE" | \
     python3 "$REPO_ROOT/scripts/read-json-field.py" token)
 LOONFS_CONFORMANCE_CASES="$REPO_ROOT/crates/loonfs-conformance/cases"
-LOONFS_PROXY_DOCUMENT="$REPO_ROOT/docs/specs/openapi-proxy.json"
 LOONFS_SERVER_DOCUMENT="$REPO_ROOT/docs/specs/openapi.json"
 export LOONFS_CONFORMANCE_URL LOONFS_CONFORMANCE_TOKEN LOONFS_CONFORMANCE_CASES
-export LOONFS_PROXY_DOCUMENT LOONFS_SERVER_DOCUMENT
+export LOONFS_SERVER_DOCUMENT
 
 case "$LANGUAGE" in
     go)

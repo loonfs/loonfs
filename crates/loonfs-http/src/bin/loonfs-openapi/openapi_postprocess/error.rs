@@ -1,4 +1,4 @@
-//! Failures while post-processing the generated OpenAPI documents.
+//! Failures while post-processing the generated OpenAPI document.
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OpenapiPostprocessError {
@@ -29,14 +29,4 @@ pub(crate) enum OpenapiPostprocessError {
     MissingPaginationMetadata { operation_id: String },
     #[error("invalid openapi document at `{location}`")]
     InvalidDocument { location: String },
-    #[error("proxy operation `{operation_id}` does not appear in the full OpenAPI document")]
-    MissingProxyOperation { operation_id: String },
-    #[error(
-        "proxy operation `{operation_id}` appears more than once in the full OpenAPI document"
-    )]
-    DuplicateProxyOperation { operation_id: String },
-    #[error("proxy operation `{operation_id}` has no `namespace_id` path parameter")]
-    MissingProxyNamespaceParameter { operation_id: String },
-    #[error("proxy document references a missing OpenAPI component `{reference}`")]
-    MissingProxyComponent { reference: String },
 }

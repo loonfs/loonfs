@@ -133,11 +133,16 @@ the source.
 ## Proxy
 
 Use `loonfs.proxy` in your backend to forward client requests while keeping the
-LoonFS credential on the server.
+LoonFS credential on the server. The proxy forwards
+`/v0/capabilities` and the namespace routes for files, uploads, snapshots,
+changes, and grep with the path unchanged, and returns 404 for every other
+route.
 
 Set `authorize` to check each request and set `Loonfs-Actor` on forwarded
 requests. The proxy always removes the browser's actor header.
-The `authorize` hook is required; returning `ProxyAuthorization()` forwards as the token holder.
+The `authorize` hook is required. Returning `ProxyAuthorization()` forwards as
+the token holder. Any namespace ID in the path reaches LoonFS, so the hook
+checks that the caller may use `context.namespace_id`.
 Here, `authorized_actor` checks the application's session and namespace access.
 
 ```python
@@ -152,7 +157,6 @@ async def authorize(scope, context):
 app = LoonFSProxy(
     os.environ["LOONFS_URL"],
     os.environ["LOONFS_AUTH_TOKEN"],
-    {"team-files": "demo"},
     authorize=authorize,
 )
 ```

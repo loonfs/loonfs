@@ -15,10 +15,6 @@ use std::assert_matches;
 
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
-const PROXY_OPENAPI_JSON_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/specs/openapi-proxy.json"
-);
 const OPENAPI_PATH_SOURCES: &[&str] = &[
     include_str!("../../src/http/openapi/host.rs"),
     include_str!("../../src/http/handlers_downloads.rs"),
@@ -124,22 +120,14 @@ fn unregistered_cursor_operation_returns_a_named_error() {
 
 #[test]
 fn openapi_static_files_are_current() {
-    let (mut full, mut proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
-            .expect("generate full and proxy OpenAPI JSON");
+    let mut full = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
+        .expect("generate OpenAPI JSON");
     full.push('\n');
-    proxy.push('\n');
 
     assert_eq!(
         full,
         std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
-    );
-    assert_eq!(
-        proxy,
-        std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH)
-            .expect("read static proxy openapi json"),
-        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
+        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- docs/specs/openapi.json`"
     );
 }
 
@@ -714,185 +702,12 @@ fn openapi_operation_ids_match_the_public_registry() {
 }
 
 #[test]
-fn proxy_operation_ids_match_the_allowlist() {
-    let registered = registered_operation_ids();
-    let allowlisted = openapi_postprocess::proxy::PROXY_OPERATIONS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        allowlisted.len(),
-        openapi_postprocess::proxy::PROXY_OPERATIONS.len(),
-        "proxy operation IDs must be unique"
-    );
-    assert!(
-        allowlisted.is_subset(&registered),
-        "proxy operation IDs must be registered public operations"
-    );
-    assert!(
-        openapi_postprocess::proxy::PROXY_OPERATIONS
-            .windows(2)
-            .all(|pair| pair[0] < pair[1]),
-        "proxy operations must stay sorted"
-    );
-
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
-    )
-    .expect("parse proxy openapi json");
-    let published = spec["paths"]
-        .as_object()
-        .expect("proxy openapi paths object")
-        .values()
-        .filter_map(Value::as_object)
-        .flat_map(|path_item| {
-            ["get", "post", "put", "delete", "patch"]
-                .into_iter()
-                .filter_map(|method| path_item.get(method))
-        })
-        .map(|operation| {
-            operation["operationId"]
-                .as_str()
-                .expect("proxy operation has an operation ID")
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(published, allowlisted);
-}
-
-#[test]
-fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
-    )
-    .expect("parse proxy openapi json");
-    assert_eq!(spec["info"]["title"], "LoonFS Browser Proxy API");
-    assert_eq!(
-        spec["info"]["description"],
-        "API for browser clients that access namespaces by alias."
-    );
-    assert!(spec.get("security").is_none());
-    assert!(spec.pointer("/components/securitySchemes").is_none());
-    assert!(values_named(&spec, "security").next().is_none());
-
-    let tag_names = spec["tags"]
-        .as_array()
-        .expect("proxy tags array")
-        .iter()
-        .filter_map(|tag| tag["name"].as_str())
-        .collect::<BTreeSet<_>>();
-    // `get_capabilities` keeps the `system` tag in the proxy document. The
-    // path checks below verify that other system routes are excluded.
-    assert!(!tag_names.contains("maintenance"));
-    let referenced_tags = spec["paths"]
-        .as_object()
-        .expect("proxy openapi paths object")
-        .values()
-        .flat_map(|path_item| path_item.as_object().expect("proxy path item").values())
-        .flat_map(|operation| operation["tags"].as_array().into_iter().flatten())
-        .filter_map(|tag| tag.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        tag_names, referenced_tags,
-        "every declared proxy tag must be referenced by a retained operation"
-    );
-
-    let paths = spec["paths"]
-        .as_object()
-        .expect("proxy openapi paths object");
-    for (path, path_item) in paths {
-        assert!(
-            !path.contains("namespace_id"),
-            "proxy path contains namespace_id: `{path}`"
-        );
-        assert!(!path.starts_with("/v0/maintenance/"));
-        assert!(!matches!(
-            path.as_str(),
-            "/health" | "/readiness" | "/metrics"
-        ));
-
-        for operation in ["get", "post", "put", "delete", "patch"]
-            .into_iter()
-            .filter_map(|method| path_item.get(method))
-        {
-            let operation_id = operation["operationId"]
-                .as_str()
-                .expect("proxy operation ID");
-            if operation_id == "get_capabilities" {
-                assert_eq!(path, "/v0/capabilities");
-                continue;
-            }
-            assert!(path.starts_with("/v0/namespace-aliases/{namespace_alias}/"));
-            let namespace_alias = operation["parameters"]
-                .as_array()
-                .expect("proxy operation parameters")
-                .iter()
-                .find(|parameter| {
-                    parameter["in"] == "path" && parameter["name"] == "namespace_alias"
-                })
-                .expect("proxy operation namespace alias parameter");
-            assert_eq!(
-                namespace_alias["description"],
-                "Application namespace alias"
-            );
-            assert_eq!(
-                namespace_alias["schema"],
-                serde_json::json!({"type": "string"})
-            );
-        }
-    }
-}
-
-#[test]
-fn proxy_components_are_exactly_the_referenced_closure() {
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
-    )
-    .expect("parse proxy openapi json");
-    let components = spec["components"]
-        .as_object()
-        .expect("proxy components object");
-    let referenced = referenced_components(&spec);
-    let published = components
-        .iter()
-        .flat_map(|(component_type, entries)| {
-            entries
-                .as_object()
-                .unwrap_or_else(|| {
-                    panic!("proxy component group `{component_type}` must be an object")
-                })
-                .keys()
-                .map(move |component_name| (component_type.clone(), component_name.clone()))
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(published, referenced);
-
-    let schemas = components["schemas"]
-        .as_object()
-        .expect("proxy schemas object");
-    for reference in string_values(&spec)
-        .filter_map(Value::as_str)
-        .filter_map(|reference| reference.strip_prefix("#/components/schemas/"))
-    {
-        let schema_name = decode_json_pointer_segment(reference);
-        assert!(
-            schemas.contains_key(&schema_name),
-            "proxy schema reference is missing: `{schema_name}`"
-        );
-    }
-}
-
-#[test]
 fn openapi_document_generation_is_byte_stable() {
-    let first = openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
-        .expect("generate full and proxy OpenAPI JSON");
-    let second = openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
-        .expect("generate full and proxy OpenAPI JSON again");
+    let first = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
+        .expect("generate OpenAPI JSON");
+    let second = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
+        .expect("generate OpenAPI JSON again");
     assert_eq!(first, second);
-    assert_eq!(
-        openapi_postprocess::document::proxy_openapi_json_pretty(&first.0)
-            .expect("derive proxy OpenAPI JSON again"),
-        first.1
-    );
 }
 
 #[test]
@@ -941,40 +756,6 @@ fn every_registered_operation_publishes_its_sdk_name() {
         assert!(
             operation.get("x-fern-ignore").is_none(),
             "named operation `{operation_id}` is ignored"
-        );
-    }
-}
-
-#[test]
-fn proxy_operations_keep_their_sdk_names() {
-    let proxy: Value = serde_json::from_str(
-        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
-    )
-    .expect("parse proxy openapi json");
-    let full: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
-    let full_operations = operations_by_id(&full);
-
-    for (operation_id, proxy_operation) in operations_by_id(&proxy) {
-        let full_operation = full_operations.get(operation_id).unwrap_or_else(|| {
-            panic!("proxy operation `{operation_id}` is missing from full spec")
-        });
-        for extension in [
-            "x-fern-sdk-group-name",
-            "x-fern-sdk-method-name",
-            "x-fern-request-name",
-        ] {
-            assert_eq!(
-                proxy_operation.get(extension),
-                full_operation.get(extension),
-                "proxy operation `{operation_id}` changed `{extension}`"
-            );
-        }
-        assert!(
-            proxy_operation.get("x-fern-ignore").is_none(),
-            "proxy operation `{operation_id}` is ignored"
         );
     }
 }
@@ -1069,46 +850,6 @@ fn cursor_list_operations_publish_the_registered_pagination_metadata() {
         .collect::<BTreeMap<_, _>>();
 
     assert_eq!(published, expected);
-}
-
-#[test]
-fn proxy_cursor_list_operations_keep_pagination_metadata() {
-    let full: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
-    let proxy: Value = serde_json::from_str(
-        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
-    )
-    .expect("parse proxy openapi json");
-    let full_operations = operations_by_id(&full);
-    let proxy_operations = operations_by_id(&proxy);
-    let expected_proxy_operations = proxy_operations
-        .keys()
-        .copied()
-        .filter(|operation_id| {
-            full_operations[*operation_id]
-                .get("x-fern-pagination")
-                .is_some()
-        })
-        .collect::<BTreeSet<_>>();
-    let mut actual_proxy_operations = BTreeSet::new();
-
-    for (operation_id, proxy_operation) in proxy_operations {
-        let full_operation = full_operations
-            .get(operation_id)
-            .unwrap_or_else(|| panic!("missing full operation `{operation_id}`"));
-        assert_eq!(
-            proxy_operation.get("x-fern-pagination"),
-            full_operation.get("x-fern-pagination"),
-            "proxy pagination metadata differs for `{operation_id}`"
-        );
-        if proxy_operation.get("x-fern-pagination").is_some() {
-            actual_proxy_operations.insert(operation_id);
-        }
-    }
-
-    assert_eq!(actual_proxy_operations, expected_proxy_operations);
 }
 
 #[test]
@@ -1531,58 +1272,55 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
 
 #[test]
 fn no_openapi_schema_wraps_an_all_of_around_a_one_of() {
-    for document_path in [OPENAPI_JSON_PATH, PROXY_OPENAPI_JSON_PATH] {
-        let spec: Value = serde_json::from_str(
-            &std::fs::read_to_string(document_path).expect("read static openapi json"),
-        )
-        .expect("parse openapi json");
-        let schemas = spec
-            .pointer("/components/schemas")
-            .and_then(Value::as_object)
-            .expect("openapi schemas object");
-        let mut composites = Vec::new();
-        collect_all_of_members(&spec, "openapi", &mut composites);
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    let mut composites = Vec::new();
+    collect_all_of_members(&spec, "openapi", &mut composites);
 
-        for (location, members) in composites {
-            for member in members {
-                let member = match member.get("$ref").and_then(Value::as_str) {
-                    Some(reference) => {
-                        component_schema_for_ref(schemas, reference).unwrap_or_else(|| {
-                            panic!("{location} references a missing component: {reference}")
-                        })
-                    }
-                    None => member,
-                };
-                assert!(
-                    member.get("oneOf").is_none(),
-                    "{location} in {document_path} wraps an allOf around a oneOf"
-                );
-            }
-        }
-
-        for (composite_name, envelope) in UNION_COMPOSITE_ENVELOPES {
-            // The proxy document publishes only the operations it serves.
-            let Some(composite) = schemas.get(*composite_name) else {
-                continue;
-            };
-            let discriminator = composite
-                .get("discriminator")
-                .and_then(Value::as_object)
-                .unwrap_or_else(|| panic!("{composite_name} has no discriminator"));
-            assert!(discriminator.contains_key("propertyName"));
-            assert!(discriminator.contains_key("mapping"));
-
-            for variant_name in one_of_schema_names(schemas, composite_name) {
-                let variant = schemas
-                    .get(variant_name)
-                    .unwrap_or_else(|| panic!("{variant_name} schema"));
-                let required = required_fields(variant);
-                for field in *envelope {
-                    assert!(
-                        required.contains(field),
-                        "{variant_name} in {document_path} must require `{field}`"
-                    );
+    for (location, members) in composites {
+        for member in members {
+            let member = match member.get("$ref").and_then(Value::as_str) {
+                Some(reference) => {
+                    component_schema_for_ref(schemas, reference).unwrap_or_else(|| {
+                        panic!("{location} references a missing component: {reference}")
+                    })
                 }
+                None => member,
+            };
+            assert!(
+                member.get("oneOf").is_none(),
+                "{location} wraps an allOf around a oneOf"
+            );
+        }
+    }
+
+    for (composite_name, envelope) in UNION_COMPOSITE_ENVELOPES {
+        let composite = schemas
+            .get(*composite_name)
+            .unwrap_or_else(|| panic!("{composite_name} schema"));
+        let discriminator = composite
+            .get("discriminator")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{composite_name} has no discriminator"));
+        assert!(discriminator.contains_key("propertyName"));
+        assert!(discriminator.contains_key("mapping"));
+
+        for variant_name in one_of_schema_names(schemas, composite_name) {
+            let variant = schemas
+                .get(variant_name)
+                .unwrap_or_else(|| panic!("{variant_name} schema"));
+            let required = required_fields(variant);
+            for field in *envelope {
+                assert!(
+                    required.contains(field),
+                    "{variant_name} must require `{field}`"
+                );
             }
         }
     }
@@ -2067,7 +1805,7 @@ fn string_values(value: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
 fn referenced_components(spec: &Value) -> BTreeSet<(String, String)> {
     let components = spec["components"]
         .as_object()
-        .expect("proxy components object");
+        .expect("openapi components object");
     let mut pending = string_values(&spec["paths"])
         .filter_map(Value::as_str)
         .filter(|value| value.starts_with("#/components/"))
@@ -2086,7 +1824,7 @@ fn referenced_components(spec: &Value) -> BTreeSet<(String, String)> {
             .get(&component_type)
             .and_then(Value::as_object)
             .and_then(|entries| entries.get(&component_name))
-            .unwrap_or_else(|| panic!("missing proxy component reference `{reference}`"));
+            .unwrap_or_else(|| panic!("missing component reference `{reference}`"));
         pending.extend(
             string_values(component)
                 .filter_map(Value::as_str)
@@ -2412,11 +2150,9 @@ fn path_parameter<'a>(
 
 #[test]
 fn actor_headers_are_global_and_only_attributed_operations_require_them() {
-    let (full, proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
-            .expect("generate documents");
+    let full = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
+        .expect("generate document");
     let full: Value = serde_json::from_str(&full).expect("full document");
-    let proxy: Value = serde_json::from_str(&proxy).expect("proxy document");
     assert_eq!(
         full["x-fern-global-headers"],
         json!([
@@ -2426,7 +2162,6 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
         {"header": "Loonfs-Principals", "name": "principals", "optional": true}
         ])
     );
-    assert!(proxy.get("x-fern-global-headers").is_none());
     let mut required = BTreeSet::new();
     for path in full["paths"].as_object().expect("paths").values() {
         for operation in path.as_object().expect("path").values() {

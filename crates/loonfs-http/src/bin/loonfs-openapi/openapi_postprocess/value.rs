@@ -85,34 +85,6 @@ pub(super) fn component_schemas(
         .ok_or_else(|| invalid_document("components.schemas"))
 }
 
-pub(super) fn collect_component_references(value: &Value, references: &mut Vec<String>) {
-    match value {
-        Value::String(value) => {
-            if value.starts_with("#/components/") {
-                references.push(value.clone());
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_component_references(value, references);
-            }
-        }
-        Value::Object(object) => {
-            for value in object.values() {
-                collect_component_references(value, references);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-pub(super) fn component_reference_parts(reference: &str) -> Option<(String, String)> {
-    let mut parts = reference.strip_prefix("#/components/")?.split('/');
-    let component_type = decode_json_pointer_segment(parts.next()?);
-    let component_name = decode_json_pointer_segment(parts.next()?);
-    Some((component_type, component_name))
-}
-
 pub(super) fn decode_json_pointer_segment(segment: &str) -> String {
     segment.replace("~1", "/").replace("~0", "~")
 }

@@ -1,10 +1,9 @@
 #!/bin/sh
-# Generates SDKs from the checked-in OpenAPI documents using pinned Fern versions.
+# Generates SDKs from the checked-in OpenAPI document using pinned Fern versions.
 # Requires Docker. Output is written to the untracked sdk/generated directory.
 #
-# Usage: scripts/generate-sdks.sh [go|python|typescript|typescript-client]
-# With no argument, validates both Fern APIs and generates every SDK.
-# The browser client uses the proxy document and the browser Fern API.
+# Usage: scripts/generate-sdks.sh [go|python|typescript]
+# With no argument, validates the Fern API and generates every SDK.
 # Handwritten transfer helpers and release overlays are copied into each SDK
 # after generation.
 
@@ -16,9 +15,6 @@ FERN_CLI_VERSION=$(python3 ../scripts/read-json-field.py version < fern/fern.con
 npx --yes "fern-api@${FERN_CLI_VERSION}" check
 
 overlay_handwritten() {
-    case "$1" in
-        typescript|typescript-client) cp transfers/typescript-shared/*.ts "generated/$1/" ;;
-    esac
     if [ -d "transfers/$1" ]; then
         cp -R "transfers/$1/." "generated/$1/"
     fi
@@ -52,17 +48,15 @@ prune_generated() {
         rm -r generated/python/core/http_sse
         python3 ../scripts/patch-python-sdk.py
         ;;
-    typescript|typescript-client)
-        python3 ../scripts/patch-typescript-sdk.py "$1"
+    typescript)
+        python3 ../scripts/patch-typescript-sdk.py
         ;;
     esac
 }
 
 generate_group() {
-    api=server
-    [ "$1" = "typescript-client" ] && api=browser
     rm -rf "generated/$1"
-    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --api "$api" --group "$1"
+    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --api server --group "$1"
     prune_generated "$1"
     overlay_handwritten "$1"
     python3 ../scripts/verify-sdk-retry-safety.py "$1"
@@ -73,6 +67,6 @@ if [ "$#" -ge 1 ]; then
     exit 0
 fi
 
-for group in go python typescript typescript-client; do
+for group in go python typescript; do
     generate_group "$group"
 done

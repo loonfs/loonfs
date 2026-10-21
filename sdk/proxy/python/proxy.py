@@ -17,7 +17,6 @@ __all__ = ["LoonFSProxy", "ProxyRouteContext", "ProxyAuthorization", "ProxyRefus
 class ProxyRouteContext:
     method: str
     template: str
-    namespace_alias: str | None
     namespace_id: str | None
 
 
@@ -54,37 +53,38 @@ _HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 
-# These routes must match docs/specs/openapi-proxy.json.
+# These routes must match the `routes` list in
+# crates/loonfs-conformance/cases/proxy.json.
 _ROUTE_TEMPLATES: tuple[tuple[str, str], ...] = (
     ("GET", "/v0/capabilities"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/changes"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/commits"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/filesystem/content"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/filesystem/entries"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/filesystem/entry"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/filesystem/trash"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/grep"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/snapshots"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/snapshots"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"),
-    ("DELETE", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads"),
-    ("GET", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete"),
-    ("PUT", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts"),
+    ("GET", "/v0/namespaces/{namespace_id}/changes"),
+    ("POST", "/v0/namespaces/{namespace_id}/commits"),
+    ("GET", "/v0/namespaces/{namespace_id}/filesystem/content"),
+    ("POST", "/v0/namespaces/{namespace_id}/filesystem/downloads"),
+    ("GET", "/v0/namespaces/{namespace_id}/filesystem/entries"),
+    ("GET", "/v0/namespaces/{namespace_id}/filesystem/entry"),
+    ("GET", "/v0/namespaces/{namespace_id}/filesystem/revisions"),
+    ("GET", "/v0/namespaces/{namespace_id}/filesystem/trash"),
+    ("GET", "/v0/namespaces/{namespace_id}/grep"),
+    ("GET", "/v0/namespaces/{namespace_id}/snapshots"),
+    ("POST", "/v0/namespaces/{namespace_id}/snapshots"),
+    ("POST", "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend"),
+    ("GET", "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}"),
+    ("DELETE", "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}"),
+    ("POST", "/v0/namespaces/{namespace_id}/uploads"),
+    ("GET", "/v0/namespaces/{namespace_id}/uploads/{upload_id}"),
+    ("POST", "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort"),
+    ("POST", "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete"),
+    ("PUT", "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content"),
+    ("POST", "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts"),
 )
 
 
 def _pattern_for(template: str) -> re.Pattern[str]:
     parts = []
     for segment in template.split("/"):
-        if segment == "{namespace_alias}":
-            parts.append(r"(?P<namespace_alias>[^/]+)")
+        if segment == "{namespace_id}":
+            parts.append(r"(?P<namespace_id>[^/]+)")
         elif segment.startswith("{") and segment.endswith("}"):
             parts.append(r"[^/]+")
         else:
@@ -147,13 +147,12 @@ async def _request_body(receive: _Receive) -> AsyncIterator[bytes]:
 
 
 class LoonFSProxy:
-    """Forward allowed browser routes to their configured namespaces."""
+    """Forward allowed browser routes to a LoonFS server."""
 
     def __init__(
         self,
         server_base_url: str,
         token: str,
-        namespace_aliases: dict[str, str],
         *,
         authorize: Callable[
             [dict[str, Any], ProxyRouteContext], Awaitable[ProxyAuthorization | ProxyRefusal]
@@ -163,12 +162,13 @@ class LoonFSProxy:
 
         Return a ProxyRefusal to refuse it.
         Returning an empty ProxyAuthorization forwards as the token holder.
+        The proxy forwards any namespace ID in the path, so check
+        `context.namespace_id` here.
         """
         if authorize is None:
             raise TypeError("authorize is required")
         self._server_base_url = server_base_url.rstrip("/")
         self._authorization = f"Bearer {token}".encode("latin-1")
-        self._namespace_aliases = dict(namespace_aliases)
         self._authorize = authorize
         self._client = httpx.AsyncClient(timeout=None, follow_redirects=False)
 
@@ -179,11 +179,10 @@ class LoonFSProxy:
         if scope["type"] != "http":
             return
 
-        resolved = self._resolve_route(scope["method"], scope["path"])
-        if resolved is None:
+        context = self._resolve_route(scope["method"], scope["path"])
+        if context is None:
             await self._not_found(send)
             return
-        rewritten_path, context = resolved
         authorization = await self._authorize(scope, context)
         if isinstance(authorization, ProxyRefusal):
             await self._refuse(send, authorization)
@@ -199,7 +198,9 @@ class LoonFSProxy:
             )
             return
 
-        target = httpx.URL(f"{self._server_base_url}{rewritten_path}").copy_with(
+        # The ASGI path is decoded. Quoting it again keeps a decoded `?` or `#`
+        # inside its segment, so LoonFS receives the route that the hook approved.
+        target = httpx.URL(f"{self._server_base_url}{quote(scope['path'])}").copy_with(
             query=scope.get("query_string", b"")
         )
         headers = _forwarded_headers(scope.get("headers", []), _REQUEST_EXCLUDED_HEADERS)
@@ -245,24 +246,19 @@ class LoonFSProxy:
         finally:
             await response.aclose()
 
-    def _resolve_route(self, method: str, path: str) -> tuple[str, ProxyRouteContext] | None:
+    @staticmethod
+    def _resolve_route(method: str, path: str) -> ProxyRouteContext | None:
+        # httpx removes `.` and `..` segments from the forwarded URL, which would
+        # change the route after the hook approved it.
+        if any(segment in {".", ".."} for segment in path.split("/")):
+            return None
         for route_method, template, pattern in _COMPILED_ROUTES:
             if method != route_method:
                 continue
             match = pattern.fullmatch(path)
             if match is None:
                 continue
-            namespace_alias = match.groupdict().get("namespace_alias")
-            if namespace_alias is None:
-                return path, ProxyRouteContext(method, template, None, None)
-            namespace_id = self._namespace_aliases.get(namespace_alias)
-            if namespace_id is None:
-                return None
-            namespace_alias_prefix = f"/v0/namespace-aliases/{namespace_alias}"
-            rewritten_path = f"/v0/namespaces/{quote(namespace_id, safe='')}{path[len(namespace_alias_prefix):]}"
-            return rewritten_path, ProxyRouteContext(
-                method, template, namespace_alias, namespace_id
-            )
+            return ProxyRouteContext(method, template, match.groupdict().get("namespace_id"))
         return None
 
     async def _lifespan(self, receive: _Receive, send: _Send) -> None:

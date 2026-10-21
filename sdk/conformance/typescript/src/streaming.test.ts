@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LoonFSClient } from "../../../generated/typescript/transfers.js";
-import { LoonFSClient as BrowserClient } from "../../../generated/typescript-client/transfers.js";
 import {
     IncrementalChecksum,
     TransferScope,
@@ -75,7 +74,6 @@ function fakeFetch(
         if (url.pathname.endsWith("/downloads"))
             return Response.json({
                 namespace_id: "demo",
-                namespace_alias: "demo",
                 path: "/file",
                 revision_no: 1,
                 content_ref: claim,
@@ -121,64 +119,58 @@ function fakeFetch(
     }) as typeof fetch;
 }
 
-for (const browser of [false, true])
-    for (const direct of [false, true])
-        for (const fixture of fixtures) {
-            test(`verified streaming ${browser ? "browser" : "server"} ${direct ? "direct" : "proxy"} ${fixture.name}`, async () => {
-                let reads = 0;
-                const body = new ReadableStream<Uint8Array>(
-                    {
-                        pull(controller) {
-                            reads++;
-                            if (reads === 1) controller.enqueue(new TextEncoder().encode(fixture.content));
-                            else if (fixture.transport_error)
-                                controller.error(new Error("body interrupted after its last byte"));
-                            else controller.close();
-                        },
+for (const direct of [false, true])
+    for (const fixture of fixtures) {
+        test(`verified streaming ${direct ? "direct" : "proxy"} ${fixture.name}`, async () => {
+            let reads = 0;
+            const body = new ReadableStream<Uint8Array>(
+                {
+                    pull(controller) {
+                        reads++;
+                        if (reads === 1) controller.enqueue(new TextEncoder().encode(fixture.content));
+                        else if (fixture.transport_error)
+                            controller.error(new Error("body interrupted after its last byte"));
+                        else controller.close();
                     },
-                    { highWaterMark: 0 },
+                },
+                { highWaterMark: 0 },
+            );
+            const requests: string[] = [];
+            const signals: AbortSignal[] = [];
+            const options = {
+                baseUrl: "http://api.test",
+                token: "private-token",
+                headers: { "X-Private": "secret" },
+                fetch: fakeFetch(fixture, direct, body, requests, signals),
+            };
+            const collect = async () => {
+                const stream = await new LoonFSClient(options).files.downloadStream({
+                    namespace_id: "demo",
+                    path: "/file",
+                });
+                assert.equal(reads, 0, "opening must not consume the response body");
+                return new Response(stream.content).text();
+            };
+            const expectedError = direct ? fixture.direct_error_message : fixture.error_message;
+            if (expectedError) await assert.rejects(collect(), { message: expectedError });
+            else assert.equal(await collect(), fixture.content);
+            if (direct)
+                assert.deepEqual(
+                    requests.filter((path) => path.startsWith("/object")),
+                    fixture.object_requests,
                 );
-                const requests: string[] = [];
-                const signals: AbortSignal[] = [];
-                const options = {
-                    baseUrl: "http://api.test",
-                    token: "private-token",
-                    headers: { "X-Private": "secret" },
-                    fetch: fakeFetch(fixture, direct, body, requests, signals),
-                };
-                const collect = async () => {
-                    const stream = browser
-                        ? await new BrowserClient(options).files.downloadStream({
-                              namespace_alias: "demo",
-                              path: "/file",
-                          })
-                        : await new LoonFSClient(options).files.downloadStream({
-                              namespace_id: "demo",
-                              path: "/file",
-                          });
-                    assert.equal(reads, 0, "opening must not consume the response body");
-                    return new Response(stream.content).text();
-                };
-                const expectedError = direct ? fixture.direct_error_message : fixture.error_message;
-                if (expectedError) await assert.rejects(collect(), { message: expectedError });
-                else assert.equal(await collect(), fixture.content);
-                if (direct)
-                    assert.deepEqual(
-                        requests.filter((path) => path.startsWith("/object")),
-                        fixture.object_requests,
-                    );
-                else
-                    assert.deepEqual(
-                        requests.map((path) => path.split("/").pop()),
-                        ["capabilities", "entry", "content"],
-                    );
-                if (direct && expectedError)
-                    assert.ok(
-                        signals.every((signal) => signal.aborted),
-                        "a failed range aborts the requests behind it",
-                    );
-            });
-        }
+            else
+                assert.deepEqual(
+                    requests.map((path) => path.split("/").pop()),
+                    ["capabilities", "entry", "content"],
+                );
+            if (direct && expectedError)
+                assert.ok(
+                    signals.every((signal) => signal.aborted),
+                    "a failed range aborts the requests behind it",
+                );
+        });
+    }
 
 test("incremental CRCs match the catalog values across chunks", () => {
     const bytes = new TextEncoder().encode("123456789");

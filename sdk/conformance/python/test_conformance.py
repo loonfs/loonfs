@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import json
 import os
@@ -413,11 +414,11 @@ class ProxyAuthorize:
     directory: str
     refuse_header: str
     refused_status: int
+    unlisted_namespace_id: str
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyACL:
-    namespace_alias: str
     namespace_id: str
     principal_scope: str
     administrator: str
@@ -430,9 +431,7 @@ class ProxyACL:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyRequest:
-    namespace_alias: str
     namespace_id: str
-    unknown_namespace_alias: str
     actor_id: ActorId
     directory: str
     proxied_path: str
@@ -450,13 +449,13 @@ class ProxyExpected:
     proxied_committed_seq: int
     direct_committed_seq: int
     entry_count: int
-    unknown_namespace_alias_status: int
     disallowed_route_status: int
     stamped_committed_by: ActorId
     stamped_committed_seq: int
     refused_status: int
     acl_stamped_committed_seq: int
     acl_forbidden_status: int
+    routes: list[str]
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -612,7 +611,6 @@ def proxy_harness(
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
         _required_environment("LOONFS_CONFORMANCE_TOKEN"),
-        {request.namespace_alias: request.namespace_id},
         authorize=authorize,
     )
     with _serve_asgi(app, "loonfs-python-proxy") as base_url:
@@ -760,7 +758,7 @@ def _proxy_create_commit(
     if content_token is not None:
         body["content_tokens"] = [content_token]
     response = client.post(
-        f"/v0/namespace-aliases/{request.namespace_alias}/commits",
+        f"/v0/namespaces/{request.namespace_id}/commits",
         json=body,
         headers={"Loonfs-Actor": request.actor_id},
     )
@@ -1631,9 +1629,9 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
 
 def test_proxy_requires_authorize() -> None:
     with pytest.raises(TypeError, match="authorize"):
-        LoonFSProxy("http://upstream.invalid", "server-token", {})
+        LoonFSProxy("http://upstream.invalid", "server-token")
     with pytest.raises(TypeError, match="authorize"):
-        LoonFSProxy("http://upstream.invalid", "server-token", {}, authorize=None)
+        LoonFSProxy("http://upstream.invalid", "server-token", authorize=None)
 
 
 def test_proxy(
@@ -1644,7 +1642,7 @@ def test_proxy(
     request, expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     payload = request.content_utf8.encode()
-    namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
+    namespace_base = f"/v0/namespaces/{request.namespace_id}"
 
     with httpx.Client(
         base_url=proxy_harness,
@@ -1663,7 +1661,7 @@ def test_proxy(
         assert mkdir.committed_seq == expected.mkdir_committed_seq
 
         proxied_begin_response = client.post(
-            f"{namespace_alias_base}/uploads",
+            f"{namespace_base}/uploads",
             json={"mode": "service_proxied"},
         )
         proxied_begin = UploadSession_Open(
@@ -1674,7 +1672,7 @@ def test_proxy(
         )
         split = len(payload) // 2
         uploaded_response = client.put(
-            f"{namespace_alias_base}/uploads/{proxied_begin.upload_id}/content",
+            f"{namespace_base}/uploads/{proxied_begin.upload_id}/content",
             headers={"Content-Type": "application/octet-stream"},
             content=iter((payload[:split], payload[split:])),
         )
@@ -1685,7 +1683,7 @@ def test_proxy(
             )
         )
         proxied_complete_response = client.post(
-            f"{namespace_alias_base}/uploads/{proxied_begin.upload_id}/complete",
+            f"{namespace_base}/uploads/{proxied_begin.upload_id}/complete",
             json={"mode": "service_proxied"},
         )
         proxied_complete_data = _proxy_response_json(
@@ -1709,7 +1707,7 @@ def test_proxy(
         assert proxied_commit.committed_seq == expected.proxied_committed_seq
 
         direct_begin_response = client.post(
-            f"{namespace_alias_base}/uploads",
+            f"{namespace_base}/uploads",
             json={"mode": "direct_put", "size_bytes": len(payload)},
         )
         direct_begin = UploadSession_Open(
@@ -1733,7 +1731,7 @@ def test_proxy(
             payload,
         )
         direct_complete_response = client.post(
-            f"{namespace_alias_base}/uploads/{direct_begin.upload_id}/complete",
+            f"{namespace_base}/uploads/{direct_begin.upload_id}/complete",
             json={
                 "mode": "direct_put",
                 "content": {
@@ -1766,7 +1764,7 @@ def test_proxy(
         assert direct_commit.committed_seq == expected.direct_committed_seq
 
         listing_response = client.get(
-            f"{namespace_alias_base}/filesystem/entries",
+            f"{namespace_base}/filesystem/entries",
             params={"path": request.directory},
         )
         listing = ListPathEntriesResponse(
@@ -1776,21 +1774,14 @@ def test_proxy(
 
         with client.stream(
             "GET",
-            f"{namespace_alias_base}/filesystem/content",
+            f"{namespace_base}/filesystem/content",
             params={"path": request.proxied_path},
         ) as read_response:
             read_response.raise_for_status()
             assert b"".join(read_response.iter_raw()) == payload
 
-        unknown_namespace_alias = client.get(
-            f"/v0/namespace-aliases/{request.unknown_namespace_alias}/filesystem/entries",
-            params={"path": request.directory},
-        )
-        assert unknown_namespace_alias.status_code == expected.unknown_namespace_alias_status
-        assert unknown_namespace_alias.content == b""
-
         disallowed_route = client.get(
-            f"{namespace_alias_base}{request.disallowed_path_suffix}"
+            f"{namespace_base}{request.disallowed_path_suffix}"
         )
         assert disallowed_route.status_code == expected.disallowed_route_status
         assert disallowed_route.content == b""
@@ -1798,9 +1789,10 @@ def test_proxy(
     refusal_body = {"code": "unauthorized", "message": "refused by the conformance hook"}
 
     async def authorize(
-        scope: dict[str, Any], _context: ProxyRouteContext
+        scope: dict[str, Any], context: ProxyRouteContext
     ) -> ProxyAuthorization | ProxyRefusal:
-        if any(
+        unlisted_namespace = context.namespace_id not in (None, request.namespace_id)
+        if unlisted_namespace or any(
             name.lower() == request.authorize.refuse_header.encode("ascii")
             for name, _ in scope.get("headers", [])
         ):
@@ -1814,13 +1806,12 @@ def test_proxy(
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
         _required_environment("LOONFS_CONFORMANCE_TOKEN"),
-        {request.namespace_alias: request.namespace_id},
         authorize=authorize,
     )
     with _serve_asgi(app, "loonfs-python-authorized-proxy") as base_url:
         with httpx.Client(base_url=base_url) as client:
             stamped_response = client.post(
-                f"{namespace_alias_base}/commits",
+                f"{namespace_base}/commits",
                 headers={"Loonfs-Actor": request.authorize.browser_actor_id},
                 json={
                     "commit_id": request.authorize.commit_id,
@@ -1847,13 +1838,18 @@ def test_proxy(
             assert stamped_changes[0].committed_by == expected.stamped_committed_by
 
             refused = client.get(
-                f"{namespace_alias_base}/filesystem/entry",
+                f"{namespace_base}/filesystem/entry",
                 params={"path": "/"},
                 headers={request.authorize.refuse_header: "1"},
             )
-            assert refused.status_code == expected.refused_status
-            assert refused.headers["content-type"] == "application/json"
-            assert refused.json() == refusal_body
+            unlisted = client.get(
+                f"/v0/namespaces/{request.authorize.unlisted_namespace_id}/filesystem/entry",
+                params={"path": "/"},
+            )
+            for response in (refused, unlisted):
+                assert response.status_code == expected.refused_status
+                assert response.headers["content-type"] == "application/json"
+                assert response.json() == refusal_body
 
 
     _proxy_acl(request, expected)
@@ -1891,12 +1887,10 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
             principals=[acl.member],
         )
 
-    app = LoonFSProxy(
-        server_url, token, {acl.namespace_alias: acl.namespace_id}, authorize=authorize
-    )
+    app = LoonFSProxy(server_url, token, authorize=authorize)
     with _serve_asgi(app, "loonfs-python-acl-proxy") as base_url:
         with httpx.Client(base_url=base_url) as client:
-            commits = f"/v0/namespace-aliases/{acl.namespace_alias}/commits"
+            commits = f"/v0/namespaces/{acl.namespace_id}/commits"
             headers = {
                 "Loonfs-Principal-Scope": acl.principal_scope,
                 "Loonfs-Principals": acl.browser_principals,
@@ -2502,21 +2496,21 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     assert removed_entry.deletion_seq == removed.committed_seq
 
 
-def test_proxy_forwards_every_documented_route(
+def test_proxy_forwards_every_listed_route(
     cases: dict[str, ConformanceCase],
 ) -> None:
-    """Proxy routes must reach the server. Excluded server routes must not."""
-    fixture, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
-    with open(_required_environment("LOONFS_PROXY_DOCUMENT"), encoding="utf-8") as handle:
-        proxy_document = json.load(handle)
+    """Listed proxy routes must reach the server unchanged. Other server routes must not."""
+    fixture, case_expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     with open(_required_environment("LOONFS_SERVER_DOCUMENT"), encoding="utf-8") as handle:
         server_document = json.load(handle)
 
-    proxy_routes = {
-        (method.upper(), template)
-        for template, item in proxy_document["paths"].items()
+    server_routes = {
+        f"{method.upper()} {template}"
+        for template, item in server_document["paths"].items()
         for method in item
     }
+    listed_routes = set(case_expected.routes)
+    assert listed_routes <= server_routes, sorted(listed_routes - server_routes)
 
     observed: list[tuple[str, str]] = []
 
@@ -2554,60 +2548,53 @@ def test_proxy_forwards_every_documented_route(
     proxy = LoonFSProxy(
         f"http://{stub_host}:{stub_port}",
         "recording-stub-token",
-        {fixture.namespace_alias: fixture.namespace_id},
         authorize=authorize,
     )
 
     def instantiate(template: str) -> str:
         return re.sub(
             r"\{([^/{}]+)\}",
-            lambda match: fixture.namespace_alias
-            if match.group(1) == "namespace_alias"
+            lambda match: fixture.namespace_id
+            if match.group(1) == "namespace_id"
             else "x",
             template,
         )
-
-    def proxy_template_for_server(template: str) -> str:
-        server_namespace_prefix = "/v0/namespaces/{namespace_id}"
-        if template == server_namespace_prefix or template.startswith(
-            f"{server_namespace_prefix}/"
-        ):
-            return template.replace(
-                server_namespace_prefix,
-                "/v0/namespace-aliases/{namespace_alias}",
-                1,
-            )
-        return template
 
     try:
         with _serve_asgi(proxy, "loonfs-python-drift-proxy") as proxy_base_url:
             expected: list[tuple[str, str]] = []
             with httpx.Client(base_url=proxy_base_url) as client:
-                for template, item in proxy_document["paths"].items():
-                    for documented_method in item:
-                        method = documented_method.upper()
-                        path = instantiate(template)
-                        forwarded_template = template.replace(
-                            "/v0/namespace-aliases/{namespace_alias}",
-                            f"/v0/namespaces/{fixture.namespace_id}",
-                        )
-                        expected.append((method, instantiate(forwarded_template)))
-                        response = client.request(method, path)
-                        assert response.status_code == 200
+                for route in sorted(server_routes):
+                    method, template = route.split(" ", 1)
+                    path = instantiate(template)
+                    response = client.request(method, path)
+                    if route in listed_routes:
+                        expected.append((method, path))
+                        assert response.status_code == 200, route
+                    else:
+                        assert response.status_code == 404, route
+            assert sorted(observed) == sorted(expected)
 
-                assert sorted(observed) == sorted(expected)
-
-                observed_before = list(observed)
-                for server_template, item in server_document["paths"].items():
-                    proxy_template = proxy_template_for_server(server_template)
-                    for documented_method in item:
-                        method = documented_method.upper()
-                        if (method, proxy_template) in proxy_routes:
-                            continue
-                        path = instantiate(proxy_template)
-                        response = client.request(method, path)
-                        assert response.status_code == 404, f"{method} {path}"
-                assert observed == observed_before
+            # httpx would remove a dot segment, and an unquoted `?` would end the
+            # path, so either one would forward a route that the hook didn't see.
+            observed.clear()
+            proxy_address = urlsplit(proxy_base_url)
+            for path, status in (
+                (f"/v0/namespaces/{fixture.namespace_id}/snapshots/..", 404),
+                (f"/v0/namespaces/{fixture.namespace_id}/snapshots/%2E%2E", 404),
+                (f"/v0/namespaces/{fixture.namespace_id}%3F/snapshots/x", 200),
+            ):
+                connection = http.client.HTTPConnection(
+                    proxy_address.hostname, proxy_address.port
+                )
+                try:
+                    connection.request("DELETE", path)
+                    assert connection.getresponse().status == status, path
+                finally:
+                    connection.close()
+            assert observed == [
+                ("DELETE", f"/v0/namespaces/{fixture.namespace_id}%3F/snapshots/x")
+            ]
     finally:
         stub.shutdown()
         stub.server_close()

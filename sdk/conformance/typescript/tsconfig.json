@@ -13,7 +13,6 @@
   "include": [
     "src/**/*.ts",
     "../../generated/typescript/**/*.ts",
-    "../../generated/typescript-client/**/*.ts",
     "../../proxy/typescript/**/*.ts"
   ]
 }
