@@ -476,8 +476,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 store
                     .put_immutable_verified(key, bytes::Bytes::new())
                     .await
-                    .map_err(CoreError::from)
-                    .map_err(cannot_write)?;
+                    .map_err(|error| cannot_write(CoreError::store(key, &error)))?;
             }
             return Ok(vec![GrantedRange {
                 object_key: key.to_owned(),

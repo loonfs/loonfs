@@ -13,7 +13,7 @@ use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
-use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
+use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{
     BindingVersion, ChangeSeq, CommitFingerprint, CommitId, ErrorDetails, InodeId, InodeKind,
     NamespaceId, PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
@@ -340,30 +340,6 @@ impl From<PathError> for CoreError {
     }
 }
 
-impl From<ImmutableWriteError> for CoreError {
-    fn from(value: ImmutableWriteError) -> Self {
-        let fallback_object_key = value.object_key().to_owned();
-        match value {
-            ImmutableWriteError::DifferentObject { object_key } => Self::NamespaceCorrupt(format!(
-                "immutable object `{object_key}` already exists with different bytes"
-            )),
-            ImmutableWriteError::StoredChecksumMissing { object_key } => Self::NamespaceCorrupt(
-                format!("immutable object `{object_key}` already exists without a stored checksum"),
-            ),
-            ImmutableWriteError::Transport { object_key, source } => Self::Store {
-                object_key,
-                message: source.public_message().into_owned(),
-                kind: ObjectStoreErrorKind::of(&source),
-            },
-            error => Self::Store {
-                object_key: fallback_object_key,
-                message: error.to_string(),
-                kind: ObjectStoreErrorKind::Other,
-            },
-        }
-    }
-}
-
 /// Returns the wire code for a failed object-store operation of this kind.
 pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
     match kind {
@@ -381,13 +357,26 @@ pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
 }
 
 impl CoreError {
-    /// Builds [`CoreError::Store`] for a failed object-store operation on
+    /// Builds the core error for a failed object-store operation on
     /// `object_key`.
+    ///
+    /// An immutable key that contains a different object, or an object
+    /// without a stored checksum, breaks a rule of the format, so either
+    /// error becomes [`CoreError::NamespaceCorrupt`]. Every other failure
+    /// becomes [`CoreError::Store`].
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
-        Self::Store {
-            object_key: object_key.into(),
-            message: error.public_message().into_owned(),
-            kind: ObjectStoreErrorKind::of(error),
+        match error {
+            ObjectStoreError::DifferentObject { object_key: key } => Self::NamespaceCorrupt(
+                format!("immutable object `{key}` already exists with different bytes"),
+            ),
+            ObjectStoreError::StoredChecksumMissing { object_key: key } => Self::NamespaceCorrupt(
+                format!("immutable object `{key}` already exists without a stored checksum"),
+            ),
+            error => Self::Store {
+                object_key: object_key.into(),
+                message: error.public_message().into_owned(),
+                kind: ObjectStoreErrorKind::of(error),
+            },
         }
     }
 
@@ -738,6 +727,7 @@ mod tests {
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_types::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
+    use std::assert_matches;
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -950,6 +940,26 @@ mod tests {
         };
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
+
+        let key = "namespaces/demo/content/blob".to_owned();
+        for (occupied, message) in [
+            (
+                ObjectStoreError::DifferentObject {
+                    object_key: key.clone(),
+                },
+                "immutable object `namespaces/demo/content/blob` already exists with different bytes",
+            ),
+            (
+                ObjectStoreError::StoredChecksumMissing {
+                    object_key: key.clone(),
+                },
+                "immutable object `namespaces/demo/content/blob` already exists without a stored checksum",
+            ),
+        ] {
+            let error = CoreError::store(&key, &occupied);
+            assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+            assert_matches!(error, CoreError::NamespaceCorrupt(text) if text == message);
+        }
 
         let segment_read = CoreError::from(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadSegment {

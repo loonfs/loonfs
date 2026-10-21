@@ -176,6 +176,13 @@ pub enum ObjectStoreError {
         /// Object whose checksum did not match.
         object_key: String,
     },
+    /// Reports an immutable key that already contains an object other than
+    /// the one the caller wrote, because its stored checksum differs.
+    #[error("immutable object `{object_key}` already exists with different bytes")]
+    DifferentObject {
+        /// Immutable key whose existing object differs.
+        object_key: String,
+    },
     /// Not object-scoped: the store lacks a required capability.
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
@@ -313,7 +320,9 @@ impl ObjectStoreError {
             Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
                 ObjectStoreErrorKind::InvalidRequest
             }
-            Self::PreconditionFailed { .. } => ObjectStoreErrorKind::PreconditionFailed,
+            Self::PreconditionFailed { .. } | Self::DifferentObject { .. } => {
+                ObjectStoreErrorKind::PreconditionFailed
+            }
             Self::PermissionDenied { .. } => ObjectStoreErrorKind::PermissionDenied,
             Self::StoredChecksumMissing { .. } => ObjectStoreErrorKind::StoredChecksumMissing,
             Self::Unsupported(_) => ObjectStoreErrorKind::Unsupported,
@@ -344,6 +353,7 @@ impl ObjectStoreError {
             | Self::PermissionDenied { object_key, .. }
             | Self::StoredChecksumMissing { object_key }
             | Self::ChecksumMismatch { object_key }
+            | Self::DifferentObject { object_key }
             | Self::Transport { object_key, .. } => Some(object_key),
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
@@ -363,6 +373,9 @@ impl ObjectStoreError {
             }
             Self::StoredChecksumMissing { .. } => "stored full-object checksum missing".to_owned(),
             Self::ChecksumMismatch { .. } => "full-object checksum mismatch".to_owned(),
+            Self::DifferentObject { .. } => {
+                "immutable object already exists with different bytes".to_owned()
+            }
             Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
             Self::Configuration(message) => {
                 format!("invalid object store configuration: {message}")
@@ -570,14 +583,14 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Creates an immutable object and accepts an occupied key only when its stored
-    /// checksum equals the checksum of `bytes`. Retryable transport failures
-    /// retry under one operation deadline. Missing stored checksums fail
-    /// verification.
-    async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    /// checksum equals the checksum of `bytes`.
+    ///
+    /// Retryable transport failures retry under one operation deadline. When
+    /// the key is occupied, the write fails with
+    /// [`ObjectStoreError::DifferentObject`] if the stored checksum differs,
+    /// and with [`ObjectStoreError::StoredChecksumMissing`] if there's no
+    /// stored checksum.
+    async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         // A store without a limiter of its own spaces the retry warnings of
         // this one write only.
         let warnings =
@@ -586,8 +599,10 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.
+    ///
     /// `expected` and source checksums use the store's algorithm.
-    /// An occupied key succeeds only with an equal stored checksum.
+    /// An occupied key succeeds only with an equal stored checksum, and
+    /// otherwise fails as it does in [`Self::put_immutable_verified`].
     /// Missing or short sources fail the precondition before completion.
     /// An in-memory store can implement it with [`crate::buffered::assemble`].
     async fn assemble(
@@ -596,7 +611,7 @@ pub trait ObjectStore: Send + Sync + Debug {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError>;
+    ) -> Result<ObjectMetadata>;
 
     /// Replaces `key` only while its current opaque token equals `expected_etag`.
     ///
@@ -703,11 +718,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().put_if_absent(key, bytes).await
     }
 
-    async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.as_ref().put_immutable_verified(key, bytes).await
     }
 
@@ -717,7 +728,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    ) -> Result<ObjectMetadata> {
         self.as_ref().assemble(key, sources, tail, expected).await
     }
 
@@ -816,11 +827,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).put_if_absent(key, bytes).await
     }
 
-    async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         (*self).put_immutable_verified(key, bytes).await
     }
 
@@ -830,7 +837,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    ) -> Result<ObjectMetadata> {
         (*self).assemble(key, sources, tail, expected).await
     }
 
@@ -917,7 +924,7 @@ mod tests {
             sources: &[crate::AssemblySource],
             tail: Vec<bytes::Bytes>,
             expected: &loonfs_types::Checksum,
-        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+        ) -> Result<ObjectMetadata> {
             crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 

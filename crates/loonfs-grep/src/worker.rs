@@ -24,11 +24,10 @@ use loonfs::engine::{
     SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs::{
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance,
-    ObjectStoreErrorKind, ReadOnly,
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
 };
 use loonfs_objectstore::timing::MonotonicTimer;
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::format::segment_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES,
@@ -994,7 +993,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     store
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes))
         .await
-        .map_err(grep_immutable_write_error)?;
+        .map_err(|error| GrepError::store(&object_key, &error))?;
     Ok(GrepSegmentRef {
         segment_id,
 
@@ -1298,23 +1297,6 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let object_key = segment_key(self.namespace_id, &segment.segment_id);
         load_data_block_span(self.store, &object_key, &entries).await
-    }
-}
-
-fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
-    let fallback_object_key = error.object_key().to_owned();
-    match error {
-        ImmutableWriteError::DifferentObject { object_key } => GrepError::IndexCorrupt {
-            message: format!("immutable object `{object_key}` already exists with different bytes"),
-        },
-        ImmutableWriteError::Transport { object_key, source } => {
-            GrepError::store(object_key, &source)
-        }
-        error => GrepError::StoreUnavailable {
-            object_key: fallback_object_key,
-            message: error.to_string(),
-            kind: ObjectStoreErrorKind::Other,
-        },
     }
 }
 

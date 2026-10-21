@@ -346,7 +346,7 @@ mod tests {
                     &Checksum::crc64nvme(b"source other")
                 )
                 .await,
-            Err(crate::ImmutableWriteError::DifferentObject { .. })
+            Err(ObjectStoreError::DifferentObject { .. })
         );
     }
 

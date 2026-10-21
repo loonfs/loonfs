@@ -524,11 +524,7 @@ where
     /// Forwarded so the inner store's own verified write runs, which for a
     /// provider sends a large body through the conditional multipart create.
     /// One `put` sample covers the whole write, retries included.
-    async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         let start = sample_clock();
         let bytes_in = bytes.len() as u64;
         let (result, attempts) =
@@ -538,7 +534,7 @@ where
             key,
             start.elapsed(),
             attempts,
-            classify_immutable_write(&result),
+            classify_result(&result),
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
@@ -553,7 +549,7 @@ where
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    ) -> Result<ObjectMetadata> {
         let start = sample_clock();
         let bytes_in = tail.iter().map(|piece| piece.len() as u64).sum();
         let (result, attempts) =
@@ -563,7 +559,7 @@ where
             key,
             start.elapsed(),
             attempts,
-            classify_immutable_write(&result),
+            classify_result(&result),
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
@@ -859,16 +855,6 @@ fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultKind {
     match result {
         Ok(_) => ObjectStoreResultKind::Ok,
         Err(error) => error.kind().into(),
-    }
-}
-
-fn classify_immutable_write(
-    result: &std::result::Result<ObjectMetadata, crate::ImmutableWriteError>,
-) -> ObjectStoreResultKind {
-    match result {
-        Ok(_) => ObjectStoreResultKind::Ok,
-        Err(crate::ImmutableWriteError::Transport { source, .. }) => source.kind().into(),
-        Err(_) => ObjectStoreResultKind::PreconditionFailed,
     }
 }
 

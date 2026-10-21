@@ -603,10 +603,9 @@ mod tests {
             .await
             .expect_err("every first chunk fails");
             let elapsed_ms = clock.monotonic_now_ms();
-            assert_matches!(
-                error,
-                crate::ImmutableWriteError::Transport { source, .. }
-                    if source.kind() == crate::ObjectStoreErrorKind::Other,
+            assert_eq!(
+                error.kind(),
+                crate::ObjectStoreErrorKind::Other,
                 "{fault:?} is reported as non-retryable"
             );
             assert_eq!(

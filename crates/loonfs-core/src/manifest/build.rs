@@ -5,7 +5,7 @@ use super::cache::MetadataSegmentCache;
 use super::index_block_load::insert_written_segment;
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_PENDING_SEGMENT_BYTES;
 use crate::metadata::MetadataState;
@@ -140,9 +140,11 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     built: BuiltSegmentBlocks,
 ) -> Result<MetadataSegmentRef> {
     let (descriptor, bytes) = prepare_manifest_segment(namespace_id, family, built);
+    let object_key = metadata_segment_object_key(&descriptor);
     store
-        .put_immutable_verified(&metadata_segment_object_key(&descriptor), bytes)
-        .await?;
+        .put_immutable_verified(&object_key, bytes)
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?;
     Ok(descriptor)
 }
 
@@ -229,7 +231,10 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
             .segment_cache
             .map(|cache| (cache, descriptor.clone(), bytes.clone()));
         let mut put = async move {
-            store.put_immutable_verified(&object_key, bytes).await?;
+            store
+                .put_immutable_verified(&object_key, bytes)
+                .await
+                .map_err(|error| CoreError::store(&object_key, &error))?;
             if let Some((cache, descriptor, bytes)) = written {
                 // A segment this process can't decode must not be published in a manifest.
                 insert_written_segment(cache, &descriptor, &bytes)?;

@@ -10,7 +10,7 @@
 
 use crate::object_store::Result as StoreResult;
 use crate::{
-    ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
+    ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
@@ -628,7 +628,7 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
         .put_immutable_verified(&key, Bytes::from(multipart_payload(payload_len, 1)))
         .await
     {
-        Err(ImmutableWriteError::DifferentObject { .. }) => {}
+        Err(ObjectStoreError::DifferentObject { .. }) => {}
         Ok(_) => {
             return Err(wrong(
                 "a create-only multipart write over an existing object was accepted",
@@ -668,28 +668,29 @@ fn multipart_payload(len: u64, offset: usize) -> Vec<u8> {
 /// failure to `operation`.
 fn ok_immutable<T>(
     operation: &str,
-    result: std::result::Result<T, ImmutableWriteError>,
+    result: StoreResult<T>,
 ) -> std::result::Result<T, CheckFailure> {
     result.map_err(|error| match error {
-        ImmutableWriteError::Transport { source, .. } => failed(operation, &source),
-        error => wrong(format!(
+        ObjectStoreError::DifferentObject { .. }
+        | ObjectStoreError::StoredChecksumMissing { .. } => wrong(format!(
             "{operation} to a new key failed: {}",
             immutable_write_message(&error)
         )),
+        error => failed(operation, &error),
     })
 }
 
 /// Describes a failed immutable write without exposing provider or object
 /// identity.
-fn immutable_write_message(error: &ImmutableWriteError) -> String {
+fn immutable_write_message(error: &ObjectStoreError) -> String {
     match error {
-        ImmutableWriteError::Transport { source, .. } => source.public_message().into_owned(),
-        ImmutableWriteError::DifferentObject { .. } => {
+        ObjectStoreError::DifferentObject { .. } => {
             "the key already contains different bytes".to_owned()
         }
-        ImmutableWriteError::StoredChecksumMissing { .. } => {
+        ObjectStoreError::StoredChecksumMissing { .. } => {
             "the key's existing object reports no stored checksum".to_owned()
         }
+        error => error.public_message().into_owned(),
     }
 }
 
@@ -809,7 +810,7 @@ mod tests {
             sources: &[crate::AssemblySource],
             tail: Vec<bytes::Bytes>,
             expected: &loonfs_types::Checksum,
-        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+        ) -> crate::Result<crate::ObjectMetadata> {
             crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 
@@ -997,7 +998,7 @@ mod tests {
             sources: &[crate::AssemblySource],
             tail: Vec<bytes::Bytes>,
             expected: &loonfs_types::Checksum,
-        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+        ) -> crate::Result<crate::ObjectMetadata> {
             crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 
@@ -1114,7 +1115,7 @@ mod tests {
             sources: &[crate::AssemblySource],
             tail: Vec<bytes::Bytes>,
             expected: &loonfs_types::Checksum,
-        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+        ) -> crate::Result<crate::ObjectMetadata> {
             crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 
@@ -1190,7 +1191,7 @@ mod tests {
             sources: &[crate::AssemblySource],
             tail: Vec<bytes::Bytes>,
             expected: &loonfs_types::Checksum,
-        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+        ) -> crate::Result<crate::ObjectMetadata> {
             crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 

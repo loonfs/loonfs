@@ -7,8 +7,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt;
@@ -175,7 +175,7 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         loonfs_objectstore::buffered::assemble(self, key, sources, tail, expected).await
     }
 

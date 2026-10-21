@@ -13,8 +13,8 @@ use loonfs_objectstore::metrics::{
 };
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ImmutableWriteError, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorKind, PutMode,
+    AssemblySource, ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError,
+    ObjectStoreErrorKind, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
@@ -517,7 +517,7 @@ impl ObjectStore for DelegatingWriteStore {
         &self,
         _key: &str,
         _bytes: Bytes,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put_immutable_verified"))
     }
 

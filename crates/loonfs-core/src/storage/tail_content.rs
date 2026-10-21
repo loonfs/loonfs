@@ -6,7 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::wal::ProjectedContent;
 use bytes::Bytes;
-use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{AssemblySource, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentLayout, ContentRef,
@@ -197,24 +197,16 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
             "content write failed"
         );
         return Err(match error {
-            ImmutableWriteError::DifferentObject { .. }
-            | ImmutableWriteError::StoredChecksumMissing { .. } => CoreError::NamespaceCorrupt(
-                format!("content object `{object_key}` requires an equal stored checksum"),
-            ),
-            ImmutableWriteError::Transport {
-                object_key,
-                source: ObjectStoreError::Transport { message, .. },
-            } => CoreError::store(
+            ObjectStoreError::Transport { message, .. } => CoreError::store(
                 &object_key,
                 &ObjectStoreError::retryable_transport(&object_key, message),
             ),
-            ImmutableWriteError::Transport {
-                source: ObjectStoreError::ChecksumMismatch { object_key },
-                ..
+            ObjectStoreError::ChecksumMismatch {
+                object_key: mismatched,
             } => CoreError::NamespaceCorrupt(format!(
-                "content object `{object_key}` does not match its stored checksum"
+                "content object `{mismatched}` does not match its stored checksum"
             )),
-            error => CoreError::from(error),
+            error => CoreError::store(&object_key, &error),
         });
     }
     extents.truncate(retained);

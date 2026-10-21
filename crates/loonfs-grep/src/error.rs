@@ -87,11 +87,22 @@ impl From<CoreError> for GrepError {
 }
 
 impl GrepError {
+    /// Builds the grep error for a failed object-store operation on
+    /// `object_key`.
+    ///
+    /// An immutable key that contains a different object means that grep's
+    /// derived state is corrupt, so that error becomes
+    /// [`GrepError::IndexCorrupt`].
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
-        Self::StoreUnavailable {
-            object_key: object_key.into(),
-            message: error.public_message().into_owned(),
-            kind: ObjectStoreErrorKind::of(error),
+        match error {
+            ObjectStoreError::DifferentObject { object_key: key } => Self::IndexCorrupt {
+                message: format!("immutable object `{key}` already exists with different bytes"),
+            },
+            error => Self::StoreUnavailable {
+                object_key: object_key.into(),
+                message: error.public_message().into_owned(),
+                kind: ObjectStoreErrorKind::of(error),
+            },
         }
     }
 
@@ -169,7 +180,7 @@ pub type Result<T> = std::result::Result<T, GrepError>;
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, GrepError, ObjectStoreErrorKind};
+    use super::{ErrorCode, GrepError, ObjectStoreError, ObjectStoreErrorKind};
 
     #[test]
     fn store_failure_kind_survives_the_grep_boundary() {
@@ -188,5 +199,14 @@ mod tests {
             };
             assert_eq!(error.code(), expected);
         }
+
+        let key = "namespaces/demo/extensions/grep/segments/seg";
+        let different = ObjectStoreError::DifferentObject {
+            object_key: key.to_owned(),
+        };
+        assert_eq!(
+            GrepError::store(key, &different).code(),
+            ErrorCode::IndexCorrupt
+        );
     }
 }
