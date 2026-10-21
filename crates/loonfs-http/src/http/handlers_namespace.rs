@@ -895,7 +895,7 @@ pub(super) struct CheckpointPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A streaming compaction can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -923,14 +923,14 @@ pub(super) async fn run_maintenance(
             let options = MaintainMetadataOptions::from_request(request)
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             maintenance
-                .maintain_metadata_with_options(&namespace_id, &options)
+                .maintain_metadata_while_due_with_options(
+                    &namespace_id,
+                    &loonfs::MaintenanceCancellation::new(),
+                    &options,
+                )
                 .await
                 .map(RunMaintenanceResponse::Metadata)
         }
-        RunMaintenanceRequest::MetadataCompaction(_) => maintenance
-            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-            .await
-            .map(RunMaintenanceResponse::MetadataCompaction),
         RunMaintenanceRequest::Gc(request) => maintenance
             .gc_with_options(&namespace_id, &GcOptions::from_request(request))
             .await

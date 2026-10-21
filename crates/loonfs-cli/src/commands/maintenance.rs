@@ -16,8 +16,7 @@ use crate::backend::StepBudget;
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, GcRequest,
-    MetadataCompactionRequest, MetadataMaintenanceRequest, RecoverAdministratorRequest,
-    RunMaintenanceRequest,
+    MetadataMaintenanceRequest, RecoverAdministratorRequest, RunMaintenanceRequest,
 };
 use std::path::Path;
 
@@ -34,7 +33,6 @@ pub(crate) async fn run_maintenance_command(
             run_maintenance_metadata(kind, config_path, args).await
         }
         MaintenanceCommand::Fold(args) => run_maintenance_fold(kind, config_path, args).await,
-        MaintenanceCommand::Compact(args) => run_maintenance_compact(kind, config_path, args).await,
         MaintenanceCommand::Checkpoint { command } => match command {
             MaintenanceCheckpointCommand::Create(args) => {
                 run_maintenance_checkpoint(kind, config_path, args).await
@@ -225,29 +223,6 @@ async fn run_maintenance_fold(
             &RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
                 max_wal_tail_objects: Some(1),
             }),
-            context.actor_id.as_ref(),
-        )
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
-}
-
-async fn run_maintenance_compact(
-    kind: CommandKind,
-    config_path: &Path,
-    args: MaintenanceNamespaceArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
-        .target
-        .client
-        .run_maintenance(
-            context.namespace(),
-            &RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
             context.actor_id.as_ref(),
         )
         .await

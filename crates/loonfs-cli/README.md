@@ -374,17 +374,15 @@ Maintenance
   loonfs maintenance recover-administrator <principal>
 
   loonfs maintenance metadata [--max-wal-tail-objects <n>]
-    Run one metadata maintenance pass, which folds the WAL tail if it has
-    reached the threshold and then runs one bounded compaction step.
-    --max-wal-tail-objects overrides the default fold threshold.
+    Fold the WAL tail if it's due, and compact metadata until nothing is
+    due. A streaming compaction can take minutes, so the command can too.
+    It stops after 16 compaction units. A `due` outcome means that work
+    remains, and a later run continues it. --max-wal-tail-objects
+    overrides the default fold threshold.
 
   loonfs maintenance fold
-    Fold the WAL tail into metadata segments, whatever its length.
-
-  loonfs maintenance compact
-    Run one metadata compaction unit. A unit is one bounded merge or one
-    streaming compaction of a family group. Repeat the command while it
-    publishes to compact every eligible group.
+    Fold the WAL tail whatever its length, and compact metadata until
+    nothing is due.
 
   loonfs maintenance retention advance [--to-seq <seq> | --before <unix-ms>]
     Advance the retention floor and discard the change-feed replay history

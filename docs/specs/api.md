@@ -778,14 +778,13 @@ A maintenance run request body identifies exactly one job with `kind`:
 
 | `kind` | Fields | Result |
 | --- | --- | --- |
-| `metadata` | Optional `max_wal_tail_objects` | `wal_fold` and `compaction` outcomes |
-| `metadata_compaction` | None | `compaction`, tagged by `outcome`. A published outcome includes the manifest number and the row, byte, and segment counts. |
+| `metadata` | Optional `max_wal_tail_objects` | `outcome` and `compaction_units` |
 | `gc` | Optional `grace_window_ms` | The collection result |
 | `grep_gc` | None | `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates` |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
 
-The `metadata`, `metadata_compaction`, `retention`, `gc`, and `grep_gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
+The `metadata`, `retention`, `gc`, and `grep_gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
 
 The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a pin. For example, this request body runs one GC pass:
 
@@ -797,39 +796,20 @@ A run that loses a race with another process, or whose work is superseded, repor
 
 A deleted namespace accepts only `gc` and `grep_gc` runs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
-`wal_fold.outcome` reports the result of the WAL fold. It has four values:
+A `metadata` run [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit is one bounded merge of a [family group](glossary.md#family-group)'s runs, or, when the group's window is too large for one bounded merge, one streaming compaction of the group. The run stops early after it publishes 16 units, after it loses three races in a row to another publisher, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A race that the run loses leaves the segments it wrote unreferenced, and a later GC pass can delete them.
 
-- `not_needed`: the WAL tail was below the threshold and hadn't gone idle (see the `metadata` options below).
-- `folded`: this step published the next current manifest.
-- `already_published`: the current manifest already covered the captured WAL tail, so this step published no manifest.
-- `retries_exhausted`: concurrent updates prevented every attempt from publishing. Nothing was folded, and a later step can try again.
+The result's `outcome` has two values:
 
-In a `metadata` result, `compaction.outcome` reports the bounded compaction step. It has five values:
+- `caught_up`: nothing is due, and nothing can become due without a new commit.
+- `due`: work is still due, or the run couldn't tell. For example, the run stopped early, or the WAL tail is below the fold threshold and hasn't gone idle yet. A later `metadata` run continues the work.
 
-| `outcome` | Means |
-| --- | --- |
-| `not_needed` | No bounded merge is due. |
-| `bounded_merge_published` | This run published one bounded merge. |
-| `metadata_compaction_required` | A family group's window is too large for one bounded merge. The caller runs the `metadata_compaction` job instead, which compacts the group by streaming. |
-| `manifest_advanced` | Another publisher changed the current manifest first. The segments this run wrote stay unreferenced, and a later GC pass can delete them. |
-| `fenced` | A newer runtime claimed the namespace's compactor epoch, so this step published nothing. |
+`compaction_units` counts the units that the run published. For example, a run that merges two family groups and then finds nothing else due returns this result:
 
-The bounded step in a `metadata` run never runs a streaming compaction. Only the `metadata_compaction` job does.
+```json
+{"kind":"metadata","namespace_id":"demo","outcome":"caught_up","compaction_units":2}
+```
 
-A `metadata_compaction` run compacts one unit. If the selected window fits in one step, the unit is a bounded merge, and otherwise it's one streaming compaction of a family group. To compact every eligible group, a caller repeats the run until a run publishes nothing.
-
-In a `metadata_compaction` result, `compaction.outcome` has six values:
-
-| `outcome` | Means |
-| --- | --- |
-| `not_needed` | No family group has eligible input. |
-| `bounded_merge_published` | The planner selected and published a bounded merge. |
-| `published` | The outcome includes the published manifest number and the row, byte, and segment counts. |
-| `cancelled` | The caller cancelled the job. |
-| `abandoned` | An input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. |
-| `fenced` | Another process advanced the manifest's compactor epoch. |
-
-The `cancelled`, `abandoned`, and `fenced` outcomes publish no manifest.
+A streaming compaction can take minutes, so a `metadata` run can too. The reference server exempts maintenance runs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's sweep does for a namespace that's still due.
 
 In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
 

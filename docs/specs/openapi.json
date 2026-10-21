@@ -659,111 +659,6 @@
         ],
         "type": "object"
       },
-      "CompactionStepOutcome": {
-        "description": "What the bounded compaction step of a maintenance pass did.",
-        "discriminator": {
-          "mapping": {
-            "bounded_merge_published": "#/components/schemas/CompactionStepOutcomeBoundedMergePublished",
-            "fenced": "#/components/schemas/CompactionStepOutcomeFenced",
-            "manifest_advanced": "#/components/schemas/CompactionStepOutcomeManifestAdvanced",
-            "metadata_compaction_required": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired",
-            "not_needed": "#/components/schemas/CompactionStepOutcomeNotNeeded"
-          },
-          "propertyName": "outcome"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CompactionStepOutcomeNotNeeded"
-          },
-          {
-            "$ref": "#/components/schemas/CompactionStepOutcomeBoundedMergePublished"
-          },
-          {
-            "$ref": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired"
-          },
-          {
-            "$ref": "#/components/schemas/CompactionStepOutcomeManifestAdvanced"
-          },
-          {
-            "$ref": "#/components/schemas/CompactionStepOutcomeFenced"
-          }
-        ]
-      },
-      "CompactionStepOutcomeBoundedMergePublished": {
-        "description": "One family group was merged, and a new manifest was published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "bounded_merge_published"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "CompactionStepOutcomeFenced": {
-        "description": "A newer runtime claimed the namespace's compactor epoch, so this step published nothing.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "fenced"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "CompactionStepOutcomeManifestAdvanced": {
-        "description": "Another publisher changed the current manifest before this step could publish.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "manifest_advanced"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "CompactionStepOutcomeMetadataCompactionRequired": {
-        "description": "A family group's window is too large for one bounded merge.\n\nRun the `metadata_compaction` job, which compacts the group by streaming.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "metadata_compaction_required"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "CompactionStepOutcomeNotNeeded": {
-        "description": "No family group had enough delta runs to merge.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "not_needed"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
       "CompleteUploadBody": {
         "description": "A request to complete an upload, in the mode that started it.",
         "discriminator": {
@@ -3228,169 +3123,13 @@
         "minimum": 0,
         "type": "integer"
       },
-      "MetadataCompactionOutcome": {
-        "description": "The outcome of one metadata compaction run.",
-        "discriminator": {
-          "mapping": {
-            "abandoned": "#/components/schemas/MetadataCompactionOutcomeAbandoned",
-            "bounded_merge_published": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished",
-            "cancelled": "#/components/schemas/MetadataCompactionOutcomeCancelled",
-            "fenced": "#/components/schemas/MetadataCompactionOutcomeFenced",
-            "not_needed": "#/components/schemas/MetadataCompactionOutcomeNotNeeded",
-            "published": "#/components/schemas/MetadataCompactionOutcomePublished"
-          },
-          "propertyName": "outcome"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeNotNeeded"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomePublished"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeCancelled"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeAbandoned"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeFenced"
-          }
-        ]
-      },
-      "MetadataCompactionOutcomeAbandoned": {
-        "description": "The run stopped because its inputs changed, time ran out, or publication retries were\nexhausted.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "abandoned"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
+      "MetadataMaintenanceOutcome": {
+        "description": "Whether metadata maintenance left work due for a namespace.",
+        "enum": [
+          "caught_up",
+          "due"
         ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeBoundedMergePublished": {
-        "description": "The selected window fit in a bounded step, and this run published it.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "bounded_merge_published"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeCancelled": {
-        "description": "The run was cancelled, so the current manifest didn't change.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "cancelled"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeFenced": {
-        "description": "Another process claimed the namespace's compactor epoch, so nothing was published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "fenced"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeNotNeeded": {
-        "description": "No eligible family group was available, so nothing was published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "not_needed"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomePublished": {
-        "description": "A streaming compaction merged the selected window and published the next manifest.",
-        "properties": {
-          "input_bytes": {
-            "description": "The input bytes that the compaction read.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "manifest_no": {
-            "$ref": "#/components/schemas/ManifestNo",
-            "description": "The manifest that the compaction published."
-          },
-          "outcome": {
-            "enum": [
-              "published"
-            ],
-            "type": "string"
-          },
-          "output_bytes": {
-            "description": "The output bytes that the compaction wrote.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "output_segments": {
-            "description": "The output segments that the compaction wrote.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "rows_read": {
-            "description": "The rows that the compaction read.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "rows_written": {
-            "description": "The rows that the compaction wrote.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "manifest_no",
-          "rows_read",
-          "rows_written",
-          "input_bytes",
-          "output_bytes",
-          "output_segments",
-          "outcome"
-        ],
-        "type": "object"
+        "type": "string"
       },
       "NameKey": {
         "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use the display name for the spelling\nthat users see.",
@@ -4008,7 +3747,6 @@
             "gc": "#/components/schemas/RunMaintenanceRequestGc",
             "grep_gc": "#/components/schemas/RunMaintenanceRequestGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
-            "metadata_compaction": "#/components/schemas/RunMaintenanceRequestMetadataCompaction",
             "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceRequestRetention"
           },
@@ -4017,9 +3755,6 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestMetadata"
-          },
-          {
-            "$ref": "#/components/schemas/RunMaintenanceRequestMetadataCompaction"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestGc"
@@ -4072,7 +3807,7 @@
         "type": "object"
       },
       "RunMaintenanceRequestMetadata": {
-        "description": "A job that folds the WAL tail and runs one bounded compaction step.",
+        "description": "A job that folds the WAL tail and compacts metadata until nothing is due, or until the job\nreaches its work limit.",
         "properties": {
           "kind": {
             "enum": [
@@ -4085,21 +3820,6 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceRequestMetadataCompaction": {
-        "description": "A job that runs one unit of metadata compaction, which is either one bounded merge or one\nstreaming compaction of a family group.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "metadata_compaction"
-            ],
-            "type": "string"
           }
         },
         "required": [
@@ -4159,7 +3879,6 @@
             "gc": "#/components/schemas/RunMaintenanceResponseGc",
             "grep_gc": "#/components/schemas/RunMaintenanceResponseGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
-            "metadata_compaction": "#/components/schemas/RunMaintenanceResponseMetadataCompaction",
             "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceResponseRetention"
           },
@@ -4168,9 +3887,6 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseMetadata"
-          },
-          {
-            "$ref": "#/components/schemas/RunMaintenanceResponseMetadataCompaction"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseGc"
@@ -4280,11 +3996,13 @@
         "type": "object"
       },
       "RunMaintenanceResponseMetadata": {
-        "description": "The result of the WAL fold and one bounded compaction step.",
+        "description": "Whether metadata maintenance is caught up, and the compaction units that the job published.",
         "properties": {
-          "compaction": {
-            "$ref": "#/components/schemas/CompactionStepOutcome",
-            "description": "What the bounded compaction step did."
+          "compaction_units": {
+            "description": "The compaction units that this run published. A unit is one bounded merge or one streaming\ncompaction of a family group.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "kind": {
             "enum": [
@@ -4296,40 +4014,15 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that this run maintained."
           },
-          "wal_fold": {
-            "$ref": "#/components/schemas/WalFoldStepOutcome",
-            "description": "What the WAL fold did."
+          "outcome": {
+            "$ref": "#/components/schemas/MetadataMaintenanceOutcome",
+            "description": "Whether work is still due when the run returns."
           }
         },
         "required": [
           "namespace_id",
-          "wal_fold",
-          "compaction",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceResponseMetadataCompaction": {
-        "description": "The result of one unit of metadata compaction.",
-        "properties": {
-          "compaction": {
-            "$ref": "#/components/schemas/MetadataCompactionOutcome",
-            "description": "The outcome of the compaction."
-          },
-          "kind": {
-            "enum": [
-              "metadata_compaction"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that this run compacted."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "compaction",
+          "outcome",
+          "compaction_units",
           "kind"
         ],
         "type": "object"
@@ -4821,112 +4514,6 @@
           "namespace_id",
           "upload_id",
           "mode"
-        ],
-        "type": "object"
-      },
-      "WalFoldStepOutcome": {
-        "description": "What the WAL fold step of a maintenance pass did.",
-        "discriminator": {
-          "mapping": {
-            "already_published": "#/components/schemas/WalFoldStepOutcomeAlreadyPublished",
-            "folded": "#/components/schemas/WalFoldStepOutcomeFolded",
-            "not_needed": "#/components/schemas/WalFoldStepOutcomeNotNeeded",
-            "retries_exhausted": "#/components/schemas/WalFoldStepOutcomeRetriesExhausted"
-          },
-          "propertyName": "outcome"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/WalFoldStepOutcomeNotNeeded"
-          },
-          {
-            "$ref": "#/components/schemas/WalFoldStepOutcomeFolded"
-          },
-          {
-            "$ref": "#/components/schemas/WalFoldStepOutcomeAlreadyPublished"
-          },
-          {
-            "$ref": "#/components/schemas/WalFoldStepOutcomeRetriesExhausted"
-          }
-        ]
-      },
-      "WalFoldStepOutcomeAlreadyPublished": {
-        "description": "The current manifest already included the captured WAL tail, so this step didn't publish a\nmanifest.",
-        "properties": {
-          "attempted_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The sequence that this step tried to fold through."
-          },
-          "current_manifest_no": {
-            "$ref": "#/components/schemas/ManifestNo",
-            "description": "The number of the namespace's current manifest."
-          },
-          "outcome": {
-            "enum": [
-              "already_published"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "attempted_seq",
-          "current_manifest_no",
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "WalFoldStepOutcomeFolded": {
-        "description": "The step folded the WAL tail and published the next current manifest.",
-        "properties": {
-          "manifest_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The last sequence that the published manifest includes."
-          },
-          "outcome": {
-            "enum": [
-              "folded"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "manifest_head_seq",
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "WalFoldStepOutcomeNotNeeded": {
-        "description": "The tail was below the threshold, so there was nothing to fold.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "not_needed"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "WalFoldStepOutcomeRetriesExhausted": {
-        "description": "Concurrent updates prevented every publication attempt.",
-        "properties": {
-          "observed_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The head sequence observed before the step ran."
-          },
-          "outcome": {
-            "enum": [
-              "retries_exhausted"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "observed_head_seq",
-          "outcome"
         ],
         "type": "object"
       },
@@ -5851,7 +5438,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A streaming compaction can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
         "operationId": "run_maintenance",
         "parameters": [
           {

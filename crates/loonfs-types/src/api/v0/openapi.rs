@@ -2,8 +2,9 @@
 //!
 //! Utoipa derives fields from the wire types. These declarations choose the tag,
 //! the few types whose fields belong to every variant, and the catch-all variant
-//! a client decodes but the document leaves out. Assembly is local to each
-//! declared type; it never searches a document for unions or guesses tags.
+//! or string value a client decodes but the document leaves out. Assembly is
+//! local to each declared type, and it never searches a document for unions or
+//! guesses tags.
 
 use super::*;
 use crate::NamespaceAccess;
@@ -23,18 +24,16 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<CommitPrecondition>("kind", None);
     named.tagged::<FilesystemChange>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);
-    named.tagged::<MetadataCompactionOutcome>("outcome", Some("unknown"));
     named.tagged::<NamespaceAccess>("kind", None);
     named.tagged::<NamespaceAccessMode>("kind", None);
     named.tagged::<ObjectTransferAccess>("kind", None);
-    named.tagged::<CompactionStepOutcome>("outcome", Some("unknown"));
     named.tagged::<RunMaintenanceRequest>("kind", None);
     named.tagged::<RunMaintenanceResponse>("kind", None);
     named.tagged::<CompleteUploadBody>("mode", None);
-    named.tagged::<WalFoldStepOutcome>("outcome", Some("unknown"));
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
     named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));
     named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
+    named.plain::<MetadataMaintenanceOutcome>("unknown");
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.
@@ -68,6 +67,25 @@ impl NamedSchemas {
             strip_catch_all(&mut union, tag, catch_all, &T::name());
         }
         self.union(&T::name(), tag, union, &source, None);
+    }
+
+    /// Leaves the catch-all value out of a string enum's derived values.
+    fn plain<T: ToSchema>(&mut self, catch_all: &str) {
+        let name = T::name().into_owned();
+        let mut schema = Source::of::<T>().schema;
+        let values = schema["enum"].as_array_mut().expect("string enum values");
+        let derived = values.len();
+        values.retain(|value| value != catch_all);
+        assert_eq!(
+            values.len() + 1,
+            derived,
+            "{name}: declared catch-all `{catch_all}` must be one value"
+        );
+        self.roots.insert(name.clone());
+        assert!(
+            self.schemas.insert(name, schema).is_none(),
+            "duplicate enum name"
+        );
     }
 
     fn composite<T: ToSchema, Kind: ToSchema>(&mut self, tag: &str, catch_all: Option<&str>) {

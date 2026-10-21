@@ -1601,11 +1601,9 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunMaintenanceRequest {
-    /// A job that folds the WAL tail and runs one bounded compaction step.
+    /// A job that folds the WAL tail and compacts metadata until nothing is due, or until the job
+    /// reaches its work limit.
     Metadata(MetadataMaintenanceRequest),
-    /// A job that runs one unit of metadata compaction, which is either one bounded merge or one
-    /// streaming compaction of a family group.
-    MetadataCompaction(MetadataCompactionRequest),
     /// A garbage collection job for aged, unreferenced objects.
     Gc(GcRequest),
     /// A garbage collection job for aged, unreferenced grep index objects.
@@ -1655,17 +1653,10 @@ pub struct MetadataMaintenanceRequest {
     pub max_wal_tail_objects: Option<u64>,
 }
 
-/// A request for one unit of metadata compaction, with no options.
-///
-/// To compact every eligible family group, repeat the request while it keeps publishing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MetadataCompactionRequest {}
-
 /// What the WAL fold step of a maintenance pass did.
+///
+/// The embedded runtime reports it. It isn't part of the HTTP API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WalFoldStepOutcome {
     /// The tail was below the threshold, so there was nothing to fold.
@@ -1694,35 +1685,24 @@ pub enum WalFoldStepOutcome {
 }
 
 /// What the bounded compaction step of a maintenance pass did.
+///
+/// The embedded runtime reports it. It isn't part of the HTTP API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum CompactionStepOutcome {
     /// No family group had enough delta runs to merge.
-    #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeNotNeeded"))]
     NotNeeded {},
     /// One family group was merged, and a new manifest was published.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CompactionStepOutcomeBoundedMergePublished")
-    )]
     BoundedMergePublished {},
-    /// A family group's window is too large for one bounded merge.
+    /// A family group's window is too large for one bounded merge, so the group needs a streaming
+    /// compaction.
     ///
-    /// Run the `metadata_compaction` job, which compacts the group by streaming.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CompactionStepOutcomeMetadataCompactionRequired")
-    )]
+    /// `Maintenance::compact_metadata` runs one, and `Maintenance::maintain_metadata_while_due`
+    /// runs one whenever a step reports this outcome.
     MetadataCompactionRequired {},
     /// Another publisher changed the current manifest before this step could publish.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CompactionStepOutcomeManifestAdvanced")
-    )]
     ManifestAdvanced {},
     /// A newer runtime claimed the namespace's compactor epoch, so this step published nothing.
-    #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeFenced"))]
     Fenced {},
     /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
@@ -1736,10 +1716,8 @@ pub enum CompactionStepOutcome {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunMaintenanceResponse {
-    /// The result of the WAL fold and one bounded compaction step.
+    /// Whether metadata maintenance is caught up, and the compaction units that the job published.
     Metadata(MetadataMaintenanceResponse),
-    /// The result of one unit of metadata compaction.
-    MetadataCompaction(MetadataCompactionResponse),
     /// The counts and deadlines from one garbage collection call.
     Gc(GcResponse),
     /// The counts from one garbage collection pass over the grep index.
@@ -1764,11 +1742,43 @@ pub enum RunMaintenanceResponse {
     RecoverAdministrator(RecoverAdministratorResponse),
 }
 
-/// What each step of one `metadata` maintenance job did.
+/// The result of one `metadata` maintenance job.
+///
+/// The job folds the WAL tail and compacts metadata until nothing is due, or until it reaches a
+/// work limit such as 16 compaction units. `Maintenance::maintain_metadata_while_due` in the
+/// embedded runtime returns the same result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {
     /// The namespace that this run maintained.
+    pub namespace_id: NamespaceId,
+    /// Whether work is still due when the run returns.
+    pub outcome: MetadataMaintenanceOutcome,
+    /// The compaction units that this run published. A unit is one bounded merge or one streaming
+    /// compaction of a family group.
+    pub compaction_units: u64,
+}
+
+/// Whether metadata maintenance left work due for a namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataMaintenanceOutcome {
+    /// Nothing is due now, and nothing can become due without a new commit.
+    CaughtUp,
+    /// Work is still due, or the run couldn't tell. Another run continues the work.
+    Due,
+    /// An outcome from a newer server.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What the WAL fold and the bounded compaction step of one metadata maintenance pass did.
+///
+/// The embedded runtime reports it. It isn't part of the HTTP API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataPassReport {
+    /// The namespace that this pass maintained.
     pub namespace_id: NamespaceId,
     /// What the WAL fold did.
     pub wal_fold: WalFoldStepOutcome,
@@ -1776,9 +1786,10 @@ pub struct MetadataMaintenanceResponse {
     pub compaction: CompactionStepOutcome,
 }
 
-/// What one metadata compaction run did.
+/// What one metadata compaction unit did.
+///
+/// The embedded runtime reports it. It isn't part of the HTTP API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataCompactionResponse {
     /// The namespace that this run compacted.
     pub namespace_id: NamespaceId,
@@ -1786,9 +1797,8 @@ pub struct MetadataCompactionResponse {
     pub compaction: MetadataCompactionOutcome,
 }
 
-/// The outcome of one metadata compaction run.
+/// The outcome of one metadata compaction unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum MetadataCompactionOutcome {
     /// No eligible family group was available, so nothing was published.
@@ -2763,63 +2773,49 @@ mod tests {
         );
     }
 
+    /// Checks that a `metadata` run reports its outcome and compaction units as flat fields next
+    /// to the job kind.
     #[test]
-    fn maintenance_outcomes_use_the_outcome_tag() {
+    fn a_metadata_run_reports_its_outcome_and_compaction_units() {
         assert_eq!(
-            serde_json::to_value(WalFoldStepOutcome::Folded {
-                manifest_head_seq: ChangeSeq(9),
-            })
-            .expect("serialize WAL fold outcome"),
-            serde_json::json!({"outcome": "folded", "manifest_head_seq": 9})
-        );
-        assert_eq!(
-            serde_json::to_value(CompactionStepOutcome::BoundedMergePublished {})
-                .expect("serialize compaction outcome"),
-            serde_json::json!({"outcome": "bounded_merge_published"})
-        );
-        assert_eq!(
-            serde_json::to_value(RunMaintenanceResponse::MetadataCompaction(
-                MetadataCompactionResponse {
+            serde_json::to_value(RunMaintenanceResponse::Metadata(
+                MetadataMaintenanceResponse {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                    compaction: MetadataCompactionOutcome::Published {
-                        manifest_no: ManifestNo(7),
-                        rows_read: 11,
-                        rows_written: 9,
-                        input_bytes: 120,
-                        output_bytes: 80,
-                        output_segments: 2,
-                    },
+                    outcome: MetadataMaintenanceOutcome::Due,
+                    compaction_units: 16,
                 },
             ))
-            .expect("serialize metadata compaction response"),
+            .expect("serialize metadata maintenance response"),
             serde_json::json!({
-                "kind": "metadata_compaction",
+                "kind": "metadata",
                 "namespace_id": "demo",
-                "compaction": {
-                    "outcome": "published",
-                    "manifest_no": 7,
-                    "rows_read": 11,
-                    "rows_written": 9,
-                    "input_bytes": 120,
-                    "output_bytes": 80,
-                    "output_segments": 2
-                }
+                "outcome": "due",
+                "compaction_units": 16
             })
+        );
+        assert_eq!(
+            serde_json::to_value(MetadataMaintenanceOutcome::CaughtUp)
+                .expect("serialize metadata maintenance outcome"),
+            serde_json::json!("caught_up")
         );
     }
 
+    /// Checks that a client decodes a metadata maintenance outcome from a newer server as
+    /// `Unknown`.
     #[test]
-    fn a_wal_fold_outcome_from_a_newer_server_decodes_as_unknown() {
-        let newer = serde_json::json!({"outcome": "deferred", "until_ms": 5});
-        let outcome: WalFoldStepOutcome =
-            serde_json::from_value(newer.clone()).expect("a newer outcome decodes");
-        assert_eq!(outcome, WalFoldStepOutcome::Unknown);
-        let outcome: CompactionStepOutcome =
-            serde_json::from_value(newer.clone()).expect("a newer outcome decodes");
-        assert_eq!(outcome, CompactionStepOutcome::Unknown);
-        let outcome: MetadataCompactionOutcome =
-            serde_json::from_value(newer).expect("a newer outcome decodes");
-        assert_eq!(outcome, MetadataCompactionOutcome::Unknown);
+    fn a_metadata_outcome_from_a_newer_server_decodes_as_unknown() {
+        let response: RunMaintenanceResponse = serde_json::from_value(serde_json::json!({
+            "kind": "metadata",
+            "namespace_id": "demo",
+            "outcome": "throttled",
+            "compaction_units": 2
+        }))
+        .expect("a newer outcome decodes");
+        let RunMaintenanceResponse::Metadata(metadata) = response else {
+            panic!("a metadata response decodes as metadata");
+        };
+        assert_eq!(metadata.outcome, MetadataMaintenanceOutcome::Unknown);
+        assert_eq!(metadata.compaction_units, 2);
     }
 
     #[test]
@@ -2853,12 +2849,7 @@ mod tests {
                     },
                 )),
             ),
-            (
-                serde_json::json!({"kind": "metadata_compaction"}),
-                Some(RunMaintenanceRequest::MetadataCompaction(
-                    MetadataCompactionRequest {},
-                )),
-            ),
+            (serde_json::json!({"kind": "metadata_compaction"}), None),
             (
                 serde_json::json!({"kind": "gc"}),
                 Some(RunMaintenanceRequest::Gc(GcRequest::default())),
@@ -2906,10 +2897,7 @@ mod tests {
             (serde_json::json!({"kind": "gc", "max_objects": 1}), None),
             (serde_json::json!({"kind": "gc", "max_steps": 1}), None),
             (serde_json::json!({"kind": "retention", "bogus": 1}), None),
-            (
-                serde_json::json!({"kind": "metadata_compaction", "bogus": 1}),
-                None,
-            ),
+            (serde_json::json!({"kind": "metadata", "bogus": 1}), None),
         ];
 
         for (body, expected) in cases {

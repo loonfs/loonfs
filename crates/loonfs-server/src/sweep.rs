@@ -341,9 +341,9 @@ impl Sweep {
                 .maintain_metadata_while_due(namespace_id, &inner.stop),
         );
         match result.await {
-            Some(Ok(outcome)) => {
+            Some(Ok(response)) => {
                 self.record_success(namespace_id, call);
-                outcome
+                response.outcome
             }
             Some(Err(error)) => {
                 self.record_failure(namespace_id, call, error.code(), &error);

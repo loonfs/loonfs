@@ -1,13 +1,21 @@
-//! Maintenance runs against namespaces that do not exist or are deleted.
+//! Maintenance runs: the metadata job's loop, and runs against namespaces
+//! that do not exist or are deleted.
 
 use super::*;
+use loonfs::{MaintainMetadataOptions, MaintenanceCancellation};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_test_support::ids::writer_id;
+use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
+use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::{CompactionStepOutcome, MetadataCompactionOutcome};
+use std::num::NonZeroUsize;
 use tower::ServiceExt;
 
 async fn run(
     router: &axum::Router,
     namespace_id: &NamespaceId,
     body: &str,
-) -> (StatusCode, String) {
+) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
         .oneshot(
@@ -25,12 +33,149 @@ async fn run(
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
-    let code = body["code"].as_str().map_or_else(
-        || body["kind"].as_str().expect("job kind").to_owned(),
-        str::to_owned,
+    (
+        status,
+        serde_json::from_slice(&bytes).expect("JSON response"),
+    )
+}
+
+/// Writes enough folded commits to each namespace that a metadata
+/// compaction is due, through a runtime that shuts down before the test's
+/// app starts, so no writer session compacts the namespaces on its own.
+async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId]) {
+    let actor = loonfs_test_support::test_actor();
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id(writer_id("history-writer"))
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(writer_id("history-maintenance"));
+    for namespace_id in namespaces {
+        writer
+            .create_namespace(namespace_id, &actor)
+            .await
+            .expect("create namespace");
+        let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+        for index in 0..DEFAULT_MAX_DELTA_RUNS + 2 {
+            namespace
+                .put_file(&format!("/file-{index}"), b"body", &actor)
+                .await
+                .expect("put a file");
+            // Each fold publishes the commit as its own delta run.
+            maintenance
+                .fold_wal(namespace_id)
+                .await
+                .expect("fold the tail");
+        }
+    }
+    writer.shutdown().await.expect("shut down the writer");
+}
+
+/// The metadata segment reads and the manifest publications that the store
+/// recorded.
+fn segment_reads_and_manifest_puts(store: &RecordingStore<LocalFsStore>) -> (usize, usize) {
+    let mut counts = (0, 0);
+    for operation in store.snapshot() {
+        let family = parse_object_key(operation.key()).map(|key| key.family());
+        match (&operation, family) {
+            (
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. },
+                Some(DurableObjectFamily::MetadataSegment),
+            ) => counts.0 += 1,
+            (
+                RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. },
+                Some(DurableObjectFamily::MetadataManifest),
+            ) => counts.1 += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// Checks that one `metadata` run does the work that a client's `metadata`
+/// and `metadata_compaction` runs did, with the same metadata segment reads
+/// and the same manifest publications.
+#[tokio::test]
+async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let [stepped, looping] = ["stepped", "looping"].map(namespace_id);
+    write_delta_runs(store.clone(), &[&stepped, &looping]).await;
+    let mut options = test_options(directory.path(), "metadata-loop");
+    options.grep = JobMode::Disabled;
+    let (router, state) = test_app(
+        options,
+        TestAppOptions {
+            store: Some(store.clone()),
+            // No run fits a one-byte merge, so every compaction unit streams.
+            execution_budget: Some(
+                loonfs::ExecutionBudget::builder()
+                    .max_merge_input_bytes(NonZeroUsize::MIN)
+                    .build(),
+            ),
+            ..TestAppOptions::default()
+        },
+    )
+    .await
+    .expect("app");
+
+    // These are the calls of a client that ran one step per `metadata` run
+    // and one unit per `metadata_compaction` run, until a step found nothing
+    // due.
+    store.reset();
+    let mut streamed_units = 0;
+    loop {
+        let step = state
+            .maintenance
+            .maintain_metadata_with_options(&stepped, &MaintainMetadataOptions::default())
+            .await
+            .expect("metadata step");
+        match step.compaction {
+            CompactionStepOutcome::NotNeeded {} => break,
+            CompactionStepOutcome::MetadataCompactionRequired {} => {
+                let unit = state
+                    .maintenance
+                    .compact_metadata(&stepped, &MaintenanceCancellation::new())
+                    .await
+                    .expect("compaction unit");
+                assert_matches!(unit.compaction, MetadataCompactionOutcome::Published { .. });
+                streamed_units += 1;
+            }
+            outcome => panic!("a one-byte merge budget streams every unit, not {outcome:?}"),
+        }
+    }
+    let stepped_requests = segment_reads_and_manifest_puts(&store);
+
+    store.reset();
+    let (status, body) = run(&router, &looping, r#"{"kind":"metadata"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "caught_up");
+    assert_eq!(body["compaction_units"], streamed_units);
+    let looping_requests = segment_reads_and_manifest_puts(&store);
+
+    assert!(
+        streamed_units > 0,
+        "the history needs a streaming compaction"
     );
-    (status, code)
+    assert_eq!(looping_requests, stepped_requests);
+    let mut manifests = Vec::new();
+    for namespace_id in [&stepped, &looping] {
+        let diagnostics = state
+            .maintenance
+            .diagnostics(namespace_id)
+            .await
+            .expect("diagnostics");
+        manifests.push(diagnostics.current_manifest_no);
+    }
+    assert_eq!(
+        manifests[0], manifests[1],
+        "both histories end on the same manifest"
+    );
+    state.runtime.shutdown().await.expect("shutdown writer");
 }
 
 #[tokio::test]
@@ -58,10 +203,13 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
         .expect("delete namespace");
 
     let mut answers = Vec::new();
-    for kind in ["metadata", "metadata_compaction", "gc", "retention"] {
+    for kind in ["metadata", "gc", "retention"] {
         for namespace_id in [&missing, &deleted] {
             let body = format!(r#"{{"kind":"{kind}"}}"#);
-            let (status, code) = run(&router, namespace_id, &body).await;
+            let (status, body) = run(&router, namespace_id, &body).await;
+            let code = body["code"]
+                .as_str()
+                .unwrap_or_else(|| body["kind"].as_str().expect("job kind"));
             answers.push(format!("{kind} {namespace_id}: {} {code}", status.as_u16()));
         }
     }
@@ -70,8 +218,6 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
         [
             "metadata missing: 404 namespace_not_found",
             "metadata deleted: 410 namespace_deleted",
-            "metadata_compaction missing: 404 namespace_not_found",
-            "metadata_compaction deleted: 410 namespace_deleted",
             "gc missing: 404 namespace_not_found",
             "gc deleted: 200 gc",
             "retention missing: 404 namespace_not_found",
