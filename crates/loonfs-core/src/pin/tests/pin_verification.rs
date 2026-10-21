@@ -221,7 +221,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
                 MetadataRunPolicy::default(),
                 None,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
             )
             .await
             .expect("delete namespace during verification");
@@ -348,7 +348,7 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
             &setup,
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
         )
         .await

@@ -95,7 +95,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
 ) -> PublishBatchReport {
     if candidates.is_empty() {
         return PublishBatchReport::unchanged(Vec::new());
@@ -440,7 +440,7 @@ mod tests {
                 tip: attempt.clone(),
                 attempt,
             },
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await;
 
@@ -522,7 +522,7 @@ mod tests {
                 attempt: batch.observe(),
                 tip: batch.observe(),
             },
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await;
 

@@ -671,7 +671,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -690,7 +690,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &later_context,
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
         )
         .await
@@ -753,7 +753,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -956,7 +956,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
         MetadataRunPolicy::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("delete");
@@ -1039,7 +1039,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
 
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for round in 0..boundary - 2 {
         let request = CommitIntent::single(
@@ -1882,7 +1882,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         None,
         &overrun,
         MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     else {

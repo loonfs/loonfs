@@ -19,7 +19,7 @@ pub use loonfs_objectstore::metrics::{
 
 pub(crate) use instruments::{
     fan_out_object_store_recorder, AdmissionInstruments, ExecutionBudgetInstruments,
-    PermitPoolGauges, PublishOutcome, ReadHeadSource, RuntimeInstruments,
+    PublishOutcome, ReadHeadSource, RuntimeInstruments,
 };
 
 use std::collections::BTreeMap;

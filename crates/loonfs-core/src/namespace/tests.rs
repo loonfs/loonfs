@@ -89,7 +89,7 @@ async fn two_creations_race_at_manifest_one() {
 /// check.
 #[tokio::test]
 async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -115,7 +115,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     publish(
         &mut NamespaceCommitEngine::new(
             source.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         ),
         &store,
         "inherited",
@@ -156,7 +156,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
 
 #[tokio::test]
 async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
@@ -213,7 +213,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
 
 #[tokio::test]
 async fn nested_forks_read_copied_runs_without_source_control_reads() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("source").expect("source");
@@ -223,7 +223,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     publish(
         &mut NamespaceCommitEngine::new(
             source.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         ),
         &store,
         "inherited",
@@ -258,7 +258,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     publish(
         &mut NamespaceCommitEngine::new(
             target.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         ),
         &store,
         "child",
@@ -362,7 +362,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
@@ -438,7 +438,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
 
 #[tokio::test]
 async fn fork_into_a_deleted_id_writes_no_source_pin() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -454,7 +454,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
     }
     NamespaceCommitEngine::new(
         target.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .delete_namespace(
         &store,
@@ -492,7 +492,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
 
 #[tokio::test]
 async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     for deleted in [false, true] {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
@@ -531,7 +531,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
                     Default::default(),
                     &setup,
                     crate::manifest::MetadataRunPolicy::default(),
-                    std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                    std::sync::Arc::new(crate::test_support::content_writes()),
                     crate::test_support::std_timer(),
                 )
                 .await

@@ -841,6 +841,9 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_compactions: const {
             std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
         },
+        max_concurrent_content_writes: const {
+            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
+        },
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),

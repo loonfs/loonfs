@@ -5,6 +5,7 @@ use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, 
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::wal::ProjectedContent;
+use crate::PermitPool;
 use bytes::Bytes;
 use loonfs_objectstore::{AssemblySource, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -12,7 +13,6 @@ use loonfs_types::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentLayout, ContentRef,
     ExtentObject,
 };
-use tokio::sync::Semaphore;
 
 /// Checks whole values before any chain writes its content.
 pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<Bytes>> {
@@ -58,7 +58,7 @@ pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: Layou
     lookup: &L,
     content: Option<&ProjectedContent>,
     content_ref: &ContentRef,
-    content_writes: &Semaphore,
+    content_writes: &PermitPool,
 ) -> Result<ContentLayout> {
     let location = ContentLocation::resolve(lookup, content, content_ref).await?;
     let mut layout =
@@ -103,7 +103,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     lookup: &L,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
-    content_writes: &Semaphore,
+    content_writes: &PermitPool,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
     let mut location = ContentLocation::resolve(lookup, Some(content), newest).await?;
@@ -180,10 +180,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         length: candidate_length,
     };
     let object_key = extent_object_key(&extent);
-    let _permit = content_writes
-        .acquire()
-        .await
-        .expect("content write semaphore should remain open");
+    let _permit = content_writes.acquire().await;
     let (sources, expected) =
         assembly_sources(store, &object_key, &extents[retained..], &candidate).await?;
     let written = store

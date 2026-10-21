@@ -30,7 +30,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
@@ -80,7 +80,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     expected_revision_no: Option<RevisionNo>,
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
@@ -119,7 +119,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// the revision, not about the content it would have extended.
 async fn plan_append<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
     revision: RevisionRecord,
@@ -150,7 +150,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
 
 async fn append_to<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
     base_row: &RevisionRecord,

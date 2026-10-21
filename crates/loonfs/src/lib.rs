@@ -209,8 +209,8 @@ pub use config::{
 };
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
-    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,
-    DEFAULT_MAX_CONTENT_WRITES, DEFAULT_MAX_READ_WORKING_BYTES,
+    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
+    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS, DEFAULT_MAX_READ_WORKING_BYTES,
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,

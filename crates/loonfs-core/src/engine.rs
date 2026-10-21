@@ -118,7 +118,7 @@ pub struct NamespaceEngine<S, M> {
     store: S,
     namespace_id: NamespaceId,
     mode: M,
-    content_writes: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<crate::PermitPool>,
     wall_clock: Arc<dyn crate::time::WallClock>,
     timer: Arc<dyn crate::time::MonotonicTimer>,
     subject: Option<Subject>,
@@ -353,7 +353,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     fn new(
         store: S,
         namespace_id: NamespaceId,
-        content_writes: Arc<tokio::sync::Semaphore>,
+        content_writes: Arc<crate::PermitPool>,
         mode: M,
     ) -> Self {
         Self {
@@ -379,7 +379,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
     pub fn reader(
         store: S,
         namespace_id: NamespaceId,
-        content_writes: Arc<tokio::sync::Semaphore>,
+        content_writes: Arc<crate::PermitPool>,
     ) -> Self {
         Self::new(store, namespace_id, content_writes, ReadOnly)
     }
@@ -391,7 +391,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         store: S,
         namespace_id: NamespaceId,
         writer_id: WriterId,
-        content_writes: Arc<tokio::sync::Semaphore>,
+        content_writes: Arc<crate::PermitPool>,
     ) -> Self {
         Self::new(store, namespace_id, content_writes, Writable { writer_id })
     }
@@ -1005,11 +1005,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
-        let _permit = self
-            .content_writes
-            .acquire()
-            .await
-            .expect("content write semaphore should remain open");
+        let _permit = self.content_writes.acquire().await;
         crate::protocol::upload_content(
             &self.store,
             &self.namespace_id,
@@ -1029,11 +1025,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         body: ByteStream,
     ) -> Result<UploadSession> {
-        let _permit = self
-            .content_writes
-            .acquire()
-            .await
-            .expect("content write semaphore should remain open");
+        let _permit = self.content_writes.acquire().await;
         crate::protocol::upload_content_stream(
             &self.store,
             &self.namespace_id,
@@ -1080,11 +1072,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject_id: Option<&loonfs_types::SubjectId>,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
-        let _permit = self
-            .content_writes
-            .acquire()
-            .await
-            .expect("content write semaphore should remain open");
+        let _permit = self.content_writes.acquire().await;
         crate::protocol::stage_owned_bytes(
             &self.store,
             self.own_catalog(catalog),
@@ -1122,11 +1110,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             None => ContentLocation::whole(content_ref)?,
         };
         let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
-        let _permit = self
-            .content_writes
-            .acquire()
-            .await
-            .expect("content write semaphore should remain open");
+        let _permit = self.content_writes.acquire().await;
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,
@@ -1149,11 +1133,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject_id: Option<&loonfs_types::SubjectId>,
         body: ByteStream,
     ) -> Result<PreparedContent> {
-        let _permit = self
-            .content_writes
-            .acquire()
-            .await
-            .expect("content write semaphore should remain open");
+        let _permit = self.content_writes.acquire().await;
         crate::protocol::stage_owned_stream(
             &self.store,
             self.own_catalog(catalog),
@@ -1413,7 +1393,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         );
         crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
             .await
@@ -1422,7 +1402,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         );
         let loaded = crate::namespace::read_anchor::load_read_anchor(
             &reader.store,
@@ -1460,7 +1440,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("writer store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         );
         crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
             .await
@@ -1470,7 +1450,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("reader store"),
             namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         );
         let crate::UploadSessionView {
             session: status,

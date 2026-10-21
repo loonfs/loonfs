@@ -170,6 +170,12 @@ pub struct ServerConfig {
     /// them. A merge never takes a fold permit.
     #[serde(default = "default_max_concurrent_compactions")]
     pub max_concurrent_compactions: NonZeroUsize,
+    /// Maximum content object writes this server runs at once, including the
+    /// content that folds write. A sustained
+    /// `loonfs.execution_budget.content_writes_waiting` gauge means this cap
+    /// is too low.
+    #[serde(default = "default_max_concurrent_content_writes")]
+    pub max_concurrent_content_writes: NonZeroUsize,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsConfig,
@@ -385,6 +391,10 @@ fn default_max_concurrent_folds() -> NonZeroUsize {
 
 fn default_max_concurrent_compactions() -> NonZeroUsize {
     const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap() }
+}
+
+fn default_max_concurrent_content_writes() -> NonZeroUsize {
+    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap() }
 }
 
 fn default_max_concurrent_downloads() -> NonZeroUsize {
@@ -715,8 +725,8 @@ impl ServerConfig {
     }
 
     /// Builds the execution budget of the server's one runtime from its fold,
-    /// compaction, and merge input limits and the totals of its
-    /// `[publication]` table, reporting to `recorder`.
+    /// compaction, content write, and merge input limits and the totals of
+    /// its `[publication]` table, reporting to `recorder`.
     pub(crate) fn execution_budget(
         &self,
         memory: &MemorySizing,
@@ -729,6 +739,7 @@ impl ServerConfig {
             .max_concurrent_reads(self.max_concurrent_reads)
             .max_concurrent_folds(self.max_concurrent_folds)
             .max_concurrent_compactions(self.max_concurrent_compactions)
+            .max_concurrent_content_writes(self.max_concurrent_content_writes)
             .max_merge_input_bytes(positive(memory.merge_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.publication.bytes))
@@ -789,7 +800,7 @@ impl MemoryTerm {
 #[derive(Debug)]
 pub(crate) struct MemorySizing {
     limit: Option<MemoryTerm>,
-    fixed: [(&'static str, u128); 6],
+    fixed: [(&'static str, u128); 7],
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
@@ -914,6 +925,11 @@ impl ServerConfig {
                 (self.max_concurrent_folds.get() as u128
                     + self.max_concurrent_compactions.get() as u128)
                     * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
+            ),
+            (
+                "content writes (`max_concurrent_content_writes` x 16 MiB, or 72 MiB on R2)",
+                self.max_concurrent_content_writes.get() as u128
+                    * u128::from(self.store.kind().max_assembly_buffer_bytes()),
             ),
             (
                 "completed upload sessions",
@@ -1146,35 +1162,36 @@ root = "unused"
                     494_927_872,
                     201_326_592,
                     134_217_728,
+                    536_870_912,
                     33_554_432,
                     0
                 ]
             );
-            assert_eq!(memory.headroom, 827_116_748);
+            assert_eq!(memory.headroom, 719_742_566);
             assert_eq!(
                 (memory.head.bytes, memory.head.source),
                 (16_777_216, "default"),
                 "the head budget isn't derived"
             );
-            assert_eq!(memory.managed, 2_452_828_980);
+            assert_eq!(memory.managed, 2_023_332_250);
             assert_eq!(
                 memory.segment.bytes,
                 if mode.serves() {
-                    735_848_694
+                    606_999_675
                 } else {
-                    981_131_592
+                    809_332_900
                 }
             );
-            assert_eq!(memory.wal_tail.bytes, 245_282_898);
-            assert_eq!(memory.wal_object.bytes, 73_584_869);
-            assert_eq!(memory.content_object.bytes, 171_698_028);
+            assert_eq!(memory.wal_tail.bytes, 202_333_225);
+            assert_eq!(memory.wal_object.bytes, 60_699_967);
+            assert_eq!(memory.content_object.bytes, 141_633_257);
             assert_eq!(
                 memory.grep.bytes,
-                if mode.serves() { 245_282_898 } else { 0 }
+                if mode.serves() { 202_333_225 } else { 0 }
             );
-            assert_eq!(memory.read_working.bytes, 490_565_796);
-            assert_eq!(memory.publication.bytes, 245_282_898);
-            assert_eq!(memory.merge_input.bytes, 122_641_449);
+            assert_eq!(memory.read_working.bytes, 404_666_450);
+            assert_eq!(memory.publication.bytes, 202_333_225);
+            assert_eq!(memory.merge_input.bytes, 101_166_612);
             for (term, _) in memory.terms() {
                 if term.name != memory.head.name {
                     assert_eq!(term.source, "derived");
@@ -1184,6 +1201,7 @@ root = "unused"
         assert_eq!(config.max_concurrent_reads.get(), 64);
         assert_eq!(config.max_concurrent_folds.get(), 2);
         assert_eq!(config.max_concurrent_compactions.get(), 2);
+        assert_eq!(config.max_concurrent_content_writes.get(), 32);
         assert_eq!(config.max_in_flight_requests.get(), 256);
         assert_eq!(config.max_connections.get(), 1024);
         assert_eq!(config.max_concurrent_uploads.get(), 8);
@@ -1203,7 +1221,7 @@ max_segment_bytes = 67108864
         let memory = config.validate().expect("smaller segment cache fits");
         assert_eq!(memory.segment.bytes, 67_108_864);
         assert_eq!(memory.segment.source, "set");
-        assert_eq!(memory.wal_tail.bytes, 245_282_898);
+        assert_eq!(memory.wal_tail.bytes, 202_333_225);
         config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
         let error = config.validate().expect_err("overrides must fit");
         assert!(error
@@ -1218,6 +1236,7 @@ max_connections = 512
 max_concurrent_uploads = 4
 max_concurrent_downloads = 4
 max_concurrent_compactions = 4
+max_concurrent_content_writes = 8
 max_read_working_bytes = 0
 max_merge_input_bytes = 67108864
 [metadata_cache]
@@ -1241,6 +1260,7 @@ max_cache_bytes = 0
                 247_463_936,
                 67_108_864,
                 201_326_592,
+                134_217_728,
                 33_554_432,
                 0
             ]
@@ -1268,7 +1288,7 @@ max_cache_bytes = 0
     }
 
     /// The terms that the error for a failed memory check lists.
-    const EVERY_MEMORY_TERM: [&str; 22] = [
+    const EVERY_MEMORY_TERM: [&str; 23] = [
         "memory_limit_bytes",
         "process",
         "max_connections",
@@ -1276,6 +1296,7 @@ max_cache_bytes = 0
         "max_concurrent_downloads",
         "max_concurrent_folds",
         "max_concurrent_compactions",
+        "max_concurrent_content_writes",
         "completed upload sessions",
         "local_cache.memory_bytes",
         "headroom",
@@ -1313,8 +1334,34 @@ max_cache_bytes = 0
         let memory = memory_config("memory_limit_bytes = 2147483648")
             .validate()
             .expect("2 GiB fits the default counts");
-        assert_eq!(memory.headroom, 397_620_019);
-        assert_eq!(memory.managed, 734_842_061);
+        assert_eq!(memory.headroom, 290_245_836);
+        assert_eq!(memory.managed, 305_345_332);
+    }
+
+    #[test]
+    fn content_writes_reserve_one_part_and_one_read_each_and_72_mib_on_r2() {
+        let local = memory_config("max_concurrent_content_writes = 4");
+        let mut r2 = local.clone();
+        r2.store = toml::from_str(
+            r#"
+kind = "cloudflare_r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+
+[credentials]
+kind = "static"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        )
+        .expect("parse an R2 store");
+        for (config, write_bytes) in [(local, 16 * super::MIB), (r2, 72 * super::MIB)] {
+            let memory = config.memory_sizing(None).expect("unsized config");
+            let (name, bytes) = memory.fixed[4];
+            assert!(name.contains("max_concurrent_content_writes"), "{name}");
+            assert_eq!(bytes, 4 * write_bytes as u128);
+        }
     }
 
     #[test]
@@ -1335,7 +1382,7 @@ disk_bytes = 107374182400
         for term in EVERY_MEMORY_TERM {
             assert!(message.contains(term), "missing {term}: {message}");
         }
-        for value in ["disk-tier buffers) = 603979776", "managed = 251658240"] {
+        for value in ["disk-tier buffers) = 603979776", "managed = 0,"] {
             assert!(message.contains(value), "missing {value}: {message}");
         }
         assert_invalid_field(error, "memory_limit_bytes");
@@ -1391,7 +1438,7 @@ disk_bytes = 107374182400
         let memory = memory_config("")
             .memory_sizing(limit)
             .expect("cgroup sizes config");
-        assert_eq!(memory.managed, 2_452_828_980);
+        assert_eq!(memory.managed, 2_023_332_250);
         assert_eq!(memory.limit.expect("cgroup limit").source, "derived");
     }
 
@@ -2013,6 +2060,10 @@ root = "/tmp/loonfs-server"
             config.max_concurrent_compactions.get(),
             loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
         );
+        assert_eq!(
+            config.max_concurrent_content_writes.get(),
+            loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES
+        );
         for field in ["max_in_flight_requests", "max_connections"] {
             let mut oversized = config.clone();
             let value = NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1)
@@ -2064,6 +2115,7 @@ root = "/tmp/loonfs-server"
             "max_connections",
             "max_concurrent_folds",
             "max_concurrent_compactions",
+            "max_concurrent_content_writes",
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",

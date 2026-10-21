@@ -22,7 +22,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let content_writes = tokio::sync::Semaphore::new(32);
+        let content_writes = crate::test_support::content_writes();
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("snapshot-source").expect("source");
         let target = NamespaceId::parse("snapshot-target").expect("target");
@@ -134,7 +134,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
     let gc_gate = BlockingStore::new(
         fixture.store.clone(),
@@ -219,7 +219,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
     let key = pin(&fixture.source, &fixture.snapshot.pin_id);
     let reads = AtomicUsize::new(0);
@@ -299,7 +299,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
     let writer = acquire_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
         .await
@@ -364,7 +364,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("snapshot-source").expect("source");
     let target = NamespaceId::parse("snapshot-target").expect("target");

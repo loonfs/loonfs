@@ -3054,7 +3054,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     timer.set_ms(0);
     crate::commit_engine::NamespaceCommitEngine::new(
         namespace.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .delete_namespace(
         store.inner(),

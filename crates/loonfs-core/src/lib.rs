@@ -30,7 +30,10 @@
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
-//! let content_writes = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
+//! let content_writes = std::sync::Arc::new(loonfs_core::PermitPool::new(
+//!     std::num::NonZeroUsize::new(32).expect("a nonzero limit"),
+//!     None,
+//! ));
 //! let engine = NamespaceEngine::writer(
 //!     store, namespace.clone(), writer_id.clone(), std::sync::Arc::clone(&content_writes),
 //! );
@@ -78,6 +81,7 @@ mod manifest;
 mod namespace;
 mod object_cache;
 mod options;
+mod permit_pool;
 mod pin;
 mod protocol;
 mod read_working_memory;
@@ -208,6 +212,7 @@ pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     GrantedRange, MAX_CURRENT_FILES_PER_STAT,
 };
+pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
     ListCheckpointFilesOptions, SnapshotPageCursor,

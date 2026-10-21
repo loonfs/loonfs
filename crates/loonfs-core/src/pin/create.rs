@@ -28,7 +28,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<PublicationReport<PinPayload>> {
     validate_pin_owner(&owner)?;

@@ -99,7 +99,7 @@ impl BatchDedup {
 )]
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession<'_>,

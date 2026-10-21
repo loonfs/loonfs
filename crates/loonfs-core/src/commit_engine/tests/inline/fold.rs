@@ -33,7 +33,7 @@ fn content_assemblies(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
 /// fold, and a retried commit finds its receipt there without reading the WAL.
 #[tokio::test]
 async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -85,7 +85,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     // A receipt replay does not land a put, so it also tests that discovery
     // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
@@ -211,7 +211,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
 
 #[tokio::test]
 async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -237,7 +237,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     engine.record_manifest_published(folded.manifest);
     NamespaceCommitEngine::new(
         engine.namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .session_writer_epoch(
         &store,
@@ -285,7 +285,7 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
 
 #[tokio::test]
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
         inline(&engine.namespace_id, Bytes::from_static(b"retained")),
@@ -398,7 +398,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
 /// finds the tail folded after the second session's epoch claim.
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut first, context) = setup().await;
     let values = vec![inline(&first.namespace_id, Bytes::from_static(b"shared"))];
     let candidate = candidate("race", values);
@@ -407,7 +407,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         .expect("publish");
     let mut second = NamespaceCommitEngine::new(
         first.namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     publish(&mut second, &store, &context, candidate)
         .await
@@ -581,7 +581,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
 
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -686,7 +686,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
 /// come from that tail, and reads and folds take the same tail.
 #[tokio::test]
 async fn a_published_fold_moves_the_position_with_its_tail() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let folded_value = inline(&engine.namespace_id, Bytes::from_static(b"folded"));
     publish(

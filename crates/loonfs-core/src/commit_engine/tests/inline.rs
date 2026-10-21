@@ -46,7 +46,7 @@ async fn setup() -> (
         .expect("bootstrap");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     engine
         .session_writer_epoch(&store, &context)
@@ -173,7 +173,7 @@ async fn commit_piece(
                 &view.projected_metadata_view(),
                 content.as_ref(),
                 &base,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
             )
             .await
             .expect("base layout"),
@@ -509,7 +509,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             input,
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("fold inline content");

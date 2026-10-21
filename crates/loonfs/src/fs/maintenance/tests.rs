@@ -839,7 +839,7 @@ impl Interceptor for RivalFold {
                     loonfs_types::StdMonotonicTimer::default(),
                 )),
                 loonfs_core::MetadataRunPolicy::default(),
-                &tokio::sync::Semaphore::new(32),
+                &loonfs_core::test_support::content_writes(),
             )
             .await
             .expect("the rival folds");
@@ -1215,7 +1215,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     };
     loonfs_core::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .delete_namespace(
         store.as_ref(),

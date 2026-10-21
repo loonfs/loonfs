@@ -30,7 +30,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(Arc::clone(&timer));
     ensure_namespace_absent(store, new_namespace_id).await?;

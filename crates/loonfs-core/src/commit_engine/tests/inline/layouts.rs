@@ -10,7 +10,6 @@ use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{Checksum, ExtentObject};
 use std::assert_matches;
-use tokio::sync::Semaphore;
 
 async fn layout(
     store: &RecordingStore<LocalFsStore>,
@@ -306,7 +305,7 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
         &view.projected_metadata_view(),
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("first write");
@@ -351,7 +350,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         &view.projected_metadata_view(),
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("whole before manifest");
@@ -363,7 +362,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             None,
             0,
             &access,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("equal whole download")
@@ -396,7 +395,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
                 Some(revision),
                 0,
                 &access,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
             )
             .await
             .expect("download revision");
@@ -559,7 +558,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
-    let content_writes = Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     store.reset();
     let target = view
         .direct_download_target(&store, "/file-0", None, 105, &access, &content_writes)
@@ -613,7 +612,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             None,
             0,
             &access,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("empty download");
@@ -703,7 +702,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         &namespace_id,
         vec![candidate],
         &context,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -1046,7 +1045,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let access = ReadAccess::live(Authorizer::Unrestricted);
         for revision in revisions {
             let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
-            let pool = Semaphore::new(1);
+            let pool = crate::PermitPool::new(std::num::NonZeroUsize::MIN, None);
             let absent = store.head(&key).await.expect("head").is_none();
             if absent {
                 blocked.block_next();
@@ -1064,11 +1063,11 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                     () = blocked.wait_until_blocked() => {}
                     result = &mut download => panic!("download finished before writing: {result:?}"),
                 }
-                assert_eq!(pool.available_permits(), 0);
+                assert_eq!(pool.counts().running, 1);
                 blocked.release();
             }
             let target = download.await.expect("download revision");
-            assert_eq!(pool.available_permits(), 1);
+            assert_eq!(pool.counts(), crate::PoolCounts::default());
             assert_eq!(target.ranges[0].object_key, key);
             assert_eq!(
                 target.content_ref.content_id,
@@ -1123,7 +1122,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
     );
     blocked.inner().block_next();
     store.reset();
-    let pool = Semaphore::new(1);
+    let pool = crate::PermitPool::new(std::num::NonZeroUsize::MIN, None);
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut fold = std::pin::pin!(fold_wal_tail(
         &blocked,
@@ -1139,13 +1138,13 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         _ = &mut fold => panic!("fold finished before the content write"),
     }
     assert!(futures::poll!(&mut fold).is_pending());
-    assert_eq!(pool.available_permits(), 0);
+    assert_eq!(pool.counts().running, 1);
     assert_eq!(blocked.puts().total, 1);
     blocked.inner().release();
     fold.await.expect("both chains finish");
     assert_eq!(blocked.puts().peak_in_flight, 1);
     assert_eq!(blocked.puts().total, 2);
-    assert_eq!(pool.available_permits(), 1);
+    assert_eq!(pool.counts(), crate::PoolCounts::default());
     assert_eq!(
         content_operations(&store)
             .iter()
@@ -1193,7 +1192,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let plan = session
         .prepare_commit(
             &store,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             &candidate,
             candidate
                 .semantic_identity(&namespace_id)
@@ -1286,7 +1285,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
         .await
         .expect("view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let content_writes = Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let store = denied.inner();
     store.reset();
     for path in ["/file-0", "/file-1"] {
@@ -1393,7 +1392,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             },
         ));
         let session = PublishPlanningSession::new(view.head(), view.wal_tail());
-        let content_writes = tokio::sync::Semaphore::new(32);
+        let content_writes = crate::test_support::content_writes();
         let mut plan = session
             .prepare_commit(
                 &store,

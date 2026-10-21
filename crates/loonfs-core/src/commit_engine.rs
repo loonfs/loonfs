@@ -627,7 +627,7 @@ pub type SharedWriterSessionStatus = Arc<Mutex<WriterSessionStatus>>;
 
 #[derive(Debug)]
 pub struct NamespaceCommitEngine {
-    content_writes: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<crate::PermitPool>,
     namespace_id: NamespaceId,
     publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
@@ -646,7 +646,7 @@ pub struct NamespaceCommitEngine {
 }
 
 impl NamespaceCommitEngine {
-    pub fn new(namespace_id: NamespaceId, content_writes: Arc<tokio::sync::Semaphore>) -> Self {
+    pub fn new(namespace_id: NamespaceId, content_writes: Arc<crate::PermitPool>) -> Self {
         Self {
             namespace_id,
             content_writes,
@@ -1102,7 +1102,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
-    content_writes: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<crate::PermitPool>,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Vec<Result<Commit>> {
     let mut engine =
@@ -1136,7 +1136,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     context: &MutationContext,
     fold_policy: MetadataRunPolicy,
-    content_writes: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<crate::PermitPool>,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<DeleteNamespaceResponse> {
     NamespaceCommitEngine::new(namespace_id.clone(), content_writes)

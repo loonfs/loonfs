@@ -53,7 +53,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -507,7 +507,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             &context,
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
         )
         .await
@@ -664,7 +664,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
             &context,
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
         )
         .await
@@ -703,7 +703,7 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -780,7 +780,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await

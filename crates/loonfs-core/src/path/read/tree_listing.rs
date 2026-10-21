@@ -249,7 +249,7 @@ mod tests {
             &namespace_id,
             vec![CommitCandidate::new(intent)],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await

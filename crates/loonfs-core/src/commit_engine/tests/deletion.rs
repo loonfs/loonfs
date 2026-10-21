@@ -33,7 +33,7 @@ async fn deletion_budget_includes_writer_acquisition() {
     let clock = Arc::new(ManualClock::new(0));
     let mut publisher = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(clock.clone());
     store.block_next();
@@ -77,7 +77,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         .expect("bootstrap");
     let mut stale = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     stale
         .publish_batch(
@@ -100,7 +100,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         .expect("publish before deletion");
     NamespaceCommitEngine::new(
         namespace_id,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .delete_namespace(
         &store,
@@ -160,7 +160,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
     let clock = Arc::new(ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(clock.clone());
     let value = InlineContent::new(
@@ -219,7 +219,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             &deadline,
             crate::manifest::MetadataRunPolicy::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect_err("deletion rejected before folding");

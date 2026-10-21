@@ -26,7 +26,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("fork");
@@ -82,7 +82,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Default::default(),
             &setup,
             crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await

@@ -27,7 +27,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&crate::cache::MetadataSegmentCache>,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(
         store,

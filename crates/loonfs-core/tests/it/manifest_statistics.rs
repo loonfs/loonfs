@@ -85,7 +85,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         ];
         let mut engine = NamespaceCommitEngine::new(
             ns.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(loonfs_core::test_support::content_writes()),
         );
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitIntent::single(
@@ -135,7 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             input.clone(),
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
             loonfs_core::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &loonfs_core::test_support::content_writes(),
         )
         .await
         .expect("fold");
@@ -158,7 +158,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             input,
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
             loonfs_core::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &loonfs_core::test_support::content_writes(),
         )
         .await
         .expect("repeat fold");

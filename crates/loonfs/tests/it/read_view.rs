@@ -322,7 +322,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         store.clone(),
         namespace_id.clone(),
         loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .claim_compactor()
     .await

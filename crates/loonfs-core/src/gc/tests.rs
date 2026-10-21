@@ -369,7 +369,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         DeleteNamespaceOptions::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -528,7 +528,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");
@@ -538,7 +538,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         DeleteNamespaceOptions::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -585,7 +585,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         DeleteNamespaceOptions::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -1146,7 +1146,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
     let content_ref = stored.content_ref().clone();
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_batch(
         store,
@@ -1209,7 +1209,7 @@ async fn publish_inline(
     );
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_batch(
         store,
@@ -1456,7 +1456,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     let error = crate::NamespaceEngine::reader(
         &store,
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .read_content_ref(&first, u64::MAX, &read_context(&store, &namespace_id).await)
     .await
@@ -1547,7 +1547,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");
@@ -1594,7 +1594,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
     let target = crate::NamespaceEngine::reader(
         &store,
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .direct_download_target(
         "/owned-0",
@@ -2167,7 +2167,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -2183,7 +2183,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -2343,7 +2343,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");
@@ -2381,7 +2381,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         DeleteNamespaceOptions::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -2531,7 +2531,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");
@@ -2593,7 +2593,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");
@@ -2670,7 +2670,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -2687,7 +2687,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork retry after abandonment");
@@ -3076,7 +3076,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         Default::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -3135,7 +3135,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             Default::default(),
             &setup,
             crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await
@@ -3581,7 +3581,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
                 &setup,
                 Default::default(),
                 None,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
                 crate::test_support::std_timer(),
             )
             .await
@@ -3658,7 +3658,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         Default::default(),
         &context(deleted_at),
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -3709,7 +3709,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -3770,7 +3770,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("fork");

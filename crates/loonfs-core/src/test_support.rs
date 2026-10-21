@@ -13,6 +13,15 @@ pub fn observed_now() -> crate::time::Observation {
     crate::time::Observation::now(std_timer())
 }
 
+/// A pool of 32 content write permits that reports its counts to nothing,
+/// for a test whose content write limit doesn't matter.
+pub fn content_writes() -> crate::PermitPool {
+    crate::PermitPool::new(
+        std::num::NonZeroUsize::new(32).expect("32 is nonzero"),
+        None,
+    )
+}
+
 /// Compares an opaque token with its golden fixture in `tests/golden/tokens`.
 ///
 /// `UPDATE_GOLDEN=1` rewrites the fixture first.
@@ -68,7 +77,7 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
 ) -> crate::error::Result<()> {
     let mut engine = crate::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for _ in 0..count {
         let commit_id = loonfs_types::CommitId::generate();

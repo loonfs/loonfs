@@ -225,7 +225,7 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         namespace_id.clone(),
         loonfs_types::WriterId::parse("writer-a").expect("writer id"),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
     .await

@@ -132,7 +132,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         Default::default(),
         &context(clock.now_ms()),
         MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -143,7 +143,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
     let mut engine = NamespaceCommitEngine::new(
         namespace_id,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(clock.clone());
     store.reset();
@@ -182,7 +182,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     engine
@@ -292,7 +292,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     let replay = CommitCandidate::new(directory_request("original", "original"));
@@ -421,7 +421,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     let replay = CommitCandidate::new(directory_request("original", "original"));
@@ -562,7 +562,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     store.reset();
