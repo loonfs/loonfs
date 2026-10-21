@@ -44,7 +44,6 @@ pub(crate) fn client(
             .get_or_init(|| loonfs_types::generated_id("content-token").into())
             .clone(),
         request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
-        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         store_kind,
         auth_policy: AuthPolicy::Unauthenticated,
     });

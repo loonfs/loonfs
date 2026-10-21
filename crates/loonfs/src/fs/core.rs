@@ -67,6 +67,8 @@ pub(crate) struct WriterIdentity {
 /// every [`Maintenance`](crate::Maintenance) value of the runtime.
 pub(crate) struct WriterBits {
     pub(crate) inline_content: crate::InlineContentPolicy,
+    /// When this runtime's sessions and maintenance fold a WAL tail.
+    pub(crate) fold_trigger: crate::publisher::FoldTrigger,
     pub(crate) identity: WriterIdentity,
     /// Where every fold and merge this runtime runs takes its permit.
     pub(crate) execution_budget: ExecutionBudget,

@@ -85,6 +85,69 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
     server.runtime.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a tick folds at the runtime's configured inline fold size, so
+/// a quiet session's 3 MiB tail under an 8 MiB trigger waits for the idle
+/// fold age.
+#[tokio::test]
+async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_idle() {
+    const MIB: usize = 1024 * 1024;
+    const VALUE_BYTES: usize = 256 * 1024;
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let mut config = sweep_config(None);
+    config.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
+    config.inline_content.inline_content_fold_at_bytes = Some(8 * MIB);
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespace_id = namespace_id("large-fold-trigger");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open");
+    store.reset();
+    for index in 0..3 * MIB / VALUE_BYTES {
+        held.put_file(
+            &format!("/value-{index}"),
+            &vec![b'x'; VALUE_BYTES],
+            &test_actor(),
+        )
+        .await
+        .expect("publish");
+    }
+    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    assert!(
+        store
+            .take()
+            .iter()
+            .all(|operation| !operation.key().starts_with(&content_prefix)),
+        "every value is written inline, so the tail has 3 MiB of inline bytes"
+    );
+    let tail_objects = server.wal_tail_objects(&namespace_id).await;
+    server.tick_after(config.tick_interval_ms).await;
+    assert!(
+        !held.metadata_caught_up(),
+        "the tail waits for its idle fold age"
+    );
+    assert_eq!(
+        server.wal_tail_objects(&namespace_id).await,
+        tail_objects,
+        "a tail below the configured fold size stays unfolded"
+    );
+    server.tick_after(config.idle_fold_after_ms).await;
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn ticks_leave_unheld_namespaces_for_the_daily_pass() {
     let directory = tempdir().expect("tempdir");

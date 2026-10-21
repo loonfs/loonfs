@@ -6,8 +6,8 @@ use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
 };
 use loonfs::{
-    ChangeSeq, ErrorCode, MaintainMetadataOptions, Maintenance, MaintenanceCancellation,
-    MetadataMaintenanceOutcome, NamespaceId, SharedObjectStore,
+    ChangeSeq, ErrorCode, Maintenance, MaintenanceCancellation, MetadataMaintenanceOutcome,
+    NamespaceId, SharedObjectStore,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -86,7 +86,6 @@ pub struct Sweep {
 struct SweepInner {
     store: SharedObjectStore,
     maintenance: Maintenance,
-    metadata: MaintainMetadataOptions,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces>,
     max_concurrent_visits: usize,
@@ -183,10 +182,6 @@ impl Sweep {
             inner: Arc::new(SweepInner {
                 store,
                 maintenance,
-                metadata: MaintainMetadataOptions {
-                    idle_fold_after_ms: config.idle_fold_after_ms,
-                    ..MaintainMetadataOptions::default()
-                },
                 grep,
                 namespaces,
                 max_concurrent_visits: config.max_concurrent_maintenance,
@@ -341,11 +336,9 @@ impl Sweep {
         let result = self.contain(
             namespace_id,
             call,
-            inner.maintenance.maintain_metadata_while_due_with_options(
-                namespace_id,
-                &inner.stop,
-                &inner.metadata,
-            ),
+            inner
+                .maintenance
+                .maintain_metadata_while_due(namespace_id, &inner.stop),
         );
         match result.await {
             Some(Ok(outcome)) => {

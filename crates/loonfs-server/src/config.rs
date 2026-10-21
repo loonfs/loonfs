@@ -467,7 +467,7 @@ fn default_max_merge_input_bytes() -> usize {
 }
 
 fn default_idle_fold_after_ms() -> u64 {
-    loonfs::MaintainMetadataOptions::default().idle_fold_after_ms
+    loonfs::DEFAULT_IDLE_FOLD_AFTER_MS
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -1877,12 +1877,6 @@ root = "/tmp/loonfs-server"
         assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
         assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
         assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
-        assert_eq!(
-            loonfs::MaintainMetadataOptions::default()
-                .inline_content_fold_at_bytes
-                .get(),
-            defaults.inline_content_fold_at_bytes
-        );
         assert_eq!(InlineContentConfig::default().effective_policy(), defaults);
         for (source, threshold) in [
             ("", Some(64 * 1024)),

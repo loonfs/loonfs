@@ -257,7 +257,6 @@ pub async fn app(
         inline_content: config.inline_content.effective_policy(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
-        idle_fold_after_ms: config.idle_fold_after_ms,
         store_kind: config.store.kind(),
         auth_policy: config
             .auth_token
@@ -335,6 +334,7 @@ pub(super) async fn build_handles(
         .min_publish_interval_ms(config.min_publish_interval_ms)
         .publication_policy(config.publication_policy())
         .inline_content(config.inline_content.effective_policy())
+        .idle_fold_after_ms(std::num::NonZeroU64::new(config.idle_fold_after_ms))
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.

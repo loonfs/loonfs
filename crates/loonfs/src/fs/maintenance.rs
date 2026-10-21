@@ -47,6 +47,25 @@ pub enum MetadataMaintenanceOutcome {
     Due,
 }
 
+/// Whether metadata maintenance folds the WAL tail before it compacts.
+#[derive(Debug, Clone, Copy)]
+enum TailFold {
+    /// Folds the tail when the runtime's fold trigger finds it due, with
+    /// `max_wal_tail_objects` as the WAL object count.
+    WhenDue { max_wal_tail_objects: u64 },
+    /// Leaves the tail to the writer session's fold task and the host's idle
+    /// fold.
+    Never,
+}
+
+impl TailFold {
+    fn from_options(options: &MaintainMetadataOptions) -> Self {
+        Self::WhenDue {
+            max_wal_tail_objects: options.max_wal_tail_objects.get(),
+        }
+    }
+}
+
 /// What one metadata step did, and whether it left a WAL fold due.
 struct MetadataStepReport {
     response: MetadataMaintenanceResponse,
@@ -218,10 +237,12 @@ impl Maintenance {
             .await
     }
 
-    /// Folds the WAL tail at the WAL object threshold, at the inline byte
-    /// threshold when the writer knows the count, or once the tail's newest
-    /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
-    /// runs one bounded compaction step. A fold waits for a fold permit from
+    /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at the
+    /// runtime's inline fold size when this runtime's writer session knows
+    /// the tail's inline bytes, or once the tail's newest commit reaches the
+    /// runtime's idle fold age on this handle's wall clock (see
+    /// [`LoonFsBuilder::idle_fold_after_ms`](crate::LoonFsBuilder::idle_fold_after_ms)).
+    /// Then runs one bounded compaction step. A fold waits for a fold permit from
     /// the runtime's execution budget, and a step that finds work waits for
     /// a compaction permit from it.
     #[tracing::instrument(
@@ -242,31 +263,46 @@ impl Maintenance {
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataMaintenanceResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.metadata_step(namespace_id, options)
-            .await
-            .map(|step| step.response)
+        self.metadata_step(
+            namespace_id,
+            TailFold::from_options(options),
+            options.compaction_policy,
+        )
+        .await
+        .map(|step| step.response)
     }
 
     async fn metadata_step(
         &self,
         namespace_id: &NamespaceId,
-        options: &MaintainMetadataOptions,
+        tail_fold: TailFold,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<MetadataStepReport> {
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
-        let inline_bytes = if status.wal_tail_objects > 0 {
-            self.publisher
-                .wal_tail_inline_bytes(namespace_id)
-                .await
-                .unwrap_or(0)
-        } else {
-            0
+        let trigger = self.writer.fold_trigger;
+        let idle_fold_due_at_ms = status
+            .wal_tail_newest_commit_at_ms
+            .and_then(|committed_at_ms| trigger.idle_fold_due_at_ms(committed_at_ms));
+        let fold = match tail_fold {
+            TailFold::WhenDue {
+                max_wal_tail_objects,
+            } => {
+                let inline_bytes = if status.wal_tail_objects > 0 {
+                    self.publisher
+                        .wal_tail_inline_bytes(namespace_id)
+                        .await
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                trigger.fold_is_due(max_wal_tail_objects, status.wal_tail_objects, inline_bytes)
+                    || idle_fold_due_at_ms.is_some_and(|due_at_ms| self.core.now_ms() >= due_at_ms)
+            }
+            TailFold::Never => false,
         };
-        let now_ms = self.core.now_ms();
-        let fold = options.fold_is_due(status.wal_tail_objects, inline_bytes)
-            || options.idle_fold_is_due(status.wal_tail_newest_commit_at_ms, now_ms);
         let response = self
-            .fold_then_compact(namespace_id, fold, &anchor, options.compaction_policy)
+            .fold_then_compact(namespace_id, fold, &anchor, compaction_policy)
             .await?;
         tracing::debug!(
             wal_tail_objects_before = status.wal_tail_objects,
@@ -276,9 +312,14 @@ impl Maintenance {
         );
         let wal_caught_up = match response.wal_fold {
             WalFoldStepOutcome::Folded { .. } => true,
-            WalFoldStepOutcome::NotNeeded => {
-                options.idle_fold_after_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
-            }
+            // A tail that waits for its idle fold age leaves metadata due. A
+            // session's own compaction doesn't fold, so a tail with a commit
+            // in it leaves metadata due for the session's fold task or the
+            // host's idle fold.
+            WalFoldStepOutcome::NotNeeded => match tail_fold {
+                TailFold::WhenDue { .. } => idle_fold_due_at_ms.is_none(),
+                TailFold::Never => status.wal_tail_newest_commit_at_ms.is_none(),
+            },
             WalFoldStepOutcome::AlreadyPublished { .. }
             | WalFoldStepOutcome::RetriesExhausted { .. }
             | WalFoldStepOutcome::Unknown => false,
@@ -328,6 +369,46 @@ impl Maintenance {
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
     /// on fencing or cancellation, when streaming compaction does not finish,
     /// or while a tail waits for the idle fold age.
+    pub async fn maintain_metadata_while_due_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        cancellation: &MaintenanceCancellation,
+        options: &MaintainMetadataOptions,
+    ) -> Result<MetadataMaintenanceOutcome> {
+        // Boxing erases the loop's nested step futures. Without it, a host
+        // that awaits this call inside its own scheduling futures exceeds
+        // rustc's type-recursion depth.
+        Box::pin(self.metadata_while_due(
+            namespace_id,
+            cancellation,
+            TailFold::from_options(options),
+            options.compaction_policy,
+        ))
+        .await
+    }
+
+    /// Repeats metadata steps without a fold while compaction is due, for a
+    /// writer session whose fold task folds its own tail.
+    ///
+    /// Stops and returns like
+    /// [`Self::maintain_metadata_while_due_with_options`], except that a tail
+    /// with a commit in it leaves metadata due.
+    pub(crate) async fn compact_metadata_while_due(
+        &self,
+        namespace_id: &NamespaceId,
+        cancellation: &MaintenanceCancellation,
+    ) -> Result<MetadataMaintenanceOutcome> {
+        self.metadata_while_due(
+            namespace_id,
+            cancellation,
+            TailFold::Never,
+            MaintainMetadataOptions::default().compaction_policy,
+        )
+        .await
+    }
+
+    /// Runs metadata steps while compaction is due, and `tail_fold` decides
+    /// whether each step may fold the tail first.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintain_metadata_while_due",
@@ -340,11 +421,12 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn maintain_metadata_while_due_with_options(
+    async fn metadata_while_due(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
-        options: &MaintainMetadataOptions,
+        tail_fold: TailFold,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<MetadataMaintenanceOutcome> {
         self.core.record_trace_context(&tracing::Span::current());
         let mut lost_races = 0;
@@ -356,7 +438,7 @@ impl Maintenance {
             let step = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Ok(MetadataMaintenanceOutcome::Due),
-                step = self.metadata_step(namespace_id, options) => step?,
+                step = self.metadata_step(namespace_id, tail_fold, compaction_policy) => step?,
             };
             let won = match step.response.compaction {
                 CompactionStepOutcome::BoundedMergePublished {} => true,

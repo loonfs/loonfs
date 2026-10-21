@@ -478,7 +478,7 @@ The threshold can't exceed 256 KiB, and the WAL object budget can't exceed 4 MiB
 
 The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. At the `MAX_UNFOLDED_WAL_OBJECTS` write stop, new commits wait for a fold regardless of the inline tail limit.
 
-Explicit metadata maintenance uses `MaintainMetadataOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
+Explicit metadata maintenance and the maintenance sweep fold at the same `inline_content_fold_at_bytes` as the writer session, when the server's session for the namespace knows the tail's inline bytes. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
 
@@ -607,7 +607,7 @@ A namespace whose writes stop before its tail reaches the fold thresholds is fol
 
 Set `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata` maintenance request uses the same period as the sweep. An embedded CLI profile doesn't read the server config, and it always uses 15 minutes.
 
-Embedded hosts pass `MaintainMetadataOptions::idle_fold_after_ms` to `Maintenance::maintain_metadata_while_due_with_options`, where zero also turns the rule off. Both `maintain_metadata_while_due` forms return `Result<bool>`. `true` means that, under the options used, no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
+An embedded host sets the period with `LoonFsBuilder::idle_fold_after_ms`, where `None` turns the rule off, and every maintenance call on that runtime uses it. Both `maintain_metadata_while_due` forms return a `MetadataMaintenanceOutcome`. `CaughtUp` means that no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
 
 ## Current limitations
 

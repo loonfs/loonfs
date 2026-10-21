@@ -143,6 +143,18 @@ impl Namespace<Writable> {
         self.session().metadata_caught_up()
     }
 
+    /// Returns when this session's last publication reaches the runtime's
+    /// idle fold age, on the runtime's monotonic clock.
+    ///
+    /// Returns `None` before the session's first publication, and when the
+    /// runtime doesn't fold idle tails (see
+    /// [`LoonFsBuilder::idle_fold_after_ms`](crate::LoonFsBuilder::idle_fold_after_ms)).
+    /// Reads memory only. This is a hook for a host that runs its own
+    /// maintenance sweep, such as the `loonfs-server` sweep.
+    pub fn idle_fold_due_at_ms(&self) -> Option<u64> {
+        self.session().idle_fold_due_at_ms()
+    }
+
     /// Records a host's metadata result only if no newer commit has published.
     ///
     /// This is a hook for a host that runs its own maintenance sweep, such as
