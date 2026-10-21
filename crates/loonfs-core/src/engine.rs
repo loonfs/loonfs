@@ -2,7 +2,7 @@
 //! uploads, snapshots, and maintenance.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
-use crate::cache::{HeadStateCache, MetadataSegmentCache, ObjectCache};
+use crate::cache::{HeadAndWalTailCache, MetadataSegmentCache, ObjectCache};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -62,11 +62,11 @@ pub struct RuntimeReadContext {
     /// Verified manifest used to replay the pinned WAL tail.
     pub basis: MetadataBasis,
     pub segment_cache: Arc<MetadataSegmentCache>,
-    pub head_state: Arc<HeadStateCache>,
+    pub head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
     pub object_cache: Arc<ObjectCache>,
     /// The projected WAL tail above `basis` at `head`, when the context
     /// starts from a writer session's position. Reads then take this tail
-    /// and don't look one up in `head_state`.
+    /// and don't look one up in `head_and_wal_tail_cache`.
     pub tail: Option<Arc<ProjectedWalTail>>,
 }
 
@@ -76,7 +76,7 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
         &context.basis,
         context.tail.as_ref(),
         Some(&context.segment_cache),
-        Some(&context.head_state),
+        Some(&context.head_and_wal_tail_cache),
         Some(&context.object_cache),
     )
 }
@@ -1435,7 +1435,7 @@ mod tests {
             basis: loaded.basis(),
             head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-            head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+            head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
             object_cache: Arc::new(ObjectCache::unshared(0, 0)),
             tail: None,
         };

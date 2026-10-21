@@ -1,5 +1,5 @@
 //! Heap weights charged to metadata caches, the per-view block memo,
-//! head-state budgets, and change feed pages.
+//! head and WAL-tail budgets, and change feed pages.
 //!
 //! A weight counts the bytes a value asks the allocator for: every slot a
 //! container reserved, filled or not, and every string, vector, map table,

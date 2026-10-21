@@ -2,9 +2,9 @@
 
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
-    CacheScope, CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache, ObjectCache,
-    ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions, SharedHeadState,
-    SharedObjects, SharedSegmentBlocks, StoredMetadataBlockCache,
+    CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache,
+    ObjectCache, ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions,
+    SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks, StoredMetadataBlockCache,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -15,11 +15,11 @@ mod tests;
 
 /// Default limit for decoded segment blocks and manifests: 256 MiB.
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
-/// Default limit for namespace head anchors: 16 MiB (enough for about 18,000
+/// Default limit for namespace heads: 16 MiB (enough for about 18,000
 /// namespaces).
 pub const DEFAULT_MAX_HEAD_BYTES: usize = 16 * 1024 * 1024;
 /// Default limit for WAL-tail projections: 64 MiB.
-pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_WAL_TAIL_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 32 MiB (enough for about
 /// 125,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
@@ -41,8 +41,8 @@ pub(crate) enum CacheLookup {
 
 /// Decoded metadata that one or more runtimes read through.
 ///
-/// The cache keeps segment blocks, manifests, namespace head anchors,
-/// WAL-tail projections, WAL objects, small content objects, and the
+/// The cache keeps segment blocks, manifests, namespace heads, WAL-tail
+/// projections, WAL objects, small content objects, and the
 /// completed upload sessions that garbage collection reuses between passes.
 ///
 /// Runtimes built with the cache over clones of one [`SharedObjectStore`]
@@ -52,7 +52,7 @@ pub(crate) enum CacheLookup {
 /// the same keys. Two runtimes built from the same
 /// [`StoreConfig`](crate::StoreConfig) each create their own object-store
 /// client, so they don't share entries. Each
-/// [`LoonFs`](crate::LoonFs) keeps its own head anchors, WAL-tail
+/// [`LoonFs`](crate::LoonFs) keeps its own namespace heads, WAL-tail
 /// projections, and completed upload sessions. The limits bound the whole
 /// cache, and the least recently used entry is evicted first, whichever
 /// runtime it belongs to. Clones share the cache. A runtime built without
@@ -64,13 +64,13 @@ pub struct MetadataCache {
 
 struct MetadataCacheInner {
     segment_blocks: Arc<SharedSegmentBlocks>,
-    head_state: Arc<SharedHeadState>,
+    heads_and_wal_tails: Arc<SharedHeadsAndWalTails>,
     completed_upload_sessions: Arc<SharedCompletedUploadSessions>,
     objects: Arc<SharedObjects>,
     next_runtime_scope: AtomicU64,
     object_store_scopes: Mutex<ObjectStoreScopes>,
-    head_anchor_hits: AtomicUsize,
-    head_anchor_misses: AtomicUsize,
+    head_hits: AtomicUsize,
+    head_misses: AtomicUsize,
 }
 
 impl fmt::Debug for MetadataCache {
@@ -94,7 +94,7 @@ impl MetadataCache {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
             max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
-            max_head_state_bytes: DEFAULT_MAX_HEAD_STATE_BYTES,
+            max_wal_tail_bytes: DEFAULT_MAX_WAL_TAIL_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
             max_wal_object_bytes: DEFAULT_MAX_WAL_OBJECT_BYTES,
             max_content_object_bytes: DEFAULT_MAX_CONTENT_OBJECT_BYTES,
@@ -106,8 +106,8 @@ impl MetadataCache {
     /// runtime that reads through it.
     pub fn stats(&self) -> MetadataCacheStats {
         let segments = self.inner.segment_blocks.stats();
-        let heads = self.inner.head_state.head_stats();
-        let tails = self.inner.head_state.tail_stats();
+        let heads = self.inner.heads_and_wal_tails.head_stats();
+        let tails = self.inner.heads_and_wal_tails.tail_stats();
         let wal_objects = self.inner.objects.wal_object_stats();
         let content_objects = self.inner.objects.content_object_stats();
         let completed_sessions = self.inner.completed_upload_sessions.stats();
@@ -119,8 +119,8 @@ impl MetadataCache {
             segment_filter_skips: segments.filter_skips,
             segment_filter_false_positives: segments.filter_false_positives,
             segment_bytes: segments.cached_decoded_bytes,
-            head_anchor_hits: self.inner.head_anchor_hits.load(Ordering::Relaxed),
-            head_anchor_misses: self.inner.head_anchor_misses.load(Ordering::Relaxed),
+            head_hits: self.inner.head_hits.load(Ordering::Relaxed),
+            head_misses: self.inner.head_misses.load(Ordering::Relaxed),
             head_evictions: heads.evictions,
             head_evicted_bytes: heads.evicted_decoded_bytes,
             head_rejections: heads.rejections,
@@ -129,29 +129,32 @@ impl MetadataCache {
             wal_tail_hits: tails.hits,
             wal_tail_misses: tails.misses,
             wal_tail_inserts: tails.inserts,
-            head_state_evictions: tails.evictions,
-            head_state_evicted_bytes: tails.evicted_decoded_bytes,
-            head_state_rejections: tails.rejections,
-            head_state_rejected_bytes: tails.rejected_decoded_bytes,
-            head_state_bytes: tails.cached_decoded_bytes,
+            wal_tail_evictions: tails.evictions,
+            wal_tail_evicted_bytes: tails.evicted_decoded_bytes,
+            wal_tail_rejections: tails.rejections,
+            wal_tail_rejected_bytes: tails.rejected_decoded_bytes,
+            wal_tail_bytes: tails.cached_decoded_bytes,
             wal_object_hits: wal_objects.hits,
             wal_object_misses: wal_objects.misses,
             wal_object_inserts: wal_objects.inserts,
+            wal_object_evictions: wal_objects.evictions,
+            wal_object_bytes: wal_objects.cached_decoded_bytes,
             content_object_hits: content_objects.hits,
             content_object_misses: content_objects.misses,
             content_object_inserts: content_objects.inserts,
-            object_evictions: wal_objects.evictions + content_objects.evictions,
-            object_bytes: wal_objects.cached_decoded_bytes + content_objects.cached_decoded_bytes,
-            completed_session_hits: completed_sessions.hits,
-            completed_session_misses: completed_sessions.misses,
-            completed_session_evictions: completed_sessions.evictions,
-            completed_session_bytes: completed_sessions.cached_decoded_bytes,
+            content_object_evictions: content_objects.evictions,
+            content_object_bytes: content_objects.cached_decoded_bytes,
+            completed_upload_session_hits: completed_sessions.hits,
+            completed_upload_session_misses: completed_sessions.misses,
+            completed_upload_session_evictions: completed_sessions.evictions,
+            completed_upload_session_bytes: completed_sessions.cached_decoded_bytes,
         }
     }
 
     /// Returns one runtime's views of the cache, with segment blocks, WAL
-    /// objects, and content objects under the scope of `store`, and head
-    /// state and completed upload sessions under a new scope for the runtime.
+    /// objects, and content objects under the scope of `store`, and namespace
+    /// heads, WAL-tail projections, and completed upload sessions under a new
+    /// scope for the runtime.
     pub(crate) fn bind(
         &self,
         store: &SharedObjectStore,
@@ -174,7 +177,10 @@ impl MetadataCache {
                 read_working_memory,
                 stored_block_cache,
             ),
-            head_state: HeadStateCache::new(Arc::clone(&self.inner.head_state), runtime_scope),
+            heads_and_wal_tails: HeadAndWalTailCache::new(
+                Arc::clone(&self.inner.heads_and_wal_tails),
+                runtime_scope,
+            ),
             completed_upload_sessions: CompletedUploadSessionCache::new(
                 Arc::clone(&self.inner.completed_upload_sessions),
                 runtime_scope,
@@ -183,12 +189,12 @@ impl MetadataCache {
         }
     }
 
-    /// Records one head anchor lookup that a read used to start from the
+    /// Records one namespace head lookup that a read used to start from the
     /// cache or that sent it to the store.
-    pub(crate) fn record_head_anchor_lookup(&self, lookup: CacheLookup) {
+    pub(crate) fn record_head_lookup(&self, lookup: CacheLookup) {
         let counter = match lookup {
-            CacheLookup::Hit => &self.inner.head_anchor_hits,
-            CacheLookup::Miss => &self.inner.head_anchor_misses,
+            CacheLookup::Hit => &self.inner.head_hits,
+            CacheLookup::Miss => &self.inner.head_misses,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -198,7 +204,7 @@ impl MetadataCache {
 pub(crate) struct MetadataCacheBinding {
     pub(crate) cache: MetadataCache,
     pub(crate) segment_blocks: MetadataSegmentCache,
-    pub(crate) head_state: HeadStateCache,
+    pub(crate) heads_and_wal_tails: HeadAndWalTailCache,
     pub(crate) completed_upload_sessions: CompletedUploadSessionCache,
     pub(crate) objects: ObjectCache,
 }
@@ -243,7 +249,7 @@ impl ObjectStoreScopes {
 pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
     max_head_bytes: usize,
-    max_head_state_bytes: usize,
+    max_wal_tail_bytes: usize,
     max_completed_upload_session_bytes: usize,
     max_wal_object_bytes: usize,
     max_content_object_bytes: usize,
@@ -258,8 +264,8 @@ impl MetadataCacheBuilder {
         self
     }
 
-    /// Sets the decoded bytes of namespace head anchors that the cache keeps
-    /// for reads. Defaults to [`DEFAULT_MAX_HEAD_BYTES`]. Zero keeps none, so
+    /// Sets the decoded bytes of namespace heads that the cache keeps for
+    /// reads. Defaults to [`DEFAULT_MAX_HEAD_BYTES`]. Zero keeps none, so
     /// every read that doesn't start from a writer session's position
     /// confirms or loads its head. A head heavier than the whole limit isn't
     /// kept.
@@ -273,13 +279,13 @@ impl MetadataCacheBuilder {
     }
 
     /// Sets the decoded bytes of WAL-tail projections that the cache keeps
-    /// for reads. Defaults to [`DEFAULT_MAX_HEAD_STATE_BYTES`]. Zero keeps
+    /// for reads. Defaults to [`DEFAULT_MAX_WAL_TAIL_BYTES`]. Zero keeps
     /// none, so reads cache no tails. (A writer session keeps its own WAL
     /// tail whatever the limit is, and namespace heads have their own limit,
     /// [`Self::max_head_bytes`].) A tail heavier than the whole limit isn't
     /// kept.
-    pub fn max_head_state_bytes(mut self, max_head_state_bytes: usize) -> Self {
-        self.max_head_state_bytes = max_head_state_bytes;
+    pub fn max_wal_tail_bytes(mut self, max_wal_tail_bytes: usize) -> Self {
+        self.max_wal_tail_bytes = max_wal_tail_bytes;
         self
     }
 
@@ -343,9 +349,9 @@ impl MetadataCacheBuilder {
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
                 segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
-                head_state: Arc::new(SharedHeadState::new(
+                heads_and_wal_tails: Arc::new(SharedHeadsAndWalTails::new(
                     self.max_head_bytes,
-                    self.max_head_state_bytes,
+                    self.max_wal_tail_bytes,
                 )),
                 completed_upload_sessions: Arc::new(SharedCompletedUploadSessions::new(
                     self.max_completed_upload_session_bytes,
@@ -357,8 +363,8 @@ impl MetadataCacheBuilder {
                 )),
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),
-                head_anchor_hits: AtomicUsize::new(0),
-                head_anchor_misses: AtomicUsize::new(0),
+                head_hits: AtomicUsize::new(0),
+                head_misses: AtomicUsize::new(0),
             }),
         }
     }
@@ -384,20 +390,21 @@ pub struct MetadataCacheStats {
     /// Bytes charged to segment blocks and manifests now, including their
     /// keys and the cache's own allocation for each entry.
     pub segment_bytes: usize,
-    /// Head anchor lookups a read could start from.
-    pub head_anchor_hits: usize,
-    /// Head anchor lookups that sent a read to the store.
-    pub head_anchor_misses: usize,
-    /// Head anchors evicted to stay within the head limit.
+    /// Namespace head lookups a read could start from.
+    pub head_hits: usize,
+    /// Namespace head lookups that sent a read to the store.
+    pub head_misses: usize,
+    /// Namespace heads evicted to stay within the head limit.
     pub head_evictions: usize,
-    /// Bytes charged to the evicted head anchors, including their keys.
+    /// Bytes charged to the evicted namespace heads, including their keys.
     pub head_evicted_bytes: usize,
-    /// Head anchors heavier than the whole head limit, which are never kept.
+    /// Namespace heads heavier than the whole head limit, which are never
+    /// kept.
     pub head_rejections: usize,
-    /// Bytes that the rejected head anchors would have been charged,
+    /// Bytes that the rejected namespace heads would have been charged,
     /// including their keys and the cache's own allocation for each entry.
     pub head_rejected_bytes: usize,
-    /// Bytes charged to head anchors now, including their keys and the
+    /// Bytes charged to namespace heads now, including their keys and the
     /// cache's own allocation for each entry.
     pub head_bytes: usize,
     /// WAL-tail projection lookups the cache answered.
@@ -406,46 +413,51 @@ pub struct MetadataCacheStats {
     pub wal_tail_misses: usize,
     /// WAL-tail projections inserted.
     pub wal_tail_inserts: usize,
-    /// WAL-tail projections evicted to stay within the head-state limit.
-    pub head_state_evictions: usize,
+    /// WAL-tail projections evicted to stay within the WAL-tail limit.
+    pub wal_tail_evictions: usize,
     /// Bytes charged to the evicted WAL-tail projections, including their
     /// keys.
-    pub head_state_evicted_bytes: usize,
-    /// WAL-tail projections heavier than the whole head-state limit, which
-    /// are never kept.
-    pub head_state_rejections: usize,
+    pub wal_tail_evicted_bytes: usize,
+    /// WAL-tail projections heavier than the whole WAL-tail limit, which are
+    /// never kept.
+    pub wal_tail_rejections: usize,
     /// Bytes that the rejected WAL-tail projections would have been charged,
     /// including their keys and the cache's own allocation for each entry.
-    pub head_state_rejected_bytes: usize,
+    pub wal_tail_rejected_bytes: usize,
     /// Bytes charged to WAL-tail projections now, including their keys and
     /// the cache's own allocation for each entry.
-    pub head_state_bytes: usize,
+    pub wal_tail_bytes: usize,
     /// WAL object lookups that found the object in the cache.
     pub wal_object_hits: usize,
     /// WAL object lookups that went to the store.
     pub wal_object_misses: usize,
     /// WAL objects inserted.
     pub wal_object_inserts: usize,
+    /// WAL objects evicted to stay within the WAL object limit.
+    pub wal_object_evictions: usize,
+    /// Bytes charged to WAL objects now, including their keys and the
+    /// cache's own allocation for each entry.
+    pub wal_object_bytes: usize,
     /// Content object lookups that found the requested bytes in the cache.
     pub content_object_hits: usize,
     /// Content object lookups that went to the store.
     pub content_object_misses: usize,
     /// Content objects inserted.
     pub content_object_inserts: usize,
-    /// WAL objects and content objects evicted to stay within their limits.
-    pub object_evictions: usize,
-    /// Bytes charged to WAL objects and content objects now, including their
-    /// keys and the cache's own allocation for each entry.
-    pub object_bytes: usize,
+    /// Content objects evicted to stay within the content object limit.
+    pub content_object_evictions: usize,
+    /// Bytes charged to content objects now, including their keys and the
+    /// cache's own allocation for each entry.
+    pub content_object_bytes: usize,
     /// Upload session lookups that found a completed session in the cache.
-    pub completed_session_hits: usize,
+    pub completed_upload_session_hits: usize,
     /// Upload session lookups that found no session in the cache, so the
     /// pass read the session's record.
-    pub completed_session_misses: usize,
+    pub completed_upload_session_misses: usize,
     /// Completed upload sessions evicted to stay within the completed
     /// upload session limit.
-    pub completed_session_evictions: usize,
+    pub completed_upload_session_evictions: usize,
     /// Bytes charged to completed upload sessions now, including their keys
     /// and the cache's own allocation for each entry.
-    pub completed_session_bytes: usize,
+    pub completed_upload_session_bytes: usize,
 }

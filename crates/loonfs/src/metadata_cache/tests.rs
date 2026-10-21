@@ -346,7 +346,7 @@ async fn bindings_share_one_capacity() {
     let cache = MetadataCache::builder()
         .max_segment_bytes(one_binding.segment_bytes)
         .max_head_bytes(one_binding.head_bytes)
-        .max_head_state_bytes(one_binding.head_state_bytes)
+        .max_wal_tail_bytes(one_binding.wal_tail_bytes)
         .build();
 
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
@@ -360,12 +360,12 @@ async fn bindings_share_one_capacity() {
     );
     assert!(stats.head_bytes <= one_binding.head_bytes, "{stats:?}");
     assert!(
-        stats.head_state_bytes <= one_binding.head_state_bytes,
+        stats.wal_tail_bytes <= one_binding.wal_tail_bytes,
         "{stats:?}"
     );
     assert!(stats.segment_evictions > 0, "{stats:?}");
     assert!(stats.head_evictions > 0, "{stats:?}");
-    assert!(stats.head_state_evictions > 0, "{stats:?}");
+    assert!(stats.wal_tail_evictions > 0, "{stats:?}");
 }
 
 #[tokio::test]
@@ -488,12 +488,12 @@ async fn read_policy_stays_with_each_binding() {
 }
 
 const CACHE_METRICS: [&str; 6] = [
-    "loonfs.metadata_segment_cache.retained_decoded_bytes",
-    "loonfs.head_state_cache.retained_decoded_bytes",
-    "loonfs.wal_tail_projection_cache.gets",
-    "loonfs.namespace_head_cache.gets",
-    "loonfs.object_cache.retained_decoded_bytes",
-    "loonfs.object_cache.gets",
+    "loonfs.segment_cache.retained_decoded_bytes",
+    "loonfs.head_cache.gets",
+    "loonfs.wal_tail_cache.retained_decoded_bytes",
+    "loonfs.wal_tail_cache.gets",
+    "loonfs.wal_object_cache.gets",
+    "loonfs.content_object_cache.retained_decoded_bytes",
 ];
 
 fn registered(snapshot: &MetricsSnapshot, name: &str) -> bool {
@@ -542,7 +542,7 @@ async fn runtimes_report_no_cache_metrics_to_their_recorder() {
         }
         let stats = runtime.metadata_cache().stats();
         assert!(
-            stats.head_anchor_misses > 0 && stats.head_state_bytes > 0,
+            stats.head_misses > 0 && stats.wal_tail_bytes > 0,
             "{stats:?}"
         );
     }
@@ -851,8 +851,6 @@ async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
 #[tokio::test]
 async fn reads_of_empty_files_keep_no_content_objects() {
     for max_content_object_bytes in [1, crate::DEFAULT_MAX_CONTENT_OBJECT_BYTES] {
-        // Without cached WAL objects, `object_bytes` counts only content
-        // objects.
         let cache = MetadataCache::builder()
             .max_wal_object_bytes(0)
             .max_content_object_bytes(max_content_object_bytes)
@@ -883,6 +881,9 @@ async fn reads_of_empty_files_keep_no_content_objects() {
         }
         let stats = cache.stats();
         assert_eq!(stats.content_object_inserts, 0, "{stats:?}");
-        assert!(stats.object_bytes <= max_content_object_bytes, "{stats:?}");
+        assert!(
+            stats.content_object_bytes <= max_content_object_bytes,
+            "{stats:?}"
+        );
     }
 }

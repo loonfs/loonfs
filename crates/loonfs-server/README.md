@@ -44,7 +44,7 @@ When a limit is available, each memory setting is derived from it by default. A 
 | --- | --- | --- |
 | `metadata_cache.max_segment_bytes` | Derived: 30% of managed memory, or 40% when grep isn't served | 256 MiB |
 | `metadata_cache.max_head_bytes` | 16 MiB (not derived) | 16 MiB |
-| `metadata_cache.max_head_state_bytes` | Derived: 10% | 64 MiB |
+| `metadata_cache.max_wal_tail_bytes` | Derived: 10% | 64 MiB |
 | `metadata_cache.max_wal_object_bytes` | Derived: 3% | 32 MiB |
 | `metadata_cache.max_content_object_bytes` | Derived: 7% | 96 MiB |
 | `grep.max_cache_bytes` | Derived: 10% when grep is served | 256 MiB when grep is served |

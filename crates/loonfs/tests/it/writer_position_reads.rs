@@ -171,7 +171,7 @@ impl Fixture {
     /// many missed.
     fn head_cache_lookups(&self) -> (usize, usize) {
         let stats = self.writer.metadata_cache().stats();
-        (stats.head_anchor_hits, stats.head_anchor_misses)
+        (stats.head_hits, stats.head_misses)
     }
 
     fn tail_replays(&self) -> u64 {

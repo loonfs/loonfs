@@ -40,7 +40,7 @@ max_concurrent_maintenance = 1
 
 [metadata_cache]
 max_segment_bytes = 67108864
-max_head_state_bytes = 67108864
+max_wal_tail_bytes = 67108864
 
 [store]
 kind = "cloudflare_r2"

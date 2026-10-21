@@ -13,7 +13,7 @@ use crate::metrics::ReadHeadSource;
 use crate::trace::phase_span;
 use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
-use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailProjectionCacheKey};
+use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
     load_read_anchor_cached, load_snapshot_read_basis, manifest_has_successor, project_anchor_tail,
     MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
@@ -64,13 +64,11 @@ impl From<Consistency> for HeadConfirmation {
 impl RuntimeCore {
     /// Records whether a load found the namespace's head in the read cache.
     fn record_head_lookup(&self, found: bool) {
-        self.inner
-            .metadata_cache
-            .record_head_anchor_lookup(if found {
-                CacheLookup::Hit
-            } else {
-                CacheLookup::Miss
-            });
+        self.inner.metadata_cache.record_head_lookup(if found {
+            CacheLookup::Hit
+        } else {
+            CacheLookup::Miss
+        });
     }
 
     /// Returns the namespace's head, confirmed or loaded for a read with
@@ -78,7 +76,7 @@ impl RuntimeCore {
     ///
     /// One refresh of the namespace's head runs at a time in this runtime,
     /// and the reads that need one share it (see
-    /// [`HeadStateCache::check_or_join_head`](loonfs_core::cache::HeadStateCache::check_or_join_head)).
+    /// [`HeadAndWalTailCache::check_or_join_head`](loonfs_core::cache::HeadAndWalTailCache::check_or_join_head)).
     /// A read waits for the refresh in flight, and then an eventual read
     /// takes the head that the refresh confirmed if it's within the read's
     /// maximum staleness. Otherwise the read shares the next refresh, or
@@ -86,7 +84,7 @@ impl RuntimeCore {
     /// refresh, and a wave of strong reads at most two.
     ///
     /// The refresh installs its result through
-    /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
+    /// [`HeadAndWalTailCache::replace_head`](loonfs_core::cache::HeadAndWalTailCache::replace_head),
     /// which keeps the newer of the result and the cached head, so the
     /// cached head doesn't move backwards whatever order a refresh and the
     /// end of a writer position finish in. The reads start from whichever
@@ -96,17 +94,17 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         consistency: Consistency,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        let head_state = &self.inner.head_state;
-        head_state
+        let cache = &self.inner.head_and_wal_tail_cache;
+        cache
             .check_or_join_head(
                 namespace_id,
                 || self.eventual_head(namespace_id, consistency),
                 || async {
-                    let cached = head_state.get_head(namespace_id);
+                    let cached = cache.get_head(namespace_id);
                     self.refresh_namespace_head(namespace_id, cached.as_deref().cloned())
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
                         .await
-                        .inspect_err(|_| head_state.invalidate_head(namespace_id))
+                        .inspect_err(|_| cache.invalidate_head(namespace_id))
                 },
             )
             .await
@@ -114,7 +112,7 @@ impl RuntimeCore {
 
     /// Loads the namespace's head from the store, without starting from the
     /// cached head, and installs it through
-    /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head).
+    /// [`HeadAndWalTailCache::replace_head`](loonfs_core::cache::HeadAndWalTailCache::replace_head).
     ///
     /// A read that finds a segment of its basis missing reloads this way,
     /// after it drops the cached head, because the newer manifest that
@@ -127,7 +125,7 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         self.inner
-            .head_state
+            .head_and_wal_tail_cache
             .check_or_join_head(
                 namespace_id,
                 || None,
@@ -197,8 +195,8 @@ impl RuntimeCore {
                 &loaded,
             )
             .await?;
-            self.inner.head_state.insert_tail(
-                WalTailProjectionCacheKey {
+            self.inner.head_and_wal_tail_cache.insert_tail(
+                WalTailCacheKey {
                     namespace_id: namespace_id.clone(),
                     manifest_no: loaded.basis().manifest_no(),
                     head_seq: loaded.read_state.seq,
@@ -277,7 +275,7 @@ impl RuntimeCore {
         consistency: Consistency,
     ) -> Option<Arc<CachedHead>> {
         let max_staleness_ms = self.max_staleness_ms(consistency)?;
-        let cached = self.inner.head_state.get_head(namespace_id)?;
+        let cached = self.inner.head_and_wal_tail_cache.get_head(namespace_id)?;
         let confirmed = cached.head_confirmed.age_ms() < max_staleness_ms
             && cached.basis_checked.is_within_revalidation_bound();
         if !confirmed {
@@ -315,7 +313,7 @@ impl RuntimeCore {
             head,
             basis,
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
-            head_state: Arc::clone(&self.inner.head_state),
+            head_and_wal_tail_cache: Arc::clone(&self.inner.head_and_wal_tail_cache),
             object_cache: Arc::clone(&self.inner.object_cache),
             tail,
         }
@@ -394,7 +392,7 @@ impl RuntimeCore {
     /// Drops the namespace's cached head, after this runtime learns of a
     /// change whose effect on the head it can't identify, so the next read
     /// loads the namespace by discovery, whatever its consistency (see
-    /// [`HeadStateCache::invalidate_head`](loonfs_core::cache::HeadStateCache::invalidate_head)).
+    /// [`HeadAndWalTailCache::invalidate_head`](loonfs_core::cache::HeadAndWalTailCache::invalidate_head)).
     /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
     /// instead, which also tells the namespace's publisher what changed.
     ///
@@ -410,7 +408,9 @@ impl RuntimeCore {
     /// wrong, only unused, and recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
-        self.inner.head_state.invalidate_head(namespace_id);
+        self.inner
+            .head_and_wal_tail_cache
+            .invalidate_head(namespace_id);
     }
 }
 

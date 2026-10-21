@@ -829,7 +829,9 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::unshared(
             usize::MAX,
         )),
-        head_state: std::sync::Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
+        head_and_wal_tail_cache: std::sync::Arc::new(crate::cache::HeadAndWalTailCache::unshared(
+            usize::MAX,
+        )),
         object_cache: std::sync::Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
         tail: None,
     };
@@ -874,7 +876,7 @@ async fn warm_context_behind(
         basis: loaded.basis(),
         head: loaded.read_state,
         segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
-        head_state: Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
+        head_and_wal_tail_cache: Arc::new(crate::cache::HeadAndWalTailCache::unshared(usize::MAX)),
         object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
         tail: None,
     }

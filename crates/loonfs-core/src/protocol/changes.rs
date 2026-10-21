@@ -279,7 +279,7 @@ mod tests {
     use super::event_from_op_deltas;
     use crate::context::MutationContext;
     use crate::error::CoreError;
-    use crate::manifest::{HeadStateCache, MetadataSegmentCache};
+    use crate::manifest::{HeadAndWalTailCache, MetadataSegmentCache};
     use crate::namespace::read_anchor::load_read_anchor;
     use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};
@@ -339,7 +339,7 @@ mod tests {
             basis: loaded.basis(),
             head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-            head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+            head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
             object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
             tail: None,
         };

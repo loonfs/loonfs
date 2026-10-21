@@ -488,7 +488,7 @@ pub struct LocalCacheConfig {
 pub struct MetadataCacheConfig {
     pub max_segment_bytes: Option<usize>,
     pub max_head_bytes: Option<usize>,
-    pub max_head_state_bytes: Option<usize>,
+    pub max_wal_tail_bytes: Option<usize>,
     pub max_wal_object_bytes: Option<usize>,
     pub max_content_object_bytes: Option<usize>,
 }
@@ -818,7 +818,7 @@ pub(crate) struct MemorySizing {
     managed: usize,
     segment: MemoryTerm,
     head: MemoryTerm,
-    head_state: MemoryTerm,
+    wal_tail: MemoryTerm,
     wal_object: MemoryTerm,
     content_object: MemoryTerm,
     pub(crate) grep: MemoryTerm,
@@ -834,7 +834,7 @@ impl MemorySizing {
         [
             (&self.segment, 1),
             (&self.head, 1),
-            (&self.head_state, 1),
+            (&self.wal_tail, 1),
             (&self.wal_object, 1),
             (&self.content_object, 1),
             (&self.grep, usize::from(self.serves_grep)),
@@ -848,7 +848,7 @@ impl MemorySizing {
         MetadataCache::builder()
             .max_segment_bytes(self.segment.bytes)
             .max_head_bytes(self.head.bytes)
-            .max_head_state_bytes(self.head_state.bytes)
+            .max_wal_tail_bytes(self.wal_tail.bytes)
             .max_wal_object_bytes(self.wal_object.bytes)
             .max_content_object_bytes(self.content_object.bytes)
             .build()
@@ -993,11 +993,11 @@ impl ServerConfig {
                 loonfs::DEFAULT_MAX_SEGMENT_BYTES,
             ),
             head,
-            head_state: MemoryTerm::new(
-                "metadata_cache.max_head_state_bytes",
-                self.metadata_cache.max_head_state_bytes,
+            wal_tail: MemoryTerm::new(
+                "metadata_cache.max_wal_tail_bytes",
+                self.metadata_cache.max_wal_tail_bytes,
                 share(10),
-                loonfs::DEFAULT_MAX_HEAD_STATE_BYTES,
+                loonfs::DEFAULT_MAX_WAL_TAIL_BYTES,
             ),
             wal_object: MemoryTerm::new(
                 "metadata_cache.max_wal_object_bytes",
@@ -1189,7 +1189,7 @@ root = "unused"
                     981_131_592
                 }
             );
-            assert_eq!(memory.head_state.bytes, 245_282_898);
+            assert_eq!(memory.wal_tail.bytes, 245_282_898);
             assert_eq!(memory.wal_object.bytes, 73_584_869);
             assert_eq!(memory.content_object.bytes, 171_698_028);
             assert_eq!(
@@ -1227,7 +1227,7 @@ max_segment_bytes = 67108864
         let memory = config.validate().expect("smaller segment cache fits");
         assert_eq!(memory.segment.bytes, 67_108_864);
         assert_eq!(memory.segment.source, "set");
-        assert_eq!(memory.head_state.bytes, 245_282_898);
+        assert_eq!(memory.wal_tail.bytes, 245_282_898);
         config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
         let error = config.validate().expect_err("overrides must fit");
         assert!(error
@@ -1247,7 +1247,7 @@ max_merge_input_bytes = 67108864
 [metadata_cache]
 max_segment_bytes = 67108864
 max_head_bytes = 8388608
-max_head_state_bytes = 0
+max_wal_tail_bytes = 0
 max_wal_object_bytes = 4194304
 max_content_object_bytes = 12582912
 [publication]
@@ -1307,7 +1307,7 @@ max_cache_bytes = 0
         "268435456",
         "metadata_cache.max_segment_bytes",
         "metadata_cache.max_head_bytes",
-        "metadata_cache.max_head_state_bytes",
+        "metadata_cache.max_wal_tail_bytes",
         "metadata_cache.max_wal_object_bytes",
         "metadata_cache.max_content_object_bytes",
         "grep.max_cache_bytes",
@@ -1376,7 +1376,7 @@ disk_bytes = 107374182400
         assert!(memory.limit.is_none());
         assert_eq!(memory.segment.bytes, 268_435_456);
         assert_eq!(memory.head.bytes, 16_777_216);
-        assert_eq!(memory.head_state.bytes, 67_108_864);
+        assert_eq!(memory.wal_tail.bytes, 67_108_864);
         assert_eq!(memory.wal_object.bytes, 33_554_432);
         assert_eq!(memory.content_object.bytes, 100_663_296);
         assert_eq!(memory.grep.bytes, 268_435_456);
@@ -2329,7 +2329,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [metadata_cache]
-max_head_state_byte = 2
+max_wal_tail_byte = 2
 
 [store]
 kind = "local_fs"
@@ -2355,7 +2355,7 @@ root = "/tmp/loonfs-server"
         for (path, typo) in [
             (top_level, "lease_duration"),
             (store_level, "key_prefiks"),
-            (metadata_cache_level, "max_head_state_byte"),
+            (metadata_cache_level, "max_wal_tail_byte"),
             (grep_level, "max_files_per_stepp"),
         ] {
             let error = load_server_config(&path).expect_err("typo'd key must be rejected");
@@ -2496,7 +2496,7 @@ max_read_working_bytes = 8192
 [metadata_cache]
 max_segment_bytes = 16384
 max_head_bytes = 1024
-max_head_state_bytes = 4096
+max_wal_tail_bytes = 4096
 max_wal_object_bytes = 2048
 max_content_object_bytes = 3072
 
@@ -2516,7 +2516,7 @@ root = "/tmp/loonfs-server"
             super::MetadataCacheConfig {
                 max_segment_bytes: Some(16384),
                 max_head_bytes: Some(1024),
-                max_head_state_bytes: Some(4096),
+                max_wal_tail_bytes: Some(4096),
                 max_wal_object_bytes: Some(2048),
                 max_content_object_bytes: Some(3072),
             }
@@ -2534,7 +2534,7 @@ writer_id = "loonfs-server"
 [metadata_cache]
 max_segment_bytes = 0
 max_head_bytes = 0
-max_head_state_bytes = 0
+max_wal_tail_bytes = 0
 max_wal_object_bytes = 0
 max_content_object_bytes = 0
 
@@ -2550,7 +2550,7 @@ root = "/tmp/loonfs-server"
             super::MetadataCacheConfig {
                 max_segment_bytes: Some(0),
                 max_head_bytes: Some(0),
-                max_head_state_bytes: Some(0),
+                max_wal_tail_bytes: Some(0),
                 max_wal_object_bytes: Some(0),
                 max_content_object_bytes: Some(0),
             }
@@ -2890,7 +2890,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [metadata_cache]
-max_head_state_bytes = -1
+max_wal_tail_bytes = -1
 
 [store]
 kind = "local_fs"

@@ -88,15 +88,16 @@ impl Fixture {
         Self::with_cache(keys, crate::MetadataCache::default()).await
     }
 
-    /// Creates the fixture with a cache that keeps no head state, and drops
-    /// the writer session's position, so every read in the writer's runtime
-    /// loads the namespace from the store, and a test can park a read there.
-    async fn without_head_state() -> Self {
+    /// Creates the fixture with a cache that keeps no heads or WAL tails, and
+    /// drops the writer session's position, so every read in the writer's
+    /// runtime loads the namespace from the store, and a test can park a read
+    /// there.
+    async fn without_heads_or_wal_tails() -> Self {
         let fixture = Self::with_cache(
             KeyPredicate::any(),
             crate::MetadataCache::builder()
                 .max_head_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .build(),
         )
         .await;
@@ -209,11 +210,11 @@ fn page<C>(cursor: Option<C>) -> PageRequest<C> {
 
 /// Checks that a list in the writable runtime and a list in a read-only
 /// runtime with the same execution budget share its one read slot. The
-/// writer's runtime has no position and keeps no head state, so its list
-/// waits in the store with the slot taken.
+/// writer's runtime has no position and keeps no heads or WAL tails, so its
+/// list waits in the store with the slot taken.
 #[tokio::test]
 async fn lists_share_one_slot_across_writable_and_read_only_runtimes() {
-    let fixture = Fixture::without_head_state().await;
+    let fixture = Fixture::without_heads_or_wal_tails().await;
     let reader = LoonFs::builder_with_store(fixture.store.clone())
         .read_only()
         .execution_budget(fixture.runtime.execution_budget().clone())
@@ -358,11 +359,11 @@ async fn streams_release_the_slot_before_reading_body_bytes() {
 
 /// Checks that dropping a read that waits for the slot, and cancelling the
 /// read that has it, both clear the read counts. The writer's runtime has no
-/// position and keeps no head state, so the running read waits in the store
-/// with the slot taken.
+/// position and keeps no heads or WAL tails, so the running read waits in the
+/// store with the slot taken.
 #[tokio::test]
 async fn dropping_waiting_and_running_reads_clears_the_counts() {
-    let fixture = Fixture::without_head_state().await;
+    let fixture = Fixture::without_heads_or_wal_tails().await;
     fixture.store.block_next();
     let held = tokio::spawn({
         let namespace = fixture.namespace.clone();

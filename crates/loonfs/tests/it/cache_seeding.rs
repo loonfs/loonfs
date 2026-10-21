@@ -286,7 +286,7 @@ fn a_cache_with_zero_limits_keeps_nothing() {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .max_wal_object_bytes(0)
                 .max_content_object_bytes(0)
                 .build(),
@@ -313,15 +313,15 @@ fn a_cache_with_zero_limits_keeps_nothing() {
     let stats = fs.metadata_cache_stats();
     assert_eq!(stats.wal_tail_hits, 0);
     assert_eq!(stats.wal_tail_misses, 0);
-    assert_eq!(stats.head_state_bytes, 0);
+    assert_eq!(stats.wal_tail_bytes, 0);
 }
 
 /// Creates `first` and `other`, each holding one file of five bytes, so the
-/// two namespaces' head state weighs the same.
+/// two namespaces' heads and WAL tails weigh the same.
 fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, NamespaceId) {
     let first = namespace_id("first");
     let other = namespace_id("other");
-    let setup = open_runtime(store, "head-state-setup");
+    let setup = open_runtime(store, "head-and-tail-setup");
     for (namespace_id, bytes) in [(&first, b"first"), (&other, b"other")] {
         setup
             .create_namespace_blocking(namespace_id, &loonfs_test_support::test_actor())
@@ -339,34 +339,34 @@ fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, Names
     (first, other)
 }
 
-/// What one namespace's head state weighs after a cold read of its file:
-/// the head anchor in the head cache, and the WAL-tail projection in the
-/// tail cache.
-fn one_namespace_head_state_bytes() -> HeadStateBytes {
+/// What one namespace's head and WAL tail weigh after a cold read of its
+/// file: the head anchor in the head cache, and the WAL-tail projection in
+/// the WAL-tail cache.
+fn one_namespace_head_and_wal_tail_bytes() -> HeadAndWalTailBytes {
     let temp_dir = tempdir().expect("tempdir");
     let shared_store = store(temp_dir.path());
     let (first, _) = two_namespaces_with_one_file(shared_store.clone());
-    let fs = open_runtime(shared_store, "head-state-measure");
+    let fs = open_runtime(shared_store, "head-and-tail-measure");
     fs.read_file_blocking(&first, "/file.txt")
         .expect("cold read");
     let stats = fs.metadata_cache_stats();
-    HeadStateBytes {
+    HeadAndWalTailBytes {
         head: stats.head_bytes,
-        tail: stats.head_state_bytes,
+        tail: stats.wal_tail_bytes,
     }
 }
 
 /// The bytes that one namespace's head anchor and WAL-tail projection
 /// weigh in their caches.
-struct HeadStateBytes {
+struct HeadAndWalTailBytes {
     head: usize,
     tail: usize,
 }
 
 #[test]
-fn head_state_evicts_by_bytes_anchors_included() {
+fn heads_and_wal_tails_evict_by_bytes_anchors_included() {
     // Room for one namespace's head and tail, not for two.
-    let one = one_namespace_head_state_bytes();
+    let one = one_namespace_head_and_wal_tail_bytes();
     let (head_budget, budget) = (one.head * 5 / 4, one.tail * 5 / 4);
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RuntimeStoreProbe::new(
@@ -375,28 +375,28 @@ fn head_state_evicts_by_bytes_anchors_included() {
     ));
     let (first, other) = two_namespaces_with_one_file(raw_store.store());
     // Without cached WAL objects, a reload reads the WAL tail from the store.
-    let fs = open_runtime_with(raw_store.store(), "head-state-budget", |builder| {
+    let fs = open_runtime_with(raw_store.store(), "head-and-tail-budget", |builder| {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_head_bytes(head_budget)
-                .max_head_state_bytes(budget)
+                .max_wal_tail_bytes(budget)
                 .max_wal_object_bytes(0)
                 .build(),
         )
     });
 
     fs.read_file_blocking(&first, "/file.txt")
-        .expect("cache the first namespace's head state");
+        .expect("cache the first namespace's head and WAL tail");
     fs.read_file_blocking(&other, "/file.txt")
-        .expect("cache the other namespace's head state");
+        .expect("cache the other namespace's head and WAL tail");
     let after_other = fs.metadata_cache_stats();
-    assert!(after_other.head_evictions > 0 && after_other.head_state_evictions > 0);
-    assert!(after_other.head_bytes <= head_budget && after_other.head_state_bytes <= budget);
+    assert!(after_other.head_evictions > 0 && after_other.wal_tail_evictions > 0);
+    assert!(after_other.head_bytes <= head_budget && after_other.wal_tail_bytes <= budget);
 
     raw_store.reset_control_get_counts();
     let file = fs
         .read_file_blocking(&first, "/file.txt")
-        .expect("reload the evicted head state");
+        .expect("reload the evicted head and WAL tail");
     assert_eq!(file.bytes, b"first");
     // Discovery reads the starting hint and rechecks it after the final gap.
     assert_eq!(
@@ -464,12 +464,12 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     assert_eq!(reader.metadata_cache().stats().head_evictions, 0);
 }
 
-/// Checks that a WAL tail heavier than the head-state budget isn't kept, so
+/// Checks that a WAL tail heavier than the WAL-tail budget isn't kept, so
 /// each read in a runtime without the writer session replays it from the
 /// store, and that the read sends nothing else.
 #[test]
-fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
-    let budget = one_namespace_head_state_bytes().tail / 2;
+fn runtime_wal_tail_cache_skips_oversized_projection() {
+    let budget = one_namespace_head_and_wal_tail_bytes().tail / 2;
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("first");
     let recording = Arc::new(RecordingStore::new(
@@ -494,7 +494,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
             .metadata_cache(
                 MetadataCache::builder()
-                    .max_head_state_bytes(budget)
+                    .max_wal_tail_bytes(budget)
                     .max_wal_object_bytes(0)
                     .build(),
             )
@@ -535,12 +535,9 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let stats = reader.metadata_cache().stats();
     assert_eq!(stats.wal_tail_misses, before.wal_tail_misses + 2);
     assert_eq!(stats.wal_tail_hits, 0);
-    assert_eq!(
-        stats.head_state_rejections,
-        before.head_state_rejections + 2
-    );
-    assert_eq!(stats.head_state_evictions, 0);
-    assert!(stats.head_state_bytes <= budget);
+    assert_eq!(stats.wal_tail_rejections, before.wal_tail_rejections + 2);
+    assert_eq!(stats.wal_tail_evictions, 0);
+    assert!(stats.wal_tail_bytes <= budget);
 }
 
 /// Checks that after a WAL publication conflict, the next write reloads
@@ -735,9 +732,9 @@ fn a_cached_head_anchor_serves_materialization_validation() {
 
     raw_store.reset_control_get_counts();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first cached materialization validation reuses cached head state");
+        .expect("first cached materialization validation reuses the cached head");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("second cached materialization validation reuses cached head state");
+        .expect("second cached materialization validation reuses the cached head");
 
     assert_eq!(raw_store.hint_get_count(), 0);
 }

@@ -3,7 +3,7 @@
 use super::frame::{ValidatedWalTail, WalTailLoadError};
 use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
-use crate::cache::WalTailProjectionCacheKey;
+use crate::cache::WalTailCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
@@ -192,7 +192,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     context: &mut RuntimeReadContext,
 ) -> Result<bool, ControlObjectLoadError> {
     let mut state = context.head.clone();
-    let mut cache_key = WalTailProjectionCacheKey {
+    let mut cache_key = WalTailCacheKey {
         namespace_id: state.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
         head_seq: state.seq,
@@ -211,12 +211,12 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         }
         let object = walk.validate(object_key, envelope).map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
-            tail = context.head_state.get_tail(&cache_key);
+            tail = context.head_and_wal_tail_cache.get_tail(&cache_key);
         }
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
         cache_key.head_seq = state.seq;
-        if let Some(cached) = context.head_state.get_tail(&cache_key) {
+        if let Some(cached) = context.head_and_wal_tail_cache.get_tail(&cache_key) {
             tail = Some(cached);
             extended = false;
         } else if let Some(current) = tail.take() {
@@ -242,7 +242,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         return Ok(false);
     }
     if let Some(tail) = tail.filter(|_| extended) {
-        context.head_state.insert_tail(cache_key, tail);
+        context.head_and_wal_tail_cache.insert_tail(cache_key, tail);
     }
     if state.seq != context.head.seq {
         // The context's tail is the tail at the head that the probe moved

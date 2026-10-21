@@ -8,8 +8,8 @@ use crate::authorize::{Absence, ReadAccess};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::manifest::{
-    load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
-    WalTailProjectionCacheKey,
+    load_basis_metadata_segments, HeadAndWalTailCache, MetadataSegmentCache,
+    VerifiedMetadataSegments, WalTailCacheKey,
 };
 use crate::metadata::{
     DirentryBindingRecord, LeafRevisionPreload, MetadataView, MetadataViewSession,
@@ -53,7 +53,7 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     /// from a writer session's position.
     tail: Option<&'anchor Arc<ProjectedWalTail>>,
     segment_cache: Option<&'cache MetadataSegmentCache>,
-    head_state: Option<&'cache HeadStateCache>,
+    head_and_wal_tail_cache: Option<&'cache HeadAndWalTailCache>,
     object_cache: Option<&'cache ObjectCache>,
 }
 
@@ -63,7 +63,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
         basis: &'anchor MetadataBasis,
         tail: Option<&'anchor Arc<ProjectedWalTail>>,
         segment_cache: Option<&'cache MetadataSegmentCache>,
-        head_state: Option<&'cache HeadStateCache>,
+        head_and_wal_tail_cache: Option<&'cache HeadAndWalTailCache>,
         object_cache: Option<&'cache ObjectCache>,
     ) -> Self {
         Self {
@@ -71,7 +71,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
             basis,
             tail,
             segment_cache,
-            head_state,
+            head_and_wal_tail_cache,
             object_cache,
         }
     }
@@ -81,7 +81,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
 ///
 /// The head sequence, manifest number, and manifest head sequence distinguish
 /// a stale snapshot from a manifest that is missing expected data. These are
-/// also the fields used to key the WAL-tail projection cache.
+/// also the fields used to key the WAL-tail cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReadAnchor {
     head_seq: ChangeSeq,
@@ -250,7 +250,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 object_cache: load_context.object_cache,
             });
         }
-        let cache_key = WalTailProjectionCacheKey {
+        let cache_key = WalTailCacheKey {
             namespace_id: namespace_id.clone(),
             manifest_no,
             head_seq: head.seq,
@@ -267,7 +267,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .map(|replayed| Arc::new(replayed.projected_tail))
             .map_err(CoreError::MetadataProjection)
         };
-        let wal_tail = match load_context.head_state {
+        let wal_tail = match load_context.head_and_wal_tail_cache {
             Some(cache) => cache.get_or_load_tail(&cache_key, replay).await?,
             None => replay().await?,
         };
@@ -1555,16 +1555,16 @@ mod tests {
         // the store before the WAL objects of the tail.
         let segment_cache = MetadataSegmentCache::unshared(1 << 20);
         let (alone, shared) = (
-            HeadStateCache::unshared(1 << 20),
-            HeadStateCache::unshared(1 << 20),
+            HeadAndWalTailCache::unshared(1 << 20),
+            HeadAndWalTailCache::unshared(1 << 20),
         );
-        let context = |head_state| {
+        let context = |cache| {
             ReadLoadContext::pinned_head(
                 &anchor.read_state,
                 &basis,
                 None,
                 Some(&segment_cache),
-                Some(head_state),
+                Some(cache),
                 None,
             )
         };
