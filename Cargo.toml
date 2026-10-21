@@ -128,7 +128,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # A blocking client for tests that send raw HTTP requests and read the raw
 # response, outside the typed client.
-ureq = { version = "2.10", features = ["json"] }
+ureq = { version = "2.10", default-features = false, features = ["json"] }
 # Generates `openapi.json` from the API types.
 utoipa = { version = "5.5", features = ["macros"] }
 walkdir = "2"
