@@ -22,11 +22,12 @@ pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
 ///
 /// A row is never split.
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum number of runs read by one compaction step.
+/// Maximum number of runs read by one compaction unit.
 pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: usize = 8;
-/// Maximum number of decoded rows read by one compaction step.
+/// Maximum number of rows that one bounded maintenance step reads, such as the
+/// compaction unit of one metadata maintenance pass.
 pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
-/// Maximum decoded input size for one build or compaction step.
+/// Maximum decoded input that one build or merge keeps in memory at once.
 pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum stored filter size embedded in a segment descriptor.
 pub const DEFAULT_MAX_INLINE_FILTER_BYTES: u32 = 1024;

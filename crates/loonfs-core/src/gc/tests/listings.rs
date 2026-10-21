@@ -156,7 +156,7 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
 
 #[tokio::test]
 async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments() {
-    use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
+    use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
     use crate::namespace::control::load_current_manifest;
     use crate::namespace::writer_epoch::acquire_writer_epoch;
 
@@ -186,20 +186,22 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             .expect("previous");
         if own_runs {
             for _ in 0..16 {
-                let outcome = compaction_step(
+                let outcome = compact_unit(
                     &store,
+                    None,
                     &namespace_id,
                     loonfs_types::CompactorEpoch(0),
                     Default::default(),
                     MetadataCompactionPolicy::CompactImmediately,
-                    None,
+                    crate::manifest::CompactionAdmission::AnySize,
+                    &crate::manifest::MetadataCompactionCancellation::default(),
                     crate::test_support::std_timer(),
                 )
                 .await
                 .expect("compact");
                 if matches!(
                     outcome,
-                    CompactionStepOutcome::UnitPublished {
+                    CompactionUnitOutcome::Published {
                         group: loonfs_types::MetadataFamilyGroup::ContentLayouts,
                         ..
                     }
@@ -278,7 +280,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
 /// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
 async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_it() {
-    use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
+    use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
     use crate::namespace::control::load_current_manifest;
 
     const DELTA_RUNS: usize = 8;
@@ -318,18 +320,20 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
     // Compacting the layouts replaces the base, so each fold's manifest except
     // the last adds a layout segment that no earlier root lists.
     while !matches!(
-        compaction_step(
+        compact_unit(
             setup_store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             Default::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compact"),
-        CompactionStepOutcome::UnitPublished {
+        CompactionUnitOutcome::Published {
             group: loonfs_types::MetadataFamilyGroup::ContentLayouts,
             ..
         }

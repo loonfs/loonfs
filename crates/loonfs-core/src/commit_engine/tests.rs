@@ -886,7 +886,7 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
 }
 
 /// Creates a writer that folds three times and moves its position after
-/// each fold, and then runs a bounded compaction that publishes the next
+/// each fold, and then runs a compaction unit that publishes the next
 /// manifest.
 async fn writer_after_own_compaction(
     store: &GatedStore,
@@ -898,7 +898,7 @@ async fn writer_after_own_compaction(
     ManifestRef,
 ) {
     use crate::manifest::{
-        compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
+        compact_unit, CompactionUnitOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
     };
 
     let (mut engine, timer, writer) = writer_after_one_publish(store, namespace_id).await;
@@ -923,19 +923,21 @@ async fn writer_after_own_compaction(
     let current = crate::namespace::control::load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");
-    let compacted = compaction_step(
+    let compacted = compact_unit(
         store,
+        engine.segment_cache.as_deref(),
         namespace_id,
         current.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
-        engine.segment_cache.as_deref(),
+        crate::manifest::CompactionAdmission::AnySize,
+        &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
     )
     .await
     .expect("own compaction");
     let manifest = match compacted {
-        CompactionStepOutcome::UnitPublished { manifest, .. } => Some(manifest),
+        CompactionUnitOutcome::Published { manifest, .. } => Some(manifest),
         _ => None,
     }
     .expect("compaction publishes a successor");
@@ -984,7 +986,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)));
 }
 
-/// Checks that a bounded compaction publishes a manifest with the same
+/// Checks that a compaction unit publishes a manifest with the same
 /// `NamespaceReadState` as the manifest it replaces, and that both manifests
 /// list runs.
 ///

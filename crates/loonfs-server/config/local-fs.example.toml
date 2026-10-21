@@ -18,9 +18,8 @@ memory_limit_bytes = 4294967296
 # Defaults to 2.
 #max_concurrent_folds = 2
 
-# Maximum metadata merges this server runs at once, bounded compaction steps
-# and streaming compactions alike. Each holds up to max_merge_input_bytes of
-# decoded input. Defaults to 2.
+# Maximum compaction units this server runs at once. Each holds up to
+# max_merge_input_bytes of decoded input. Defaults to 2.
 #max_concurrent_compactions = 2
 
 # Minimum interval between publication starts per namespace; cold namespaces

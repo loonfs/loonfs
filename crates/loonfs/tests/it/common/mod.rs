@@ -206,7 +206,7 @@ pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: 
             .maintain_metadata_with_options(namespace_id, &options)
             .await
             .expect("compact metadata");
-        if step.compaction == (loonfs::CompactionStepOutcome::NotNeeded {}) {
+        if step.compaction == loonfs::MetadataCompactionOutcome::NotNeeded {
             return;
         }
     }

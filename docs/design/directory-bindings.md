@@ -62,7 +62,7 @@ WAL deltas, semantic fingerprints, and change-feed events don't depend on how bi
 
 This section describes what this design costs, and the alternatives to it.
 
-An unbind writes two rows, and a bottom-anchored compaction can remove those rows along with the history they hide. Reads don't need a join against removals. Bounded and streaming compaction both process one index at a time, and neither one collects removals or makes point reads to find them.
+An unbind writes two rows, and a bottom-anchored compaction can remove those rows along with the history they hide. Reads don't need a join against removals. Compaction processes one index at a time, and it doesn't collect removals or make point reads to find them.
 
 | Alternative | Cost |
 | --- | --- |

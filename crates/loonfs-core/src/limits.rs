@@ -177,16 +177,17 @@ const _: () = assert!(
 /// Minimum provider age of a metadata segment no manifest lists before garbage
 /// collection may delete it.
 ///
-/// A streaming compaction writes its output under `segments/` as it goes and
+/// A compaction unit writes its output under `segments/` as it goes and
 /// publishes at the end, so its earliest segment is unreferenced for the whole
 /// run. One day is the bound on a run; the difference between this age and the
-/// grace window below is how long a job may keep merging before it gives up.
+/// grace window below is how long a unit may keep merging before it abandons
+/// its output.
 pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Elapsed monotonic time after which a streaming compaction abandons instead
-/// of publishing.
+/// Elapsed monotonic time after which a compaction unit abandons instead of
+/// publishing.
 ///
-/// A job that starts its last publication attempt at this bound finishes within
+/// A unit that starts its last publication attempt at this bound finishes within
 /// one grace window, which the minimum age above reserves after the budget. The
 /// subtraction fails to compile if the grace window ever exceeds the minimum
 /// age.

@@ -12,6 +12,7 @@ use loonfs_test_support::stores::{
     KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::ChecksumAlgorithm;
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -748,9 +749,9 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
             .compact_metadata(&demo(), &crate::MaintenanceCancellation::new())
             .await
             .expect("compact");
-        assert_eq!(
+        assert_matches!(
             compaction.compaction,
-            crate::MetadataCompactionOutcome::BoundedMergePublished
+            crate::MetadataCompactionOutcome::Published { .. }
         );
 
         store.reset();

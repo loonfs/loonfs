@@ -5,8 +5,8 @@ use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
-    current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions,
+    current_time_ms, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
+    GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions, MetadataCompactionOutcome,
     MetadataCompactionPolicy, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
 };
 use loonfs_core::control::load_namespace_current_manifest;
@@ -24,6 +24,7 @@ use loonfs_types::{
     ChangeSeq, ErrorCode, NamespaceAccess, PageRequest, PathEntry, PrincipalId, PrincipalScope,
     PrincipalSet, RevisionNo, Subject, SubjectId,
 };
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
 
@@ -256,14 +257,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                         )
                         .await
                         .expect("rebuild metadata after retention");
-                    if step.compaction == (CompactionStepOutcome::NotNeeded {}) {
+                    if step.compaction == MetadataCompactionOutcome::NotNeeded {
                         finished = true;
                         break;
                     }
-                    assert_eq!(
-                        step.compaction,
-                        CompactionStepOutcome::BoundedMergePublished {}
-                    );
+                    assert_matches!(step.compaction, MetadataCompactionOutcome::Published { .. });
                     rebuilt = true;
                 }
                 assert!(rebuilt && finished, "metadata must rebuild and finish");

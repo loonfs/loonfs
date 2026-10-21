@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, CompactionStepOutcome, EntryInodeKind, ErrorCode, InodeId, MetadataCache,
+    ChangeSeq, EntryInodeKind, ErrorCode, InodeId, MetadataCache, MetadataCompactionOutcome,
     NamespaceId, SharedObjectStore, StoredMetadataBlockKind,
 };
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
@@ -970,7 +970,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         );
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
-        if step.compaction == (CompactionStepOutcome::BoundedMergePublished {}) {
+        if matches!(step.compaction, MetadataCompactionOutcome::Published { .. }) {
             compacted = true;
             break;
         }

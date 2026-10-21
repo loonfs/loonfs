@@ -520,7 +520,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 #[tokio::test]
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
     use crate::content::{mint_content_token, verify_content_token};
-    use crate::manifest::{CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy};
+    use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy, MetadataRunPolicy};
     use crate::namespace::catalog::load_namespace_catalog_entry;
     use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
     use std::num::NonZeroUsize;
@@ -599,8 +599,9 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .await
         .expect("fold commits");
     loop {
-        let outcome = crate::manifest::compaction_step(
+        let outcome = crate::manifest::compact_unit(
             &store,
+            None,
             &namespace_id,
             loonfs_types::CompactorEpoch(0),
             MetadataRunPolicy {
@@ -608,17 +609,18 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
                 ..MetadataRunPolicy::default()
             },
             MetadataCompactionPolicy::default(),
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compact metadata");
-        if matches!(outcome, CompactionStepOutcome::UnitPublished { .. }) {
+        if matches!(outcome, CompactionUnitOutcome::Published { .. }) {
             continue;
         }
         assert_matches!(
             outcome,
-            CompactionStepOutcome::NotNeeded { .. },
+            CompactionUnitOutcome::NotNeeded,
             "unexpected compaction outcome: {outcome:?}"
         );
         break;

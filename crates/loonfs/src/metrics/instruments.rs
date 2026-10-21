@@ -10,7 +10,8 @@ use super::{
     ObjectStoreMetricsRecorder, SMALL_COUNT_BOUNDARIES,
 };
 use crate::metrics::{LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_OK};
-use crate::{GcResponse, MetadataCompactionJobOutcome};
+use crate::GcResponse;
+use loonfs_core::CompactionUnitOutcome;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -61,7 +62,7 @@ impl<E: MetricLabel> LabeledCounters<E> {
     }
 }
 
-/// The closed outcome vocabulary for a finished streaming compaction.
+/// The closed outcome vocabulary for a finished compaction unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactionOutcome {
     Completed,
@@ -222,14 +223,17 @@ impl RuntimeInstruments {
         }) as Arc<dyn ObjectStoreMetricsRecorder>)
     }
 
-    /// Reports one finished streaming compaction and any merge it completed.
+    /// Reports one finished compaction unit and any merge it completed. A
+    /// unit that found nothing to merge, or a window too large for its call,
+    /// reports nothing.
     pub(crate) fn compaction_finished(
         &self,
-        outcome: &crate::Result<MetadataCompactionJobOutcome>,
+        outcome: &crate::Result<CompactionUnitOutcome>,
         elapsed_ms: u64,
     ) {
         let (outcome, totals) = match outcome {
-            Ok(MetadataCompactionJobOutcome::Published {
+            Ok(CompactionUnitOutcome::NotNeeded | CompactionUnitOutcome::TooLarge { .. }) => return,
+            Ok(CompactionUnitOutcome::Published {
                 rows_read,
                 rows_written,
                 input_bytes,
@@ -239,9 +243,9 @@ impl RuntimeInstruments {
                 CompactionOutcome::Completed,
                 Some((*rows_read, *rows_written, *input_bytes, *output_bytes)),
             ),
-            Ok(MetadataCompactionJobOutcome::Abandoned) => (CompactionOutcome::Abandoned, None),
-            Ok(MetadataCompactionJobOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
-            Ok(MetadataCompactionJobOutcome::Fenced) => (CompactionOutcome::Fenced, None),
+            Ok(CompactionUnitOutcome::Abandoned) => (CompactionOutcome::Abandoned, None),
+            Ok(CompactionUnitOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
+            Ok(CompactionUnitOutcome::Fenced) => (CompactionOutcome::Fenced, None),
             Err(_) => (CompactionOutcome::Failed, None),
         };
         self.record_compaction(outcome, elapsed_ms, totals);
@@ -729,7 +733,7 @@ impl PermitPoolGauges {
     }
 }
 
-/// The gauges and durable totals for this process's streaming compactions.
+/// The gauges and durable totals for this process's compaction units.
 struct CompactionInstruments {
     outcomes: LabeledCounters<CompactionOutcome>,
     outcome_seconds: Vec<Arc<dyn HistogramHandle>>,
@@ -744,14 +748,14 @@ impl CompactionInstruments {
         let rows = |direction: &'static str| {
             recorder.register_counter(
                 "loonfs.maintenance.compaction_rows",
-                "Rows processed by streaming metadata compactions",
+                "Rows processed by metadata compaction units",
                 &[("direction", direction)],
             )
         };
         let bytes = |direction: &'static str| {
             recorder.register_counter(
                 "loonfs.maintenance.compaction_bytes",
-                "Bytes processed by streaming metadata compactions",
+                "Bytes processed by metadata compaction units",
                 &[("direction", direction)],
             )
         };
@@ -759,7 +763,7 @@ impl CompactionInstruments {
             outcomes: LabeledCounters::register(
                 recorder,
                 "loonfs.maintenance.compactions",
-                "Streaming metadata compactions by outcome",
+                "Metadata compaction units by outcome",
                 "outcome",
                 &[],
             ),
@@ -768,7 +772,7 @@ impl CompactionInstruments {
                 .map(|outcome| {
                     recorder.register_histogram(
                         "loonfs.maintenance.compaction_seconds",
-                        "Duration of a finished streaming metadata compaction in seconds",
+                        "Duration of a finished metadata compaction unit in seconds",
                         &[("outcome", outcome.as_str())],
                         LATENCY_SECONDS_BOUNDARIES,
                     )
@@ -1141,7 +1145,9 @@ mod tests {
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
 
         instruments.compaction_finished(
-            &Ok(MetadataCompactionJobOutcome::Published {
+            &Ok(CompactionUnitOutcome::Published {
+                group: loonfs_core::MetadataFamilyGroup::Bindings,
+                input_runs: 2,
                 manifest: loonfs_types::format::control::ManifestRef {
                     owner_namespace_id: loonfs_types::NamespaceId::parse("demo")
                         .expect("valid namespace id"),
@@ -1157,7 +1163,8 @@ mod tests {
             }),
             25,
         );
-        instruments.compaction_finished(&Ok(MetadataCompactionJobOutcome::Abandoned), 10);
+        instruments.compaction_finished(&Ok(CompactionUnitOutcome::Abandoned), 10);
+        instruments.compaction_finished(&Ok(CompactionUnitOutcome::NotNeeded), 10);
 
         let snapshot = recorder.snapshot();
         assert_eq!(

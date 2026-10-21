@@ -63,18 +63,20 @@ impl Fixture {
             .await
             .expect("advance source");
         fold_wal(&store, &source).await.expect("fold");
-        let report = compaction_step(
+        let report = compact_unit(
             &store,
+            None,
             &source,
             selected.state.compactor_epoch(),
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("replace old runs");
-        assert_matches!(report, CompactionStepOutcome::UnitPublished { .. });
+        assert_matches!(report, CompactionUnitOutcome::Published { .. });
         let current = load_current_manifest(&store, &source)
             .await
             .expect("current");

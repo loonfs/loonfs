@@ -55,7 +55,9 @@ pub use self::cache::{
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
-pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy};
+pub use self::compaction_step::{
+    CompactionAdmission, CompactionUnitOutcome, MetadataCompactionPolicy,
+};
 pub use self::error::ManifestLoadError;
 pub use self::fold::{
     fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
@@ -70,11 +72,9 @@ pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,
 };
-pub use self::streaming_compaction::{
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
-};
+pub use self::streaming_compaction::MetadataCompactionCancellation;
 
-pub(crate) use self::compaction_step::compaction_step;
+pub(crate) use self::compaction_step::compact_unit;
 pub use self::compaction_step::metadata_compaction_due;
 pub(crate) use self::compactor::claim_compactor;
 #[cfg(test)]
@@ -87,4 +87,3 @@ pub(crate) use self::load::{
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};
-pub(crate) use self::streaming_compaction::run_metadata_compaction_job;

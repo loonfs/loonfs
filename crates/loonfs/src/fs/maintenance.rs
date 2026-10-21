@@ -10,12 +10,11 @@ use crate::trace::phase_span;
 use crate::Maintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, CompactionStepOutcome,
-    CreateCheckpointOptions, DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse,
-    ListCheckpointsResponse, MaintainMetadataOptions, MaintenanceCancellation,
-    MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, MetadataPassReport, NamespaceId, PinId, SharedObjectStore,
-    Snapshot, WalFoldStepOutcome,
+    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, CreateCheckpointOptions,
+    DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse, ListCheckpointsResponse,
+    MaintainMetadataOptions, MaintenanceCancellation, MetadataCompactionOutcome,
+    MetadataCompactionResponse, MetadataMaintenanceOutcome, MetadataMaintenanceResponse,
+    MetadataPassReport, NamespaceId, PinId, SharedObjectStore, Snapshot, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -29,12 +28,13 @@ use tracing::Instrument;
 #[cfg(test)]
 mod tests;
 
-/// Lost races in a row after which
-/// [`Maintenance::maintain_metadata_while_due`] stops, so a loop that keeps
-/// losing to folds or another compactor cannot spin.
+/// Abandoned compaction units in a row after which
+/// [`Maintenance::maintain_metadata_while_due`] stops, so a loop whose units
+/// keep finding their inputs replaced, or keep losing every publication
+/// attempt, can't spin.
 const MAX_LOST_COMPACTION_RACES: u32 = 3;
 
-/// Compaction units, bounded or streaming, that one call of
+/// Compaction units that one call of
 /// [`Maintenance::maintain_metadata_while_due`] publishes before it returns,
 /// so a namespace with a backlog cannot hold its caller for long.
 const MAX_COMPACTION_UNITS_PER_CALL: u32 = 16;
@@ -64,31 +64,24 @@ struct MetadataStepReport {
     wal_fold: MetadataMaintenanceOutcome,
 }
 
-/// What one compaction unit left for its caller.
-enum CompactionUnitOutcome {
-    Fenced,
-    /// The unit is finished, and this is what it did.
-    Concluded(CompactionStepOutcome),
-    /// A family group has outgrown a bounded step. The caller reports that a
-    /// streaming compaction is required, or runs it.
-    CompactionPlanned(loonfs_core::MetadataCompactionSpec),
-}
-
 /// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
 
-fn metadata_compaction_response(
-    namespace_id: &NamespaceId,
-    outcome: loonfs_core::MetadataCompactionJobOutcome,
-) -> MetadataCompactionResponse {
-    let compaction = match outcome {
-        loonfs_core::MetadataCompactionJobOutcome::Published {
+/// Converts what one compaction unit did into its wire form.
+fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCompactionOutcome {
+    match outcome {
+        loonfs_core::CompactionUnitOutcome::NotNeeded => MetadataCompactionOutcome::NotNeeded,
+        loonfs_core::CompactionUnitOutcome::TooLarge { .. } => {
+            MetadataCompactionOutcome::MetadataCompactionRequired
+        }
+        loonfs_core::CompactionUnitOutcome::Published {
             manifest,
             rows_read,
             rows_written,
             input_bytes,
             output_bytes,
             output_segments,
+            ..
         } => MetadataCompactionOutcome::Published {
             manifest_no: manifest.manifest_no,
             rows_read,
@@ -97,17 +90,9 @@ fn metadata_compaction_response(
             output_bytes,
             output_segments: u64::try_from(output_segments).unwrap_or(u64::MAX),
         },
-        loonfs_core::MetadataCompactionJobOutcome::Cancelled => {
-            MetadataCompactionOutcome::Cancelled
-        }
-        loonfs_core::MetadataCompactionJobOutcome::Abandoned => {
-            MetadataCompactionOutcome::Abandoned
-        }
-        loonfs_core::MetadataCompactionJobOutcome::Fenced => MetadataCompactionOutcome::Fenced,
-    };
-    MetadataCompactionResponse {
-        namespace_id: namespace_id.clone(),
-        compaction,
+        loonfs_core::CompactionUnitOutcome::Cancelled => MetadataCompactionOutcome::Cancelled,
+        loonfs_core::CompactionUnitOutcome::Abandoned => MetadataCompactionOutcome::Abandoned,
+        loonfs_core::CompactionUnitOutcome::Fenced => MetadataCompactionOutcome::Fenced,
     }
 }
 
@@ -120,7 +105,10 @@ impl Maintenance {
         let engine = self.core.writer_engine(&self.actor, namespace_id);
         #[cfg(test)]
         let engine = match self.compaction_row_budget {
-            Some(rows) => engine.starve_compaction_row_budget(rows),
+            Some(rows) => engine.with_metadata_run_policy(loonfs_core::MetadataRunPolicy {
+                max_decoded_input_rows_per_step: rows,
+                ..self.core.inner.config.metadata_run_policy
+            }),
             None => engine,
         };
         #[cfg(test)]
@@ -234,9 +222,11 @@ impl Maintenance {
     /// the tail's inline bytes, or once the tail's newest commit reaches the
     /// runtime's idle fold age on this handle's wall clock (see
     /// [`LoonFsBuilder::idle_fold_after_ms`](crate::LoonFsBuilder::idle_fold_after_ms)).
-    /// Then runs one bounded compaction step. A fold waits for a fold permit from
-    /// the runtime's execution budget, and a step that finds work waits for
-    /// a compaction permit from it.
+    /// Then runs one compaction unit whose window lists at most the run
+    /// policy's `max_decoded_input_rows_per_step` rows, and reports a larger
+    /// window as [`MetadataCompactionOutcome::MetadataCompactionRequired`]. A
+    /// fold waits for a fold permit from the runtime's execution budget, and a
+    /// unit that finds work waits for a compaction permit from it.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintain_metadata",
@@ -255,21 +245,96 @@ impl Maintenance {
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataPassReport> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.metadata_step(
-            namespace_id,
-            TailFold::from_options(options),
-            options.compaction_policy,
-        )
-        .await
-        .map(|step| step.response)
+        let step = self
+            .metadata_step(
+                namespace_id,
+                TailFold::from_options(options),
+                options.compaction_policy,
+                &MaintenanceCancellation::new(),
+            )
+            .await?;
+        Ok(step
+            .expect("a pass without a cancellation runs to its end")
+            .response)
     }
 
+    /// Runs one metadata pass, or returns `None` when `cancellation` stops
+    /// the pass before its compaction unit starts.
+    ///
+    /// Cancellation drops the anchor load and the fold at once, and the
+    /// compaction unit stops at its next block.
     async fn metadata_step(
         &self,
         namespace_id: &NamespaceId,
         tail_fold: TailFold,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
-    ) -> Result<MetadataStepReport> {
+        cancellation: &MaintenanceCancellation,
+    ) -> Result<Option<MetadataStepReport>> {
+        let (anchor, status, idle_fold_due_at_ms, fold, wal_fold) = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Ok(None),
+            folded = self.fold_if_due(namespace_id, tail_fold) => folded?,
+        };
+        // A fold attempt can move the manifest, so the unit observes it again.
+        let observed = (!fold).then_some(&anchor);
+        let compaction = self
+            .compact_once(
+                namespace_id,
+                compaction_policy,
+                loonfs_core::CompactionAdmission::WithinRowBudget,
+                observed,
+                cancellation,
+            )
+            .await?;
+        let response = MetadataPassReport {
+            namespace_id: namespace_id.clone(),
+            wal_fold,
+            compaction,
+        };
+        tracing::debug!(
+            wal_tail_objects_before = status.wal_tail_objects,
+            wal_fold = ?response.wal_fold,
+            compaction = ?response.compaction,
+            "metadata maintenance pass concluded"
+        );
+        let wal_caught_up = match response.wal_fold {
+            WalFoldStepOutcome::Folded { .. } => true,
+            // A tail that waits for its idle fold age leaves metadata due. A
+            // session's own compaction doesn't fold, so a tail with a commit
+            // in it leaves metadata due for the session's fold task or the
+            // host's idle fold.
+            WalFoldStepOutcome::NotNeeded => match tail_fold {
+                TailFold::WhenDue { .. } => idle_fold_due_at_ms.is_none(),
+                TailFold::Never => status.wal_tail_newest_commit_at_ms.is_none(),
+            },
+            WalFoldStepOutcome::AlreadyPublished { .. }
+            | WalFoldStepOutcome::RetriesExhausted { .. }
+            | WalFoldStepOutcome::Unknown => false,
+        };
+        Ok(Some(MetadataStepReport {
+            response,
+            wal_fold: if wal_caught_up {
+                MetadataMaintenanceOutcome::CaughtUp
+            } else {
+                MetadataMaintenanceOutcome::Due
+            },
+        }))
+    }
+
+    /// Loads the anchor a pass decides on and folds the WAL tail when a fold
+    /// is due, and returns when the tail reaches its idle fold age, whether
+    /// it folded, and what the fold did.
+    async fn fold_if_due(
+        &self,
+        namespace_id: &NamespaceId,
+        tail_fold: TailFold,
+    ) -> Result<(
+        NamespaceReadAnchor,
+        NamespaceStorageDiagnostics,
+        Option<u64>,
+        bool,
+        WalFoldStepOutcome,
+    )> {
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
         let trigger = self.writer.fold_trigger;
@@ -293,37 +358,31 @@ impl Maintenance {
             }
             TailFold::Never => false,
         };
-        let response = self
-            .fold_then_compact(namespace_id, fold, &anchor, compaction_policy)
-            .await?;
-        tracing::debug!(
-            wal_tail_objects_before = status.wal_tail_objects,
-            wal_fold = ?response.wal_fold,
-            compaction = ?response.compaction,
-            "metadata maintenance pass concluded"
-        );
-        let wal_caught_up = match response.wal_fold {
-            WalFoldStepOutcome::Folded { .. } => true,
-            // A tail that waits for its idle fold age leaves metadata due. A
-            // session's own compaction doesn't fold, so a tail with a commit
-            // in it leaves metadata due for the session's fold task or the
-            // host's idle fold.
-            WalFoldStepOutcome::NotNeeded => match tail_fold {
-                TailFold::WhenDue { .. } => idle_fold_due_at_ms.is_none(),
-                TailFold::Never => status.wal_tail_newest_commit_at_ms.is_none(),
-            },
-            WalFoldStepOutcome::AlreadyPublished { .. }
-            | WalFoldStepOutcome::RetriesExhausted { .. }
-            | WalFoldStepOutcome::Unknown => false,
+        let wal_fold = if fold {
+            match self.run_wal_fold(namespace_id).await {
+                Ok(folded) => match folded.outcome {
+                    FoldWalOutcome::Published => WalFoldStepOutcome::Folded {
+                        manifest_head_seq: folded.manifest_head_seq,
+                    },
+                    FoldWalOutcome::AlreadyCurrent => WalFoldStepOutcome::AlreadyPublished {
+                        attempted_seq: folded.target_head_seq,
+                        current_manifest_no: folded.manifest_no,
+                    },
+                },
+                // The head seq of the anchor the pass decided on is reported
+                // when concurrent updates prevent every fold attempt from
+                // publishing.
+                Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                    WalFoldStepOutcome::RetriesExhausted {
+                        observed_head_seq: anchor.read_state.seq,
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            WalFoldStepOutcome::NotNeeded
         };
-        Ok(MetadataStepReport {
-            response,
-            wal_fold: if wal_caught_up {
-                MetadataMaintenanceOutcome::CaughtUp
-            } else {
-                MetadataMaintenanceOutcome::Due
-            },
-        })
+        Ok((anchor, status, idle_fold_due_at_ms, fold, wal_fold))
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -342,25 +401,27 @@ impl Maintenance {
     }
 
     /// Repeats [`Self::maintain_metadata_with_options`] while it finds
-    /// compaction due. When a step reports that a streaming compaction is
-    /// required, runs [`Self::compact_metadata`].
+    /// compaction due. When a pass reports a window too large for it, runs
+    /// [`Self::compact_metadata`].
     ///
     /// Stops when nothing is due, when another process holds the compactor
-    /// epoch, when `cancellation` is set, after three lost races in a row, or
-    /// after it publishes 16 compaction units, bounded or streaming. Work
-    /// still due after the 16th unit waits for the next call. Setting
-    /// `cancellation` ends a wait for a permit and drops a bounded call in
-    /// progress at once; a streaming compaction stops at its next block. A
-    /// dropped call leaves what a crash would: unreferenced segments, or a
-    /// manifest the runtime learns of the way it learns of another
-    /// process's. Fails with the first error. Keeps no state between calls.
+    /// epoch, when `cancellation` is set, after three abandoned units in a
+    /// row, or after it publishes 16 compaction units. Work still due after
+    /// the 16th unit waits for the next call. A unit that loses its manifest
+    /// put to another publication tries again over the manifest that won, so
+    /// only an abandoned unit counts as a lost race. Setting `cancellation`
+    /// ends a wait for a permit and drops a fold in progress at once, and a
+    /// running compaction unit stops at its next block. A dropped call
+    /// leaves what a crash would: unreferenced segments, or a manifest the
+    /// runtime learns of the way it learns of another process's. Fails with
+    /// the first error. Keeps no state between calls.
     ///
     /// The response reports the compaction units the call published, and an
     /// outcome. The outcome is [`MetadataMaintenanceOutcome::CaughtUp`] when
     /// nothing is due now and nothing can become due without a new commit
     /// under `options`, based on the state this call read. It is
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
-    /// on fencing or cancellation, when streaming compaction does not finish,
+    /// on fencing or cancellation, when a compaction unit does not finish,
     /// or while a tail waits for the idle fold age.
     pub async fn maintain_metadata_while_due_with_options(
         &self,
@@ -431,24 +492,25 @@ impl Maintenance {
             {
                 break MetadataMaintenanceOutcome::Due;
             }
-            let step = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => break 'maintenance MetadataMaintenanceOutcome::Due,
-                step = self.metadata_step(namespace_id, tail_fold, compaction_policy) => step?,
+            let Some(step) = self
+                .metadata_step(namespace_id, tail_fold, compaction_policy, cancellation)
+                .await?
+            else {
+                break 'maintenance MetadataMaintenanceOutcome::Due;
             };
             let won = match step.response.compaction {
-                CompactionStepOutcome::BoundedMergePublished {} => true,
-                CompactionStepOutcome::ManifestAdvanced {} => false,
-                CompactionStepOutcome::MetadataCompactionRequired {} => {
+                MetadataCompactionOutcome::Published { .. } => true,
+                MetadataCompactionOutcome::Abandoned => false,
+                MetadataCompactionOutcome::MetadataCompactionRequired => {
                     match self
                         .run_compaction_unit(namespace_id, cancellation)
                         .await?
                         .compaction
                     {
-                        MetadataCompactionOutcome::Published { .. }
-                        | MetadataCompactionOutcome::BoundedMergePublished => true,
+                        MetadataCompactionOutcome::Published { .. } => true,
                         MetadataCompactionOutcome::Abandoned => false,
                         MetadataCompactionOutcome::NotNeeded
+                        | MetadataCompactionOutcome::MetadataCompactionRequired
                         | MetadataCompactionOutcome::Cancelled
                         | MetadataCompactionOutcome::Fenced
                         | MetadataCompactionOutcome::Unknown => {
@@ -456,11 +518,13 @@ impl Maintenance {
                         }
                     }
                 }
-                CompactionStepOutcome::NotNeeded {} if cancellation.is_cancelled() => {
+                MetadataCompactionOutcome::NotNeeded if cancellation.is_cancelled() => {
                     break 'maintenance MetadataMaintenanceOutcome::Due
                 }
-                CompactionStepOutcome::NotNeeded {} => break 'maintenance step.wal_fold,
-                CompactionStepOutcome::Fenced {} | CompactionStepOutcome::Unknown => {
+                MetadataCompactionOutcome::NotNeeded => break 'maintenance step.wal_fold,
+                MetadataCompactionOutcome::Cancelled
+                | MetadataCompactionOutcome::Fenced
+                | MetadataCompactionOutcome::Unknown => {
                     break 'maintenance MetadataMaintenanceOutcome::Due
                 }
             };
@@ -476,74 +540,6 @@ impl Maintenance {
             outcome,
             compaction_units: u64::from(published_units),
         })
-    }
-
-    /// Optionally folds the WAL tail, then runs one compaction step.
-    /// `observed` is the anchor the caller decided on. Its head seq is
-    /// reported when concurrent updates prevent every fold attempt from
-    /// publishing.
-    async fn fold_then_compact(
-        &self,
-        namespace_id: &NamespaceId,
-        fold: bool,
-        observed: &NamespaceReadAnchor,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
-    ) -> Result<MetadataPassReport> {
-        let wal_fold = if fold {
-            match self.run_wal_fold(namespace_id).await {
-                Ok(folded) => match folded.outcome {
-                    FoldWalOutcome::Published => WalFoldStepOutcome::Folded {
-                        manifest_head_seq: folded.manifest_head_seq,
-                    },
-                    FoldWalOutcome::AlreadyCurrent => WalFoldStepOutcome::AlreadyPublished {
-                        attempted_seq: folded.target_head_seq,
-                        current_manifest_no: folded.manifest_no,
-                    },
-                },
-                Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFoldStepOutcome::RetriesExhausted {
-                        observed_head_seq: observed.read_state.seq,
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            WalFoldStepOutcome::NotNeeded
-        };
-        // A fold attempt can move the manifest, so the step observes it again.
-        let observed = (!fold).then_some(observed);
-        let compaction = self
-            .run_compaction_step(namespace_id, compaction_policy, observed)
-            .await?;
-        Ok(MetadataPassReport {
-            namespace_id: namespace_id.clone(),
-            wal_fold,
-            compaction,
-        })
-    }
-
-    /// Runs one bounded compaction step for one metadata family.
-    ///
-    /// A family group whose oldest run no longer fits one unit reports that
-    /// a streaming compaction is required.
-    async fn run_compaction_step(
-        &self,
-        namespace_id: &NamespaceId,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
-        observed: Option<&NamespaceReadAnchor>,
-    ) -> Result<CompactionStepOutcome> {
-        Ok(
-            match self
-                .compact_once(namespace_id, compaction_policy, observed)
-                .await?
-            {
-                CompactionUnitOutcome::Concluded(outcome) => outcome,
-                CompactionUnitOutcome::Fenced => CompactionStepOutcome::Fenced {},
-                CompactionUnitOutcome::CompactionPlanned(_) => {
-                    CompactionStepOutcome::MetadataCompactionRequired {}
-                }
-            },
-        )
     }
 
     async fn compactor_epoch(&self, namespace_id: &NamespaceId) -> Result<CompactorEpoch> {
@@ -578,13 +574,23 @@ impl Maintenance {
         }
     }
 
+    /// Runs one compaction unit under this runtime's compactor epoch.
+    ///
     /// `observed`, when given, was loaded after anything this call published.
+    /// The unit waits for a compaction permit from the runtime's execution
+    /// budget, and `cancellation` ends that wait or stops the merge at its
+    /// next block.
     async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
+        admission: loonfs_core::CompactionAdmission,
         observed: Option<&NamespaceReadAnchor>,
-    ) -> Result<CompactionUnitOutcome> {
+        cancellation: &MaintenanceCancellation,
+    ) -> Result<MetadataCompactionOutcome> {
+        if cancellation.is_cancelled() {
+            return Ok(MetadataCompactionOutcome::Cancelled);
+        }
         let claimed = self
             .writer
             .compactor_epochs
@@ -596,89 +602,74 @@ impl Maintenance {
             if observed.is_some_and(|anchor| epoch != anchor.compactor_epoch()) {
                 self.forget_fenced_compactor_epoch(namespace_id, epoch)
                     .await;
-                return Ok(CompactionUnitOutcome::Fenced);
+                return Ok(MetadataCompactionOutcome::Fenced);
             }
         }
         let due = |anchor: &NamespaceReadAnchor| {
             loonfs_core::cache::metadata_compaction_due(anchor, compaction_policy)
         };
-        let step_due = match observed {
+        let unit_due = match observed {
             Some(anchor) => due(anchor),
-            // A claimed step reads less than loading an anchor to check first.
+            // A claimed unit reads less than loading an anchor to check first.
             None => claimed.is_some() || due(&self.load_live_anchor(namespace_id).await?),
         };
-        if !step_due {
-            return Ok(CompactionUnitOutcome::Concluded(
-                CompactionStepOutcome::NotNeeded {},
-            ));
+        if !unit_due {
+            return Ok(MetadataCompactionOutcome::NotNeeded);
         }
-        let _permit = self.writer.execution_budget.compaction_permit().await;
+        let _permit = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
+            permit = self.writer.execution_budget.compaction_permit() => permit,
+        };
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
+        let started_at_ms = self.core.inner.timer.monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
-            .metadata_compaction_step(compaction_policy, compactor_epoch)
+            .compact_metadata_unit(
+                compaction_policy,
+                admission,
+                compactor_epoch,
+                cancellation.metadata_compaction(),
+            )
             .await
-            .map_err(Error::Core)?;
-        Ok(CompactionUnitOutcome::Concluded(match outcome {
-            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => {
-                CompactionStepOutcome::NotNeeded {}
-            }
-            loonfs_core::CompactionStepOutcome::UnitPublished {
-                group,
-                merged_delta_rows,
-                input_runs,
-                decoded_input_rows,
-                decoded_input_bytes,
-                manifest,
-                bottom_anchored_merge_blocked,
-            } => {
+            .map_err(Error::Core);
+        let elapsed_ms = self
+            .core
+            .inner
+            .timer
+            .monotonic_now_ms()
+            .saturating_sub(started_at_ms);
+        self.core
+            .instruments()
+            .compaction_finished(&outcome, elapsed_ms);
+        match &outcome {
+            Ok(loonfs_core::CompactionUnitOutcome::Published { manifest, .. }) => {
                 self.publisher
                     .invalidate_namespace(
                         namespace_id,
-                        NamespaceChange::Published(PublishedManifest::SameHead(manifest)),
+                        NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
                     )
                     .await;
-                tracing::info!(
-                    families = ?group.families(),
-                    merged_delta_rows,
-                    input_runs,
-                    decoded_input_rows,
-                    decoded_input_bytes,
-                    bottom_anchored_merge_blocked,
-                    "metadata compaction unit published"
-                );
-                CompactionStepOutcome::BoundedMergePublished {}
             }
-            loonfs_core::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
-                return Ok(CompactionUnitOutcome::CompactionPlanned(spec))
-            }
-            loonfs_core::CompactionStepOutcome::Fenced => {
+            Ok(loonfs_core::CompactionUnitOutcome::Fenced) => {
                 self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
                     .await;
-                return Ok(CompactionUnitOutcome::Fenced);
             }
-            loonfs_core::CompactionStepOutcome::Superseded => {
-                tracing::info!(
-                    "current manifest changed before compaction published; a later step retries"
-                );
-                CompactionStepOutcome::ManifestAdvanced {}
-            }
-        }))
+            Ok(_) | Err(_) => {}
+        }
+        outcome.map(compaction_outcome)
     }
 
-    /// Runs one metadata compaction unit in the caller's task.
+    /// Runs one metadata compaction unit in the caller's task, whatever the
+    /// size of its window.
     ///
-    /// The unit is a bounded merge when the selected window fits one step,
-    /// and otherwise one streaming compaction of a family group. Use this
-    /// when [`CompactionStepOutcome::MetadataCompactionRequired`] is reported, and
-    /// repeat it while it publishes to compact every eligible group. Each
-    /// merge waits for a compaction permit from the runtime's execution
-    /// budget, the step that plans the unit first and then the streaming
-    /// compaction.
+    /// Use this when [`MetadataCompactionOutcome::MetadataCompactionRequired`]
+    /// is reported, and repeat it while it publishes to compact every
+    /// eligible group. The unit waits for a compaction permit from the
+    /// runtime's execution budget.
     ///
-    /// Cancelling `cancellation` drops the step that plans the unit, or ends
-    /// the streaming compaction's wait for a permit, and reports the unit
-    /// cancelled. A running streaming compaction stops at its next block.
+    /// Cancelling `cancellation` ends the wait for a permit and reports the
+    /// unit cancelled. A running unit stops at its next block.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.compact_metadata",
@@ -699,109 +690,27 @@ impl Maintenance {
         self.run_compaction_unit(namespace_id, cancellation).await
     }
 
-    /// Runs one compaction unit for [`Self::compact_metadata`] and
-    /// [`Self::maintain_metadata_while_due_with_options`].
+    /// Runs one compaction unit of any size for [`Self::compact_metadata`]
+    /// and [`Self::maintain_metadata_while_due_with_options`].
     async fn run_compaction_unit(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
     ) -> Result<MetadataCompactionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let cancelled = || {
-            Ok(MetadataCompactionResponse {
-                namespace_id: namespace_id.clone(),
-                compaction: MetadataCompactionOutcome::Cancelled,
-            })
-        };
-        let planned = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return cancelled(),
-            planned = self.compact_once(
+        let compaction = self
+            .compact_once(
                 namespace_id,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
                 None,
-            ) => planned?,
-        };
-        let spec = match planned {
-            CompactionUnitOutcome::Fenced => {
-                return Ok(MetadataCompactionResponse {
-                    namespace_id: namespace_id.clone(),
-                    compaction: MetadataCompactionOutcome::Fenced,
-                });
-            }
-            CompactionUnitOutcome::CompactionPlanned(spec) => spec,
-            CompactionUnitOutcome::Concluded(CompactionStepOutcome::BoundedMergePublished {}) => {
-                return Ok(MetadataCompactionResponse {
-                    namespace_id: namespace_id.clone(),
-                    compaction: MetadataCompactionOutcome::BoundedMergePublished,
-                })
-            }
-            CompactionUnitOutcome::Concluded(_) => {
-                return Ok(MetadataCompactionResponse {
-                    namespace_id: namespace_id.clone(),
-                    compaction: MetadataCompactionOutcome::NotNeeded,
-                })
-            }
-        };
-        let _permit = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return cancelled(),
-            permit = self.writer.execution_budget.compaction_permit() => permit,
-        };
-        let outcome = self
-            .run_streaming_compaction(namespace_id, &spec, cancellation.metadata_compaction())
-            .await;
-        outcome.map(|outcome| metadata_compaction_response(namespace_id, outcome))
-    }
-
-    /// Runs a planned compaction under this runtime's remembered epoch.
-    pub(crate) async fn run_streaming_compaction(
-        &self,
-        namespace_id: &NamespaceId,
-        spec: &loonfs_core::MetadataCompactionSpec,
-        cancellation: &loonfs_core::MetadataCompactionCancellation,
-    ) -> Result<loonfs_core::MetadataCompactionJobOutcome> {
-        let compactor_epoch = self.compactor_epoch(namespace_id).await?;
-        let started_at_ms = self.core.inner.timer.monotonic_now_ms();
-        let outcome = self
-            .engine(namespace_id)
-            .run_metadata_compaction(spec, compactor_epoch, cancellation)
-            .await
-            .map_err(Error::Core);
-        if matches!(
-            outcome,
-            Ok(loonfs_core::MetadataCompactionJobOutcome::Fenced)
-        ) {
-            self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
-                .await;
-        }
-        let elapsed_ms = self
-            .core
-            .inner
-            .timer
-            .monotonic_now_ms()
-            .saturating_sub(started_at_ms);
-        self.core
-            .instruments()
-            .compaction_finished(&outcome, elapsed_ms);
-        match &outcome {
-            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { manifest, .. }) => {
-                self.publisher
-                    .invalidate_namespace(
-                        namespace_id,
-                        NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
-                    )
-                    .await;
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(
-                namespace_id = %namespace_id,
-                families = ?spec.families(),
-                error = %error.public_message(),
-                "streaming metadata compaction failed; a later step plans it again"
-            ),
-        }
-        outcome
+                cancellation,
+            )
+            .await?;
+        Ok(MetadataCompactionResponse {
+            namespace_id: namespace_id.clone(),
+            compaction,
+        })
     }
 
     /// Runs [`Self::gc_with_options`] with the default grace window.
@@ -1026,7 +935,7 @@ impl Maintenance {
     /// [`FoldWalOutcome::AlreadyCurrent`] and publishes nothing. The fold
     /// waits for a fold permit from the runtime's execution budget. This runs
     /// no compaction; [`Self::maintain_metadata`] folds and then runs one
-    /// compaction step.
+    /// compaction unit.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.fold_wal",

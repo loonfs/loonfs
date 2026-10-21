@@ -18,8 +18,8 @@ pub struct Maintenance {
     pub(crate) publisher: PublisherRegistry,
     pub(crate) writer: Arc<WriterBits>,
     pub(crate) actor: WriterIdentity,
-    /// A narrowed per-step row budget for the tests that need a family group
-    /// whose base run no bounded step can compact. See
+    /// A narrowed row budget for the tests that need a family group whose
+    /// window is too large for a `metadata` pass. See
     /// [`Self::starve_compaction_row_budget`].
     #[cfg(test)]
     pub(crate) compaction_row_budget: Option<std::num::NonZeroUsize>,
@@ -48,12 +48,12 @@ impl Maintenance {
         }
     }
 
-    /// Narrows the rows one compaction step this value drives may decode, so
-    /// a namespace a test can build in seconds ends up with a base run no
-    /// bounded step can compact.
+    /// Narrows the rows that a `metadata` pass this value drives admits in
+    /// one compaction unit, so a namespace a test can build in seconds has a
+    /// window too large for one pass.
     ///
     /// Test-only, and the one shipped number that has to move to reach that
-    /// state: planning, running, and publishing the job are the shipped path
+    /// state: planning, running, and publishing the unit are the shipped path
     /// either way.
     #[cfg(test)]
     #[must_use]

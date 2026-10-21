@@ -1684,31 +1684,6 @@ pub enum WalFoldStepOutcome {
     Unknown,
 }
 
-/// What the bounded compaction step of a maintenance pass did.
-///
-/// The embedded runtime reports it. It isn't part of the HTTP API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum CompactionStepOutcome {
-    /// No family group had enough delta runs to merge.
-    NotNeeded {},
-    /// One family group was merged, and a new manifest was published.
-    BoundedMergePublished {},
-    /// A family group's window is too large for one bounded merge, so the group needs a streaming
-    /// compaction.
-    ///
-    /// `Maintenance::compact_metadata` runs one, and `Maintenance::maintain_metadata_while_due`
-    /// runs one whenever a step reports this outcome.
-    MetadataCompactionRequired {},
-    /// Another publisher changed the current manifest before this step could publish.
-    ManifestAdvanced {},
-    /// A newer runtime claimed the namespace's compactor epoch, so this step published nothing.
-    Fenced {},
-    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
-    #[serde(other)]
-    Unknown,
-}
-
 /// The result of one maintenance job.
 ///
 /// The `kind` matches the request.
@@ -1754,8 +1729,7 @@ pub struct MetadataMaintenanceResponse {
     pub namespace_id: NamespaceId,
     /// Whether work is still due when the run returns.
     pub outcome: MetadataMaintenanceOutcome,
-    /// The compaction units that this run published. A unit is one bounded merge or one streaming
-    /// compaction of a family group.
+    /// The compaction units that this run published. A unit merges one family group's window.
     pub compaction_units: u64,
 }
 
@@ -1773,7 +1747,7 @@ pub enum MetadataMaintenanceOutcome {
     Unknown,
 }
 
-/// What the WAL fold and the bounded compaction step of one metadata maintenance pass did.
+/// What the WAL fold and the compaction unit of one metadata maintenance pass did.
 ///
 /// The embedded runtime reports it. It isn't part of the HTTP API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1782,8 +1756,8 @@ pub struct MetadataPassReport {
     pub namespace_id: NamespaceId,
     /// What the WAL fold did.
     pub wal_fold: WalFoldStepOutcome,
-    /// What the bounded compaction step did.
-    pub compaction: CompactionStepOutcome,
+    /// What the compaction unit did.
+    pub compaction: MetadataCompactionOutcome,
 }
 
 /// What one metadata compaction unit did.
@@ -1803,9 +1777,7 @@ pub struct MetadataCompactionResponse {
 pub enum MetadataCompactionOutcome {
     /// No eligible family group was available, so nothing was published.
     NotNeeded,
-    /// The selected window fit in a bounded step, and this run published it.
-    BoundedMergePublished,
-    /// A streaming compaction merged the selected window and published the next manifest.
+    /// The unit merged the selected window and published the next manifest.
     Published {
         /// The manifest that the compaction published.
         manifest_no: ManifestNo,
@@ -1820,10 +1792,15 @@ pub enum MetadataCompactionOutcome {
         /// The output segments that the compaction wrote.
         output_segments: u64,
     },
+    /// The selected window lists more rows than a metadata pass merges, so nothing was published.
+    ///
+    /// `Maintenance::compact_metadata` merges a window of any size, and
+    /// `Maintenance::maintain_metadata_while_due` runs it whenever a pass reports this outcome.
+    MetadataCompactionRequired,
     /// The run was cancelled, so the current manifest didn't change.
     Cancelled,
-    /// The run stopped because its inputs changed, time ran out, or publication retries were
-    /// exhausted.
+    /// The unit stopped because its inputs changed, time ran out, or every publication attempt
+    /// lost.
     Abandoned,
     /// Another process claimed the namespace's compactor epoch, so nothing was published.
     Fenced,

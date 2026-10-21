@@ -207,8 +207,8 @@ async fn run_maintenance_checkpoint_delete(
 /// One metadata-upkeep pass at a threshold of one WAL object.
 ///
 /// The fold an operator asks for explicitly runs whatever the tail length.
-/// The bounded compaction step runs in the same pass, and the output reports
-/// both.
+/// The same job then compacts metadata until nothing is due, and the output
+/// reports the outcome and the compaction units.
 async fn run_maintenance_fold(
     kind: CommandKind,
     config_path: &Path,

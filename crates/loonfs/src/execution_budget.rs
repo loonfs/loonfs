@@ -17,8 +17,8 @@ mod tests;
 /// Default maximum WAL-tail folds that the runtimes sharing one budget run at
 /// once.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
-/// Default maximum metadata merges, bounded or streaming, that the runtimes
-/// sharing one budget run at once.
+/// Default maximum metadata compaction units that the runtimes sharing one
+/// budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
 /// Default maximum public reads that runtimes sharing one budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
@@ -179,8 +179,7 @@ impl ExecutionBudget {
         self.inner.folds.acquire().await
     }
 
-    /// Waits for a compaction permit. Every bounded compaction step and every
-    /// streaming compaction holds one.
+    /// Waits for a compaction permit. Every compaction unit takes one.
     pub(crate) async fn compaction_permit(&self) -> BudgetPermit<'_> {
         self.inner.compactions.acquire().await
     }
@@ -266,9 +265,9 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Sets the maximum number of metadata merges run at once, bounded
-    /// compaction steps and streaming compactions alike, whether sessions or
-    /// [`Maintenance`](crate::Maintenance) calls start them. A merge never
+    /// Sets the maximum number of metadata compaction units run at once,
+    /// whether sessions or [`Maintenance`](crate::Maintenance) calls start
+    /// them. A merge never
     /// holds a fold permit. Defaults to
     /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`].
     pub fn max_concurrent_compactions(mut self, limit: NonZeroUsize) -> Self {
@@ -276,10 +275,8 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Sets the decoded metadata bytes one merge may hold. A maintenance step
-    /// merges inline only the runs that fit; a larger window runs as a
-    /// streaming compaction that holds at most this much at once. Defaults
-    /// to 64 MiB.
+    /// Sets the decoded metadata bytes one merge keeps in memory at once,
+    /// whatever the size of its window. Defaults to 64 MiB.
     pub fn max_merge_input_bytes(mut self, max_merge_input_bytes: NonZeroUsize) -> Self {
         self.max_merge_input_bytes = max_merge_input_bytes;
         self

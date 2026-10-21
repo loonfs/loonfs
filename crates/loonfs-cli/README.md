@@ -375,7 +375,7 @@ Maintenance
 
   loonfs maintenance metadata [--max-wal-tail-objects <n>]
     Fold the WAL tail if it's due, and compact metadata until nothing is
-    due. A streaming compaction can take minutes, so the command can too.
+    due. A compaction unit can take minutes, so the command can too.
     It stops after 16 compaction units. A `due` outcome means that work
     remains, and a later run continues it. --max-wal-tail-objects
     overrides the default fold threshold.

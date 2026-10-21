@@ -53,13 +53,14 @@ pub struct MetadataRunPolicy {
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
-    /// Complete logical runs one compaction step may inspect and merge.
+    /// Complete logical runs one compaction unit may merge, up to eight.
     pub max_input_runs_per_step: NonZeroUsize,
-    /// Row payloads one compaction step may decode across its selected runs.
+    /// Rows, by its runs' descriptor counts, that a window may list when the
+    /// call admits only windows within this budget (a `metadata` pass). A
+    /// larger window waits for a unit that admits any size.
     pub max_decoded_input_rows_per_step: NonZeroUsize,
-    /// Decoded data-block bytes one compaction merges. A bounded step
-    /// takes only the runs that fit. A streaming merge holds at most this much
-    /// across its open inputs, though each input always holds one whole block.
+    /// Decoded data-block bytes one merge keeps in memory across its open
+    /// inputs, though each input always keeps one whole block.
     pub max_decoded_input_bytes_per_step: NonZeroUsize,
 }
 

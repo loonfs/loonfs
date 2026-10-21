@@ -169,8 +169,7 @@ async fn read_during_compaction_and_collection(
             }
             assert_matches!(
                 outcome.compaction,
-                loonfs::MetadataCompactionOutcome::BoundedMergePublished
-                    | loonfs::MetadataCompactionOutcome::Published { .. },
+                loonfs::MetadataCompactionOutcome::Published { .. },
                 "unexpected compaction: {:?}",
                 outcome.compaction
             );

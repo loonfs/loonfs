@@ -384,11 +384,11 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and bounded compaction memos | Shared |
-| Merge input | `max_merge_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction or maintenance step merges | Per operation |
+| Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and pin-fold memos | Shared |
+| Merge input | `max_merge_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments that one fold, compaction, or maintenance step keeps in memory while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and checkpoint, snapshot, and fork creation start | Concurrency |
-| Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
+| Compactions | `max_concurrent_compactions` | 2 | Metadata compactions running at once, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
 | Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that have file content or index segments in memory at once, across daily visits and session ticks | Concurrency |
 | Reads | `max_concurrent_reads` | 64 | Public reads running at once. Each page takes one slot | Concurrency |
@@ -398,7 +398,7 @@ All memos share one read working memory pool. When the pool is full, a memo evic
 
 A fold keeps its segment output in memory and takes its memo from the shared pool. A merge keeps its merge input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A sweep visit that folds the WAL tail and then merges takes a fold permit for the fold, and then a compaction permit for the merge. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
 
-A maintenance step merges only the runs that fit in `max_merge_input_bytes`. A larger window runs as a streaming compaction, which keeps at most that much decoded input in memory at once. So lowering `max_merge_input_bytes` moves work from maintenance steps to compactions.
+A compaction keeps at most `max_merge_input_bytes` of decoded input in memory at once, whatever the size of its window, so lowering the setting makes merges read in smaller waves.
 
 The segment output budget has no setting, and a segment larger than the budget is written on its own.
 
@@ -583,7 +583,7 @@ Each session that the host keeps has its own publisher, engine state, head posit
 
 The daily pass (the full sweep pass) runs when the server starts and then every `full_sweep_interval_ms` (86400000 ms, or 24 hours, by default). It lists every namespace, runs metadata and index maintenance, and collects garbage. It covers namespaces that this host doesn't write to, forks, deleted namespaces, work left by a crashed process, and garbage that was still inside a grace window. If the host loses its in-memory scheduling facts, no durable progress is lost.
 
-The daily pass and the ticks run at the same time. They share the `max_concurrent_maintenance` visit slots (8 by default), and a per-namespace set of current visits keeps two visits to one namespace from overlapping. A streaming compaction uses one slot while the other free slots continue working. The daily pass lists up to 1000 namespace IDs per page, and it requests another page when its visit slots allow it. Hosts can call `Sweep::run_pass` and `Sweep::tick` directly.
+The daily pass and the ticks run at the same time. They share the `max_concurrent_maintenance` visit slots (8 by default), and a per-namespace set of current visits keeps two visits to one namespace from overlapping. A long compaction uses one slot while the other free slots continue working. The daily pass lists up to 1000 namespace IDs per page, and it requests another page when its visit slots allow it. Hosts can call `Sweep::run_pass` and `Sweep::tick` directly.
 
 All the interval and idle-close settings must be positive.
 
@@ -599,7 +599,7 @@ If listing the namespaces fails, the pass doesn't start any new visits. The visi
 
 On shutdown, the server stops the sweep in these steps:
 
-1. It stops the sweep at the same moment it stops admitting requests. No new visit starts, and a running streaming compaction stops at its next block.
+1. It stops the sweep at the same moment it stops admitting requests. No new visit starts, and a running compaction stops at its next block.
 2. After the request drain, it waits for the visits that are still running, up to the same `shutdown_deadline_ms` that limits the drain.
 3. At that deadline, it drops the visits that are still running, logs a warning, and shuts the runtime down.
 
@@ -616,7 +616,7 @@ On a collection pass, each object that's still inside its collection grace adds 
 
 The full pass also collects deleted namespaces. A deleted namespace's content becomes eligible once its retirement grace passes, about 61 minutes after the delete. The next full pass collects eligible content, and later full passes keep collecting it. Late writes through upload capabilities that were already issued, and dependent forks, can extend reclamation, and the later passes find them. In a garbage collection report, `deleted.retired_content_objects` counts the listed content objects that the pass deleted, and a pass with nothing left under the content prefix reports zero. For what can block reclamation, see the API specification's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns).
 
-An explicit `metadata` maintenance run compacts until nothing is due, so it can include a streaming compaction, which can take minutes. Maintenance runs are exempt from `request_deadline_ms`. If the response's `outcome` is `due`, the writer session, the next sweep visit, or a later run continues the work.
+An explicit `metadata` maintenance run compacts until nothing is due, so it can include a compaction of a large window, which can take minutes. Maintenance runs are exempt from `request_deadline_ms`. If the response's `outcome` is `due`, the writer session, the next sweep visit, or a later run continues the work.
 
 A namespace whose writes stop before its tail reaches the fold thresholds is folded by the first eligible metadata tick after its newest commit is `idle_fold_after_ms` old. This period defaults to 900000 ms, which is 15 minutes. If a visit slot is free, a tail that the host keeps gets its first idle-fold attempt within one tick after that age, even when the metadata retry delay is longer. After a restart, or after a write through another process, the fold waits for a full pass after the age threshold. A namespace that's written more often than once per period isn't folded this way. Instead, its writer folds it at the thresholds.
 

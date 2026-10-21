@@ -36,12 +36,12 @@ use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 use super::streaming_compaction::{
-    retention_clusters, run_metadata_compaction_job, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec,
+    finalize_metadata_compaction, input_segment_keys, retention_clusters, run_metadata_compaction,
+    CompactionPublication, MetadataCompactionCancellation, MetadataCompactionSpec,
 };
 use super::{
-    compaction_step, data_block_load, fold, index_block_load, load, row, scan,
-    CompactionStepOutcome, MetadataCompactionPolicy,
+    compact_unit, compaction_step, data_block_load, fold, index_block_load, load, row, scan,
+    CompactionUnitOutcome, MetadataCompactionPolicy,
 };
 use crate::block_cache::SegmentBlockKind;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
@@ -325,21 +325,23 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
 ) -> (ManifestNo, usize) {
     let mut published = 0;
     loop {
-        let outcome = super::compaction_step(
+        let outcome = super::compact_unit(
             store,
+            None,
             namespace_id,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
-            None,
+            crate::manifest::CompactionAdmission::AnySize,
+            &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
         )
         .await
         .expect("compaction step");
         match outcome {
-            CompactionStepOutcome::UnitPublished { .. } => published += 1,
-            CompactionStepOutcome::Superseded | CompactionStepOutcome::Fenced => continue,
-            CompactionStepOutcome::NotNeeded { .. } => {
+            CompactionUnitOutcome::Published { .. } => published += 1,
+            CompactionUnitOutcome::Abandoned | CompactionUnitOutcome::Fenced => continue,
+            CompactionUnitOutcome::NotNeeded => {
                 let manifest_no = load_current_manifest(store, namespace_id)
                     .await
                     .expect("read metadata manifest")
@@ -348,34 +350,73 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
                     .manifest_no;
                 return (manifest_no, published);
             }
-            CompactionStepOutcome::CompactionPlanned { .. } => {
-                panic!("test compaction budget should admit a progress-making subset")
-            }
+            other => panic!("an admitted unit should publish or find nothing, got {other:?}"),
         }
     }
 }
 
-/// Runs the job a step planned, the way a maintenance caller runs it after
-/// the step, which keeps the test deterministic.
+/// Runs a unit over a plan made earlier, against the current manifest, the
+/// way [`compact_unit`] runs the plan it makes.
+///
+/// For a test that has to do something between the plan and the merge, which
+/// stands for other publications during a long merge.
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
-) -> MetadataCompactionJobOutcome {
-    run_metadata_compaction_job(
+) -> CompactionUnitOutcome {
+    run_planned_compaction_under(
         store,
-        None,
         namespace_id,
-        loonfs_types::CompactorEpoch(0),
-        spec,
         policy,
+        spec,
         &MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
-    .expect("run the planned streaming compaction")
+}
+
+/// The same, with the token a test that cancels the unit sets.
+async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataRunPolicy,
+    spec: &MetadataCompactionSpec,
+    cancellation: &MetadataCompactionCancellation,
+) -> CompactionUnitOutcome {
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest");
+    let segments = super::metadata_basis_from_manifest(store, None, &current).segments;
+    let Some(input_keys) = input_segment_keys(&segments.scan_runs, spec) else {
+        return CompactionUnitOutcome::Abandoned;
+    };
+    let merged =
+        match run_metadata_compaction(&segments, None, namespace_id, spec, policy, cancellation)
+            .await
+            .expect("merge the planned window")
+        {
+            Ok(merged) => merged,
+            Err(stopped) => return stopped,
+        };
+    drop(segments);
+    let timer = crate::test_support::std_timer();
+    finalize_metadata_compaction(
+        store,
+        namespace_id,
+        spec,
+        &input_keys,
+        merged,
+        cancellation,
+        &CompactionPublication {
+            compactor_epoch: loonfs_types::CompactorEpoch(0),
+            compaction: Deadline::start(Arc::clone(&timer)),
+            publication: Deadline::start(timer),
+        },
+    )
+    .await
+    .expect("publish the planned unit")
 }
 
 /// What a reader sees right now: every inode the namespace knows, resolved
@@ -418,7 +459,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     .expect("resolve every inode the namespace knows")
 }
 
-/// Rebuilds one family group through a streaming compaction and publishes the
+/// Rebuilds one family group through a compaction unit and publishes the
 /// swap, answering with the staged object keys the manifest now names.
 ///
 /// For a caller that needs a namespace whose manifest references segments
@@ -434,37 +475,31 @@ pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
     segment_keys_of_the_current_manifest(store, namespace_id).await
 }
 
-/// Plans one family group's streaming compaction without running it, with the
-/// budgets that make a small namespace's group too large to merge in one step.
+/// Plans one family group's compaction unit without running it.
 ///
 /// For a caller that has to do something between the plan and the
-/// publication — the collector's tests, which run a pass across that gap.
+/// publication, such as the collector's tests, which run a pass across that
+/// gap.
 pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
 ) -> (MetadataRunPolicy, MetadataCompactionSpec) {
-    // One byte admits no run whole, so the group a step selects has no window
-    // that makes progress and is handed to a job.
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataRunPolicy::default()
     };
-    let report = compaction_step(
-        store,
-        namespace_id,
-        loonfs_types::CompactorEpoch(0),
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest");
+    let payload = current.state.envelope.payload();
+    let spec = compaction_step::plan_compaction(
+        payload,
+        &runs_newest_first(payload),
         policy,
         MetadataCompactionPolicy::default(),
-        None,
-        crate::test_support::std_timer(),
     )
-    .await
-    .expect("plan a streaming compaction");
-    let CompactionStepOutcome::CompactionPlanned { spec, .. } = report else {
-        panic!("a budget that admits no run whole must plan a streaming compaction");
-    };
+    .expect("a namespace with delta runs plans a unit");
     (policy, spec)
 }
 
@@ -505,7 +540,7 @@ pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
     assert_matches!(
         outcome,
-        MetadataCompactionJobOutcome::Published { .. },
+        CompactionUnitOutcome::Published { .. },
         "the planned job must publish, got {outcome:?}"
     );
 }
