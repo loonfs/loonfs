@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
@@ -268,11 +268,7 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
-        let failed = |source| ImmutableWriteError::Transport {
-            object_key: key.to_owned(),
-            source,
-        };
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let context = OperationContext::new(
             key,
             OperationKind::Assemble {
@@ -282,27 +278,15 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
             },
         );
         let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(failed(error)),
+            Intercept::FailBefore(error) => return Err(error),
             intercept => intercept,
         };
         let result = self
             .inner
             .assemble(key, sources, tail.clone(), expected)
             .await;
-        if intercept.calls_after() {
-            self.interceptor.after(
-                &context,
-                &if result.is_ok() {
-                    Outcome::Success
-                } else {
-                    Outcome::Failure
-                },
-            );
-        }
-        match (intercept, result) {
-            (Intercept::FailAfter(error), Ok(_)) => Err(failed(error)),
-            (_, result) => result,
-        }
+        let outcome = result_outcome(&result);
+        Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

@@ -199,7 +199,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         sources: &[loonfs_objectstore::AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> Result<ObjectMetadata, loonfs_objectstore::ImmutableWriteError> {
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let _guard = self.enter(key, &self.puts).await;
         self.inner.assemble(key, sources, tail, expected).await
     }

@@ -43,7 +43,6 @@ pub mod timing;
 mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
-pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
     ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode, Result,

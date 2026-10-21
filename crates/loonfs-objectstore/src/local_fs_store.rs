@@ -14,8 +14,8 @@ use crate::keyspace::{
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -567,7 +567,7 @@ impl ObjectStore for LocalFsStore {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
+    ) -> Result<ObjectMetadata> {
         let mut complete = false;
         let created = async {
             crate::assembly::validate_algorithms(
@@ -591,10 +591,7 @@ impl ObjectStore for LocalFsStore {
         }
         .await;
         if !complete {
-            return created.map_err(|source| ImmutableWriteError::Transport {
-                object_key: key.to_owned(),
-                source,
-            });
+            return created;
         }
         crate::immutable_write::decide_created(self, key, expected, created).await
     }

@@ -279,7 +279,7 @@ macro_rules! __delegate_object_store_method {
             tail: Vec<::bytes::Bytes>,
             expected: &'expected ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<Output = ::core::result::Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ImmutableWriteError>> + Send + 'future,
+            dyn ::core::future::Future<Output = ::core::result::Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ObjectStoreError>> + Send + 'future,
         >>
         where 'store: 'future, 'key: 'future, 'sources: 'future, 'expected: 'future, Self: 'future,
         {
@@ -375,7 +375,7 @@ macro_rules! __delegate_object_store_method {
             dyn ::core::future::Future<
                     Output = Result<
                         ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ImmutableWriteError,
+                        ::loonfs_objectstore::ObjectStoreError,
                     >,
                 > + Send
                 + 'future,
@@ -396,7 +396,7 @@ macro_rules! __delegate_object_store_method {
             tail: Vec<::bytes::Bytes>,
             expected: &'expected ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<Output = Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ImmutableWriteError>> + Send + 'future,
+            dyn ::core::future::Future<Output = Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ObjectStoreError>> + Send + 'future,
         >>
         where 'store: 'future, 'key: 'future, 'sources: 'future, 'expected: 'future, Self: 'future,
         {

@@ -9,8 +9,8 @@ use futures::stream::BoxStream;
 use futures::Stream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::HashMap;
@@ -389,7 +389,7 @@ where
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
         let result = self.inner.assemble(key, sources, tail, expected).await;
         let class = match &result {
@@ -397,10 +397,13 @@ where
                 self.remember_successful_write(key);
                 SimEventOutcome::Ok
             }
-            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
-            Err(_) => SimEventOutcome::Error {
+            Err(
+                ObjectStoreError::DifferentObject { .. }
+                | ObjectStoreError::StoredChecksumMissing { .. },
+            ) => SimEventOutcome::Error {
                 class: "precondition_failed".to_owned(),
             },
+            Err(error) => error_result_class(error),
         };
         self.push_trace(op, "assemble", None, class);
         result

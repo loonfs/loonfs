@@ -698,7 +698,8 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     let object_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
-        .await?;
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?;
 
     Ok(StoredContent {
         #[cfg(any(test, feature = "test-support"))]
@@ -719,7 +720,9 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::ids::content_ref;
-    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+    use loonfs_test_support::stores::{
+        KeyPredicate, MetadataMapStore, OperationSelector, RecordingStore,
+    };
     use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
     use std::assert_matches;
     use tempfile::tempdir;
@@ -945,6 +948,47 @@ mod tests {
                     .expect("read staged object")
                     .expect("staged object exists"),
                 Bytes::from_static(b"identical payload")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn staging_over_an_object_without_an_equal_stored_checksum_is_corruption() {
+        let (_temp_dir, local) = test_store();
+        let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+        let content_id = ContentId::generate();
+        let key = content_blob(&namespace_id, &content_id);
+        local
+            .put_if_absent(&key, Bytes::from_static(b"staged"))
+            .await
+            .expect("occupant");
+        let without_checksum =
+            MetadataMapStore::new(&local, KeyPredicate::exact(key.clone()), |mut metadata| {
+                metadata.checksum = None;
+                metadata
+            });
+        let cases: [(&dyn ObjectStore, &[u8], &str); 2] = [
+            (&local, b"other", "already exists with different bytes"),
+            (
+                &without_checksum,
+                b"staged",
+                "already exists without a stored checksum",
+            ),
+        ];
+        for (store, bytes, reason) in cases {
+            let error = stage_bytes_under_content_id(
+                store,
+                namespace_id.clone(),
+                content_id.clone(),
+                bytes,
+            )
+            .await
+            .expect_err("occupied key");
+            assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+            assert_matches!(
+                error,
+                CoreError::NamespaceCorrupt(message)
+                    if message.contains(&key) && message.ends_with(reason)
             );
         }
     }

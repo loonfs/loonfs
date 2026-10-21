@@ -12,7 +12,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStoreError};
+use loonfs_objectstore::{AssemblySource, ObjectStoreError};
 use loonfs_objectstore::{
     AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
     SharedObjectStore, StoreConfig,
@@ -839,10 +839,7 @@ async fn assert_assembly<S: ObjectStore>(
                     &Checksum::compute(crc, b"wrong")
                 )
                 .await,
-            Err(ImmutableWriteError::Transport {
-                source: ObjectStoreError::ChecksumMismatch { .. },
-                ..
-            })
+            Err(ObjectStoreError::ChecksumMismatch { .. })
         );
         // A provider that verifies after completion leaves the rejected object
         // for collection; nothing names it, and no writer deletes it.
@@ -879,10 +876,7 @@ async fn assert_assembly<S: ObjectStore>(
             store
                 .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
-            Err(ImmutableWriteError::Transport {
-                source: ObjectStoreError::PreconditionFailed { .. },
-                ..
-            })
+            Err(ObjectStoreError::PreconditionFailed { .. })
         );
         assert!(store
             .head(&ranged)
@@ -894,10 +888,7 @@ async fn assert_assembly<S: ObjectStore>(
             store
                 .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
-            Err(ImmutableWriteError::Transport {
-                source: ObjectStoreError::PreconditionFailed { .. },
-                ..
-            })
+            Err(ObjectStoreError::PreconditionFailed { .. })
         );
         assert!(store
             .head(&ranged)
@@ -947,7 +938,7 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
                 &Checksum::compute(expected.algorithm, &[payload, b"other"].concat())
             )
             .await,
-        Err(ImmutableWriteError::DifferentObject { .. })
+        Err(ObjectStoreError::DifferentObject { .. })
     );
     assert_eq!(
         store.head(&put_key).await.expect("unchanged put"),

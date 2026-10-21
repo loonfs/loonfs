@@ -6,9 +6,7 @@
 //! which route the write through the store's own [`ObjectStore::put`] and
 //! [`ObjectStore::put_immutable_verified`].
 
-use crate::{
-    AssemblySource, ByteStream, ImmutableWriteError, ObjectMetadata, ObjectStore, PutMode, Result,
-};
+use crate::{AssemblySource, ByteStream, ObjectMetadata, ObjectStore, PutMode, Result};
 use futures::StreamExt as _;
 use loonfs_types::Checksum;
 
@@ -38,12 +36,7 @@ pub async fn assemble<S: ObjectStore + ?Sized>(
     sources: &[AssemblySource],
     tail: Vec<bytes::Bytes>,
     expected: &Checksum,
-) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    let bytes = crate::assembly::read_sources(store, sources, tail, expected, key)
-        .await
-        .map_err(|source| ImmutableWriteError::Transport {
-            object_key: key.to_owned(),
-            source,
-        })?;
+) -> Result<ObjectMetadata> {
+    let bytes = crate::assembly::read_sources(store, sources, tail, expected, key).await?;
     store.put_immutable_verified(key, bytes).await
 }

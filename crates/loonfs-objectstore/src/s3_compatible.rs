@@ -1156,7 +1156,7 @@ mod tests {
     /// upload is created once.
     #[tokio::test(start_paused = true)]
     async fn a_failing_request_is_attempted_under_one_retry_budget() {
-        use crate::{ImmutableWriteError, ObjectStore};
+        use crate::ObjectStore;
         let retried = usize::try_from(DEFAULT.max_retries).expect("retry count") + 1;
         // Four 30 s attempts and their backoffs pass the 120 s deadline.
         let timed_out = 4;
@@ -1205,11 +1205,11 @@ mod tests {
                         "put" => (store, Bytes::from_static(b"payload")),
                         _ => (store.multipart_geometry(3, 3), Bytes::from_static(b"one")),
                     };
-                    match store.put_immutable_verified(KEY, payload).await {
-                        Ok(_) => None,
-                        Err(ImmutableWriteError::Transport { source, .. }) => Some(source.kind()),
-                        Err(other) => panic!("{operation} {fault:?} returned {other:?}"),
-                    }
+                    store
+                        .put_immutable_verified(KEY, payload)
+                        .await
+                        .err()
+                        .map(|error| error.kind())
                 }
             };
             let elapsed_ms = clock.monotonic_now_ms();
@@ -1302,7 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn verified_put_and_assembly_accept_the_same_stored_checksum() {
-        use crate::{ImmutableWriteError, ObjectStore};
+        use crate::{ObjectStore, ObjectStoreError};
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
             ConfiguredObjectStoreKind::CloudflareR2,
@@ -1342,7 +1342,7 @@ mod tests {
                         &Checksum::crc64nvme(b"source other")
                     )
                     .await,
-                Err(ImmutableWriteError::DifferentObject { object_key }) if object_key == KEY
+                Err(ObjectStoreError::DifferentObject { object_key }) if object_key == KEY
             );
             // Each assembly learns of the occupied key from its create, and
             // then checks the stored checksum with one HEAD.

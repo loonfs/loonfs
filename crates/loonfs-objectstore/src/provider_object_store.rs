@@ -652,11 +652,7 @@ impl ObjectStore for ProviderObjectStore {
     /// bounded by the operation deadline, so the whole takes longer than
     /// one request's allowance: content and segments come through here,
     /// never a publication.
-    async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         if (bytes.len() as u64) < self.multipart_geometry.threshold_bytes {
             return crate::immutable_write::put(self, &self.retry_warnings, key, bytes).await;
         }
@@ -748,12 +744,8 @@ impl ObjectStore for ProviderObjectStore {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::assembly::validate_algorithms(self.checksum_algorithm(), key, sources, expected)
-            .map_err(|source| crate::ImmutableWriteError::Transport {
-                object_key: key.to_owned(),
-                source,
-            })?;
+    ) -> Result<ObjectMetadata> {
+        crate::assembly::validate_algorithms(self.checksum_algorithm(), key, sources, expected)?;
         // Below the threshold the create is one conditional PUT, and only an
         // occupied key costs a HEAD, after the conflict. A multipart assembly
         // checks first, so a retry copies nothing, and so that it never
@@ -762,17 +754,8 @@ impl ObjectStore for ProviderObjectStore {
         if crate::assembly::assembled_size_bytes(sources, &tail)
             >= PROVIDER_MULTIPART_THRESHOLD_BYTES
         {
-            match self.head(key).await {
-                Ok(Some(existing)) => {
-                    return crate::immutable_write::verify_stored_checksum(key, expected, existing)
-                }
-                Err(source) => {
-                    return Err(crate::ImmutableWriteError::Transport {
-                        object_key: key.to_owned(),
-                        source,
-                    })
-                }
-                Ok(None) => {}
+            if let Some(existing) = self.head(key).await? {
+                return crate::immutable_write::verify_stored_checksum(key, expected, existing);
             }
         }
         let created = self
@@ -2037,12 +2020,12 @@ mod tests {
         assert_eq!(accepted.checksum, Some(Checksum::crc64nvme(&ours)));
         assert_matches!(
             store.put_immutable_verified(different, ours.clone()).await,
-            Err(crate::ImmutableWriteError::DifferentObject { object_key })
+            Err(ObjectStoreError::DifferentObject { object_key })
                 if object_key == different
         );
         assert_matches!(
             store.put_immutable_verified(without_checksum, ours).await,
-            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key })
+            Err(ObjectStoreError::StoredChecksumMissing { object_key })
                 if object_key == without_checksum
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
@@ -2105,13 +2088,7 @@ mod tests {
             .await
             .expect_err("persistent failure exhausts the immutable retry budget");
 
-        assert_matches!(
-            error,
-            crate::ImmutableWriteError::Transport {
-                source: ObjectStoreError::Transport { .. },
-                ..
-            }
-        );
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 11);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
     }
@@ -2192,13 +2169,7 @@ mod tests {
             .await
             .expect_err("auth rejection surfaces immediately");
 
-        assert_matches!(
-            error,
-            crate::ImmutableWriteError::Transport {
-                source: ObjectStoreError::PermissionDenied { .. },
-                ..
-            }
-        );
+        assert_matches!(error, ObjectStoreError::PermissionDenied { .. });
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 

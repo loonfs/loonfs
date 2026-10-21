@@ -26,8 +26,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,
+    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, Result,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::BTreeMap;
@@ -280,18 +280,14 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-        let failed = |source| ImmutableWriteError::Transport {
-            object_key: key.to_owned(),
-            source,
-        };
-        if let Some(metadata) = self.head(key).await.map_err(failed)? {
+    ) -> Result<ObjectMetadata> {
+        if let Some(metadata) = self.head(key).await? {
             return match &metadata.checksum {
                 Some(actual) if actual == expected => Ok(metadata),
-                Some(_) => Err(ImmutableWriteError::DifferentObject {
+                Some(_) => Err(ObjectStoreError::DifferentObject {
                     object_key: key.to_owned(),
                 }),
-                None => Err(ImmutableWriteError::StoredChecksumMissing {
+                None => Err(ObjectStoreError::StoredChecksumMissing {
                     object_key: key.to_owned(),
                 }),
             };
@@ -301,24 +297,21 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             let selected = self
                 .inner
                 .get(&source.key, source.range.clone())
-                .await
-                .map_err(failed)?
-                .ok_or_else(|| {
-                    failed(ObjectStoreError::PreconditionFailed {
-                        object_key: source.key.clone(),
-                    })
+                .await?
+                .ok_or_else(|| ObjectStoreError::PreconditionFailed {
+                    object_key: source.key.clone(),
                 })?;
             if source.range.as_ref().is_some_and(|range| {
                 selected.len() as u64 != range.end_exclusive - range.start_inclusive
             }) {
-                return Err(failed(ObjectStoreError::PreconditionFailed {
+                return Err(ObjectStoreError::PreconditionFailed {
                     object_key: source.key.clone(),
-                }));
+                });
             }
             if !source.checksum.matches(&selected) {
-                return Err(failed(ObjectStoreError::ChecksumMismatch {
+                return Err(ObjectStoreError::ChecksumMismatch {
                     object_key: source.key.clone(),
-                }));
+                });
             }
             bytes.extend_from_slice(&selected);
         }
@@ -326,9 +319,9 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             bytes.extend_from_slice(&piece);
         }
         if !expected.matches(&bytes) {
-            return Err(failed(ObjectStoreError::ChecksumMismatch {
+            return Err(ObjectStoreError::ChecksumMismatch {
                 object_key: key.to_owned(),
-            }));
+            });
         }
         let mut metadata = self.inner.put_immutable_verified(key, bytes.into()).await?;
         self.stored_checksums
