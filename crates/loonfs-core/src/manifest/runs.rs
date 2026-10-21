@@ -12,6 +12,7 @@ use std::num::NonZeroUsize;
 pub(super) use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
     DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DEFAULT_MIN_COMPACTION_RUNS,
 };
 pub use loonfs_types::MetadataFamilyGroup;
 
@@ -47,9 +48,12 @@ pub(super) struct MetadataRunManifest {
 /// hold while it works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRunPolicy {
+    /// Delta runs at which a family group merges its newest
+    /// `min_compaction_runs` runs, even when no size tier is ready.
     pub max_delta_runs: NonZeroUsize,
-    /// Runs up to this stored-byte size may merge without a size ratio.
-    pub small_run_bytes: NonZeroUsize,
+    /// Runs of similar size that a family group needs before they merge.
+    /// A minimum of one acts as two.
+    pub min_compaction_runs: NonZeroUsize,
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
@@ -67,8 +71,8 @@ pub struct MetadataRunPolicy {
 impl Default for MetadataRunPolicy {
     fn default() -> Self {
         Self {
-            small_run_bytes: const { NonZeroUsize::new(8 * 1024 * 1024).unwrap() },
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
+            min_compaction_runs: const { NonZeroUsize::new(DEFAULT_MIN_COMPACTION_RUNS).unwrap() },
             max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
             target_segment_bytes: const {
                 NonZeroUsize::new(
@@ -87,14 +91,6 @@ impl Default for MetadataRunPolicy {
             },
         }
     }
-}
-
-pub(super) fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
-    payload
-        .runs
-        .iter()
-        .filter(|run| run.tier == RunTier::Delta)
-        .count()
 }
 
 /// Orders runs for compaction planning: delta runs before base runs,

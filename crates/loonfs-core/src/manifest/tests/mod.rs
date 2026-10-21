@@ -725,8 +725,15 @@ use super::build::{
     build_manifest_delta_run_segments, debug_assert_manifest_segments_do_not_overlap,
 };
 use super::fold::next_run_no_after;
-use super::runs::delta_run_count;
 use std::assert_matches;
+
+fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
+    payload
+        .runs
+        .iter()
+        .filter(|run| run.tier == RunTier::Delta)
+        .count()
+}
 
 // Test support: a manifest built directly from a MetadataState, used to
 // author arbitrary layouts without driving the full checkpoint pipeline.

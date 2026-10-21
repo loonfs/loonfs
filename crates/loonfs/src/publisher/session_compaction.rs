@@ -6,7 +6,7 @@ use super::*;
 use crate::{InlineContentPolicy, MetadataCompactionOutcome};
 use loonfs_core::control::CurrentManifest;
 use loonfs_types::format::manifest::RunTier;
-use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::format::segment_blocks::{DEFAULT_MAX_DELTA_RUNS, DEFAULT_MIN_COMPACTION_RUNS};
 
 /// Each write leaves one inline byte in the tail, so each write is folded.
 fn fold_every_write() -> InlineContentPolicy {
@@ -67,6 +67,10 @@ async fn write_until_the_session_compacts(
 
 /// Opens a session on a new namespace and writes until one more fold makes
 /// compaction due.
+///
+/// The first fold writes each group's base, and every later fold adds a
+/// delta run of about the same size, so the fold that brings the manifest to
+/// a tier's worth of runs makes compaction due.
 async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     writer: &crate::LoonFs<crate::Writable>,
     store: &S,
@@ -80,13 +84,19 @@ async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    for write in 0..=DEFAULT_MAX_DELTA_RUNS {
-        if delta_runs(&current_manifest(store, &namespace_id).await) == DEFAULT_MAX_DELTA_RUNS - 1 {
+    for write in 0..DEFAULT_MIN_COMPACTION_RUNS {
+        let runs = current_manifest(store, &namespace_id)
+            .await
+            .envelope
+            .payload()
+            .runs
+            .len();
+        if runs == DEFAULT_MIN_COMPACTION_RUNS - 1 {
             return namespace;
         }
         write_and_settle(writer, &namespace, &format!("/file-{write}")).await;
     }
-    panic!("every write should leave one delta run");
+    panic!("every write should leave one more run");
 }
 
 /// A budget whose merges run one at a time.
@@ -141,7 +151,7 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
 
     let manifest = current_manifest(store.as_ref(), &namespace_id).await;
     assert!(
-        delta_runs(&manifest) < DEFAULT_MAX_DELTA_RUNS,
+        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
         "found {} delta runs",
         delta_runs(&manifest)
     );
@@ -246,7 +256,7 @@ async fn a_session_streaming_compaction_survives_its_own_next_fold() {
     }
     let manifest = parked.manifest().await;
     assert!(
-        delta_runs(&manifest) < DEFAULT_MAX_DELTA_RUNS,
+        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
         "found {} delta runs",
         delta_runs(&manifest)
     );
@@ -419,7 +429,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     for namespace in &sessions {
         let manifest = current_manifest(store.inner(), namespace.id()).await;
         assert!(
-            delta_runs(&manifest) < DEFAULT_MAX_DELTA_RUNS,
+            delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
             "`{}` still has {} delta runs",
             namespace.id(),
             delta_runs(&manifest)
@@ -488,7 +498,8 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     store.release();
     writer.drain().await.expect("the other merge finishes");
     assert!(
-        delta_runs(&current_manifest(store.inner(), merging.id()).await) < DEFAULT_MAX_DELTA_RUNS
+        delta_runs(&current_manifest(store.inner(), merging.id()).await)
+            < DEFAULT_MIN_COMPACTION_RUNS
     );
     assert_eq!(
         writer.execution_budget().stats(),
@@ -501,7 +512,8 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
         .expect("reopen the closed namespace");
     write_and_settle(&writer, &reopened, "/after-close").await;
     assert!(
-        delta_runs(&current_manifest(store.inner(), reopened.id()).await) < DEFAULT_MAX_DELTA_RUNS,
+        delta_runs(&current_manifest(store.inner(), reopened.id()).await)
+            < DEFAULT_MIN_COMPACTION_RUNS,
         "a later fold on a reopened session compacts"
     );
     writer.shutdown().await.expect("shut down writer");

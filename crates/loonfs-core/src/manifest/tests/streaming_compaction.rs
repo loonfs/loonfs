@@ -576,8 +576,8 @@ async fn orphan_segment_keys<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Merges the group inside one maintenance pass with the budgets raised, which
-/// is the other way of running the same engine.
+/// Merges the group in one explicit compaction unit with the budgets raised,
+/// which is the other way of running the same engine.
 async fn merge_group_whole<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -589,7 +589,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         namespace_id,
         loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
-        MetadataCompactionPolicy::default(),
+        MetadataCompactionPolicy::CompactImmediately,
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
@@ -609,9 +609,9 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
 // The plan split
 // -------------------------------------------------------------------------
 
-/// Checks that a plan takes every run of the group, up to eight, which is
-/// what anchors it at the bottom, and judges rows against the manifest's
-/// retention floor.
+/// Checks that an explicit plan takes every run of the group, up to eight,
+/// which is what anchors it at the bottom, and judges rows against the
+/// manifest's retention floor.
 #[tokio::test]
 async fn the_planner_takes_the_groups_oldest_window_whole() {
     let temp_dir = tempdir().expect("tempdir");
@@ -629,7 +629,7 @@ async fn the_planner_takes_the_groups_oldest_window_whole() {
             &segments.scan_runs,
             group,
             policy,
-            MetadataCompactionPolicy::default(),
+            MetadataCompactionPolicy::CompactImmediately,
         )
         .expect("plan the group");
         assert_eq!(spec.group(), group);
@@ -659,28 +659,43 @@ async fn a_window_over_the_row_budget_is_too_large_for_a_bounded_call() {
     seed_bindings_workload(&store, &namespace_id).await;
     let group = MetadataFamilyGroup::Bindings;
     let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-    let before = current_manifest_number(&store, &namespace_id).await;
 
+    // The tiers of delta runs merge within the budget first. Then the group's
+    // base and the run its tier merged into make a window over it.
     let store = loonfs_test_support::stores::RecordingStore::new(store, KeyPredicate::any());
-    let report = compact_unit_with(
-        &store,
-        &namespace_id,
-        policy,
-        CompactionAdmission::WithinRowBudget,
-    )
-    .await;
-    assert_eq!(report, CompactionUnitOutcome::TooLarge { group });
-    assert_eq!(
-        current_manifest_number(&store, &namespace_id).await,
-        before,
-        "a window that's too large publishes nothing"
-    );
+    let mut too_large = None;
+    for _ in 0..16 {
+        let before = current_manifest_number(&store, &namespace_id).await;
+        store.take();
+        match compact_unit_with(
+            &store,
+            &namespace_id,
+            policy,
+            CompactionAdmission::WithinRowBudget,
+        )
+        .await
+        {
+            CompactionUnitOutcome::Published { .. } => {}
+            CompactionUnitOutcome::TooLarge { group } => {
+                too_large = Some((group, before));
+                break;
+            }
+            other => panic!("a bounded unit merges or reports a window too large, got {other:?}"),
+        }
+    }
+    let (planned, before) = too_large.expect("a bounded unit reports the group too large");
+    assert_eq!(planned, group);
     assert!(
         store.take().iter().all(|operation| matches!(
             parse_object_key(operation.key()).map(|key| key.family()),
             Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
         )),
         "a unit that's too large reads only the manifest"
+    );
+    assert_eq!(
+        current_manifest_number(&store, &namespace_id).await,
+        before,
+        "a window that's too large publishes nothing"
     );
 
     let report =
@@ -2754,6 +2769,115 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             RivalPublication::SameGroup(_) => {}
         }
     }
+}
+
+/// Checks that a fold whose manifest a unit publishes over doesn't make the
+/// unit's group due again. The unit leaves its group with a base and the
+/// fold's run, and two runs aren't a tier, so the fold's run waits for later
+/// folds while every other group merges it into its own tier.
+#[tokio::test]
+async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let policy = MetadataRunPolicy::default();
+    for index in 0..policy.min_compaction_runs.get() {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/f{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write a file");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("fold the file");
+    }
+    let before = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest");
+    let payload = before.state.envelope.payload();
+    let runs = runs_newest_first(payload);
+    let due_groups = MetadataFamilyGroup::ALL
+        .into_iter()
+        .filter(|group| {
+            plan_group(
+                payload,
+                &runs,
+                *group,
+                policy,
+                MetadataCompactionPolicy::SizeTiered,
+            )
+            .is_some()
+        })
+        .count();
+    assert!(due_groups > 1, "the folds must make several groups due");
+
+    let intercepted = InterceptStore::with_interceptor(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        RivalDuringPublication {
+            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id: namespace_id.clone(),
+            publication: RivalPublication::Fold,
+            published: AtomicUsize::new(0),
+        },
+    );
+    let mut units = Vec::new();
+    while units.len() <= MetadataFamilyGroup::ALL.len() {
+        match super::super::compact_unit(
+            &intercepted,
+            None,
+            &namespace_id,
+            loonfs_types::CompactorEpoch(0),
+            policy,
+            MetadataCompactionPolicy::SizeTiered,
+            CompactionAdmission::AnySize,
+            &MetadataCompactionCancellation::default(),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("run a unit")
+        {
+            CompactionUnitOutcome::Published { group, .. } => units.push(group),
+            CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("a unit publishes or finds nothing due, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        intercepted.interceptor().published.load(Ordering::SeqCst),
+        units.len() + 1,
+        "the first unit's put lost to the fold, and the unit published over it"
+    );
+    assert_eq!(
+        units.len(),
+        due_groups,
+        "each due group merges once, and the fold's run doesn't make another unit due"
+    );
+    let after = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest");
+    let fold_run = runs_newest_first(after.state.envelope.payload())
+        .into_iter()
+        .find(|run| run.run_no == payload.next_run_no)
+        .expect("the fold's run is still listed");
+    assert_eq!(fold_run.tier, RunTier::Delta);
+    assert_eq!(
+        fold_run
+            .segments
+            .iter()
+            .filter(|family_segments| !family_segments.segments.is_empty())
+            .map(|family_segments| family_segments.family)
+            .collect::<BTreeSet<_>>(),
+        units[0].families().iter().copied().collect::<BTreeSet<_>>(),
+        "the fold's run keeps only the first unit's group, which waits for a tier"
+    );
 }
 
 #[tokio::test]

@@ -971,8 +971,9 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         .await
         .expect("create the namespace");
     // One unit merges at most eight runs of one family group, and each
-    // folded write adds a run to several groups.
-    for index in 0..3 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
+    // folded write adds a run to several groups, so 32 folded writes need at
+    // least four units in each of those groups.
+    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance

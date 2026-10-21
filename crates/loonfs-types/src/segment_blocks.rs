@@ -14,8 +14,11 @@ use xxhash_rust::xxh64::xxh64;
 
 /// Target uncompressed size of one data block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
-/// Number of level-zero runs that triggers compaction.
+/// Number of delta runs at which a merge is due, whatever the runs' sizes.
 pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
+/// Number of similar-size metadata runs in one family group that makes a
+/// merge due.
+pub const DEFAULT_MIN_COMPACTION_RUNS: usize = 4;
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
 /// Target decoded data bytes in one metadata segment.
@@ -24,6 +27,13 @@ pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of runs read by one compaction unit.
 pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: usize = 8;
+// A merge above a group's oldest run needs two runs, and a group at the delta
+// run limit has enough delta runs for one unit to merge the minimum.
+const _: () = assert!(
+    2 <= DEFAULT_MIN_COMPACTION_RUNS
+        && DEFAULT_MIN_COMPACTION_RUNS <= DEFAULT_MAX_DELTA_RUNS
+        && DEFAULT_MIN_COMPACTION_RUNS <= DEFAULT_MAX_COMPACTION_INPUT_RUNS
+);
 /// Maximum number of rows that one bounded maintenance step reads, such as the
 /// compaction unit of one metadata maintenance pass.
 pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
