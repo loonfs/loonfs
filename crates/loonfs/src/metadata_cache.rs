@@ -23,8 +23,10 @@ pub const DEFAULT_MAX_HEAD_STATE_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 32 MiB (enough for about
 /// 125,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
-/// Default limit for decoded WAL objects and small content objects: 128 MiB.
-pub const DEFAULT_MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;
+/// Default limit for decoded WAL objects: 32 MiB.
+pub const DEFAULT_MAX_WAL_OBJECT_BYTES: usize = 32 * 1024 * 1024;
+/// Default limit for small content objects: 96 MiB.
+pub const DEFAULT_MAX_CONTENT_OBJECT_BYTES: usize = 96 * 1024 * 1024;
 /// Default size of the largest content object the cache keeps: 1 MiB.
 pub const DEFAULT_MAX_CACHED_OBJECT_BYTES: u64 = 1024 * 1024;
 
@@ -94,7 +96,8 @@ impl MetadataCache {
             max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
             max_head_state_bytes: DEFAULT_MAX_HEAD_STATE_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
-            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_wal_object_bytes: DEFAULT_MAX_WAL_OBJECT_BYTES,
+            max_content_object_bytes: DEFAULT_MAX_CONTENT_OBJECT_BYTES,
             max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
         }
     }
@@ -105,7 +108,8 @@ impl MetadataCache {
         let segments = self.inner.segment_blocks.stats();
         let heads = self.inner.head_state.head_stats();
         let tails = self.inner.head_state.tail_stats();
-        let objects = self.inner.objects.stats();
+        let wal_objects = self.inner.objects.wal_object_stats();
+        let content_objects = self.inner.objects.content_object_stats();
         let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
             segment_hits: segments.hits,
@@ -130,14 +134,14 @@ impl MetadataCache {
             head_state_rejections: tails.rejections,
             head_state_rejected_bytes: tails.rejected_decoded_bytes,
             head_state_bytes: tails.cached_decoded_bytes,
-            wal_object_hits: objects.wal_hits,
-            wal_object_misses: objects.wal_misses,
-            wal_object_inserts: objects.wal_inserts,
-            content_object_hits: objects.content_hits,
-            content_object_misses: objects.content_misses,
-            content_object_inserts: objects.content_inserts,
-            object_evictions: objects.evictions,
-            object_bytes: objects.cached_decoded_bytes,
+            wal_object_hits: wal_objects.hits,
+            wal_object_misses: wal_objects.misses,
+            wal_object_inserts: wal_objects.inserts,
+            content_object_hits: content_objects.hits,
+            content_object_misses: content_objects.misses,
+            content_object_inserts: content_objects.inserts,
+            object_evictions: wal_objects.evictions + content_objects.evictions,
+            object_bytes: wal_objects.cached_decoded_bytes + content_objects.cached_decoded_bytes,
             completed_session_hits: completed_sessions.hits,
             completed_session_misses: completed_sessions.misses,
             completed_session_evictions: completed_sessions.evictions,
@@ -241,7 +245,8 @@ pub struct MetadataCacheBuilder {
     max_head_bytes: usize,
     max_head_state_bytes: usize,
     max_completed_upload_session_bytes: usize,
-    max_object_bytes: usize,
+    max_wal_object_bytes: usize,
+    max_content_object_bytes: usize,
     max_cached_object_bytes: u64,
 }
 
@@ -293,14 +298,35 @@ impl MetadataCacheBuilder {
         self
     }
 
-    /// Sets the decoded bytes of WAL objects and small content objects the
-    /// cache keeps. Reads look for both kinds of object here before the
-    /// store, and a read that loads a WAL object or verifies a small content
-    /// object from the store adds it. Defaults to
-    /// [`DEFAULT_MAX_OBJECT_BYTES`]; zero keeps none. An object heavier than
-    /// the whole limit is not kept.
-    pub fn max_object_bytes(mut self, max_object_bytes: usize) -> Self {
-        self.max_object_bytes = max_object_bytes;
+    /// Sets the decoded bytes of WAL objects that the cache keeps for reads.
+    /// Reads look for a WAL object here before the store, and a read that
+    /// loads a WAL object from the store adds it. Defaults to
+    /// [`DEFAULT_MAX_WAL_OBJECT_BYTES`]. Zero keeps none. A WAL object
+    /// heavier than the whole limit isn't kept.
+    ///
+    /// WAL objects have a limit of their own, so a burst of reads of content
+    /// objects can't evict the WAL objects that reads probe for and replay.
+    /// The default is the smaller of the two object limits, because a read
+    /// replays only the WAL objects that no fold has moved into segments
+    /// yet, and a writer session folds its tail at 32 WAL objects, or at
+    /// 2 MiB of inline bytes by default.
+    pub fn max_wal_object_bytes(mut self, max_wal_object_bytes: usize) -> Self {
+        self.max_wal_object_bytes = max_wal_object_bytes;
+        self
+    }
+
+    /// Sets the bytes of small content objects that the cache keeps for
+    /// reads. Reads look for a content object here before the store, and a
+    /// read that verifies a content object of up to
+    /// [`Self::max_cached_object_bytes`] from the store adds it. Defaults to
+    /// [`DEFAULT_MAX_CONTENT_OBJECT_BYTES`]. Zero keeps none.
+    ///
+    /// Content objects have a limit of their own, so replays of WAL objects
+    /// can't evict the content objects that reads keep. The default is the larger of
+    /// the two object limits, because each entry can be up to 1 MiB, and the
+    /// bytes that reads keep grow with the number of small files they read.
+    pub fn max_content_object_bytes(mut self, max_content_object_bytes: usize) -> Self {
+        self.max_content_object_bytes = max_content_object_bytes;
         self
     }
 
@@ -325,7 +351,8 @@ impl MetadataCacheBuilder {
                     self.max_completed_upload_session_bytes,
                 )),
                 objects: Arc::new(SharedObjects::new(
-                    self.max_object_bytes,
+                    self.max_wal_object_bytes,
+                    self.max_content_object_bytes,
                     self.max_cached_object_bytes,
                 )),
                 next_runtime_scope: AtomicU64::new(0),
@@ -405,8 +432,7 @@ pub struct MetadataCacheStats {
     pub content_object_misses: usize,
     /// Content objects inserted.
     pub content_object_inserts: usize,
-    /// WAL objects and content objects evicted to stay within the object
-    /// limit.
+    /// WAL objects and content objects evicted to stay within their limits.
     pub object_evictions: usize,
     /// Bytes charged to WAL objects and content objects now, including their
     /// keys and the cache's own allocation for each entry.

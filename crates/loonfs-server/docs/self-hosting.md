@@ -96,7 +96,8 @@ The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of manag
 | --- | ---: | --- |
 | Metadata segment cache | 30% | `metadata_cache.max_segment_bytes` |
 | Head state cache (WAL tails) | 10% | `metadata_cache.max_head_state_bytes` |
-| Object cache | 10% | `metadata_cache.max_object_bytes` |
+| WAL object cache | 3% | `metadata_cache.max_wal_object_bytes` |
+| Content object cache | 7% | `metadata_cache.max_content_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
 | Read working memory | 20% | `max_read_working_bytes` |
 | Admitted publication bytes | 10% | `publication.max_estimated_bytes` |
@@ -378,7 +379,8 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Head cache | `metadata_cache.max_head_bytes` | 16 MiB, with or without a memory limit | Cached namespace heads for reads, about 18,000 namespaces at 0.9 KB each | Steady |
 | Head state | `metadata_cache.max_head_state_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
-| Object cache | `metadata_cache.max_object_bytes` | Derived: 10%. 128 MiB without a memory limit | Decoded WAL objects, and verified content objects of up to 1 MiB, that reads keep for later reads | Steady |
+| WAL object cache | `metadata_cache.max_wal_object_bytes` | Derived: 3%. 32 MiB without a memory limit | Decoded WAL objects that reads keep for later reads | Steady |
+| Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 7%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
 | Publication queue | `publication.max_estimated_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |

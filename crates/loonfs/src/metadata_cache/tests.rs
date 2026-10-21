@@ -705,9 +705,9 @@ fn object_gets(operations: &[RecordedOperation], family: DurableObjectFamily) ->
 /// because reads in the writer's runtime start from the writer's position.
 #[tokio::test]
 async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
-    for max_object_bytes in [crate::DEFAULT_MAX_OBJECT_BYTES, 0] {
+    for max_wal_object_bytes in [crate::DEFAULT_MAX_WAL_OBJECT_BYTES, 0] {
         let cache = MetadataCache::builder()
-            .max_object_bytes(max_object_bytes)
+            .max_wal_object_bytes(max_wal_object_bytes)
             .build();
         let (writer, store, _root) = recorded_writer(cache.clone()).await;
         let reader = LoonFs::builder_with_store(store.clone())
@@ -770,7 +770,7 @@ async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
             "the read reloads the anchor: {operations:?}"
         );
         let wal_gets = object_gets(&operations, DurableObjectFamily::WalObject);
-        if max_object_bytes == 0 {
+        if max_wal_object_bytes == 0 {
             assert_eq!(wal_gets, 3, "without the cache, the reload reads the tail");
         } else {
             assert_eq!(wal_gets, 0, "{:?}", cache.stats());
@@ -865,9 +865,12 @@ async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
 /// object cache, under a budget of one byte and under the default budget.
 #[tokio::test]
 async fn reads_of_empty_files_keep_no_content_objects() {
-    for max_object_bytes in [1, crate::DEFAULT_MAX_OBJECT_BYTES] {
+    for max_content_object_bytes in [1, crate::DEFAULT_MAX_CONTENT_OBJECT_BYTES] {
+        // Without cached WAL objects, `object_bytes` counts only content
+        // objects.
         let cache = MetadataCache::builder()
-            .max_object_bytes(max_object_bytes)
+            .max_wal_object_bytes(0)
+            .max_content_object_bytes(max_content_object_bytes)
             .build();
         let (writer, _store, _root) = recorded_writer(cache.clone()).await;
         let namespace = writer.open_namespace(&demo()).expect("open namespace");
@@ -895,6 +898,6 @@ async fn reads_of_empty_files_keep_no_content_objects() {
         }
         let stats = cache.stats();
         assert_eq!(stats.content_object_inserts, 0, "{stats:?}");
-        assert!(stats.object_bytes <= max_object_bytes, "{stats:?}");
+        assert!(stats.object_bytes <= max_content_object_bytes, "{stats:?}");
     }
 }

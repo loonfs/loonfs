@@ -59,36 +59,6 @@ pub struct DecodedBlockCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
-/// Lookups and inserts of one kind of entry, in a cache that keeps more than
-/// one kind of entry under one budget.
-///
-/// The cache records a lookup or an insert here only when it records one in
-/// its own counters, so a disabled cache records nothing here either.
-#[derive(Debug, Default)]
-pub(crate) struct KindCounters {
-    hits: AtomicUsize,
-    misses: AtomicUsize,
-    inserts: AtomicUsize,
-}
-
-/// A snapshot of [`KindCounters`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct KindStats {
-    pub(crate) hits: usize,
-    pub(crate) misses: usize,
-    pub(crate) inserts: usize,
-}
-
-impl KindCounters {
-    pub(crate) fn stats(&self) -> KindStats {
-        KindStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
-            inserts: self.inserts.load(Ordering::Relaxed),
-        }
-    }
-}
-
 /// Returns the bytes the cache allocates for one entry, apart from the
 /// key's heap and the value's weight.
 ///
@@ -264,7 +234,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                     let start = self.start(cache_key);
                     async move {
                         let block = load().await?;
-                        self.insert_entry(cache_key.clone(), block.clone(), None, Some(start));
+                        self.insert_entry(cache_key.clone(), block.clone(), Some(start));
                         Ok(block)
                     }
                 },
@@ -354,48 +324,14 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         }
     }
 
-    /// Returns the value under `key` and marks it recently used.
+    /// Returns the value under `key`, marks it recently used, and records a
+    /// hit or a miss.
     ///
     /// A disabled cache returns `None` and records neither a hit nor a miss.
     pub fn get(&self, key: &K) -> Option<V> {
-        self.get_entry(key, None, Some)
-    }
-
-    /// Returns the value under `key` if `accept` takes it, and records the
-    /// lookup in `kind` too: a hit if `accept` took the value, and a miss
-    /// otherwise.
-    pub(crate) fn get_kind<T>(
-        &self,
-        key: &K,
-        kind: &KindCounters,
-        accept: impl FnOnce(V) -> Option<T>,
-    ) -> Option<T> {
-        self.get_entry(key, Some(kind), accept)
-    }
-
-    fn get_entry<T>(
-        &self,
-        key: &K,
-        kind: Option<&KindCounters>,
-        accept: impl FnOnce(V) -> Option<T>,
-    ) -> Option<T> {
         if self.disabled() {
             return None;
         }
-        let found = self.touch_entry(key).and_then(accept);
-        if let Some(kind) = kind {
-            let counter = match found {
-                Some(_) => &kind.hits,
-                None => &kind.misses,
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-        found
-    }
-
-    /// Returns the value under `key`, marks it recently used, and records a
-    /// hit or a miss.
-    fn touch_entry(&self, key: &K) -> Option<V> {
         let mut inner = self.lock();
         let Some((key, block)) = inner
             .entries
@@ -416,6 +352,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.lock().entries.get(key).map(|slot| slot.block.clone())
     }
 
+    /// Records a miss for a lookup whose caller found an entry with
+    /// [`Self::peek`] but can't use it, such as a prefix of an object that's
+    /// shorter than a read needs.
+    ///
+    /// A disabled cache records nothing.
+    pub(crate) fn record_miss(&self) {
+        if !self.disabled() {
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Inserts `block` under `key`, then evicts the least recently used
     /// entries until the cache is within its budget again.
     ///
@@ -425,24 +372,12 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// entry first and then the entry itself. When the cache doesn't keep
     /// the entry, the entry that the key already had stays.
     pub fn insert(&self, key: K, block: V) -> bool {
-        self.insert_entry(key, block, None, None)
-    }
-
-    /// Inserts like [`Self::insert`], and records the insert in `kind` too
-    /// if the cache kept the entry.
-    pub(crate) fn insert_kind(&self, key: K, block: V, kind: &KindCounters) -> bool {
-        self.insert_entry(key, block, Some(kind), None)
+        self.insert_entry(key, block, None)
     }
 
     /// Inserts like [`Self::insert`], unless `start` is the start of a load
     /// that an invalidation or an eviction of `key` has passed.
-    fn insert_entry(
-        &self,
-        key: K,
-        block: V,
-        kind: Option<&KindCounters>,
-        start: Option<CheckStart>,
-    ) -> bool {
+    fn insert_entry(&self, key: K, block: V, start: Option<CheckStart>) -> bool {
         if self.disabled() {
             return false;
         }
@@ -457,11 +392,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         if start.is_some_and(|start| inner.dropped_since(&key, start)) {
             return false;
         }
-        let kept = self.put(&mut inner, key, block, entry_charge);
-        if let Some(kind) = kind.filter(|_| kept) {
-            kind.inserts.fetch_add(1, Ordering::Relaxed);
-        }
-        kept
+        self.put(&mut inner, key, block, entry_charge)
     }
 
     /// Inserts `value` under `key` if the key has no entry or `newer`
@@ -692,6 +623,14 @@ impl DecodedBlockKey for String {
 impl<A: DecodedBlockKey, B: DecodedBlockKey> DecodedBlockKey for (A, B) {
     fn heap_bytes(&self) -> usize {
         DecodedBlockKey::heap_bytes(&self.0) + DecodedBlockKey::heap_bytes(&self.1)
+    }
+}
+
+impl<A: DecodedBlockKey, B: DecodedBlockKey, C: DecodedBlockKey> DecodedBlockKey for (A, B, C) {
+    fn heap_bytes(&self) -> usize {
+        DecodedBlockKey::heap_bytes(&self.0)
+            + DecodedBlockKey::heap_bytes(&self.1)
+            + DecodedBlockKey::heap_bytes(&self.2)
     }
 }
 

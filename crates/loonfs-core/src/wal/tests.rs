@@ -568,8 +568,8 @@ async fn the_object_cache_keeps_only_wal_objects_that_decode() {
         }
         assert_eq!(store.count(OperationSelector::Get), store_gets, "{outcome}");
     }
-    let stats = cache.stats();
-    assert_eq!((stats.wal_inserts, stats.wal_hits), (1, 1));
+    let stats = cache.wal_object_stats();
+    assert_eq!((stats.inserts, stats.hits), (1, 1));
 }
 
 #[tokio::test]

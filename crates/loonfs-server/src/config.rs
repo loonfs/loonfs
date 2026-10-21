@@ -516,7 +516,8 @@ pub struct MetadataCacheConfig {
     pub max_segment_bytes: Option<usize>,
     pub max_head_bytes: Option<usize>,
     pub max_head_state_bytes: Option<usize>,
-    pub max_object_bytes: Option<usize>,
+    pub max_wal_object_bytes: Option<usize>,
+    pub max_content_object_bytes: Option<usize>,
 }
 
 /// The server's `[grep]` table.
@@ -853,7 +854,8 @@ pub(crate) struct MemorySizing {
     segment: MemoryTerm,
     head: MemoryTerm,
     head_state: MemoryTerm,
-    object: MemoryTerm,
+    wal_object: MemoryTerm,
+    content_object: MemoryTerm,
     pub(crate) grep: MemoryTerm,
     read_working: MemoryTerm,
     publication: MemoryTerm,
@@ -863,12 +865,13 @@ pub(crate) struct MemorySizing {
 }
 
 impl MemorySizing {
-    fn terms(&self) -> [(&MemoryTerm, usize); 8] {
+    fn terms(&self) -> [(&MemoryTerm, usize); 9] {
         [
             (&self.segment, 1),
             (&self.head, 1),
             (&self.head_state, 1),
-            (&self.object, 1),
+            (&self.wal_object, 1),
+            (&self.content_object, 1),
             (&self.grep, usize::from(self.serves_grep)),
             (&self.read_working, 1),
             (&self.publication, 1),
@@ -881,7 +884,8 @@ impl MemorySizing {
             .max_segment_bytes(self.segment.bytes)
             .max_head_bytes(self.head.bytes)
             .max_head_state_bytes(self.head_state.bytes)
-            .max_object_bytes(self.object.bytes)
+            .max_wal_object_bytes(self.wal_object.bytes)
+            .max_content_object_bytes(self.content_object.bytes)
             .build()
     }
 
@@ -1030,11 +1034,17 @@ impl ServerConfig {
                 share(10),
                 loonfs::DEFAULT_MAX_HEAD_STATE_BYTES,
             ),
-            object: MemoryTerm::new(
-                "metadata_cache.max_object_bytes",
-                self.metadata_cache.max_object_bytes,
-                share(10),
-                loonfs::DEFAULT_MAX_OBJECT_BYTES,
+            wal_object: MemoryTerm::new(
+                "metadata_cache.max_wal_object_bytes",
+                self.metadata_cache.max_wal_object_bytes,
+                share(3),
+                loonfs::DEFAULT_MAX_WAL_OBJECT_BYTES,
+            ),
+            content_object: MemoryTerm::new(
+                "metadata_cache.max_content_object_bytes",
+                self.metadata_cache.max_content_object_bytes,
+                share(7),
+                loonfs::DEFAULT_MAX_CONTENT_OBJECT_BYTES,
             ),
             grep: MemoryTerm::new(
                 "grep.max_cache_bytes",
@@ -1215,7 +1225,8 @@ root = "unused"
                 }
             );
             assert_eq!(memory.head_state.bytes, 245_282_898);
-            assert_eq!(memory.object.bytes, 245_282_898);
+            assert_eq!(memory.wal_object.bytes, 73_584_869);
+            assert_eq!(memory.content_object.bytes, 171_698_028);
             assert_eq!(
                 memory.grep.bytes,
                 if mode.serves() { 245_282_898 } else { 0 }
@@ -1272,7 +1283,8 @@ max_merge_input_bytes = 67108864
 max_segment_bytes = 67108864
 max_head_bytes = 8388608
 max_head_state_bytes = 0
-max_object_bytes = 16777216
+max_wal_object_bytes = 4194304
+max_content_object_bytes = 12582912
 [publication]
 max_estimated_bytes = 8388608
 [grep]
@@ -1298,7 +1310,8 @@ max_cache_bytes = 0
                 (67_108_864, 1),
                 (8_388_608, 1),
                 (0, 1),
-                (16_777_216, 1),
+                (4_194_304, 1),
+                (12_582_912, 1),
                 (0, 1),
                 (0, 1),
                 (8_388_608, 1),
@@ -1314,7 +1327,7 @@ max_cache_bytes = 0
     }
 
     /// The terms that the error for a failed memory check lists.
-    const EVERY_MEMORY_TERM: [&str; 21] = [
+    const EVERY_MEMORY_TERM: [&str; 22] = [
         "memory_limit_bytes",
         "process",
         "max_connections",
@@ -1330,7 +1343,8 @@ max_cache_bytes = 0
         "metadata_cache.max_segment_bytes",
         "metadata_cache.max_head_bytes",
         "metadata_cache.max_head_state_bytes",
-        "metadata_cache.max_object_bytes",
+        "metadata_cache.max_wal_object_bytes",
+        "metadata_cache.max_content_object_bytes",
         "grep.max_cache_bytes",
         "max_read_working_bytes",
         "publication.max_estimated_bytes",
@@ -1398,7 +1412,8 @@ disk_bytes = 107374182400
         assert_eq!(memory.segment.bytes, 268_435_456);
         assert_eq!(memory.head.bytes, 16_777_216);
         assert_eq!(memory.head_state.bytes, 67_108_864);
-        assert_eq!(memory.object.bytes, 134_217_728);
+        assert_eq!(memory.wal_object.bytes, 33_554_432);
+        assert_eq!(memory.content_object.bytes, 100_663_296);
         assert_eq!(memory.grep.bytes, 268_435_456);
         assert_eq!(memory.read_working.bytes, 268_435_456);
         assert_eq!(memory.publication.bytes, 67_108_864);
@@ -2518,7 +2533,8 @@ max_read_working_bytes = 8192
 max_segment_bytes = 16384
 max_head_bytes = 1024
 max_head_state_bytes = 4096
-max_object_bytes = 2048
+max_wal_object_bytes = 2048
+max_content_object_bytes = 3072
 
 [store]
 kind = "local_fs"
@@ -2537,7 +2553,8 @@ root = "/tmp/loonfs-server"
                 max_segment_bytes: Some(16384),
                 max_head_bytes: Some(1024),
                 max_head_state_bytes: Some(4096),
-                max_object_bytes: Some(2048),
+                max_wal_object_bytes: Some(2048),
+                max_content_object_bytes: Some(3072),
             }
         );
     }
@@ -2554,7 +2571,8 @@ writer_id = "loonfs-server"
 max_segment_bytes = 0
 max_head_bytes = 0
 max_head_state_bytes = 0
-max_object_bytes = 0
+max_wal_object_bytes = 0
+max_content_object_bytes = 0
 
 [store]
 kind = "local_fs"
@@ -2569,7 +2587,8 @@ root = "/tmp/loonfs-server"
                 max_segment_bytes: Some(0),
                 max_head_bytes: Some(0),
                 max_head_state_bytes: Some(0),
-                max_object_bytes: Some(0),
+                max_wal_object_bytes: Some(0),
+                max_content_object_bytes: Some(0),
             }
         );
     }
