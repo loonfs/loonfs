@@ -71,6 +71,13 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .await
 }
 
+/// Advances the retention floor toward `target` (format spec, "Advancing the
+/// retention floor").
+///
+/// The advance loads the current manifest once to find the target, and it
+/// returns that manifest's floor without another request when the target is
+/// at or below the floor. A floor that moves is published through
+/// [`update_manifest`], which loads the manifest again.
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -78,13 +85,27 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     target: RetentionTarget,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
-    let target_seq = match target {
-        RetentionTarget::Head => None,
-        RetentionTarget::Seq(seq) => Some(seq),
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let manifest = current.state.envelope.payload();
+    ensure_namespace_live(&NamespaceReadState::from(manifest))?;
+    let target = match target {
+        RetentionTarget::Head => manifest.head_seq,
+        RetentionTarget::Seq(seq) => seq.min(manifest.head_seq),
         RetentionTarget::Cutoff { cutoff_at_ms } => {
-            Some(last_commit_at_or_before(store, segment_cache, namespace_id, cutoff_at_ms).await?)
+            last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
         }
     };
+    if target <= manifest.retention_floor_seq {
+        return Ok(PublicationReport {
+            response: AdvanceRetentionResponse {
+                namespace_id: namespace_id.clone(),
+                retention_floor_seq: manifest.retention_floor_seq,
+            },
+            published: None,
+        });
+    }
     let deadline = Deadline::start(timer);
     let ((floor, advanced), current, _) = update_manifest(
         store,
@@ -94,7 +115,8 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         |current: LoadedManifest| async move {
             let mut payload = current.state.envelope.payload().clone();
             ensure_namespace_live(&NamespaceReadState::from(&payload))?;
-            let target = target_seq.map_or(payload.head_seq, |seq| seq.min(payload.head_seq));
+            // Another advance can publish a floor at or above `target` after
+            // the first load.
             if payload.retention_floor_seq >= target {
                 return Ok(ManifestChange::Finished((
                     payload.retention_floor_seq,
@@ -118,19 +140,15 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
 }
 
 /// The sequence of the last commit at or before `cutoff_at_ms`, read upward
-/// from the current manifest's floor. The floor itself when the first commit
-/// above it is later than the cutoff.
+/// from `current`'s floor. The floor itself when the first commit above it
+/// is later than the cutoff.
 async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
+    current: &LoadedManifest,
     cutoff_at_ms: u64,
 ) -> Result<ChangeSeq> {
-    let current = load_current_manifest(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    ensure_namespace_live(&NamespaceReadState::from(current.state.envelope.payload()))?;
-    let basis = metadata_basis_from_manifest(store, segment_cache, &current);
+    let basis = metadata_basis_from_manifest(store, segment_cache, current);
     let mut last = current.state.retention_floor_seq();
     // One commit per scan, as the change feed reads them: a commit row can
     // be large, and the memo keeps the block for the next call within the
