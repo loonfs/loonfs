@@ -16,9 +16,9 @@ use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
 use crate::presign::{
-    base64_crc64nvme, CompletionCondition, DirectGetIssuer, DirectMultipartIssuer,
-    DirectTransferIssuers, PresignedGetRequest, PresignedPartRequest, PresignedUrl,
-    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
+    base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
+    PresignedGetRequest, PresignedPartRequest, PresignedUrl, S3CompatiblePresigner,
+    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };
 use crate::provider_object_store::{
@@ -337,15 +337,17 @@ impl MultipartController for S3RequestSigner {
         checksum: &Checksum,
     ) -> Result<()> {
         let parts: Vec<_> = parts.iter().map(UploadedPart::from).collect();
-        self.complete_upload(
-            key,
-            provider_upload_id,
-            &parts,
-            Some(checksum),
-            CompletionCondition::Unconditional,
-        )
-        .await
-        .map(|_| ())
+        match self
+            .complete_upload(key, provider_upload_id, &parts, Some(checksum))
+            .await
+        {
+            Ok(_) => Ok(()),
+            // The key is occupied, most often by this upload's own earlier
+            // completion, whose response was lost. The caller's
+            // stored-checksum check decides whether it's the client's object.
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
@@ -416,13 +418,7 @@ impl MultipartController for S3RequestSigner {
         parts.sort_unstable_by_key(|part| part.part_number);
         let crc = crc.finish();
         let etag = self
-            .finish_upload(
-                key,
-                &upload_id,
-                &parts,
-                Some(&crc),
-                CompletionCondition::CreateOnly,
-            )
+            .finish_upload(key, &upload_id, &parts, Some(&crc))
             .await?;
         abort_on_drop.disarm();
         Ok(ObjectMetadata {
@@ -596,15 +592,14 @@ impl S3RequestSigner {
         }
     }
 
-    /// Sends `CompleteMultipartUpload` under `condition`, answering `None`
-    /// when the provider no longer knows the upload.
+    /// Sends a create-only `CompleteMultipartUpload`, returning `None` when
+    /// the provider no longer knows the upload.
     async fn complete_upload(
         &self,
         key: &str,
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        condition: CompletionCondition,
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
@@ -612,7 +607,6 @@ impl S3RequestSigner {
                 key,
                 upload_id,
                 checksum,
-                condition,
                 MULTIPART_CONTROL_TTL,
                 signing_time(),
             )
@@ -641,10 +635,9 @@ impl S3RequestSigner {
         upload_id: &str,
         parts: &[UploadedPart],
         checksum: Option<&Checksum>,
-        condition: CompletionCondition,
     ) -> Result<String> {
         let response = self
-            .complete_upload(key, upload_id, parts, checksum, condition)
+            .complete_upload(key, upload_id, parts, checksum)
             .await?
             .ok_or_else(|| {
                 ObjectStoreError::retryable_transport(
@@ -958,13 +951,23 @@ mod tests {
                     assert_eq!(copied.contains("ChecksumCRC64NVME"), !r2);
                     let bytes: Vec<u8> = self.parts.lock().expect("parts").iter()
                         .flat_map(|part| part.iter().copied()).collect();
-                    self.objects.lock().expect("objects").insert(parts.uri.path().to_owned(), bytes.into());
-                    (
-                        "complete",
-                        response.body(Bytes::from_static(
-                            b"<CompleteMultipartUploadResult><ETag>\"assembled\"</ETag></CompleteMultipartUploadResult>",
-                        )),
-                    )
+                    let mut objects = self.objects.lock().expect("objects");
+                    if objects.contains_key(parts.uri.path()) {
+                        (
+                            "complete_refused",
+                            response.status(http::StatusCode::PRECONDITION_FAILED).body(
+                                Bytes::from_static(b"<Error><Code>PreconditionFailed</Code></Error>"),
+                            ),
+                        )
+                    } else {
+                        objects.insert(parts.uri.path().to_owned(), bytes.into());
+                        (
+                            "complete",
+                            response.body(Bytes::from_static(
+                                b"<CompleteMultipartUploadResult><ETag>\"assembled\"</ETag></CompleteMultipartUploadResult>",
+                            )),
+                        )
+                    }
                 }
                 http::Method::DELETE if !query.contains("uploadId") => {
                     assert!(self.objects.lock().expect("objects").remove(request.uri().path()).is_some());
@@ -1250,6 +1253,51 @@ mod tests {
             last_modified_at_ms: None,
             checksum: Some(Checksum::crc64nvme(&provider.base)),
         }
+    }
+
+    /// Checks that a direct multipart completion is create-only, and that a
+    /// completion refused because the key is occupied returns success, so
+    /// the caller's stored-checksum check decides.
+    ///
+    /// The retry of a completion whose response was lost is refused by its
+    /// own object, and a completion of other bytes leaves the object alone.
+    #[tokio::test]
+    async fn a_direct_completion_over_an_occupied_key_leaves_the_object_and_succeeds() {
+        use crate::ObjectStore;
+        let kind = ConfiguredObjectStoreKind::AwsS3;
+        let provider = ScriptedProvider {
+            kind,
+            base: Arc::new(b"source".to_vec()),
+            operations: Arc::default(),
+            aborted: Arc::default(),
+            objects: Arc::default(),
+            parts: Arc::default(),
+        };
+        let store = scripted_store(kind, &provider);
+        let first = Bytes::from_static(b"direct part");
+        let first_checksum = Checksum::crc64nvme(&first);
+        for (bytes, attempts) in [(first.clone(), 2), (Bytes::from_static(b"other part"), 1)] {
+            *provider.parts.lock().expect("parts") = vec![bytes.clone()];
+            let checksum = Checksum::crc64nvme(&bytes);
+            let parts = [crate::MultipartPart {
+                part_number: 1,
+                etag: "\"uploaded\"".to_owned(),
+                checksum: checksum.clone(),
+            }];
+            for _ in 0..attempts {
+                store
+                    .complete_multipart_upload(KEY, "scripted", &parts, &checksum)
+                    .await
+                    .expect("a completion over an occupied key succeeds");
+            }
+        }
+        assert_eq!(
+            provider.operations(),
+            ["complete", "complete_refused", "complete_refused"]
+        );
+        let stored = store.head(KEY).await.expect("head").expect("object");
+        assert_eq!(stored.checksum, Some(first_checksum));
+        assert_eq!(stored.size_bytes, first.len() as u64);
     }
 
     #[tokio::test]

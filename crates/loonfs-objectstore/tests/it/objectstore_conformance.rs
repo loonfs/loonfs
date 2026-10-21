@@ -9,6 +9,7 @@ use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStoreError};
@@ -16,18 +17,27 @@ use loonfs_objectstore::{
     AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
     SharedObjectStore, StoreConfig,
 };
+use loonfs_objectstore::{ConfiguredObjectStore, MultipartPart};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
+use object_store::client::{HttpClient, HttpConnector, HttpRequestBody, ReqwestConnector};
 use std::assert_matches;
 use tempfile::TempDir;
 
 const MIB: usize = 1024 * 1024;
 
 fn aws_s3_store() -> SharedObjectStore {
+    StoreConfig::AwsS3(aws_s3_config())
+        .configured_object_store()
+        .expect("create AWS S3 object store")
+        .into_shared()
+}
+
+fn aws_s3_config() -> AwsS3StoreConfig {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    StoreConfig::AwsS3(AwsS3StoreConfig {
+    AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -38,16 +48,20 @@ fn aws_s3_store() -> SharedObjectStore {
         },
         key_prefix: Some(config.prefix),
         force_path_style: false,
-    })
-    .configured_object_store()
-    .expect("create AWS S3 object store")
-    .into_shared()
+    }
 }
 
 fn cloudflare_r2_store() -> SharedObjectStore {
+    StoreConfig::CloudflareR2(cloudflare_r2_config())
+        .configured_object_store()
+        .expect("create Cloudflare R2 object store")
+        .into_shared()
+}
+
+fn cloudflare_r2_config() -> CloudflareR2StoreConfig {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
+    CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
@@ -56,10 +70,7 @@ fn cloudflare_r2_store() -> SharedObjectStore {
             secret_access_key: config.secret_access_key,
         },
         key_prefix: Some(config.prefix),
-    })
-    .configured_object_store()
-    .expect("create Cloudflare R2 object store")
-    .into_shared()
+    }
 }
 
 fn gcp_gcs_store() -> SharedObjectStore {
@@ -187,6 +198,24 @@ async fn gcp_gcs_assembly() {
     )
     .await;
     assert_chained_compose(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_direct_completion_is_create_only() {
+    let configured = StoreConfig::AwsS3(aws_s3_config())
+        .configured_object_store()
+        .expect("create AWS S3 store");
+    assert_direct_completion_is_create_only(configured).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_direct_completion_is_create_only() {
+    let configured = StoreConfig::CloudflareR2(cloudflare_r2_config())
+        .configured_object_store()
+        .expect("create Cloudflare R2 store");
+    assert_direct_completion_is_create_only(configured).await;
 }
 
 #[tokio::test]
@@ -465,6 +494,133 @@ async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
         "store contract probe {run_id} did not pass:\n{}",
         probe_report_lines(&report)
     );
+}
+
+/// Checks that a direct multipart completion is create-only on a real
+/// provider.
+///
+/// Completing one upload again succeeds, and completing a second upload of
+/// other bytes at the same key is refused by the provider, which the store
+/// reports as success, so the first object must still be the one stored.
+async fn assert_direct_completion_is_create_only(configured: ConfiguredObjectStore) {
+    let issuer = configured
+        .direct_transfers()
+        .and_then(|issuers| issuers.multipart)
+        .expect("direct multipart needs a proven endpoint");
+    let store = configured.into_shared();
+    let key = content_blob(
+        &NamespaceId::parse("demo").expect("namespace id"),
+        &ContentId::generate(),
+    );
+    let http = ReqwestConnector::default()
+        .connect(&object_store::ClientOptions::new())
+        .expect("HTTP client");
+    let first = Bytes::from(vec![b'a'; MIB]);
+    let second = Bytes::from(vec![b'b'; MIB]);
+
+    let (first_upload, first_parts, first_checksum) =
+        upload_one_part(&*store, &*issuer, &http, &key, &first).await;
+    for _ in 0..2 {
+        store
+            .complete_multipart_upload(&key, &first_upload, &first_parts, &first_checksum)
+            .await
+            .expect("a completion and its retry succeed");
+    }
+    let (second_upload, second_parts, second_checksum) =
+        upload_one_part(&*store, &*issuer, &http, &key, &second).await;
+    store
+        .complete_multipart_upload(&key, &second_upload, &second_parts, &second_checksum)
+        .await
+        .expect("a refused completion is reported as success");
+
+    let stored = store
+        .head(&key)
+        .await
+        .expect("head the completed object")
+        .expect("the completed object exists");
+    assert_eq!(
+        stored.checksum,
+        Some(first_checksum),
+        "the provider replaced an object on a create-only completion"
+    );
+    assert_eq!(stored.size_bytes, first.len() as u64);
+    store
+        .abort_multipart_upload(&key, &second_upload)
+        .await
+        .expect("abort the refused upload");
+    store
+        .delete(&key)
+        .await
+        .expect("delete the completed object");
+}
+
+/// Opens a multipart upload at `key`, sends `bytes` as its one part through
+/// a presigned part request, and returns the upload, its part, and the
+/// whole-object checksum.
+async fn upload_one_part(
+    store: &dyn ObjectStore,
+    issuer: &dyn DirectMultipartIssuer,
+    http: &HttpClient,
+    key: &str,
+    bytes: &Bytes,
+) -> (String, Vec<MultipartPart>, Checksum) {
+    let upload = store
+        .create_multipart_upload(key)
+        .await
+        .expect("create the multipart upload");
+    let checksum = Checksum::compute(store.checksum_algorithm(), bytes);
+    let signed = issuer
+        .presign_multipart_part(
+            PresignedPartRequest {
+                object_key: key,
+                provider_upload_id: &upload,
+                part_number: 1,
+                checksum: &checksum,
+                ttl: std::time::Duration::from_secs(300),
+            },
+            signing_time(),
+        )
+        .await
+        .expect("presign the part");
+    let mut request = http::Request::builder()
+        .method(signed.method.as_str())
+        .uri(&signed.url);
+    for (name, value) in &signed.headers {
+        request = request.header(name, value);
+    }
+    let response = http
+        .execute(
+            request
+                .body(HttpRequestBody::from(bytes.clone()))
+                .expect("part request"),
+        )
+        .await
+        .expect("send the part");
+    assert!(
+        response.status().is_success(),
+        "the part upload failed with {}",
+        response.status()
+    );
+    let etag = response
+        .headers()
+        .get(http::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("the part upload returns an etag")
+        .to_owned();
+    let parts = vec![MultipartPart {
+        part_number: 1,
+        etag,
+        checksum: checksum.clone(),
+    }];
+    (upload, parts, checksum)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a presigned request against a live provider is dated with wall time"
+)]
+fn signing_time() -> std::time::SystemTime {
+    std::time::SystemTime::now()
 }
 
 fn probe_report_lines(report: &StoreProbeReport) -> String {

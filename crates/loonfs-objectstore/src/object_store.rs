@@ -425,9 +425,12 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// reports the true checksum, so a caller must read the object's stored
     /// checksum back before believing anything about its bytes.
     ///
-    /// An upload the provider no longer knows was consumed by an earlier
-    /// completion or by an abort, so completing it again succeeds. The
-    /// object at `key` is the only evidence of what that earlier call did.
+    /// The completion is create-only, so it never replaces an object that is
+    /// already at `key`. An upload the provider no longer knows was consumed
+    /// by an earlier completion or by an abort, and a completion refused
+    /// because `key` is occupied usually follows an earlier completion whose
+    /// response was lost, so both succeed. The object at `key` is the only
+    /// evidence of what happened, and the caller checks its stored checksum.
     async fn complete_multipart_upload(
         &self,
         key: &str,
