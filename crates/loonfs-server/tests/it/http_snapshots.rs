@@ -4,7 +4,7 @@ use crate::common::http_split_support::test_config;
 use crate::common::start_server;
 use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ChangeSeq, DeleteSnapshotResponse, ErrorResponse, ListSnapshotsResponse, NamespaceId, Snapshot,
 };
@@ -396,7 +396,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
     assert!(harness
         .client
         .list_snapshots(&namespace)
-        .page(first_page())
+        .page()
         .await
         .expect("list deleted snapshots")
         .snapshots
@@ -408,7 +408,6 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
     use loonfs_client::ClientError;
     use loonfs_test_support::ids::page_limit;
-    use loonfs_types::PageRequest;
 
     let temp_dir = tempdir().expect("tempdir");
     let config = test_config(
@@ -430,14 +429,11 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
             .await
             .expect("create snapshot");
     }
-    let first_of = |cursor| PageRequest {
-        limit: page_limit(1),
-        cursor,
-    };
     let snapshot_cursor = harness
         .client
         .list_snapshots(&namespace)
-        .page(first_of(None))
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("first snapshot page")
         .next_cursor
@@ -445,14 +441,17 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
     let resumed = harness
         .client
         .list_snapshots(&namespace)
-        .page(first_of(Some(snapshot_cursor.clone())))
+        .page_limit(page_limit(1))
+        .cursor(Some(snapshot_cursor.clone()))
+        .page()
         .await
         .expect("a snapshot cursor resumes the snapshot listing");
     assert_eq!(resumed.snapshots.len(), 1);
     let checkpoint_cursor = harness
         .client
         .list_checkpoints(&namespace)
-        .page(first_of(None))
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("first checkpoint page")
         .next_cursor
@@ -462,13 +461,17 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
         harness
             .client
             .list_snapshots(&namespace)
-            .page(first_of(Some(checkpoint_cursor)))
+            .page_limit(page_limit(1))
+            .cursor(Some(checkpoint_cursor))
+            .page()
             .await
             .map(drop),
         harness
             .client
             .list_checkpoints(&namespace)
-            .page(first_of(Some(snapshot_cursor)))
+            .page_limit(page_limit(1))
+            .cursor(Some(snapshot_cursor))
+            .page()
             .await
             .map(drop),
     ];
@@ -515,7 +518,7 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
     let listed = harness
         .client
         .list_snapshots(&namespace)
-        .page(first_page())
+        .page()
         .await
         .expect("list snapshots");
     let retrieved = harness
@@ -527,7 +530,7 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
     let checkpoints = harness
         .client
         .list_checkpoints(&namespace)
-        .page(first_page())
+        .page()
         .await
         .expect("list checkpoints");
     let checkpoint = harness

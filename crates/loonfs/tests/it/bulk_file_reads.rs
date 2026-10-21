@@ -6,8 +6,8 @@ use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFile, CurrentFileState,
     DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error, ErrorCode, InodeId,
-    ListCheckpointFilesOptions, LoonFs, NamespaceId, PageRequest, PutFileOptions, ReadOnly,
-    RevisionNo, SharedObjectStore, StoreConfig,
+    ListCheckpointFilesOptions, LoonFs, NamespaceId, PutFileOptions, ReadOnly, RevisionNo,
+    SharedObjectStore, StoreConfig,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
@@ -94,10 +94,9 @@ async fn checkpoint_files(
     loop {
         let page = namespace
             .list_checkpoint_files(checkpoint_id)
-            .page(PageRequest {
-                limit: page_limit(limit),
-                cursor,
-            })
+            .page_limit(page_limit(limit))
+            .cursor(cursor)
+            .page()
             .await
             .expect("read a checkpoint files page");
         assert!(
@@ -313,10 +312,8 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
                 include_deleted: true,
             },
         )
-        .page(PageRequest {
-            limit: page_limit(100),
-            cursor: None,
-        })
+        .page_limit(page_limit(100))
+        .page()
         .await
         .expect("list the files the checkpoint retains");
     let (visible, deleted): (Vec<_>, Vec<_>) = retained
@@ -402,12 +399,11 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
             .list_checkpoint_files(&checkpoint.snapshot_id)
-            .page(PageRequest {
-                limit: page_limit(100),
-                cursor: Some(CheckpointFilesPageCursor {
-                    after_inode_id: file.inode_id,
-                }),
-            })
+            .page_limit(page_limit(100))
+            .cursor(Some(CheckpointFilesPageCursor {
+                after_inode_id: file.inode_id,
+            }))
+            .page()
             .await
             .expect("resume from a cursor");
         assert_eq!(resumed.files, whole[index + 1..]);
@@ -432,10 +428,8 @@ async fn an_empty_namespace_answers_one_empty_page() {
 
     let page = namespace
         .list_checkpoint_files(&checkpoint.snapshot_id)
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect("enumerate an empty namespace");
     assert!(page.files.is_empty());
@@ -554,10 +548,8 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
 
     let error = namespace
         .list_checkpoint_files(&checkpoint.snapshot_id)
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect_err("a deleted checkpoint pins nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
@@ -566,10 +558,8 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .expect("valid checkpoint id");
     let error = namespace
         .list_checkpoint_files(&missing)
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect_err("a checkpoint that never existed pins nothing either");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);

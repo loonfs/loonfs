@@ -18,9 +18,7 @@ use axum::Json;
 use loonfs::{ListOptions, ReadFileStreamOptions, StatOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-use loonfs_types::{
-    public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PageRequest,
-};
+use loonfs_types::{public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse};
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodePathParams {
@@ -191,10 +189,9 @@ pub(super) async fn list_inode_children(
     let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let listing = target
         .list_by_inode_with_options(inode_id, &options)
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor: checked_list_cursor(query.cursor, &options)?,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(checked_list_cursor(query.cursor, &options)?)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(super::page_response::page_response(listing))
@@ -247,10 +244,9 @@ pub(super) async fn list_file_revisions_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let response = namespace
         .list_file_revisions_by_inode(inode_id)
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))

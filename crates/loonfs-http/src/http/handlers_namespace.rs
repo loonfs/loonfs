@@ -21,8 +21,8 @@ use loonfs_types::ErrorResponse;
 use loonfs_types::{
     AccessRight, CapabilityDocument, Checkpoint, CreateNamespaceRequest, CreateSnapshotRequest,
     DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PageRequest, PaginationPolicy,
-    PinId, RunMaintenanceRequest, RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0,
+    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PaginationPolicy, PinId,
+    RunMaintenanceRequest, RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
@@ -515,10 +515,9 @@ pub(super) async fn list_snapshots(
     let cursor = checked_cursor::<SnapshotPageCursor>(query.cursor)?;
     let response = namespace
         .list_snapshots()
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(cursor)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;
@@ -712,10 +711,9 @@ pub(super) async fn list_checkpoints(
     let response = state
         .maintenance
         .list_checkpoints(&namespace_id)
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(cursor)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;

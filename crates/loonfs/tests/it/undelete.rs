@@ -6,7 +6,7 @@ use loonfs::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error,
     ErrorCode, InodeId, PutFileOptions, RevisionNo,
 };
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use std::assert_matches;
 use tempfile::tempdir;
 
@@ -509,8 +509,7 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     ))
     .expect("undelete");
 
-    let changes =
-        block_on(namespace.list_changes(ChangeSeq(0)).page(first_page())).expect("list changes");
+    let changes = block_on(namespace.list_changes(ChangeSeq(0)).page()).expect("list changes");
     let mut deleted_seq = None;
     let mut undeleted = None;
     for change in &changes.changes {
@@ -560,8 +559,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     )
     .expect("delete");
 
-    let changes =
-        block_on(namespace.list_changes(ChangeSeq(0)).page(first_page())).expect("list changes");
+    let changes = block_on(namespace.list_changes(ChangeSeq(0)).page()).expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
     // deletion as well as the creation — without a second lookup per entry.
@@ -804,7 +802,7 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
     );
     let revisions = namespace
         .list_file_revisions("/docs/report.txt")
-        .page(first_page())
+        .page()
         .await
         .expect("list revisions");
     assert_eq!(

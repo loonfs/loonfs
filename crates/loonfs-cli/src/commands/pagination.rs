@@ -2,62 +2,71 @@
 
 use crate::args::PageLimitArgs;
 use crate::error::CliError;
-use loonfs_types::{PageRequest, PagedResponse, PaginationPolicy};
-use std::future::Future;
-
-/// Tracks the total result limit and the size of each request.
-pub(super) struct PagePlan {
-    limit: Option<u32>,
-    page_size: Option<u32>,
-    follow_to_end: bool,
-    emitted: u32,
-}
+use loonfs_types::{usize_from_u64, LimitError, PagedResponse, Pager, PaginationPolicy};
 
 pub(super) enum PagedListing<P> {
     Streamed,
     Collected(P),
 }
 
-/// Visits and releases each page before requesting the next one.
-pub(super) async fn visit_pages<P, F, Fut, V>(
-    mut plan: PagePlan,
-    mut cursor: Option<P::Cursor>,
-    mut load_page: F,
+/// Visits and releases each page before loading the next one.
+///
+/// `--page-size` and `--limit` size the pager's requests. The listing
+/// follows every page with `--all`, `--jsonl`, or `--limit`, and stops after
+/// the first page otherwise.
+pub(super) async fn visit_pages<P, E, V>(
+    mut pager: Pager<P, E>,
+    args: &PageLimitArgs,
     mut visit: V,
 ) -> Result<(), CliError>
 where
     P: PagedResponse,
-    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
-    Fut: Future<Output = Result<P, CliError>>,
+    CliError: From<E>,
     V: FnMut(P) -> Result<(), CliError>,
 {
-    loop {
-        let page = load_page(cursor, plan.request_size()).await?;
-        plan.record(page.items().len());
-        cursor = page.next_cursor();
-        visit(page)?;
-        if !plan.should_continue(cursor.is_some()) {
-            return Ok(());
+    // Both flags meet the pagination contract here, with the error the
+    // server gives for an invalid `limit`.
+    if let Some(page_size) = args.page_size {
+        let page_limit = PaginationPolicy::default()
+            .effective_limit(Some(page_size))
+            .map_err(invalid_limit)?;
+        pager = pager.page_limit(page_limit);
+    }
+    if let Some(limit) = args.limit {
+        if limit == 0 {
+            return Err(invalid_limit(LimitError::Zero));
+        }
+        pager = pager.max_items(usize_from_u64(u64::from(limit)));
+    }
+    let follows = args.all || args.jsonl || args.limit.is_some();
+    while let Some(page) = pager.next().await {
+        visit(page?)?;
+        if !follows {
+            break;
         }
     }
+    Ok(())
 }
 
-/// Fetches pages until the plan is satisfied and returns them as one response.
-pub(super) async fn collect_pages<P, F, Fut, O>(
-    plan: PagePlan,
-    cursor: Option<P::Cursor>,
-    load_page: F,
+/// Writes each page to stdout as JSON lines as it arrives when `--jsonl` is
+/// set, and collects the pages into one response otherwise.
+pub(super) async fn collect_or_stream_pages<P, E, O>(
+    pager: Pager<P, E>,
+    args: &PageLimitArgs,
     mut observe: O,
-) -> Result<P, CliError>
+) -> Result<PagedListing<P>, CliError>
 where
     P: PagedResponse,
-    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
-    Fut: Future<Output = Result<P, CliError>>,
+    P::Item: serde::Serialize,
+    CliError: From<E>,
     O: FnMut(&P),
 {
     let mut collected: Option<P> = None;
-    visit_pages(plan, cursor, load_page, |page| {
+    visit_pages(pager, args, |page| {
         observe(&page);
+        if args.jsonl {
+            return crate::render::write_jsonl_page(page.items()).map_err(CliError::io);
+        }
         match &mut collected {
             Some(collected) => collected.absorb(page),
             None => collected = Some(page),
@@ -65,165 +74,151 @@ where
         Ok(())
     })
     .await?;
-    Ok(collected.expect("pagination should fetch at least one page"))
+    if args.jsonl {
+        return Ok(PagedListing::Streamed);
+    }
+    Ok(PagedListing::Collected(collected.expect(
+        "a listing with a nonzero limit should load its first page",
+    )))
 }
 
-/// Writes each page to stdout as JSON lines when `jsonl` is set, and
-/// collects the pages otherwise.
-pub(super) async fn collect_or_stream_pages<P, F, Fut, O>(
-    plan: PagePlan,
-    cursor: Option<P::Cursor>,
-    jsonl: bool,
-    load_page: F,
-    mut observe: O,
-) -> Result<PagedListing<P>, CliError>
-where
-    P: PagedResponse,
-    P::Item: serde::Serialize,
-    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
-    Fut: Future<Output = Result<P, CliError>>,
-    O: FnMut(&P),
-{
-    if !jsonl {
-        return collect_pages(plan, cursor, load_page, observe)
-            .await
-            .map(PagedListing::Collected);
-    }
-    visit_pages(plan, cursor, load_page, |page| {
-        observe(&page);
-        crate::render::write_jsonl_page(page.items()).map_err(CliError::io)
-    })
-    .await?;
-    Ok(PagedListing::Streamed)
-}
-
-/// Names one page for the client. The limit meets the pagination contract
-/// here, with the error the server gives, because a page request holds only
-/// a valid limit.
-pub(super) fn page_request<C>(
-    cursor: Option<C>,
-    limit: Option<u32>,
-) -> Result<PageRequest<C>, CliError> {
-    let limit = PaginationPolicy::default()
-        .effective_limit(limit)
-        .map_err(|error| CliError::invalid_request(error.to_string()).with_param("limit"))?;
-    Ok(PageRequest { limit, cursor })
-}
-
-impl PagePlan {
-    pub(super) fn new(args: &PageLimitArgs) -> Self {
-        Self {
-            limit: args.limit,
-            page_size: args.page_size,
-            follow_to_end: args.all || args.jsonl,
-            emitted: 0,
-        }
-    }
-
-    /// Returns the number of items to request on the next page.
-    ///
-    /// A total limit larger than one page is split across several requests.
-    pub(super) fn request_size(&self) -> Option<u32> {
-        self.limit.map_or(self.page_size, |limit| {
-            let remaining = limit.saturating_sub(self.emitted);
-            Some(
-                self.page_size
-                    .unwrap_or(loonfs_types::DEFAULT_PAGE_LIMIT)
-                    .min(remaining),
-            )
-        })
-    }
-
-    pub(super) fn record(&mut self, items: usize) {
-        self.emitted = self
-            .emitted
-            .saturating_add(u32::try_from(items).unwrap_or(u32::MAX));
-    }
-
-    pub(super) fn should_continue(&self, has_next: bool) -> bool {
-        has_next
-            && self
-                .limit
-                .map_or(self.follow_to_end, |limit| self.emitted < limit)
-    }
+fn invalid_limit(error: LimitError) -> CliError {
+    CliError::invalid_request(error.to_string()).with_param("limit")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::{AbsolutePath, ChangeSeq, ListPathEntriesResponse, NamespaceId};
-    use std::cell::Cell;
+    use loonfs_types::{ErrorCode, PageRequest, DEFAULT_MAX_PAGE_LIMIT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    #[tokio::test]
-    async fn pages_are_delivered_before_the_next_fetch_even_if_it_fails() {
-        let delivered = Cell::new(false);
-        let result = visit_pages(
-            PagePlan::new(&args(None, Some(1), true)),
-            None,
-            async |cursor: Option<String>, _| {
-                if cursor.is_some() {
-                    assert!(delivered.get(), "the first page must already be delivered");
-                    return Err(CliError::invalid_request("second page failed"));
-                }
-                Ok(ListPathEntriesResponse {
-                    namespace_id: NamespaceId::parse("demo").expect("namespace"),
-                    path: AbsolutePath::parse("/").expect("root path"),
-                    head_seq: ChangeSeq(1),
-                    entries: Vec::new(),
-                    next_cursor: Some("next".to_owned()),
-                })
-            },
-            |_| {
-                delivered.set(true);
-                Ok(())
-            },
-        )
-        .await;
-        result.expect_err("the failed second fetch should fail the listing");
-        assert!(delivered.get());
+    #[derive(Debug)]
+    struct NumberPage {
+        numbers: Vec<u32>,
+        next_cursor: Option<u32>,
     }
 
-    fn args(limit: Option<u32>, page_size: Option<u32>, all: bool) -> PageLimitArgs {
+    impl PagedResponse for NumberPage {
+        type Item = u32;
+        type Cursor = u32;
+
+        fn items_mut(&mut self) -> &mut Vec<u32> {
+            &mut self.numbers
+        }
+
+        fn items(&self) -> &[u32] {
+            &self.numbers
+        }
+
+        fn next_cursor(&self) -> Option<u32> {
+            self.next_cursor
+        }
+
+        fn absorb(&mut self, mut later: Self) {
+            self.numbers.append(&mut later.numbers);
+            self.next_cursor = later.next_cursor;
+        }
+    }
+
+    /// Serves the numbers below `count` and records the size of each request.
+    fn numbers(count: u32, requests: Arc<Mutex<Vec<u32>>>) -> Pager<NumberPage, CliError> {
+        Pager::new(move |request: PageRequest<u32>| {
+            requests
+                .lock()
+                .expect("request log lock")
+                .push(request.limit.get());
+            let start = request.cursor.map_or(0, |cursor| cursor + 1);
+            let numbers: Vec<u32> = (start..count).take(request.limit.as_usize()).collect();
+            let next_cursor = numbers.last().copied().filter(|last| last + 1 < count);
+            std::future::ready(Ok(NumberPage {
+                numbers,
+                next_cursor,
+            }))
+        })
+    }
+
+    fn args(limit: Option<u32>, page_size: Option<u32>, all: bool, jsonl: bool) -> PageLimitArgs {
         PageLimitArgs {
             limit,
             page_size,
             all,
-            jsonl: false,
+            jsonl,
         }
     }
 
-    #[test]
-    fn a_total_smaller_than_a_page_is_the_first_request_size() {
-        let plan = PagePlan::new(&args(Some(3), Some(10), false));
-        assert_eq!(plan.request_size(), Some(3));
+    #[tokio::test]
+    async fn pages_are_delivered_before_the_next_fetch_even_if_it_fails() {
+        let delivered = Arc::new(AtomicBool::new(false));
+        let pager = Pager::new({
+            let delivered = delivered.clone();
+            move |request: PageRequest<u32>| {
+                let page = match request.cursor {
+                    Some(_) => {
+                        assert!(
+                            delivered.load(Ordering::SeqCst),
+                            "the first page must already be delivered"
+                        );
+                        Err(CliError::invalid_request("second page failed"))
+                    }
+                    None => Ok(NumberPage {
+                        numbers: Vec::new(),
+                        next_cursor: Some(0),
+                    }),
+                };
+                std::future::ready(page)
+            }
+        });
+        let result = visit_pages(pager, &args(None, Some(1), true, false), |_| {
+            delivered.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        result.expect_err("the failed second fetch should fail the listing");
+        assert!(delivered.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn a_total_larger_than_a_page_follows_until_the_remaining_final_page() {
-        let mut plan = PagePlan::new(&args(Some(7), Some(3), false));
-        assert_eq!(plan.request_size(), Some(3));
-        plan.record(3);
-        assert!(plan.should_continue(true));
-        assert_eq!(plan.request_size(), Some(3));
-        plan.record(3);
-        assert_eq!(plan.request_size(), Some(1));
-        plan.record(1);
-        assert!(!plan.should_continue(true));
-    }
+    #[tokio::test]
+    async fn page_size_and_limit_size_each_request_through_the_pager() {
+        // Each case is the listing's length, the flags, and the size of
+        // each request.
+        let cases = [
+            (20, args(Some(3), Some(10), false, false), vec![3]),
+            (20, args(Some(7), Some(3), false, false), vec![3, 3, 1]),
+            (20, args(None, Some(2), false, false), vec![2]),
+            (5, args(None, Some(2), true, false), vec![2, 2, 2]),
+            (5, args(None, Some(2), false, true), vec![2, 2, 2]),
+            (20, args(Some(2), Some(2), true, false), vec![2]),
+            (2_000, args(Some(1_001), None, false, false), vec![1_000, 1]),
+            (2_000, args(None, None, false, false), vec![1_000]),
+        ];
+        for (count, args, expected) in cases {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            visit_pages(numbers(count, requests.clone()), &args, |_| Ok(()))
+                .await
+                .expect("a listing within the pagination contract");
+            assert_eq!(
+                *requests.lock().expect("request log lock"),
+                expected,
+                "{args:?}"
+            );
+        }
 
-    #[test]
-    fn one_page_is_the_default_but_all_follows() {
-        let mut one_page = PagePlan::new(&args(None, Some(2), false));
-        one_page.record(2);
-        assert!(!one_page.should_continue(true));
-
-        let mut all = PagePlan::new(&args(None, Some(2), true));
-        all.record(2);
-        assert!(all.should_continue(true));
-        assert!(!all.should_continue(false));
-
-        let mut bounded_all = PagePlan::new(&args(Some(2), Some(2), true));
-        bounded_all.record(2);
-        assert!(!bounded_all.should_continue(true));
+        for invalid in [
+            args(Some(0), None, false, false),
+            args(None, Some(0), false, false),
+            args(None, Some(DEFAULT_MAX_PAGE_LIMIT + 1), false, false),
+        ] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let error = visit_pages(numbers(20, requests.clone()), &invalid, |_| Ok(()))
+                .await
+                .expect_err("a flag outside the pagination contract");
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidRequest.as_str(),
+                "{invalid:?}"
+            );
+            assert!(requests.lock().expect("request log lock").is_empty());
+        }
     }
 }

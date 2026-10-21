@@ -7,7 +7,7 @@ use crate::common::start_server;
 use loonfs::publish::CommitIntent;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::api::v0::{
     AdvanceRetentionRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
@@ -128,7 +128,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     let remote_changes = harness
         .client
         .list_changes(&remote_ns, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("remote changes");
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
@@ -192,7 +192,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let embedded_changes = namespace
         .list_changes(ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("embedded changes");
 
@@ -285,7 +285,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let feed = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("changes");
     assert_eq!(feed.changes.len(), 1, "{feed:?}");

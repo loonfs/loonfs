@@ -12,7 +12,6 @@ use loonfs::{
     Snapshot, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -776,7 +775,7 @@ impl RuntimeTestExt for TestRuntime {
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ListChangesResponse> {
         let namespace = self.reader.namespace(namespace_id);
-        block_on(namespace.list_changes(after_seq).page(first_page()))
+        block_on(namespace.list_changes(after_seq).page())
     }
 
     fn create_snapshot_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Snapshot> {

@@ -7,7 +7,7 @@ use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::{first_page, namespace_id, test_actor, writer_id};
+use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_test_support::stores::{
     KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -288,7 +288,7 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
         let page = runtime
             .namespace(&demo())
             .list("/folded")
-            .page(first_page())
+            .page()
             .await
             .expect("list the folded directory");
         assert_eq!(page.entries.len(), 1);

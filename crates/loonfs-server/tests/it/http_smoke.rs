@@ -7,7 +7,7 @@ use loonfs::publish::{
     MAX_COMMIT_OPERATIONS, MAX_COMMIT_PRECONDITIONS,
 };
 use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ChangeSeq, CommitId, DestinationBehavior, EntryInodeKind, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
@@ -443,7 +443,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     match harness
         .client
         .list_changes(&namespace_id("clone"), ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -452,7 +452,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     let clone_changes = harness
         .client
         .list_changes(&namespace_id("clone"), ChangeSeq(1))
-        .page(first_page())
+        .page()
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);

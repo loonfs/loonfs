@@ -8,7 +8,7 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
     ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorResponse, ManifestNo,
@@ -354,18 +354,14 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello maintenance\n");
 
-    match client
-        .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
-        .await
-    {
+    match client.list_changes(&namespace, ChangeSeq(0)).page().await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
         other => panic!("expected rebootstrap_required, got {other:?}"),
     }
 
     let empty = client
         .list_changes(&namespace, ChangeSeq(1))
-        .page(first_page())
+        .page()
         .await
         .expect("changes after floor");
     assert_eq!(empty.changes, Vec::new());

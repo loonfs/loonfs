@@ -4,8 +4,7 @@ use crate::common::http_split_support::*;
 use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, start_server};
 use loonfs_client::{ClientError, ListOptions, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
-use loonfs_types::PageRequest;
+use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::{
     api::v0::FilesystemChange, ChangeSeq, CommitId, DestinationBehavior, ErrorCode, ErrorResponse,
     ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo, DEFAULT_MAX_PAGE_LIMIT,
@@ -69,10 +68,9 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         let page = harness
             .client
             .list_checkpoints(&demo)
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: cursor.clone(),
-            })
+            .page_limit(page_limit(2))
+            .cursor(cursor.clone())
+            .page()
             .await
             .expect("list checkpoint page");
         actual_ids.extend(
@@ -102,10 +100,8 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     let first = harness
         .client
         .list_checkpoints(&demo)
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        })
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("first checkpoint page");
     let foreign_cursor = first.next_cursor.expect("checkpoint cursor");
@@ -113,20 +109,18 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         harness
             .client
             .list_checkpoints(&other)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor: Some(foreign_cursor.clone()),
-            })
+            .page_limit(page_limit(1))
+            .cursor(Some(foreign_cursor.clone()))
+            .page()
             .await,
     );
     assert_invalid_request(
         harness
             .client
             .list_checkpoints(&demo)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor: Some("not-a-cursor".to_owned()),
-            })
+            .page_limit(page_limit(1))
+            .cursor(Some("not-a-cursor".to_owned()))
+            .page()
             .await,
     );
     // A page request holds only a valid limit, so a zero limit goes out raw.
@@ -145,10 +139,8 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         harness
             .client
             .list_checkpoints(&demo)
-            .page(PageRequest {
-                limit: page_limit(DEFAULT_MAX_PAGE_LIMIT + 1),
-                cursor: None,
-            })
+            .page_limit(page_limit(DEFAULT_MAX_PAGE_LIMIT + 1))
+            .page()
             .await,
     );
 
@@ -171,10 +163,9 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     let deleted_page = harness
         .client
         .list_checkpoints(&demo)
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: Some(foreign_cursor.clone()),
-        })
+        .page_limit(page_limit(1))
+        .cursor(Some(foreign_cursor.clone()))
+        .page()
         .await
         .expect("resume checkpoints in deleted namespace");
     assert_eq!(deleted_page.checkpoints.len(), 1);
@@ -268,10 +259,8 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let first_page = harness
         .client
         .list(&docs)
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        })
+        .page_limit(page_limit(2))
+        .page()
         .await
         .expect("first directory page");
     assert_eq!(entry_names(&first_page), vec!["a.txt", "b.txt"]);
@@ -280,10 +269,9 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let second_page = harness
         .client
         .list(&docs)
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: Some(cursor.clone()),
-        })
+        .page_limit(page_limit(2))
+        .cursor(Some(cursor.clone()))
+        .page()
         .await
         .expect("second directory page");
     assert_eq!(entry_names(&second_page), vec!["c.txt"]);
@@ -298,10 +286,9 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let mismatch = harness
         .client
         .list(&other)
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: Some(cursor.clone()),
-        })
+        .page_limit(page_limit(2))
+        .cursor(Some(cursor.clone()))
+        .page()
         .await
         .expect_err("directory cursor must match listed path");
     match mismatch {
@@ -406,10 +393,9 @@ async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
         let page = harness
             .client
             .list_with_options(&docs, &recursive)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor,
-            })
+            .page_limit(page_limit(1))
+            .cursor(cursor)
+            .page()
             .await
             .expect("recursive page by path");
         by_path.extend(page.entries.into_iter().map(|entry| entry.path.to_string()));
@@ -446,20 +432,17 @@ async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
         let cursor = harness
             .client
             .list_with_options(&docs, &issuing)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor: None,
-            })
+            .page_limit(page_limit(1))
+            .page()
             .await
             .expect("first page")
             .next_cursor;
         let resumed = harness
             .client
             .list_with_options(&docs, &resuming)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor,
-            })
+            .page_limit(page_limit(1))
+            .cursor(cursor)
+            .page()
             .await;
         assert_eq!(error_param(resumed).as_deref(), Some("cursor"));
     }
@@ -631,7 +614,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     let changes = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes");
     assert_eq!(changes.changes.len(), 3);
@@ -655,10 +638,8 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     let first_page = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        })
+        .page_limit(page_limit(2))
+        .page()
         .await
         .expect("list first changes page");
     assert_eq!(first_page.after_seq, ChangeSeq(0));
@@ -669,10 +650,8 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     let second_page = harness
         .client
         .list_changes(&namespace, first_page.next_after_seq.expect("next page"))
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        })
+        .page_limit(page_limit(2))
+        .page()
         .await
         .expect("list second changes page");
     assert_eq!(second_page.after_seq, ChangeSeq(2));
@@ -727,7 +706,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let revisions = harness
         .client
         .list_file_revisions(&target)
-        .page(first_page())
+        .page()
         .await
         .expect("path revisions");
     assert_eq!(revisions.inode_id, entry.inode_id);
@@ -762,14 +741,14 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .await
         .expect("move path");
     assert_matches!(
-        harness.client.list_file_revisions(&target).page(first_page()).await,
+        harness.client.list_file_revisions(&target).page().await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
     );
     // Revision history follows the inode after a move.
     let moved_revisions = harness
         .client
         .list_file_revisions(&moved)
-        .page(first_page())
+        .page()
         .await
         .expect("moved-path revisions");
     assert_eq!(moved_revisions.inode_id, entry.inode_id);

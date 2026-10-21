@@ -4,9 +4,7 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::AttributeChanges;
-use loonfs::{
-    AttributesRevisionNo, CommitId, ListOptions, PageRequest, StatOptions, UpdateAttributesOptions,
-};
+use loonfs::{AttributesRevisionNo, CommitId, ListOptions, StatOptions, UpdateAttributesOptions};
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::semantic_commit_fingerprint;
 use std::assert_matches;
@@ -353,10 +351,8 @@ fn read_options_project_grouped_attributes_or_none() {
                     ..Default::default()
                 },
             )
-            .page(PageRequest {
-                limit: page_limit(16),
-                cursor: None,
-            }),
+            .page_limit(page_limit(16))
+            .page(),
     )
     .expect("list with attributes");
     assert_eq!(projected.entries.len(), 2);

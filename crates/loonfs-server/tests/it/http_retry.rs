@@ -6,7 +6,7 @@ use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
     PutFileOptions,
 };
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::api::v0::{
     AdvanceRetentionRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
@@ -339,7 +339,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     let changes = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes");
     let committed = changes

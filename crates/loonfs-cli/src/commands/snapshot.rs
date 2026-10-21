@@ -2,7 +2,7 @@
 
 use super::context::{resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
+use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
     SnapshotListArgs, SnapshotTargetArgs,
@@ -62,17 +62,12 @@ async fn run_snapshot_list(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        args.pagination.cursor,
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .client
-                .list_snapshots(context.namespace())
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context
+            .target
+            .client
+            .list_snapshots(context.namespace())
+            .cursor(args.pagination.cursor),
+        &args.pagination.page_limits,
         |_: &loonfs_types::api::v0::ListSnapshotsResponse| {},
     )
     .await

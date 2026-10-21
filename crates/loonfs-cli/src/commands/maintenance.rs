@@ -3,7 +3,7 @@
 
 use super::context::{resolve_command_context, resolve_mutation_context, resolve_profile_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
-use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
+use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs,
     MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
@@ -137,17 +137,12 @@ async fn run_maintenance_checkpoint_list(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        args.pagination.cursor.clone(),
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .client
-                .list_checkpoints(context.namespace())
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context
+            .target
+            .client
+            .list_checkpoints(context.namespace())
+            .cursor(args.pagination.cursor.clone()),
+        &args.pagination.page_limits,
         |_: &loonfs_types::ListCheckpointsResponse| {},
     )
     .await
@@ -260,16 +255,12 @@ pub(crate) async fn run_changes(
     let after_seq = args.after.unwrap_or(ChangeSeq(0));
     let snapshot_id = args.snapshot_id.clone();
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        Some(after_seq),
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .list_changes_at_snapshot(context.namespace(), after_seq, snapshot_id.as_ref())
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context.target.list_changes_at_snapshot(
+            context.namespace(),
+            after_seq,
+            snapshot_id.as_ref(),
+        ),
+        &args.pagination.page_limits,
         |_: &loonfs_types::api::v0::ListChangesResponse| {},
     )
     .await

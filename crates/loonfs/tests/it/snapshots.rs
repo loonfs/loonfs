@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::{
     CheckpointOwner, CreateSnapshotOptions, ErrorCode, ForkNamespaceOptions, ListSnapshotsResponse,
-    LoonFs, NamespaceId, PageRequest, PaginationPolicy, ReadOnly, SharedObjectStore,
+    LoonFs, NamespaceId, ReadOnly, SharedObjectStore,
 };
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -454,12 +454,6 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
             .expect("snapshot inode"),
         before
     );
-    let request = PageRequest {
-        limit: PaginationPolicy::default()
-            .effective_limit(None)
-            .expect("limit"),
-        cursor: None,
-    };
     let paths = namespace_reader
         .list_with_options(
             "/",
@@ -468,7 +462,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
                 ..Default::default()
             },
         )
-        .page(request.clone())
+        .page()
         .await
         .expect("snapshot paths");
     let inodes = namespace_reader
@@ -479,7 +473,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
                 ..Default::default()
             },
         )
-        .page(request)
+        .page()
         .await
         .expect("snapshot children");
     assert_eq!(paths.entries.len(), 1);

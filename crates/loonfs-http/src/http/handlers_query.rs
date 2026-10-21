@@ -16,7 +16,8 @@ use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    GrepRequest, GrepResponse, NamespaceId, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    GrepRequest, GrepResponse, NamespaceId, PageRequest, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_QUERY_GREP,
 };
 use std::sync::Arc;
 
@@ -80,7 +81,10 @@ pub(super) async fn grep(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    let limit = effective_page_limit(query.limit.take())?;
+    let page = PageRequest {
+        limit: effective_page_limit(query.limit.take())?,
+        cursor: query.cursor.take(),
+    };
     let request = grep_request(query)?;
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
@@ -92,7 +96,7 @@ pub(super) async fn grep(
         None => reads,
     };
     let response = service
-        .query(&request, limit, &reads, &store)
+        .query(&request, page, &reads, &store)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(response))
@@ -123,7 +127,6 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
         path_prefix,
         inode_id,
-        cursor: query.cursor,
         allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
         allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,
     })

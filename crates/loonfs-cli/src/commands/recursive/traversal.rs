@@ -7,7 +7,6 @@
 //! directory or every file in the tree.
 
 use super::{remote_spec, CommandContext, FileJob};
-use crate::commands::pagination::page_request;
 use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use futures::Stream;
@@ -376,7 +375,8 @@ impl<Destination: TreePath> RemoteTree<'_, Destination> {
             .context
             .target
             .list_tree_at_snapshot(&spec, self.snapshot_id)
-            .page(page_request(cursor, None)?)
+            .cursor(cursor)
+            .page()
             .await?)
     }
 }

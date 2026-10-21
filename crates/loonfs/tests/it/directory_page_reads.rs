@@ -1,8 +1,6 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
-use loonfs::{
-    DestinationBehavior, LoonFs, PageRequest, PutFileOptions, SharedObjectStore, StatOptions,
-};
+use loonfs::{DestinationBehavior, LoonFs, PutFileOptions, SharedObjectStore, StatOptions};
 use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -129,10 +127,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     let namespace = reader.namespace(&namespace_id);
     let page = namespace
         .list("/files")
-        .page(PageRequest {
-            limit: page_limit(300),
-            cursor: None,
-        })
+        .page_limit(page_limit(300))
+        .page()
         .await
         .expect("directory page");
     assert_eq!(page.entries.len(), 300);

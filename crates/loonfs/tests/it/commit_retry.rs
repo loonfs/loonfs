@@ -9,7 +9,6 @@ use loonfs::{
     ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, DestinationBehavior,
     MetadataCompactionOutcome, NamespaceId, PutFileOptions, RevisionNo,
 };
-use loonfs_test_support::ids::first_page;
 use loonfs_types::ActorId;
 use loonfs_types::ErrorCode;
 use tempfile::tempdir;
@@ -54,7 +53,7 @@ async fn feed_message(
     let namespace = runtime.reader.namespace(namespace_id);
     let page = namespace
         .list_changes(ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes");
     page.changes
@@ -145,7 +144,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let namespace = reopened.reader.namespace(&namespace_id);
     let page = namespace
         .list_changes(ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("replay change feed after restart");
     let change = page

@@ -3,8 +3,8 @@
 use crate::common::*;
 use loonfs::AttributeChanges;
 use loonfs::{
-    ActorId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, PageRequest,
-    PutFileOptions, RevisionNo,
+    ActorId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, PutFileOptions,
+    RevisionNo,
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::BTreeMap;
@@ -79,10 +79,8 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let revisions = block_on(
         namespace
             .list_file_revisions("/implicit/parent/report.txt")
-            .page(PageRequest {
-                limit: page_limit(10),
-                cursor: None,
-            }),
+            .page_limit(page_limit(10))
+            .page(),
     )
     .expect("list revisions");
     assert_eq!(revisions.revisions[0].committed_by, restorer);
@@ -238,10 +236,12 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
             },
         )
         .expect("delete subtree");
-    let trash = block_on(source_namespace.list_trash().page(PageRequest {
-        limit: page_limit(10),
-        cursor: None,
-    }))
+    let trash = block_on(
+        source_namespace
+            .list_trash()
+            .page_limit(page_limit(10))
+            .page(),
+    )
     .expect("list trash before checkpoint");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
@@ -254,10 +254,12 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");
     let reopened_namespace = reopened.reader.namespace(&source_id);
-    let trash = block_on(reopened_namespace.list_trash().page(PageRequest {
-        limit: page_limit(10),
-        cursor: None,
-    }))
+    let trash = block_on(
+        reopened_namespace
+            .list_trash()
+            .page_limit(page_limit(10))
+            .page(),
+    )
     .expect("list trash after checkpoint, retention, and restart");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);

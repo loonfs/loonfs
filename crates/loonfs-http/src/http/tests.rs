@@ -812,10 +812,7 @@ async fn grep_error_disabled_manifest_is_not_materialized_and_core_reads_survive
     let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client
-        .grep(&namespace_id, &binding)
-        .page(loonfs_test_support::ids::first_page())
-        .await;
+    let result = client.grep(&namespace_id, &binding).page().await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -844,10 +841,7 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
     let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client
-        .grep(&namespace_id, &binding)
-        .page(loonfs_test_support::ids::first_page())
-        .await;
+    let result = client.grep(&namespace_id, &binding).page().await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -878,10 +872,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     fault_store.fail_next(1);
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client
-        .grep(&namespace_id, &binding)
-        .page(loonfs_test_support::ids::first_page())
-        .await;
+    let result = client.grep(&namespace_id, &binding).page().await;
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -965,7 +956,7 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
     ] {
         let result = client
             .grep(&namespace_id, &grep_error_request())
-            .page(loonfs_test_support::ids::first_page())
+            .page()
             .await;
         assert_grep_api_error_and_core_read(
             client,
@@ -2630,7 +2621,6 @@ fn grep_error_request() -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         inode_id: None,
-        cursor: None,
         allow_stale: false,
         allow_scan: false,
     }

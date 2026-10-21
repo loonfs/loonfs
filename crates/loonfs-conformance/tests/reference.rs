@@ -11,7 +11,7 @@ use loonfs_client::{
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
-use loonfs_test_support::ids::{first_page, page_limit};
+use loonfs_test_support::ids::page_limit;
 use loonfs_types::api::v0::{
     CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
     DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
@@ -19,7 +19,6 @@ use loonfs_types::api::v0::{
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
-use loonfs_types::PageRequest;
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest,
@@ -1139,10 +1138,9 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         let page = harness
             .client
             .list_by_inode(&namespace, parent_inode_id)
-            .page(PageRequest {
-                limit: page_limit(request.page_size),
-                cursor: cursor.clone(),
-            })
+            .page_limit(page_limit(request.page_size))
+            .cursor(cursor.clone())
+            .page()
             .await
             .expect("list children-by-inode page");
         page_count += 1;
@@ -1190,22 +1188,18 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
 
     let saved_cursor = saved_cursor.expect("saved mid-walk cursor");
     let resume_offset = resume_offset.expect("saved mid-walk offset");
-    let mut pager = harness.client.list_by_inode(&namespace, parent_inode_id);
-    let mut cursor = Some(saved_cursor);
+    let mut pager = harness
+        .client
+        .list_by_inode(&namespace, parent_inode_id)
+        .page_limit(page_limit(request.page_size))
+        .cursor(Some(saved_cursor));
     let mut resumed = Vec::new();
-    while cursor.is_some() {
-        let page = pager
-            .page(PageRequest {
-                limit: page_limit(request.page_size),
-                cursor,
-            })
-            .await
-            .expect("resume children-by-inode page");
+    while let Some(page) = pager.next().await {
+        let page = page.expect("resume children-by-inode page");
         assert_eq!(page.namespace_id, namespace);
         assert_eq!(page.parent_inode_id, parent_inode_id);
         assert_eq!(page.head_seq.0, expected.renamed_head_seq);
         resumed.extend(page.entries.iter().map(listed_name));
-        cursor = page.next_cursor;
     }
     validate_page_walk(&request.entry_names, &observed, resume_offset, &resumed)
         .expect("children-by-inode pagination invariants");
@@ -1323,7 +1317,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let listing = harness
         .client
         .list(&directory)
-        .page(first_page())
+        .page()
         .await
         .expect("list inode-mutations directory");
     let names: Vec<String> = listing.entries.iter().map(listed_name).collect();
@@ -1509,10 +1503,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let feed = harness
         .client
         .list_changes(&namespace, ChangeSeq(expected.moved_committed_seq - 1))
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        })
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("list inode-mutations changes");
     match feed
@@ -1896,7 +1888,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
     let listing = harness
         .client
         .list(&directory)
-        .page(first_page())
+        .page()
         .await
         .expect("list inode-addressing directory");
     assert_eq!(
@@ -2457,10 +2449,9 @@ async fn run_pagination(harness: &Harness, case: &Case) {
         let page = harness
             .client
             .list(&directory)
-            .page(PageRequest {
-                limit: page_limit(request.page_size),
-                cursor: cursor.clone(),
-            })
+            .page_limit(page_limit(request.page_size))
+            .cursor(cursor.clone())
+            .page()
             .await
             .expect("list pagination page");
         page_count += 1;
@@ -2487,10 +2478,9 @@ async fn run_pagination(harness: &Harness, case: &Case) {
         let page = harness
             .client
             .list(&directory)
-            .page(PageRequest {
-                limit: page_limit(request.page_size),
-                cursor: cursor.clone(),
-            })
+            .page_limit(page_limit(request.page_size))
+            .cursor(cursor.clone())
+            .page()
             .await
             .expect("resume pagination page");
         resumed.extend(page.entries.iter().map(listed_name));
@@ -2545,7 +2535,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     let feed = harness
         .client
         .list_changes(&namespace, ChangeSeq(request.after_seq))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes");
     assert_eq!(feed.changes.len(), expected.change_count);
@@ -2634,7 +2624,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let initial_listing = harness
         .client
         .list(&directory)
-        .page(first_page())
+        .page()
         .await
         .expect("list uploaded file");
     assert!(initial_listing
@@ -2664,7 +2654,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let moved_listing = harness
         .client
         .list(&directory)
-        .page(first_page())
+        .page()
         .await
         .expect("list moved file");
     assert!(moved_listing
@@ -2675,7 +2665,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let revisions = harness
         .client
         .list_file_revisions(&moved_path)
-        .page(first_page())
+        .page()
         .await
         .expect("list end-to-end revisions");
     assert_eq!(revisions.revisions.len(), expected.revision_count);
@@ -2687,7 +2677,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let changes = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list end-to-end changes before remove");
     assert_eq!(changes.changes.len(), expected.change_count - 1);
@@ -2705,7 +2695,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let changes = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list complete end-to-end changes");
     assert_eq!(changes.changes.len(), expected.change_count);
@@ -2731,7 +2721,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let trash = harness
         .client
         .list_trash(&namespace)
-        .page(first_page())
+        .page()
         .await
         .expect("list end-to-end trash");
     let removed_entry = trash

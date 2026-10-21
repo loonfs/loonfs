@@ -17,7 +17,7 @@ use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, PageRequest, ROOT_INODE_ID};
+use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
 
@@ -370,10 +370,8 @@ async fn a_strong_default_confirms_reads_that_set_no_consistency() {
     fixture.recording.reset();
     let revisions = reader
         .list_file_revisions("/next.txt")
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect("the listing confirms the head and finds the new file");
     assert_eq!(revisions.revisions.len(), 1);

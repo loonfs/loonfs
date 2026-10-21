@@ -4,10 +4,7 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{NamespacePath, PutFileOptions};
-use loonfs_test_support::ids::{
-    attribute_key, attribute_text, first_page, namespace_id, page_limit,
-};
-use loonfs_types::PageRequest;
+use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -29,7 +26,7 @@ async fn change_at(
     harness
         .client
         .list_changes(&namespace_id("demo"), ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes")
         .changes
@@ -124,10 +121,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let revisions = harness
         .client
         .list_file_revisions(&path("/implicit/parent/report.txt"))
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect("list revisions");
     assert_eq!(
@@ -216,10 +211,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let trash = harness
         .client
         .list_trash(&namespace)
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect("list trash");
     assert_eq!(trash.entries.len(), 1);
@@ -248,10 +241,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert!(harness
         .client
         .list_trash(&namespace)
-        .page(PageRequest {
-            limit: page_limit(10),
-            cursor: None
-        })
+        .page_limit(page_limit(10))
+        .page()
         .await
         .expect("list trash after undelete")
         .entries
