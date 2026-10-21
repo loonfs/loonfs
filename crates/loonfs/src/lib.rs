@@ -104,9 +104,8 @@ pub use loonfs_types::{
     Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId, RetainedCandidates,
     RetainedReason, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, Snapshot,
     TrashEntry, UploadId, WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
