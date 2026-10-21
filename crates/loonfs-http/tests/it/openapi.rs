@@ -1086,9 +1086,6 @@ fn openapi_names_tagged_one_of_alternatives() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
 
-    assert!(!schemas.contains_key("GrepGcRequest"));
-    assert!(!schemas.contains_key("GrepGcResponse"));
-
     for (schema_name, expected_names) in [
         (
             "NamespaceAccess",
@@ -1103,7 +1100,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             &[
                 "RunMaintenanceRequestMetadata",
                 "RunMaintenanceRequestGc",
-                "RunMaintenanceRequestGrepGc",
                 "RunMaintenanceRequestRetention",
                 "RunMaintenanceRequestRecoverAdministrator",
             ][..],
@@ -1113,7 +1109,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             &[
                 "RunMaintenanceResponseMetadata",
                 "RunMaintenanceResponseGc",
-                "RunMaintenanceResponseGrepGc",
                 "RunMaintenanceResponseRetention",
                 "RunMaintenanceResponseRecoverAdministrator",
             ][..],

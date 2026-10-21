@@ -93,20 +93,25 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 }
 
 #[tokio::test]
-async fn grep_gc_requires_grep_maintenance() {
+async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index() {
     for mode in [JobMode::Disabled, JobMode::ServeOnly] {
         let temp_dir = tempdir().expect("store tempdir");
+        let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "unmaintained").await;
         let (router, server) = app(test_config(temp_dir.path(), mode), AppConfig::default())
             .await
             .expect("build app");
-        assert_not_supported(
+        let response = send(
             &router,
             Method::POST,
-            "/v0/maintenance/namespaces/demo/runs",
-            Some(br#"{"kind":"grep_gc"}"#.to_vec()),
-            FEATURE_MAINTENANCE_GREP_INDEX,
+            &format!("/v0/maintenance/namespaces/{namespace_id}/runs"),
+            Some(br#"{"kind":"gc"}"#.to_vec()),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::OK, "{mode:?}");
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["kind"], "gc");
+        assert_eq!(body["namespace_id"], namespace_id.as_str());
+        assert!(body.get("extensions").is_none(), "{mode:?}: {body}");
         server
             .runtime
             .shutdown()
@@ -344,26 +349,23 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         &router,
         Method::POST,
         &format!("/v0/maintenance/namespaces/{namespace_id}/runs"),
-        Some(br#"{"kind":"grep_gc"}"#.to_vec()),
+        Some(br#"{"kind":"gc"}"#.to_vec()),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let gc: RunMaintenanceResponse = response_json(response).await;
-    let RunMaintenanceResponse::GrepGc {
-        namespace_id: actual_namespace_id,
-        deleted_segments,
-        deleted_other_objects,
-        namespace_reaped,
-        retained_candidates,
-    } = gc
-    else {
-        panic!("expected grep collection, got {gc:?}");
+    let RunMaintenanceResponse::Gc(collected) = gc else {
+        panic!("expected garbage collection, got {gc:?}");
     };
-    assert_eq!(actual_namespace_id, namespace_id);
-    assert_eq!(deleted_segments, 0);
-    assert_eq!(deleted_other_objects, 0);
-    assert!(!namespace_reaped);
-    assert!(retained_candidates > 0);
+    assert_eq!(collected.namespace_id, namespace_id);
+    let grep_counts = collected
+        .extensions
+        .grep
+        .expect("a deployment that maintains the index collects it in a `gc` run");
+    assert_eq!(grep_counts.deleted_segments, 0);
+    assert_eq!(grep_counts.deleted_other_objects, 0);
+    assert!(!grep_counts.namespace_reaped);
+    assert!(grep_counts.retained_candidates > 0);
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     sweep(&server).await;

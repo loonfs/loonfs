@@ -1421,6 +1421,16 @@
         ],
         "type": "object"
       },
+      "ExtensionGcReports": {
+        "description": "The reports from the extension collectors that one `gc` run ran, with one optional field for\neach extension.\n\nEach extension reports its collector under its own name here. A deployment that doesn't\nmaintain an extension's state leaves that extension's field out, and a client ignores a name\nit doesn't know.",
+        "properties": {
+          "grep": {
+            "$ref": "#/components/schemas/GrepGcReport",
+            "description": "The counts from the grep index's collector, present when the deployment maintains a grep\nindex."
+          }
+        },
+        "type": "object"
+      },
       "FileRevision": {
         "description": "One immutable revision of a file.",
         "properties": {
@@ -2587,6 +2597,40 @@
         ],
         "type": "object"
       },
+      "GrepGcReport": {
+        "description": "The counts from one pass of the grep index's collector over one namespace.",
+        "properties": {
+          "deleted_other_objects": {
+            "description": "The other unreferenced grep objects that the pass deleted after the grace window.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deleted_segments": {
+            "description": "The unreferenced grep segments that the pass deleted because they were older than the\nminimum segment age.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "namespace_reaped": {
+            "description": "Whether the pass deleted the grep extension state of a namespace that is missing or\ndeleted.",
+            "type": "boolean"
+          },
+          "retained_candidates": {
+            "description": "The candidates that the pass kept because they were referenced, too young, or\nunrecognized.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted_segments",
+          "deleted_other_objects",
+          "namespace_reaped",
+          "retained_candidates"
+        ],
+        "type": "object"
+      },
       "GrepIndex": {
         "description": "The maintenance status of a namespace's grep index.",
         "discriminator": {
@@ -3668,7 +3712,6 @@
         "discriminator": {
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceRequestGc",
-            "grep_gc": "#/components/schemas/RunMaintenanceRequestGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
             "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceRequestRetention"
@@ -3683,9 +3726,6 @@
             "$ref": "#/components/schemas/RunMaintenanceRequestGc"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestGrepGc"
-          },
-          {
             "$ref": "#/components/schemas/RunMaintenanceRequestRetention"
           },
           {
@@ -3694,10 +3734,10 @@
         ]
       },
       "RunMaintenanceRequestGc": {
-        "description": "A garbage collection job for aged, unreferenced objects.",
+        "description": "A garbage collection job for aged, unreferenced objects, which also collects the grep\nindex's objects when the deployment maintains a grep index.",
         "properties": {
           "grace_window_ms": {
-            "description": "The minimum age, in milliseconds, that an object must reach before the pass can delete it.\nThe value must be at least the server's advertised safety floor.",
+            "description": "The minimum age, in milliseconds, that an object must reach before the pass can delete it.\nThe value must be at least the server's advertised safety floor. The grep index's collector\nkeeps its own age rules, so this value doesn't change them.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3705,21 +3745,6 @@
           "kind": {
             "enum": [
               "gc"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceRequestGrepGc": {
-        "description": "A garbage collection job for aged, unreferenced grep index objects.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "grep_gc"
             ],
             "type": "string"
           }
@@ -3800,7 +3825,6 @@
         "discriminator": {
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceResponseGc",
-            "grep_gc": "#/components/schemas/RunMaintenanceResponseGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
             "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceResponseRetention"
@@ -3813,9 +3837,6 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseGc"
-          },
-          {
-            "$ref": "#/components/schemas/RunMaintenanceResponseGrepGc"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseRetention"
@@ -3835,6 +3856,10 @@
           "deleted_checkpoints_by_owner": {
             "$ref": "#/components/schemas/DeletedCheckpointsByOwner",
             "description": "The checkpoint records that the pass deleted, counted by owner."
+          },
+          "extensions": {
+            "$ref": "#/components/schemas/ExtensionGcReports",
+            "description": "The reports from the extension collectors, each under its extension's name, left out when\nno extension collector ran.\n\nThe `gc` maintenance job runs each extension's collector after the core collector.\n`Maintenance::gc` in the embedded runtime runs only the core collector, so its result\nleaves this field out."
           },
           "kind": {
             "enum": [
@@ -3868,52 +3893,6 @@
           "deleted",
           "deleted_checkpoints_by_owner",
           "retained",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceResponseGrepGc": {
-        "description": "The counts from one garbage collection pass over the grep index.",
-        "properties": {
-          "deleted_other_objects": {
-            "description": "The other unreferenced grep objects that the pass deleted after the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "deleted_segments": {
-            "description": "The unreferenced grep segments that the pass deleted because they were older than the\nminimum segment age.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "kind": {
-            "enum": [
-              "grep_gc"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose grep keyspace the pass inspected."
-          },
-          "namespace_reaped": {
-            "description": "Whether the pass deleted the grep extension state of a namespace that is missing or\ndeleted.",
-            "type": "boolean"
-          },
-          "retained_candidates": {
-            "description": "The candidates that the pass kept because they were referenced, too young, or\nunrecognized.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "namespace_id",
-          "deleted_segments",
-          "deleted_other_objects",
-          "namespace_reaped",
-          "retained_candidates",
           "kind"
         ],
         "type": "object"
@@ -5173,7 +5152,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
         "operationId": "run_maintenance",
         "parameters": [
           {
@@ -5257,16 +5236,6 @@
               }
             },
             "description": "JSON body exceeds the 2 MiB limit"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "This deployment doesn't maintain the grep index"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

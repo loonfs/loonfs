@@ -72,7 +72,8 @@ pub enum GrepError {
         object_key: String,
     },
     /// A genuine runtime failure encountered while grep read or wrote
-    /// through the filesystem handles.
+    /// through the filesystem handles, or a core collector failure in a
+    /// `gc` job that also runs grep's collector.
     #[error(transparent)]
     Runtime(#[from] loonfs::Error),
 }

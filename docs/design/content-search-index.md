@@ -255,13 +255,15 @@ Index maintenance reduces this gap when it runs. Core backpressure on the WAL ta
 
 ## Grep garbage collection
 
-Grep garbage collection deletes grep manifests and segments that are no longer needed. Each call covers one namespace, and it runs through any of these:
+Grep garbage collection deletes grep manifests and segments that are no longer needed. Each call covers one namespace, and it runs right after the core collector in each of these:
 
-- `loonfs maintenance grep-gc`
-- `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`
+- `loonfs maintenance gc`
+- `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "gc"`
 - the reference server's sweep, on each collection pass
 
-Building and reorganizing the index don't run it.
+Building and reorganizing the index don't run the grep collector.
+
+Grep is an extension, and an extension owns its key prefix, its collector, its routes, and its feature keys. For grep, those are `namespaces/{namespace_id}/extensions/grep/`, the collector that this section describes, the query and index routes, and the `query.grep` and `maintenance.grep.index` keys. The core collector doesn't delete objects under an extension's prefix. Instead, the core `gc` job runs each extension's collector after its own, and the `gc` result reports each extension under its name in `extensions`, so the grep collector's counts are in `extensions.grep`.
 
 Each call loads the current manifest, builds its set of live segments, and scans the manifest and segment collections from beginning to end. It uses one clock value for the whole call, and it stores no progress cursor. If a root is invalid or unreadable, the call fails before it deletes anything.
 
@@ -275,7 +277,7 @@ The collector keeps objects under these rules:
 
 Every step that produces output checks the bounded metadata publication budget before it creates its next manifest. That budget and the collection age rules protect concurrent builds. A failed or interrupted step can leave segments behind for a later collection.
 
-If the core namespace is missing or deleted, an explicit call can delete the entire grep prefix after the ordinary grace. The core and grep collectors work on separate families of objects, and neither one resumes a durable collection run from a previous call.
+If the core namespace is missing or deleted, a `gc` job can delete the entire grep prefix after the ordinary grace. The core and grep collectors work on separate families of objects, so the job runs the grep collector even when the core collector fails, and neither one resumes a durable collection run from a previous call.
 
 ## Costs and defaults
 

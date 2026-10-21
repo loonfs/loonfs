@@ -15,7 +15,7 @@ use loonfs::engine::{
 };
 use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{ErrorCode, ManifestNo, NamespaceId, RunMaintenanceResponse};
+use loonfs_types::{ErrorCode, GrepGcReport, ManifestNo, NamespaceId};
 use std::collections::BTreeSet;
 
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
@@ -23,29 +23,6 @@ const _: () = assert!(GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 const _: () = assert!(
     METADATA_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS <= UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
 );
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GrepGcReport {
-    pub deleted_segments: u64,
-    pub deleted_other_objects: u64,
-    pub namespace_reaped: bool,
-    pub retained_candidates: u64,
-}
-
-pub async fn gc_grep<S: ObjectStore + Clone>(
-    worker: &GrepWorker<S>,
-    namespace_id: &NamespaceId,
-    now_ms: u64,
-) -> Result<RunMaintenanceResponse> {
-    let report = worker.gc_namespace(namespace_id, now_ms).await?;
-    Ok(RunMaintenanceResponse::GrepGc {
-        namespace_id: namespace_id.clone(),
-        deleted_segments: report.deleted_segments,
-        deleted_other_objects: report.deleted_other_objects,
-        namespace_reaped: report.namespace_reaped,
-        retained_candidates: report.retained_candidates,
-    })
-}
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn gc_namespace(

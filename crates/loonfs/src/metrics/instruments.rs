@@ -1258,6 +1258,7 @@ mod tests {
             },
             next_reclamation_at_ms: None,
             reclaimable_at_ms: None,
+            extensions: loonfs_types::ExtensionGcReports::default(),
         };
 
         instruments.gc_pass(&gc);

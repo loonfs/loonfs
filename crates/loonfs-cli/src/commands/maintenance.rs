@@ -54,7 +54,6 @@ pub(crate) async fn run_maintenance_command(
             }
         },
         MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args).await,
-        MaintenanceCommand::GrepGc(args) => run_maintenance_grep_gc(kind, config_path, args).await,
         MaintenanceCommand::Store { command } => match command {
             MaintenanceStoreCommand::Probe(args) => {
                 run_maintenance_store_probe(kind, config_path, args).await
@@ -372,28 +371,6 @@ async fn run_maintenance_index_status(
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(kind, CommandData::GrepIndexStatus(response)))
-}
-
-async fn run_maintenance_grep_gc(
-    kind: CommandKind,
-    config_path: &Path,
-    args: MaintenanceNamespaceArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
-        .target
-        .client
-        .run_maintenance(
-            context.namespace(),
-            &RunMaintenanceRequest::GrepGc {},
-            context.actor_id.as_ref(),
-        )
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
 }
 
 async fn run_maintenance_index_disable(

@@ -1046,7 +1046,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
     // One hint read each for the metadata call, the grep build, and
     // collection; grep collection reads the hint and lists its own prefix.
     assert_eq!(stray.len(), 5, "{stray:?}");
-    for call in ["metadata", "grep_index", "gc", "grep_gc"] {
+    for call in ["metadata", "grep_index", "gc"] {
         assert_eq!(
             server.counter("loonfs.maintenance.sweep_visit_failures", &[("call", call)]),
             0,

@@ -130,7 +130,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "file_created",
     "file_revision",
     "grace_window_ms",
-    "grep_gc",
     "head_drift",
     "head_seq",
     "idle_session_close_after_ms",
@@ -1858,9 +1857,9 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&runs_url)
                 .set("content-type", "application/json")
-                .send_string(r#"{"kind":"grep_gc"}"#)
+                .send_string(r#"{"kind":"gc"}"#)
         },
-        "grep index collection should require authorization",
+        "garbage collection should require authorization",
         401,
         "unauthorized",
     );

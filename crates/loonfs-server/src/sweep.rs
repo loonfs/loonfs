@@ -6,8 +6,8 @@ use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
 };
 use loonfs::{
-    ChangeSeq, ErrorCode, Maintenance, MaintenanceCancellation, MetadataMaintenanceOutcome,
-    NamespaceId, SharedObjectStore,
+    ChangeSeq, ErrorCode, GcOptions, Maintenance, MaintenanceCancellation,
+    MetadataMaintenanceOutcome, NamespaceId, SharedObjectStore,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -134,19 +134,19 @@ struct GrepIndexing {
 enum SweepCall {
     Metadata,
     GrepIndex,
+    /// Garbage collection, which runs the core collector and then the grep index's collector
+    /// through [`loonfs_http::gc_namespace`].
     Gc,
-    GrepGc,
 }
 
 impl SweepCall {
-    const ALL: [Self; 4] = [Self::Metadata, Self::GrepIndex, Self::Gc, Self::GrepGc];
+    const ALL: [Self; 3] = [Self::Metadata, Self::GrepIndex, Self::Gc];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Metadata => "metadata",
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
-            Self::GrepGc => "grep_gc",
         }
     }
 }
@@ -491,51 +491,32 @@ impl Sweep {
 
     async fn gc(&self, namespace_id: &NamespaceId) -> bool {
         let inner = &self.inner;
-        if inner.stop.is_cancelled() {
+        let call = SweepCall::Gc;
+        if inner.stop.is_cancelled() || self.backed_off(namespace_id, call) {
             return false;
         }
-        let mut collected = true;
-        if self.backed_off(namespace_id, SweepCall::Gc) {
-            collected = false;
-        } else {
-            let call = SweepCall::Gc;
-            match self
-                .contain(namespace_id, call, inner.maintenance.gc(namespace_id))
-                .await
-            {
-                Some(Ok(_)) => self.record_success(namespace_id, call),
-                Some(Err(error)) => {
-                    self.record_failure(namespace_id, call, error.code(), &error);
-                    collected = false;
-                }
-                None => collected = false,
-            }
-        }
-        let Some(grep) = &inner.grep else {
-            return collected;
-        };
-        if inner.stop.is_cancelled() {
-            return false;
-        }
-        if self.backed_off(namespace_id, SweepCall::GrepGc) {
-            return false;
-        }
-        let call = SweepCall::GrepGc;
+        let options = GcOptions::default();
         let result = self.contain(
             namespace_id,
             call,
-            grep.worker
-                .gc_namespace(namespace_id, inner.maintenance.now_ms()),
+            loonfs_http::gc_namespace(
+                &inner.maintenance,
+                inner.grep.as_ref().map(|grep| &grep.worker),
+                namespace_id,
+                &options,
+            ),
         );
         match result.await {
-            Some(Ok(_)) => self.record_success(namespace_id, call),
+            Some(Ok(_)) => {
+                self.record_success(namespace_id, call);
+                true
+            }
             Some(Err(error)) => {
                 self.record_failure(namespace_id, call, error.code(), &error);
-                collected = false;
+                false
             }
-            None => collected = false,
+            None => false,
         }
-        collected
     }
 
     /// Runs build steps while each one publishes, at most
@@ -775,7 +756,7 @@ struct SweepMetrics {
     passes_ok: Arc<dyn CounterHandle>,
     passes_failed: Arc<dyn CounterHandle>,
     pass_seconds: Arc<dyn HistogramHandle>,
-    visit_failures: [Arc<dyn CounterHandle>; 4],
+    visit_failures: [Arc<dyn CounterHandle>; 3],
     panics: Arc<dyn CounterHandle>,
     backoff_entries: Arc<dyn GaugeHandle>,
     namespaces: Arc<dyn GaugeHandle>,
