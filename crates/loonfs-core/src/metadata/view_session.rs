@@ -175,7 +175,7 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
     attributes_cache: HashMap<InodeId, AttributesProjection>,
     access_row_cache: HashMap<InodeId, Option<AccessRevisionRecord>>,
-    active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
+    hiding_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     counters: MetadataViewSessionCounters,
 }
@@ -191,7 +191,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             latest_revision_head_cache: HashMap::new(),
             attributes_cache: HashMap::new(),
             access_row_cache: HashMap::new(),
-            active_tombstone_cache: HashMap::new(),
+            hiding_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
             counters: MetadataViewSessionCounters::default(),
         }
@@ -205,11 +205,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.inode_at_seq_cache.get(&inode_id).cloned()
     }
 
-    fn cached_active_subtree_tombstone(
+    fn cached_hiding_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Option<Option<SubtreeTombstoneRecord>> {
-        self.active_tombstone_cache.get(&root_inode_id).cloned()
+        self.hiding_tombstone_cache.get(&root_inode_id).cloned()
     }
 
     fn cached_latest_parent_binding_for_child(
@@ -420,16 +420,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let base = &self.base;
         let pending: Vec<_> = child_inode_ids
             .into_iter()
-            .filter(|inode_id| !self.active_tombstone_cache.contains_key(inode_id))
+            .filter(|inode_id| !self.hiding_tombstone_cache.contains_key(inode_id))
             .collect();
         let loaded =
-            preload_inode_groups(&pending, |inode_id| base.active_subtree_tombstone(inode_id))
+            preload_inode_groups(&pending, |inode_id| base.hiding_subtree_tombstone(inode_id))
                 .await?;
         self.counters.list_preload_child_lookups = self
             .counters
             .list_preload_child_lookups
             .saturating_add(loaded.len() as u64);
-        self.active_tombstone_cache.extend(loaded);
+        self.hiding_tombstone_cache.extend(loaded);
         Ok(())
     }
 
@@ -440,7 +440,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .filter(|inode_id| {
                 !(self.inode_at_seq_cache.contains_key(inode_id)
                     && self.latest_parent_binding_cache.contains_key(inode_id)
-                    && self.active_tombstone_cache.contains_key(inode_id))
+                    && self.hiding_tombstone_cache.contains_key(inode_id))
             })
             .collect();
         pending.sort_unstable();
@@ -474,10 +474,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         for (inode_id, (inode, binding, tombstones)) in lookups {
             self.inode_at_seq_cache.insert(inode_id, inode);
             self.latest_parent_binding_cache.insert(inode_id, binding);
-            let active_tombstone =
-                super::rows::active_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
-            self.active_tombstone_cache
-                .insert(inode_id, active_tombstone);
+            let hiding_tombstone =
+                super::rows::hiding_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
+            self.hiding_tombstone_cache
+                .insert(inode_id, hiding_tombstone);
         }
         Ok(())
     }
@@ -531,9 +531,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     }
                 },
                 async {
-                    match self.cached_active_subtree_tombstone(current_inode_id) {
+                    match self.cached_hiding_subtree_tombstone(current_inode_id) {
                         Some(tombstone) => Ok(tombstone),
-                        None => base.active_subtree_tombstone(current_inode_id).await,
+                        None => base.hiding_subtree_tombstone(current_inode_id).await,
                     }
                 },
                 async {
@@ -570,7 +570,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             if is_root_path {
                 self.inode_at_seq_cache.insert(current_inode_id, inode);
             }
-            self.active_tombstone_cache
+            self.hiding_tombstone_cache
                 .insert(current_inode_id, tombstone);
             self.latest_parent_binding_cache
                 .insert(current_inode_id, parent_binding);
@@ -809,16 +809,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.base.active_deletions_page(start_after, limit).await
     }
 
-    pub(crate) async fn active_subtree_tombstone(
+    pub(crate) async fn hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
-        if let Some(cached) = self.cached_active_subtree_tombstone(root_inode_id) {
+        if let Some(cached) = self.cached_hiding_subtree_tombstone(root_inode_id) {
             return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let tombstone = self.base.active_subtree_tombstone(root_inode_id).await?;
-        self.active_tombstone_cache
+        let tombstone = self.base.hiding_subtree_tombstone(root_inode_id).await?;
+        self.hiding_tombstone_cache
             .insert(root_inode_id, tombstone.clone());
         Ok(tombstone)
     }
@@ -873,11 +873,11 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         self.latest_parent_binding_for_child(child_inode_id).await
     }
 
-    async fn find_active_subtree_tombstone(
+    async fn find_hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        self.active_subtree_tombstone(root_inode_id).await
+        self.hiding_subtree_tombstone(root_inode_id).await
     }
 
     async fn find_access_row(

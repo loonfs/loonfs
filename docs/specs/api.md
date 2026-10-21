@@ -2273,6 +2273,7 @@ Event kinds:
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_version`. |
 | `deleted` | A file or directory subtree was deleted. To restore it, use the enclosing `committed_seq` as `deletion_seq`. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and bound to a name again. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
+| `deletion_expired` | A deletion stopped being recoverable. The deleted subtree stays hidden, and an undelete of the deletion returns `not_deleted`. The namespace's writer makes the commit, which is attributed to `loonfs`, and no request can produce this event. | `inode_id` (the deletion's root) and `deletion_seq` (the `committed_seq` of the commit that deleted it). |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer can update its own copy without reading anything back. An empty map means the attributes were cleared. | `inode_id`, `attributes_revision_no`, `attributes`. |
 | `access_changed` | An inode's access row was replaced. `grants` is the complete direct grant map after the update. | `inode_id`, `access_revision_no`, `boundary`, `grants`. |
 

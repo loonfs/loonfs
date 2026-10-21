@@ -44,19 +44,20 @@ impl Default for MetadataState {
     }
 }
 
-/// The newest-event-wins active-tombstone rule, shared by every aggregation
-/// site: among records at or below `visible_seq`, the newest position
-/// speaks for the root — a `Set` newest means that deletion is active, a
-/// `Revoke` newest means none is.
-/// The newest event is authoritative WITHOUT consulting the revoke's
-/// target: commit validation guarantees a revoke only ever lands against
-/// the position that was active, so for valid histories the two rules
-/// agree, and the recorded target serves as audit metadata and the
-/// projection contract (change-feed consumers reduce with it and can flag
+/// The newest-event-wins tombstone rule, shared by every aggregation site:
+/// among records at or below `visible_seq`, the newest position speaks for
+/// the root. A `Set` or an `Expire` newest means the root's subtree is
+/// hidden, and a `Revoke` newest means it isn't. Only a `Set` newest is a
+/// recoverable deletion ([`TombstoneRowAction::is_recoverable`]).
+/// The newest event is authoritative WITHOUT consulting the target of a
+/// revoke or an expire: commit validation guarantees either one only ever
+/// lands against the position that was recoverable, so for valid histories
+/// the two rules agree, and the recorded target serves as audit metadata and
+/// the projection contract (change-feed consumers reduce with it and can flag
 /// a mismatch as corruption). Keep every reader on this helper — a site
 /// with its own copy of the rule is how visibility splits from the durable
 /// truth.
-pub(crate) fn active_tombstone_from_records(
+pub(crate) fn hiding_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
     visible_seq: ChangeSeq,
 ) -> Option<SubtreeTombstoneRecord> {
@@ -64,18 +65,19 @@ pub(crate) fn active_tombstone_from_records(
         .into_iter()
         .filter(|tombstone| tombstone.committed_seq <= visible_seq)
         .max_by_key(|tombstone| tombstone.position())
-        .filter(|tombstone| matches!(tombstone.action, TombstoneRowAction::Set { .. }))
+        .filter(|tombstone| tombstone.action.hides_subtree())
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
-/// adds a deletion to the listing, and a `revoke` removes that position.
+/// adds a deletion to the listing, and a `revoke` or an `expire` removes that
+/// position.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
-/// [`active_tombstone_from_records`] reduces target-blind. Commit validation
-/// only ever lands a revoke against the position that was active, so the two
-/// agree on every history a writer can produce; the target is what lets a
-/// removal be derived one event at a time instead of by re-reading a root's
-/// whole history.
+/// [`hiding_tombstone_from_records`] reduces target-blind. Commit validation
+/// only ever lands a revoke or an expire against the position that was
+/// recoverable, so the two agree on every history a writer can produce; the
+/// target is what lets a removal be derived one event at a time instead of by
+/// re-reading a root's whole history.
 pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
     inode_kind: InodeKind,
@@ -91,13 +93,15 @@ pub(crate) fn active_deletion_from_tombstone(
                 deleted_binding: deleted_binding.clone(),
             },
         },
-        TombstoneRowAction::Revoke { target } => ActiveDeletionRecord {
-            root_inode_id: tombstone.root_inode_id,
-            deletion_seq: target.seq,
-            action: ActiveDeletionRowAction::Removed {
-                revocation_seq: tombstone.committed_seq,
-            },
-        },
+        TombstoneRowAction::Revoke { target } | TombstoneRowAction::Expire { target } => {
+            ActiveDeletionRecord {
+                root_inode_id: tombstone.root_inode_id,
+                deletion_seq: target.seq,
+                action: ActiveDeletionRowAction::Removed {
+                    revocation_seq: tombstone.committed_seq,
+                },
+            }
+        }
     }
 }
 

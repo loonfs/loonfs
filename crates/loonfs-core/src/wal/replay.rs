@@ -104,6 +104,7 @@ fn replay_next_inode_id_from_commit_deltas(
                 | WalDelta::AppendFileRevision { .. }
                 | WalDelta::TombstoneSubtree { .. }
                 | WalDelta::RevokeSubtreeTombstone { .. }
+                | WalDelta::ExpireSubtreeTombstone { .. }
                 | WalDelta::AppendAttributesRevision { .. }
                 | WalDelta::AppendAccessRevision { .. } => next_inode_id,
             }

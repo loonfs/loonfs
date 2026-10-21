@@ -782,7 +782,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
             "base",
             vec![inline(&namespace_id, Bytes::copy_from_slice(&bytes))],
         );
-        base.intent
+        base.intent_mut()
             .operations
             .extend((1..count).map(|_| append("/base-0", &bytes)));
         publish(&mut engine, &store, &context, base)

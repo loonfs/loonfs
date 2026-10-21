@@ -2,12 +2,12 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::planned_pieces::PlannedPieces;
-use super::planner::prepare_commit_against_publish_view;
+use super::planner::{prepare_commit_against_publish_view, prepare_expiry_against_publish_view};
 use super::preconditions::evaluate_preconditions;
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
-use crate::commit_engine::CommitCandidate;
+use crate::commit_engine::{CandidateRequest, CommitCandidate};
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -91,9 +91,24 @@ impl<'a> PublishPlanningSession<'a> {
         allocation: &mut CandidateAllocation,
     ) -> Result<ValidatedCommitPlan> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
+        let intent = match candidate.request() {
+            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
+            CandidateRequest::Expiry(expiry) => {
+                // Boxed so the layout of this future, which every commit path
+                // nests, stays within rustc's default query depth.
+                return Box::pin(prepare_expiry_against_publish_view(
+                    expiry,
+                    semantic_identity,
+                    self,
+                    base_view,
+                    committed_at_ms,
+                ))
+                .await;
+            }
+        };
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
-            &candidate.intent().preconditions,
+            &intent.preconditions,
             candidate.authority(),
             &self.head,
             &pre_state,
@@ -103,6 +118,7 @@ impl<'a> PublishPlanningSession<'a> {
             store,
             content_writes,
             candidate,
+            intent,
             semantic_identity,
             self,
             base_view,
@@ -264,7 +280,10 @@ mod tests {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("view");
-        let request = create_directory_candidate("wal", "/docs").intent().clone();
+        let request = create_directory_candidate("wal", "/docs")
+            .intent()
+            .expect("a filesystem request")
+            .clone();
         let mut payloads = Vec::new();
         for preconditions in [
             Vec::new(),

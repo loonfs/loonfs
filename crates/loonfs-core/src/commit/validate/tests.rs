@@ -13,7 +13,7 @@ use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
 use loonfs_types::format::{
-    manifest::DeletedBinding,
+    manifest::{DeletedBinding, DeltaPosition},
     wal::{WalCommitDelta, WalDelta},
 };
 use loonfs_types::{
@@ -900,5 +900,115 @@ async fn restore_revision_overflow_is_rejected() {
             inode_id: InodeId(2),
             base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }
+    );
+}
+
+/// An expiry, like an undelete, applies only while the deletion it names is
+/// its root's latest tombstone event.
+#[tokio::test]
+async fn an_expiry_applies_only_while_its_deletion_is_the_roots_latest_event() {
+    let deletion = DeltaPosition {
+        seq: ChangeSeq(2),
+        delta_index: 0,
+    };
+    let revoke = vec![WalDelta::RevokeSubtreeTombstone {
+        delta_index: 0,
+        root_inode_id: InodeId(2),
+        target: deletion,
+    }];
+    let expire = vec![WalDelta::ExpireSubtreeTombstone {
+        delta_index: 0,
+        root_inode_id: InodeId(2),
+        target: deletion,
+    }];
+    let expire_at = |seq| CommitOperation::ExpireDeletion {
+        inode_id: InodeId(2),
+        deletion_seq: ChangeSeq(seq),
+    };
+    let undelete_at = |seq| CommitOperation::Undelete {
+        inode_id: InodeId(2),
+        deletion_seq: ChangeSeq(seq),
+        parent_inode_id: InodeId(1),
+        display_name: test_display_name("docs"),
+    };
+    let not_deleted = |operand| CommitValidationError::TargetNotDeleted {
+        operand,
+        inode_id: InodeId(2),
+    };
+    let cases = [
+        (
+            "expired twice in one commit",
+            Vec::new(),
+            vec![expire_at(2), expire_at(2)],
+            not_deleted(CommitOperand::ExpireTarget),
+        ),
+        (
+            "already undeleted",
+            vec![revoke.clone()],
+            vec![expire_at(2)],
+            not_deleted(CommitOperand::ExpireTarget),
+        ),
+        (
+            "already expired",
+            vec![expire.clone()],
+            vec![expire_at(2)],
+            not_deleted(CommitOperand::ExpireTarget),
+        ),
+        (
+            "undeleted after it expired",
+            vec![expire],
+            vec![undelete_at(2)],
+            not_deleted(CommitOperand::UndeleteTarget),
+        ),
+        (
+            "deleted again since",
+            vec![revoke, wal_tombstone(0, InodeId(2))],
+            vec![expire_at(2)],
+            CommitValidationError::DeletionSequenceMismatch {
+                operand: CommitOperand::ExpireTarget,
+                inode_id: InodeId(2),
+                requested_seq: ChangeSeq(2),
+                active_seq: ChangeSeq(4),
+            },
+        ),
+    ];
+    for (name, later, ops, expected) in cases {
+        let mut history = vec![
+            wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+            wal_tombstone(0, InodeId(2)),
+        ];
+        history.extend(later);
+        let metadata_state = metadata_state_after(&history);
+        let head_seq = ChangeSeq(u64::try_from(history.len()).expect("seq"));
+        let context = validation_context(&metadata_state, head_seq, InodeId(3));
+        let error = build_commit_plan(&ops, 4_200, &context)
+            .await
+            .expect_err(name);
+        assert_eq!(error, expected, "{name}");
+        assert_eq!(
+            CoreError::from(error).code(),
+            ErrorCode::NotDeleted,
+            "{name}"
+        );
+    }
+
+    let metadata_state = metadata_state_after(&[
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_tombstone(0, InodeId(2)),
+    ]);
+    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(3));
+    let plan = build_commit_plan(&[expire_at(2)], 4_200, &context)
+        .await
+        .expect("expire the latest deletion");
+    assert_eq!(
+        plan.deltas,
+        vec![WalCommitDelta {
+            semantic_operation_index: 0,
+            delta: WalDelta::ExpireSubtreeTombstone {
+                delta_index: 0,
+                root_inode_id: InodeId(2),
+                target: deletion,
+            },
+        }]
     );
 }

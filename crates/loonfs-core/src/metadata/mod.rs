@@ -28,7 +28,7 @@ pub use loonfs_types::format::manifest::{
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 /// Newest-event-wins tombstone selection used by differential tests.
 #[cfg(test)]
-pub(crate) use self::rows::active_tombstone_from_records;
+pub(crate) use self::rows::hiding_tombstone_from_records;
 pub(crate) use self::rows::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, RecoverableDeletion,
 };

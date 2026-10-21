@@ -4,7 +4,6 @@
 use super::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
 };
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey};
@@ -125,15 +124,15 @@ impl MetadataIndexes {
             .cloned()
     }
 
-    pub(super) fn active_tombstone(
+    pub(super) fn hiding_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Option<SubtreeTombstoneRecord> {
         // The index keeps the newest record per root, whatever its action;
-        // a revoke as the newest record means no tombstone is active.
+        // a revoke as the newest record means the subtree isn't hidden.
         self.tombstone_by_root
             .get(&root_inode_id)
-            .filter(|tombstone| matches!(tombstone.action, TombstoneRowAction::Set { .. }))
+            .filter(|tombstone| tombstone.action.hides_subtree())
             .cloned()
     }
 

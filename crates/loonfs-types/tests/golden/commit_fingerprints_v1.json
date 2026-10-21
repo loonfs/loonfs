@@ -710,5 +710,21 @@
     "preconditions": [],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"append_file_by_inode\",\"inode_id\":7,\"inline_content\":{\"kind\":\"append_v1\",\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"size_bytes\":6},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:256cbd68d336bb7b1040fdcd040b0b39829b63d34b0d140ecb237e8047c99058"
+  },
+  {
+    "name": "expire_deletions",
+    "expired_deletions": [
+      {
+        "inode_id": 7,
+        "deletion_seq": 40
+      },
+      {
+        "inode_id": 12,
+        "deletion_seq": 41
+      }
+    ],
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"loonfs\",\"subject_id\":null,\"operations\":[{\"kind\":\"expire_deletion\",\"inode_id\":7,\"deletion_seq\":40},{\"kind\":\"expire_deletion\",\"inode_id\":12,\"deletion_seq\":41}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:1769d590dd102dd9a3e0550adeac0c13521c88f39f5edf770fe8a87196e9b6aa"
   }
 ]

@@ -157,6 +157,10 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
+            CommitOperation::ExpireDeletion {
+                inode_id,
+                deletion_seq,
+            } => validate_expire_deletion(view, numbering, *inode_id, *deletion_seq).await?,
             CommitOperation::UpdateAttributes {
                 inode_id,
                 base_attributes_revision_no,
@@ -445,7 +449,17 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
 ) -> Result<Vec<WalDelta>> {
-    let (inode, active) = validate_undelete_target(view, inode_id, deletion_seq).await?;
+    let inode =
+        view.view()
+            .inode_at_seq(inode_id)
+            .await?
+            .ok_or(CommitValidationError::InodeMissing {
+                operand: CommitOperand::UndeleteTarget,
+                inode_id,
+            })?;
+    let deletion =
+        validate_recoverable_deletion(view, inode_id, deletion_seq, CommitOperand::UndeleteTarget)
+            .await?;
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -460,7 +474,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
         WalDelta::RevokeSubtreeTombstone {
             delta_index: numbering.reserve_delta_index()?,
             root_inode_id: inode_id,
-            target: active.position(),
+            target: deletion.position(),
         },
         WalDelta::BindDirentry {
             delta_index: numbering.reserve_delta_index()?,
@@ -473,6 +487,25 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
             child_created_at_ms: inode.committed_at_ms,
         },
     ])
+}
+
+/// Validates an expiry the way [`validate_undelete`] validates an undelete:
+/// the deletion at `deletion_seq` has to be the root's latest tombstone event.
+/// The expire event restores no binding, so the subtree stays hidden.
+async fn validate_expire_deletion<S: ObjectStore + ?Sized>(
+    view: &PublishValidationSession<'_, S>,
+    numbering: &mut CommitNumbering,
+    inode_id: InodeId,
+    deletion_seq: ChangeSeq,
+) -> Result<Vec<WalDelta>> {
+    let deletion =
+        validate_recoverable_deletion(view, inode_id, deletion_seq, CommitOperand::ExpireTarget)
+            .await?;
+    Ok(vec![WalDelta::ExpireSubtreeTombstone {
+        delta_index: numbering.reserve_delta_index()?,
+        root_inode_id: inode_id,
+        target: deletion.position(),
+    }])
 }
 
 async fn validate_update_attributes<S: ObjectStore + ?Sized>(
@@ -585,36 +618,34 @@ fn next_attributes_revision_no(
         })
 }
 
-async fn validate_undelete_target<S: ObjectStore + ?Sized>(
+/// Returns the `set` event of the deletion that `deletion_seq` identifies,
+/// which has to be the root's latest tombstone event. A request for a
+/// deletion that a later event revoked or expired, or that a later deletion
+/// replaced, fails here, so it can't cancel a different deletion.
+async fn validate_recoverable_deletion<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-) -> Result<(InodeRecord, SubtreeTombstoneRecord)> {
-    let committed_seq = view.committed_seq();
-    let inode =
-        view.view()
-            .inode_at_seq(inode_id)
-            .await?
-            .ok_or(CommitValidationError::InodeMissing {
-                operand: CommitOperand::UndeleteTarget,
-                inode_id,
-            })?;
-    let Some(active) = view.view().active_subtree_tombstone(inode_id).await? else {
-        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+    operand: CommitOperand,
+) -> Result<SubtreeTombstoneRecord> {
+    let Some(deletion) = view.view().recoverable_deletion(inode_id).await? else {
+        return Err(CommitValidationError::TargetNotDeleted { operand, inode_id }.into());
     };
-    if active.committed_seq >= committed_seq {
-        return Err(CommitValidationError::UndeleteTargetsCurrentCommit { inode_id }.into());
+    if deletion.committed_seq >= view.committed_seq() {
+        return Err(
+            CommitValidationError::TargetDeletedInCurrentCommit { operand, inode_id }.into(),
+        );
     }
-    if active.committed_seq != deletion_seq {
-        return Err(CommitValidationError::UndeleteSequenceMismatch {
+    if deletion.committed_seq != deletion_seq {
+        return Err(CommitValidationError::DeletionSequenceMismatch {
+            operand,
             inode_id,
             requested_seq: deletion_seq,
-            active_seq: active.committed_seq,
+            active_seq: deletion.committed_seq,
         }
         .into());
     }
-
-    Ok((inode, active))
+    Ok(deletion)
 }
 
 async fn validate_target_visible<S: ObjectStore + ?Sized>(

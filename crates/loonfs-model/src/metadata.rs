@@ -81,8 +81,9 @@ pub struct SubtreeTombstoneRecord {
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
     pub committed_by: ActorId,
-    /// Action recorded by this event. The newest event for each root determines
-    /// state; a newest `Revoke` means no tombstone is active.
+    /// Action recorded by this event. The newest event for each root
+    /// determines state: a newest `Set` or `Expire` hides the subtree, and a
+    /// newest `Revoke` doesn't.
     pub action: SubtreeTombstoneAction,
 }
 
@@ -157,6 +158,9 @@ pub enum SubtreeTombstoneAction {
     Set { deleted_binding: DeletedBinding },
     /// Cancels exactly the deletion recorded at `target`.
     Revoke { target: DeltaPosition },
+    /// Ends the recoverability of exactly the deletion recorded at `target`,
+    /// which keeps hiding its subtree.
+    Expire { target: DeltaPosition },
 }
 
 impl MetadataState {
@@ -288,6 +292,28 @@ impl MetadataState {
                             committed_at_ms,
                             committed_by: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
+                                target: DeltaPosition {
+                                    seq: target.seq,
+                                    delta_index: target.delta_index,
+                                },
+                            },
+                        });
+                }
+                WalDelta::ExpireSubtreeTombstone {
+                    delta_index,
+                    root_inode_id,
+                    target,
+                } => {
+                    metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *root_inode_id,
+                            committed_seq,
+                            delta_index: *delta_index,
+                            commit_id: commit_id.clone(),
+                            committed_at_ms,
+                            committed_by: actor.clone(),
+                            action: SubtreeTombstoneAction::Expire {
                                 target: DeltaPosition {
                                     seq: target.seq,
                                     delta_index: target.delta_index,

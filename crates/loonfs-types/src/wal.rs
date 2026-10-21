@@ -185,6 +185,18 @@ pub enum WalDelta {
         /// The exact tombstone position this delta compensates.
         target: DeltaPosition,
     },
+    /// Ends the recoverability of exactly one deletion, the `set` event
+    /// recorded at `target`. The tombstone keeps hiding the subtree, but an
+    /// undelete can no longer restore it
+    /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
+    ExpireSubtreeTombstone {
+        /// Stable position of this delta within its commit.
+        delta_index: u32,
+        /// Root inode of the deletion being expired.
+        root_inode_id: InodeId,
+        /// The exact `set` event this delta expires.
+        target: DeltaPosition,
+    },
     /// Publishes the next attribute revision of one inode, as complete state.
     ///
     /// The delta carries the whole resulting map rather than the changes that

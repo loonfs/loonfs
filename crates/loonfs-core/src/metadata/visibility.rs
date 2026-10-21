@@ -39,8 +39,9 @@ pub(crate) trait MetadataVisibilityReads {
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindingRecord>, Self::Error>;
 
-    /// Latest subtree tombstone rooted at `root_inode_id` at the read seq.
-    async fn find_active_subtree_tombstone(
+    /// Latest tombstone event rooted at `root_inode_id` at the read seq, when
+    /// that event hides the subtree (a `set` or an `expire`).
+    async fn find_hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
@@ -187,10 +188,11 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
-/// The first active subtree tombstone rooted at `inode_id` or at any of its
-/// current ancestors (following current parent bindings upward). A walk that
-/// revisits an inode found a parent-binding cycle, which is corrupt stored
-/// metadata: answering "not covered" could show a deleted subtree.
+/// The first hiding subtree tombstone rooted at `inode_id` or at any of its
+/// current ancestors (following current parent bindings upward). A
+/// recoverable deletion and an expired one both hide their subtree. A walk
+/// that revisits an inode found a parent-binding cycle, which is corrupt
+/// stored metadata: answering "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
@@ -206,7 +208,7 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
             .into());
         }
         if let Some(tombstone) = reads
-            .find_active_subtree_tombstone(candidate_inode_id)
+            .find_hiding_subtree_tombstone(candidate_inode_id)
             .await?
         {
             return Ok(Some(tombstone));
@@ -492,15 +494,15 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
         ))
     }
 
-    async fn find_active_subtree_tombstone(
+    async fn find_hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         Ok(if self.base_seq >= self.state.indexed_seq() {
-            self.state.indexes.active_tombstone(root_inode_id)
+            self.state.indexes.hiding_tombstone(root_inode_id)
         } else {
             self.state
-                .active_subtree_tombstone_scan(root_inode_id, self.base_seq)
+                .hiding_subtree_tombstone_scan(root_inode_id, self.base_seq)
         })
     }
 

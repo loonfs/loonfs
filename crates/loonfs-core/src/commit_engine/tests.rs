@@ -87,14 +87,14 @@ fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
 
 #[test]
 fn principals_add_to_candidate_admission_weight() {
-    let mut candidate = CommitCandidate::new(create_dir_request("subject-weight", "docs"));
+    let candidate = CommitCandidate::new(create_dir_request("subject-weight", "docs"));
     let before = candidate.estimated_retained_bytes().expect("weight");
     let principals = (0..64)
         .map(|index| {
             PrincipalId::parse(format!("{index:03}{}", "x".repeat(253))).expect("principal")
         })
         .collect::<BTreeSet<_>>();
-    candidate.intent.subject = Some(Subject {
+    let candidate = candidate.with_subject(Subject {
         principal_scope: PrincipalScope::parse("scope").expect("scope"),
         subject_id: SubjectId::parse("subject").expect("subject"),
         principals: PrincipalSet::new(principals).expect("principals"),

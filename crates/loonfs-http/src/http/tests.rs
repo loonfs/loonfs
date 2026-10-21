@@ -110,6 +110,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "deleted_binding",
     "deleted_by",
     "deleted_checkpoints_by_owner",
+    "deletion_expired",
     "deletion_seq",
     "destination_display_name",
     "destination_exists",

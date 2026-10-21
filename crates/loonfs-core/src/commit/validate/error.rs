@@ -21,6 +21,7 @@ pub enum CommitOperand {
     AttributeTarget,
     AccessTarget,
     UndeleteTarget,
+    ExpireTarget,
     EmptyDirectoryTarget,
 }
 
@@ -37,6 +38,7 @@ impl fmt::Display for CommitOperand {
             Self::AttributeTarget => "attribute update target",
             Self::AccessTarget => "access update target",
             Self::UndeleteTarget => "undelete target",
+            Self::ExpireTarget => "expire target",
             Self::EmptyDirectoryTarget => "empty directory target",
         })
     }
@@ -117,16 +119,23 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     },
-    #[error("undelete target inode `{inode_id}` is not the root of a live deletion")]
-    UndeleteTargetNotDeleted { inode_id: InodeId },
+    #[error("{operand} inode `{inode_id}` is not the root of a recoverable deletion")]
+    TargetNotDeleted {
+        operand: CommitOperand,
+        inode_id: InodeId,
+    },
     #[error(
-        "undelete of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
+        "{operand} inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
     )]
-    UndeleteTargetsCurrentCommit { inode_id: InodeId },
+    TargetDeletedInCurrentCommit {
+        operand: CommitOperand,
+        inode_id: InodeId,
+    },
     #[error(
-        "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the active deletion is at seq `{active_seq}`"
+        "{operand} inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
     )]
-    UndeleteSequenceMismatch {
+    DeletionSequenceMismatch {
+        operand: CommitOperand,
         inode_id: InodeId,
         requested_seq: ChangeSeq,
         active_seq: ChangeSeq,
@@ -199,9 +208,9 @@ impl CommitValidationError {
             | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
             Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
             Self::InodeMissing { .. } => ErrorCode::PathNotFound,
-            Self::UndeleteTargetNotDeleted { .. }
-            | Self::UndeleteTargetsCurrentCommit { .. }
-            | Self::UndeleteSequenceMismatch { .. } => ErrorCode::NotDeleted,
+            Self::TargetNotDeleted { .. }
+            | Self::TargetDeletedInCurrentCommit { .. }
+            | Self::DeletionSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
             Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
@@ -239,15 +248,16 @@ impl CommitValidationError {
                 operand: CommitOperand::UndeleteTarget,
                 inode_id,
             }
-            | Self::UndeleteTargetNotDeleted { inode_id }
-            | Self::UndeleteTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
+            | Self::TargetNotDeleted { inode_id, .. }
+            | Self::TargetDeletedInCurrentCommit { inode_id, .. } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 ..ErrorDetails::default()
             }),
-            Self::UndeleteSequenceMismatch {
+            Self::DeletionSequenceMismatch {
                 inode_id,
                 requested_seq,
                 active_seq,
+                ..
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_deletion_seq: Some(*requested_seq),
