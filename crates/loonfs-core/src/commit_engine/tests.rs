@@ -18,7 +18,6 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{
     ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
     WriterEpoch,
@@ -868,7 +867,7 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
             &content_writes,
         )
     };
-    let input = engine.begin_wal_fold().expect("tail");
+    let input = engine.wal_fold_input().expect("tail");
     let other = fold(None).await.expect("another process folds");
     assert_eq!(other.response.outcome, crate::FoldWalOutcome::Published);
     let folded = fold(Some(input)).await.expect("the session's fold");
@@ -876,10 +875,10 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
         folded.response.outcome,
         crate::FoldWalOutcome::AlreadyCurrent
     );
-    engine.record_wal_fold(Ok(&folded));
+    engine.record_manifest_published(folded.manifest);
     assert_eq!(
-        engine.read_position().expect("the position moved").basis,
-        other.basis
+        engine.read_position().expect("the position moved").basis.0,
+        other.manifest.manifest
     );
     assert_eq!(engine.wal_tail_objects(), Some(0));
     publish_one(&mut engine, &store, &writer, "after").await;
@@ -895,7 +894,7 @@ async fn writer_after_own_compaction(
     NamespaceCommitEngine,
     Arc<loonfs_test_support::clock::ManualClock>,
     MutationContext,
-    ManifestRef,
+    PublishedManifest,
 ) {
     use crate::manifest::{
         compact_unit, CompactionUnitOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
@@ -905,7 +904,7 @@ async fn writer_after_own_compaction(
     // Move the position after each fold, as the publisher does.
     for name in ["beta", "gamma", "delta"] {
         publish_one(&mut engine, store, &writer, name).await;
-        let input = engine.begin_wal_fold().expect("retained tail");
+        let input = engine.wal_fold_input().expect("retained tail");
         let folded = fold_wal_tail(
             store,
             None,
@@ -917,7 +916,7 @@ async fn writer_after_own_compaction(
         )
         .await
         .expect("own fold");
-        engine.record_wal_fold(Ok(&folded));
+        engine.record_manifest_published(folded.manifest);
     }
     let before = engine.wal_fold_input().expect("re-anchored tail");
     let current = crate::namespace::control::load_current_manifest(store, namespace_id)
@@ -942,7 +941,7 @@ async fn writer_after_own_compaction(
     }
     .expect("compaction publishes a successor");
     assert_eq!(
-        manifest.manifest_no,
+        manifest.manifest.manifest_no,
         before.basis.manifest_no().successor().expect("successor")
     );
     let after = load_namespace_read_state(store, namespace_id, crate::test_support::std_timer())
@@ -973,7 +972,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
     );
     assert_eq!(
         engine.read_position().expect("landed").basis.manifest_no(),
-        manifest.manifest_no
+        manifest.manifest.manifest_no
     );
     let operations = store.take();
     assert!(is_head_under(&operations[0], &wal_prefix(&namespace_id)));
@@ -990,8 +989,8 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
 /// `NamespaceReadState` as the manifest it replaces, and that both manifests
 /// list runs.
 ///
-/// `PublishTailPosition::reanchor_after_publish` depends on both facts to
-/// keep the position's WAL tail after a compaction.
+/// `same_head` depends on both facts to keep the position's WAL tail after a
+/// compaction.
 #[tokio::test]
 async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
     use crate::manifest::load_namespace_manifest_envelope;
@@ -1006,9 +1005,10 @@ async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
     let replaced = load_namespace_manifest_envelope(&store, &namespace_id, &replaced.manifest_no())
         .await
         .expect("replaced manifest");
-    let compacted = load_namespace_manifest_envelope(&store, &namespace_id, &compacted.manifest_no)
-        .await
-        .expect("compacted manifest");
+    let compacted =
+        load_namespace_manifest_envelope(&store, &namespace_id, &compacted.manifest.manifest_no)
+            .await
+            .expect("compacted manifest");
     assert_eq!(
         NamespaceReadState::from(compacted.payload()),
         NamespaceReadState::from(replaced.payload())
@@ -1027,7 +1027,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     let (mut engine, _timer, writer, manifest) =
         writer_after_own_compaction(&store, &namespace_id).await;
 
-    engine.record_manifest_published(PublishedManifest::SameHead(manifest.clone()));
+    engine.record_manifest_published(manifest.clone());
     store.reset();
     let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
     assert_eq!(
@@ -1036,7 +1036,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     );
     assert_eq!(
         engine.read_position().expect("put succeeded").basis,
-        MetadataBasis(manifest)
+        MetadataBasis(manifest.manifest)
     );
     let operations = store.take();
     assert!(
@@ -1077,7 +1077,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
 
     engine.record_manifest_published(published.clone());
     let moved = engine.wal_fold_input().expect("the position moved");
-    assert_eq!(moved.basis.manifest(), published.manifest());
+    assert_eq!(moved.basis.manifest(), &published.manifest);
     assert_eq!(moved.wal_tail_objects, 1);
     assert_eq!(moved.tail_state.chunks().len(), 1);
     let receipt =
@@ -1090,7 +1090,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         Some(TailSource::Cached)
     );
     let written = engine.read_position().expect("put succeeded");
-    assert_eq!(written.basis.manifest(), published.manifest());
+    assert_eq!(written.basis.manifest(), &published.manifest);
     let operations = store.take();
     assert!(
         operations.iter().all(|operation| {
@@ -1106,6 +1106,79 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     assert_eq!(
         written.head, loaded,
         "a reader loads the head the writer has"
+    );
+}
+
+/// Checks that a manifest this runtime published two numbers above the
+/// position's manifest, over another process's fold, moves the position with
+/// the commit after that fold as its tail, and that the start of the
+/// publication becomes the position's last successor check.
+#[tokio::test]
+async fn a_manifest_published_over_another_process_fold_moves_the_position() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    publish_one(&mut engine, &store, &writer, "beta").await;
+    let basis = engine.wal_fold_input().expect("position").basis;
+    // Another process folds the tail through beta, and the writer then
+    // commits gamma on the manifest that the fold replaced.
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &namespace_id,
+        None,
+        &Deadline::start(timer.clone()),
+        crate::manifest::MetadataRunPolicy::default(),
+        &tokio::sync::Semaphore::new(32),
+    )
+    .await
+    .expect("fold");
+    assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
+    publish_one(&mut engine, &store, &writer, "gamma").await;
+    timer.advance_ms(10);
+    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone())
+        .await
+        .expect("claim the compactor")
+        .published
+        .expect("the claim publishes a manifest");
+    assert_eq!(claimed.manifest.manifest_no.0, basis.manifest_no().0 + 2);
+
+    engine.record_manifest_published(claimed.clone());
+    let moved = engine.wal_fold_input().expect("the position moved");
+    assert_eq!(moved.basis.0, claimed.manifest);
+    assert_eq!(moved.head.folded_wal_no, folded.manifest.folded_wal_no);
+    assert_eq!(moved.wal_tail_objects, 1);
+    let receipt =
+        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    assert!(receipt("gamma") && !receipt("beta"));
+    assert_eq!(engine.basis_checked, claimed.started);
+}
+
+/// Checks that a manifest at the head of a manifest that lists no runs keeps
+/// the position's whole tail, including the root directory that replay adds
+/// above such a manifest, so the next commit still finds the root.
+#[tokio::test]
+async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    let before = engine.wal_fold_input().expect("position");
+    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone())
+        .await
+        .expect("claim the compactor")
+        .published
+        .expect("the claim publishes a manifest");
+
+    engine.record_manifest_published(claimed.clone());
+    let moved = engine.wal_fold_input().expect("the position moved");
+    assert_eq!(moved.basis.0, claimed.manifest);
+    assert!(Arc::ptr_eq(&moved.tail_state, &before.tail_state));
+    let published = publish_one(&mut engine, &store, &writer, "beta").await;
+    assert_eq!(
+        published.wal_tail.map(|tail| tail.source),
+        Some(TailSource::Cached)
     );
 }
 

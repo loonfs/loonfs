@@ -4,7 +4,7 @@ use super::fold::{fold_wal_tail, FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
-use crate::manifest::claim_compactor;
+use crate::manifest::{claim_compactor, PublishedManifest};
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
 use crate::wal::WalPublishError;
@@ -181,13 +181,14 @@ impl Writer {
         self.fold_against(&[]).await.expect("fold")
     }
 
-    /// Folds the writer's tail and records the fold's result. The fold's
+    /// Folds the writer's tail and records the fold's manifest, as the
+    /// publisher does. The fold's
     /// first manifest put waits while the first rival publishes from another
     /// process, its next put waits for the next rival, and so on. The request
     /// log is cleared after each rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> Result<FoldedWalTail> {
         let content_writes = tokio::sync::Semaphore::new(32);
-        let input = self.engine.begin_wal_fold().expect("tail");
+        let input = self.engine.wal_fold_input().expect("tail");
         let basis = input.basis.manifest_no();
         let other = self.other_process();
         let mut store: Arc<dyn ObjectStore> = self.store.clone();
@@ -225,7 +226,10 @@ impl Writer {
                 }
             }
         );
-        self.engine.record_wal_fold(folded.as_ref());
+        if let Ok(folded) = &folded {
+            self.engine
+                .record_manifest_published(folded.manifest.clone());
+        }
         folded
     }
 
@@ -539,8 +543,8 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         assert!(writer.wal_reads(&operations).is_empty(), "{operations:?}");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         assert_eq!(
-            writer.engine.wal_fold_input().expect("tail").basis,
-            folded.basis
+            writer.engine.wal_fold_input().expect("tail").basis.0,
+            folded.manifest.manifest
         );
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
@@ -618,7 +622,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     let content_writes = tokio::sync::Semaphore::new(32);
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
-    let input = writer.engine.begin_wal_fold().expect("tail");
+    let input = writer.engine.wal_fold_input().expect("tail");
     let head = input.head.clone();
     let claim_no = input
         .basis
@@ -661,13 +665,16 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
         folded.response.manifest_no,
         claim_no.successor().expect("the number after the claim")
     );
-    assert_eq!(folded.writer_epoch, WriterEpoch(head.writer_epoch.0 + 1));
     assert_eq!(
-        folded.folded_wal_no,
+        folded.manifest.writer_epoch,
+        WriterEpoch(head.writer_epoch.0 + 1)
+    );
+    assert_eq!(
+        folded.manifest.folded_wal_no,
         head.wal_no.successor().expect("the new writer's fence")
     );
 
-    writer.engine.record_wal_fold(Ok(&folded));
+    writer.engine.record_manifest_published(folded.manifest);
     assert!(writer.engine.read_position().is_none());
     let results = writer
         .engine
@@ -692,12 +699,11 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     assert_matches!(results.as_slice(), [Err(CoreError::WriterFenced(_))]);
 }
 
-/// Checks that a session's position moves to its fold's manifest only when
-/// that manifest folds the head the fold started from under the session's
-/// writer epoch, whether the fold published that manifest or found it
-/// current, that a manifest of another epoch, or one that folds another WAL
-/// number, drops the position, and that a failed fold leaves the position
-/// where it was.
+/// Checks that a session's position moves to the manifest that covers its
+/// fold's tail under the session's writer epoch, whether the fold published
+/// that manifest or found it current, that a manifest of another epoch, or
+/// one that folds a WAL number past the session's head, drops the position,
+/// and that a failed fold leaves the position where it was.
 #[tokio::test]
 async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
     enum Position {
@@ -716,7 +722,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
     ] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
-        let input = writer.engine.begin_wal_fold().expect("tail");
+        let input = writer.engine.wal_fold_input().expect("tail");
         let before = input.basis.clone();
         let folded = fold_wal_tail(
             &*writer.store,
@@ -734,24 +740,70 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
                 outcome,
                 ..folded.response.clone()
             },
-            basis: folded.basis.clone(),
-            writer_epoch: WriterEpoch(folded.writer_epoch.0 + epoch_after),
-            folded_wal_no: WalNo(folded.folded_wal_no.0 + wal_after),
+            manifest: PublishedManifest {
+                writer_epoch: WriterEpoch(folded.manifest.writer_epoch.0 + epoch_after),
+                folded_wal_no: WalNo(folded.manifest.folded_wal_no.0 + wal_after),
+                ..folded.manifest.clone()
+            },
         });
-        let failed = CoreError::Internal("the fold failed".to_owned());
-        writer
-            .engine
-            .record_wal_fold(recorded.as_ref().ok_or(&failed));
+        // As the publisher does, a fold that ended reports the manifest that
+        // covers its tail, and a fold that failed reports nothing.
+        if let Some(recorded) = recorded {
+            writer.engine.record_manifest_published(recorded.manifest);
+        }
         let position = writer.engine.read_position();
         let expected = match expected {
-            Position::Moves => Some(&folded.basis),
+            Position::Moves => Some(&folded.manifest.manifest),
             Position::Drops => None,
-            Position::Stays => Some(&before),
+            Position::Stays => Some(&before.0),
         };
         assert_eq!(
-            position.as_ref().map(|position| &position.basis),
+            position.as_ref().map(|position| &position.basis.0),
             expected,
             "epoch +{epoch_after}, WAL number +{wal_after}, {outcome:?}"
         );
     }
+}
+
+/// Checks that a session's fold that finds its tail already folded by
+/// another process, through a commit that the session made after its fold
+/// began, moves the position onto that process's manifest with no tail.
+#[tokio::test]
+async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold() {
+    let content_writes = tokio::sync::Semaphore::new(32);
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let input = writer.engine.wal_fold_input().expect("tail");
+    writer.commit("second", Vec::new(), &["/b"]).await;
+    let newest = writer.engine.wal_fold_input().expect("tail");
+    Rival::Fold(Box::new(newest.clone()))
+        .publish(&writer.other_process(), &writer.namespace_id)
+        .await;
+    let folded = fold_wal_tail(
+        &*writer.store,
+        None,
+        &writer.namespace_id,
+        Some(input.clone()),
+        &deadline(),
+        crate::manifest::MetadataRunPolicy::default(),
+        &content_writes,
+    )
+    .await
+    .expect("fold");
+    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
+    assert_eq!(folded.manifest.folded_wal_no, newest.head.wal_no);
+    assert!(input.head.wal_no < newest.head.wal_no);
+
+    writer
+        .engine
+        .record_manifest_published(folded.manifest.clone());
+    let moved = writer
+        .engine
+        .wal_fold_input()
+        .expect("the position moves onto the covering fold");
+    assert_eq!(moved.basis.0, folded.manifest.manifest);
+    assert_eq!(moved.head.seq, newest.head.seq);
+    assert_eq!(moved.head.folded_wal_no, newest.head.wal_no);
+    assert_eq!(moved.wal_tail_objects, 0);
+    assert!(moved.tail_state.chunks().is_empty());
 }

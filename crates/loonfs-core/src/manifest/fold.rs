@@ -3,8 +3,8 @@
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
 use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
-use super::publish::{manifest_ref_for, update_manifest, ManifestChange};
-use super::published::PublishedManifest;
+use super::publish::{update_manifest, ManifestChange};
+use super::published::{same_head, PublishedManifest};
 use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit_engine::WalFoldInput;
@@ -26,10 +26,8 @@ use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::format::manifest::{
-    MetadataRunRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
-};
-use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo, WriterEpoch};
+use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
+use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -93,36 +91,6 @@ async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Whether a tail replayed above `basis` is also the tail above `winner`, a
-/// later manifest that took the fold's number.
-fn keeps_held_tail(basis: &NamespaceManifestPayload, winner: &NamespaceManifestPayload) -> bool {
-    // The winner may differ from the basis only where a compactor claim, a
-    // compaction, or a retention advance writes. Everything the fold holds
-    // is then still right over the winner:
-    // - Tail rows: replay reads the WAL above `folded_wal_no`, starts from
-    //   `head_seq` and `next_inode_id`, and adds the root inode only when
-    //   there are no runs. All of these are equal.
-    // - Deletion roots: the fold reads each one through the winner's runs,
-    //   which hold the same view at `head_seq`. A compaction keeps every
-    //   view at or above the floor, and the floor is at most `head_seq`.
-    // - Activity: a successor at the same `head_seq` keeps it, so the
-    //   basis activity plus the tail's is still the total.
-    // - Run numbers: the retry takes its runs and run number from the winner.
-    // - Content: the first attempt's extents and layouts still describe this tail.
-    //   A deleted winner differs in `status`.
-    winner.manifest_no > basis.manifest_no
-        && winner.runs.is_empty() == basis.runs.is_empty()
-        && *winner
-            == NamespaceManifestPayload {
-                manifest_no: winner.manifest_no,
-                compactor_epoch: winner.compactor_epoch,
-                retention_floor_seq: winner.retention_floor_seq,
-                next_run_no: winner.next_run_no,
-                runs: winner.runs.clone(),
-                ..basis.clone()
-            }
-}
-
 /// Whether `current` already folds the WAL tail that ends at `head`.
 fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) -> bool {
     current.folded_wal_no >= head.wal_no && current.head_seq >= head.seq
@@ -168,43 +136,33 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
 
 pub struct FoldedWalTail {
     pub response: FoldWalResponse,
-    /// The manifest that covers the tail after the call: the one it published,
-    /// or the current one that already covered it.
-    pub basis: MetadataBasis,
-    /// The writer epoch of `basis`.
-    pub writer_epoch: WriterEpoch,
-    /// The WAL number that `basis` folds through.
-    pub folded_wal_no: WalNo,
+    /// The manifest that covers the tail after the call: the one it
+    /// published, or the current one that already covered it.
+    pub manifest: PublishedManifest,
 }
 
 impl FoldedWalTail {
     fn new(
         namespace_id: &NamespaceId,
         target_head_seq: ChangeSeq,
-        manifest: &NamespaceManifestEnvelope,
+        manifest: PublishedManifest,
         outcome: FoldWalOutcome,
     ) -> Self {
-        let basis = manifest_ref_for(namespace_id, manifest);
         Self {
             response: FoldWalResponse {
                 namespace_id: namespace_id.clone(),
                 target_head_seq,
-                manifest_no: basis.manifest_no,
-                manifest_head_seq: basis.head_seq,
+                manifest_no: manifest.manifest.manifest_no,
+                manifest_head_seq: manifest.manifest.head_seq,
                 outcome,
             },
-            basis: MetadataBasis(basis),
-            writer_epoch: manifest.payload().writer_epoch,
-            folded_wal_no: manifest.payload().folded_wal_no,
+            manifest,
         }
     }
 
     /// The manifest this fold published, or `None` when it published none.
     pub(crate) fn published(&self) -> Option<PublishedManifest> {
-        (self.response.outcome == FoldWalOutcome::Published).then(|| PublishedManifest::Fold {
-            manifest: self.basis.0.clone(),
-            folded_wal_no: self.folded_wal_no,
-        })
+        (self.response.outcome == FoldWalOutcome::Published).then(|| self.manifest.clone())
     }
 }
 
@@ -217,7 +175,7 @@ impl FoldedWalTail {
 /// A current manifest that folds the tail finishes the fold, and any other
 /// manifest after the fold's own predecessor makes the fold rebuild against
 /// it. The rebuild keeps the tail it read when the manifest is at the same
-/// head (see `keeps_held_tail`), and loads the tail again otherwise, which
+/// head (see `same_head`), and loads the tail again otherwise, which
 /// folds a new writer's log after the writer's claim. A namespace tombstone
 /// stops the fold.
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
@@ -244,10 +202,12 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     };
     let basis = projection.manifest_segments.manifest();
     if basis.payload().folded_wal_no == projection.head.wal_no {
+        // No store observation confirms the basis here, so the manifest has
+        // no start observation.
         return Ok(FoldedWalTail::new(
             namespace_id,
             projection.head.seq,
-            basis,
+            PublishedManifest::new(basis, None),
             FoldWalOutcome::AlreadyCurrent,
         ));
     }
@@ -282,10 +242,12 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(error),
     };
+    // The call published the manifest, or found it current, after the
+    // deadline started.
     Ok(FoldedWalTail::new(
         namespace_id,
         fold.into_inner().projection.head.seq,
-        &manifest.state.envelope,
+        PublishedManifest::new(&manifest.state.envelope, Some(deadline.origin())),
         outcome,
     ))
 }
@@ -319,10 +281,24 @@ impl<S: ObjectStore + ?Sized> FoldAttempts<'_, S> {
         }
         // Another manifest followed the fold's own predecessor without
         // folding its tail, such as a compaction or a new writer's claim.
+        // Over a manifest at the same head, everything the fold holds is
+        // still right:
+        // - Tail rows: see `same_head`.
+        // - Deletion roots: the fold reads each one through the winner's
+        //   runs, which hold the same view at `head_seq`. A compaction keeps
+        //   every view at or above the floor, and the floor is at most
+        //   `head_seq`.
+        // - Activity: a successor at the same `head_seq` keeps it, so the
+        //   basis activity plus the tail's is still the total.
+        // - Run numbers: the retry takes its runs and run number from the
+        //   winner.
+        // - Content: the first attempt's extents and layouts still describe
+        //   this tail.
         if payload.manifest_no != self.projection.basis.manifest_no() {
-            if keeps_held_tail(
-                self.projection.manifest_segments.manifest().payload(),
-                payload,
+            if same_head(
+                &self.projection.basis,
+                &self.projection.head,
+                &PublishedManifest::new(&current.state.envelope, None),
             ) {
                 self.projection.basis = MetadataBasis(current.state.manifest());
                 self.projection.manifest_segments =

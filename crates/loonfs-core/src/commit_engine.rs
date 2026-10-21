@@ -14,9 +14,7 @@ use crate::namespace::writer_epoch::acquire_writer;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
-use crate::protocol::{
-    load_publish_metadata_view, PublishTailPosition, PublishViewEffect, ReanchorOutcome,
-};
+use crate::protocol::{load_publish_metadata_view, PublishTailPosition, PublishViewEffect};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
@@ -634,10 +632,6 @@ pub struct NamespaceCommitEngine {
     publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    fold_observed: Option<Observation>,
-    /// The newest manifest this runtime published while a fold was in
-    /// progress. [`Self::record_wal_fold`] applies it once the fold finishes.
-    published_during_fold: Option<PublishedManifest>,
     /// When a store observation last confirmed the projection's basis manifest
     /// current: the discovery that loaded it, or a HEAD that found no successor.
     basis_checked: Option<Observation>,
@@ -659,8 +653,6 @@ impl NamespaceCommitEngine {
             publish_tail: None,
             projection_observed: None,
             acquired_anchor: None,
-            fold_observed: None,
-            published_during_fold: None,
             basis_checked: None,
             session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
@@ -702,7 +694,6 @@ impl NamespaceCommitEngine {
         self.acquired_anchor = None;
         self.projection_observed = None;
         self.basis_checked = None;
-        self.published_during_fold = None;
     }
 
     /// The basis manifest that needs a successor check, either because its
@@ -753,7 +744,7 @@ impl NamespaceCommitEngine {
     pub fn wal_tail_objects(&self) -> Option<u64> {
         self.publish_tail
             .as_ref()
-            .map(|position| position.wal_tail_objects)
+            .map(|position| position.head.unfolded_wal_objects())
     }
 
     /// Inline content bytes in the unfolded WAL tail as of the last
@@ -772,103 +763,47 @@ impl NamespaceCommitEngine {
             head: position.head.clone(),
             basis: position.basis().clone(),
             tail_state: Arc::clone(&position.tail),
-            wal_tail_objects: position.wal_tail_objects,
+            wal_tail_objects: position.head.unfolded_wal_objects(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
         })
     }
 
-    /// Starts the session's own fold, and returns the tail to fold, or
-    /// `None` when the engine has no position, so the fold loads the tail
-    /// from the store.
-    pub fn begin_wal_fold(&mut self) -> Option<WalFoldInput> {
-        self.fold_observed = Some(Observation::now(Arc::clone(&self.timer)));
-        let input = self.wal_fold_input();
-        if let Some(position) = self.publish_tail.as_mut() {
-            position.begin_fold();
-        }
-        input
-    }
-
-    /// Records how the session's own fold ended. A fold moves the position
-    /// to the manifest that covers the fold's tail, whether the fold
-    /// published that manifest or found it current, or drops the position
-    /// when it can't move there. A fold that failed leaves the position where
-    /// it was.
-    pub fn record_wal_fold(
-        &mut self,
-        folded: std::result::Result<&crate::manifest::FoldedWalTail, &CoreError>,
-    ) {
-        let fold_observed = self.fold_observed.take();
-        let published_during_fold = self.published_during_fold.take();
-        match folded {
-            Ok(folded) => {
-                let moved = self.publish_tail.as_mut().map(|position| {
-                    let new_basis = position.basis() != &folded.basis;
-                    (position.reanchor_after_fold(folded), new_basis)
-                });
-                match moved {
-                    Some((true, new_basis)) => {
-                        // The fold published a new basis, or found it current,
-                        // after the fold began, so no manifest followed it
-                        // then. The position's own basis has no such check.
-                        if new_basis {
-                            self.basis_checked = fold_observed;
-                        }
-                    }
-                    _ => self.invalidate_projection(),
-                }
-            }
-            Err(_) => {
-                if let Some(position) = self.publish_tail.as_mut() {
-                    position.end_fold();
-                }
-            }
-        }
-        if let Some(published) = published_during_fold {
-            self.record_manifest_published(published);
-        }
-    }
-
-    /// Moves the position to a manifest that this runtime published, as
-    /// [`Self::record_wal_fold`] does after the session's own fold, or drops
-    /// the position when it can't move there (see
-    /// `PublishTailPosition::reanchor_after_publish` for the rule).
+    /// Moves the position onto `manifest`, a manifest that this runtime
+    /// published or found current (the session's own fold, or a maintenance
+    /// call), or that a read found above the position, or drops the
+    /// position when it can't move there (see
+    /// `PublishTailPosition::move_to` for the rule).
     ///
     /// Later commits then plan against the new manifest, and reads in this
     /// runtime start from it, so a read's manifest check doesn't find the
     /// new manifest as a successor and drop the position. The position keeps
-    /// the WAL tail above the new manifest. The time of the last manifest
-    /// check stays the same. That check found no successor of the old
-    /// manifest, so it happened before this runtime published the new
-    /// manifest, and no manifest after the new one existed then either.
+    /// the WAL tail above the new manifest.
     ///
-    /// A manifest that arrives during a fold waits for the fold to finish,
-    /// because the fold's outcome decides which manifest the position uses
-    /// first. Only the newest such manifest is kept, because applying it
-    /// alone either moves the position to it or drops the position.
-    pub fn record_manifest_published(&mut self, published: PublishedManifest) {
-        if self
-            .publish_tail
-            .as_ref()
-            .is_some_and(PublishTailPosition::is_folding)
-        {
-            let newest = match self.published_during_fold.take() {
-                Some(earlier)
-                    if earlier.manifest().manifest_no > published.manifest().manifest_no =>
-                {
-                    earlier
-                }
-                _ => published,
-            };
-            self.published_during_fold = Some(newest);
-            return;
-        }
+    /// The last check of the position's manifest stays valid after a move.
+    /// That check found no successor of the old manifest, so it happened
+    /// before the new manifest was published, and no manifest after the new
+    /// one existed then either. Once the position is on a manifest that this
+    /// runtime published or found current, the start of that call is a check
+    /// of the manifest too, because no manifest followed it then, so the
+    /// position keeps the younger of the two checks.
+    pub fn record_manifest_published(&mut self, manifest: PublishedManifest) {
         let Some(position) = self.publish_tail.as_mut() else {
             return;
         };
-        match position.reanchor_after_publish(&published) {
-            ReanchorOutcome::Kept | ReanchorOutcome::Moved => {}
-            ReanchorOutcome::Superseded => self.invalidate_projection(),
+        if !position.move_to(&manifest) {
+            self.invalidate_projection();
+            return;
+        }
+        let Some(started) = manifest.started else {
+            return;
+        };
+        if position.basis().manifest() == &manifest.manifest
+            && self
+                .basis_checked
+                .as_ref()
+                .is_none_or(|checked| started.age_ms() < checked.age_ms())
+        {
+            self.basis_checked = Some(started);
         }
     }
 
@@ -1111,17 +1046,16 @@ impl NamespaceCommitEngine {
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
-                    wal_tail_objects: position.wal_tail_objects,
+                    wal_tail_objects: position.head.unfolded_wal_objects(),
                     wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                     landed: false,
                 };
             }
             PublishViewEffect::Advanced { records, head } => {
-                position.wal_tail_objects += 1;
-                let applied = Arc::make_mut(&mut position.tail)
-                    .push_object(&self.namespace_id, &records)
-                    .and_then(|chunk| position.apply_fold_object(chunk));
-                if let Err(error) = applied {
+                position.reanchor(head);
+                if let Err(error) =
+                    Arc::make_mut(&mut position.tail).push_object(&self.namespace_id, &records)
+                {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.
                     tracing::warn!(
@@ -1131,16 +1065,15 @@ impl NamespaceCommitEngine {
                     );
                     self.invalidate_projection();
                     return TailProjectionUpdate {
-                        wal_tail_objects: position.wal_tail_objects,
+                        wal_tail_objects: position.head.unfolded_wal_objects(),
                         wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                         landed: false,
                     };
                 }
-                position.reanchor(head);
             }
         }
         let update = TailProjectionUpdate {
-            wal_tail_objects: position.wal_tail_objects,
+            wal_tail_objects: position.head.unfolded_wal_objects(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             landed: advanced,
         };

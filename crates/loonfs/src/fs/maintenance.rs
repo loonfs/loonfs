@@ -19,7 +19,7 @@ use crate::{
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
 use loonfs_core::control::NamespaceReadAnchor;
-use loonfs_core::{CheckpointPageCursor, PublishedManifest};
+use loonfs_core::CheckpointPageCursor;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
 use std::sync::Arc;
@@ -83,7 +83,7 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
             output_segments,
             ..
         } => MetadataCompactionOutcome::Published {
-            manifest_no: manifest.manifest_no,
+            manifest_no: manifest.manifest.manifest_no,
             rows_read,
             rows_written,
             input_bytes,
@@ -637,7 +637,7 @@ impl Maintenance {
                 self.publisher
                     .invalidate_namespace(
                         namespace_id,
-                        NamespaceChange::Published(PublishedManifest::SameHead(manifest.clone())),
+                        NamespaceChange::Published(manifest.clone()),
                     )
                     .await;
             }

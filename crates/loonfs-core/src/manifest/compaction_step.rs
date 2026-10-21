@@ -11,6 +11,7 @@ use super::cache::MetadataSegmentCache;
 use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::index_block_load::segment_object_bytes;
 use super::load::metadata_basis_from_manifest;
+use super::published::PublishedManifest;
 use super::runs::{
     delta_run_count, runs_in_merge_order, runs_newest_first, MetadataFamilyGroup,
     MetadataRunManifest, MetadataRunPolicy,
@@ -26,7 +27,6 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
@@ -76,8 +76,8 @@ pub enum CompactionUnitOutcome {
         /// The group this unit merged. Its families are
         /// [`MetadataFamilyGroup::families`].
         group: MetadataFamilyGroup,
-        /// A reference to the published manifest.
-        manifest: ManifestRef,
+        /// The published manifest.
+        manifest: PublishedManifest,
         input_runs: usize,
         rows_read: u64,
         rows_written: u64,
@@ -220,7 +220,7 @@ fn log_unit_outcome(
             input_bytes,
             output_bytes,
             output_segments,
-            manifest_no = manifest.manifest_no.0,
+            manifest_no = manifest.manifest.manifest_no.0,
             "metadata compaction unit published"
         ),
         CompactionUnitOutcome::Cancelled => tracing::info!(

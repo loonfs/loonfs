@@ -292,7 +292,7 @@ impl RuntimeCore {
             return Ok(());
         };
         let newest = moves.last().map_or(position.basis.manifest_no(), |moved| {
-            moved.manifest().manifest_no
+            moved.manifest.manifest_no
         });
         for published in moves {
             positions.move_position(namespace_id, published).await;
