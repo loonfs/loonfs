@@ -1853,7 +1853,9 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
             .flat_map(|run| group_run_descriptors(run, group))
             .map(|descriptor| descriptor.row_count)
             .sum(),
-        compaction_step::MergePlacement::Base {
+        // A delta merge: these attribute rows have no inodes or bindings,
+        // so a base merge's kept inode filter would remove every one.
+        compaction_step::MergePlacement::Delta {
             output_seq: ChangeSeq(3),
         },
         ChangeSeq(0),

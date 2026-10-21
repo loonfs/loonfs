@@ -1464,6 +1464,104 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     assert_eq!(error.code(), crate::error::ErrorCode::PathNotFound);
 }
 
+/// Checks that once a base compaction of each group removes the rows that
+/// an expired deletion hides, and a later layout compaction drops their
+/// chains, a pass past the grace deletes the hidden file's content and keeps
+/// the content of a visible file.
+#[tokio::test]
+async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
+    let hidden = put_file_content(&store, &namespace_id, "/old/file", b"hidden").await;
+    let kept = put_file_content(&store, &namespace_id, "/kept", b"kept").await;
+    let old = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("load view")
+        .resolve_path(
+            "/old",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("resolve /old")
+        .inode_id;
+    let deletion_seq =
+        crate::test_support::ops::delete_path(&store, &namespace_id, "/old", &setup, None)
+            .await
+            .expect("delete /old")
+            .committed_seq;
+    crate::manifest::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the deletion");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("move the floor past the deletion");
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .publish_expiry(
+        &store,
+        loonfs_types::CommitId::generate(),
+        vec![loonfs_types::ExpiredDeletion {
+            inode_id: old,
+            deletion_seq,
+        }],
+        &setup,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("expire the deletion");
+    // Each pass merges every group that a new file gave a delta run. The
+    // first pass removes the hidden revision, but its layout merge can run
+    // before its revisions merge, so the second pass drops the chain.
+    for path in ["/later-1", "/later-2"] {
+        put_file_content(&store, &namespace_id, path, b"later").await;
+        compact_below_the_floor(&store, &namespace_id).await;
+    }
+
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(
+        &store,
+        None,
+        None,
+        &namespace_id,
+        &options(),
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("gc pass past the grace");
+    let content_key = |content_ref: &ContentRef| {
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id)
+    };
+    assert!(report.deleted.content_objects >= 1);
+    assert!(store
+        .head(&content_key(&hidden))
+        .await
+        .expect("head")
+        .is_none());
+    assert!(store
+        .head(&content_key(&kept))
+        .await
+        .expect("head")
+        .is_some());
+}
+
 #[tokio::test]
 async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() {
     let temp_dir = tempdir().expect("tempdir");

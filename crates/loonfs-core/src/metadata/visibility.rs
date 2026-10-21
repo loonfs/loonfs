@@ -354,9 +354,11 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
 /// For a page or walk that already checked its parent is a visible directory, the
 /// newest slot binding at the read sequence is equivalent to [`visible_child`]
 /// without an inode lookup: commit validation creates the child's inode row
-/// in the same commit as its first binding, and retention keeps every inode row.
-/// A bound binding therefore implies the child inode exists at that sequence,
-/// leaving a covering subtree tombstone as the only way it can be invisible.
+/// in the same commit as its first binding, and retention removes an inode row
+/// only when an expired deletion hides the inode, which no visible directory
+/// binds. A bound binding under a visible directory therefore implies the
+/// child inode exists at that sequence, leaving a covering subtree tombstone
+/// as the only way it can be invisible.
 pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
     reads: &mut R,
     direntry: DirentryBindingRecord,

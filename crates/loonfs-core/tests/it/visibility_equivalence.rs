@@ -5,17 +5,21 @@
 
 use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::publish::{
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
+};
+use loonfs_core::time::Deadline;
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
-    NamespaceWriterEngine, RuntimeReadContext,
+    MutationContext, NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, PageRequest, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    ExpiredDeletion, InodeId, NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -233,6 +237,41 @@ impl VisibilityHarness {
 
     async fn read_context(&self) -> RuntimeReadContext {
         read_context(&self.store, self.namespace_id()).await
+    }
+
+    /// Commits the writer's expiry of one deletion.
+    async fn expire(&self, inode_id: InodeId, deletion_seq: ChangeSeq) {
+        NamespaceCommitEngine::new(
+            self.namespace_id().clone(),
+            Arc::new(tokio::sync::Semaphore::new(32)),
+        )
+        .publish_expiry(
+            &*self.store,
+            CommitId::generate(),
+            vec![ExpiredDeletion {
+                inode_id,
+                deletion_seq,
+            }],
+            &MutationContext {
+                writer_id: loonfs_types::WriterId::parse("visibility-equivalence")
+                    .expect("writer id"),
+                now_ms: 5_000,
+            },
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("expire the deletion");
+    }
+
+    /// The inode rows that the current manifest's segments store.
+    async fn inode_rows(&self) -> u64 {
+        loonfs_core::control::load_namespace_statistics(&*self.store, self.namespace_id())
+            .await
+            .expect("load the namespace's statistics")
+            .inode_record_count
     }
 
     async fn inode_id(&self, path: &str) -> InodeId {
@@ -857,7 +896,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
     harness.engine.fold_wal().await.expect("fold fifth run");
     let reused_old = harness.inode_id("/old").await;
     let reused_file = harness.inode_id("/old/reused.txt").await;
-    harness
+    let grave_deletion = harness
         .delete("/grave", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete retained descendant subtree");
@@ -908,7 +947,14 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
                 .advance_retention_floor(loonfs_core::RetentionTarget::Head)
                 .await
                 .expect("advance retention before compaction");
-            drain_compaction(&harness, &expected, "after retention").await;
+            // The floor has passed the deletion of /grave, so the writer can
+            // expire it, and each group's base compaction then removes the
+            // rows of the three inodes that the deletion hides.
+            harness.expire(grave, grave_deletion.committed_seq).await;
+            harness.engine.fold_wal().await.expect("fold the expiry");
+            let inode_rows = harness.inode_rows().await;
+            drain_compaction(&harness, &expected, "after retention and expiry").await;
+            assert_eq!(harness.inode_rows().await, inode_rows - 3);
         }
     }
 

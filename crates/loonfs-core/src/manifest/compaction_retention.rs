@@ -136,9 +136,11 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
 /// at or below the floor is the inode's state at the floor, including a cleared
-/// state, and the floor keeps no older history. Deleted inodes keep their
-/// whole-state rows so an undelete restores the prior state. The operator
-/// processes this order without retaining the complete history.
+/// state, and the floor keeps no older history. The operator keeps a
+/// recoverably deleted inode's rows like any other inode's, so an undelete
+/// restores the prior state, and a base merge removes the rows of an inode
+/// that an expired deletion hides before they reach the operator. The
+/// operator processes this order without retaining the complete history.
 #[derive(Debug, Default)]
 pub(super) struct WholeStateRetention {
     /// The revision of the previous row at or below the floor. The inode has

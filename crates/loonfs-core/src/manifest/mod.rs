@@ -33,6 +33,7 @@ mod data_block_load;
 mod error;
 mod fold;
 mod index_block_load;
+mod kept_inodes;
 mod load;
 pub(crate) mod publish;
 mod published;

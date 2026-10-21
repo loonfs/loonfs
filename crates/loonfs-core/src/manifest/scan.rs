@@ -82,6 +82,24 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
+    /// The same segments with an empty block memo of their own, so the
+    /// blocks that one pass memoizes are released when the pass ends.
+    pub(super) fn with_empty_block_memo(&self) -> Self {
+        Self {
+            store: self.store,
+            segment_cache: self.segment_cache,
+            manifest_object_key: self.manifest_object_key.clone(),
+            manifest: self.manifest.clone(),
+            manifest_bytes: self.manifest_bytes,
+            scan_runs: Arc::clone(&self.scan_runs),
+            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(
+                self.segment_cache,
+            )),
+            #[cfg(test)]
+            peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         self.manifest
             .as_deref()
