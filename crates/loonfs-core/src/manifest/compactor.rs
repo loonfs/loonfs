@@ -38,6 +38,9 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
         .await?;
     Ok(PublicationReport {
         response: epoch,
-        published: Some(PublishedManifest::SameHead(claimed.state.manifest())),
+        published: Some(PublishedManifest::new(
+            &claimed.state.envelope,
+            Some(deadline.origin()),
+        )),
     })
 }

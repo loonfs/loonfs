@@ -1145,12 +1145,18 @@ mod tests {
             &Ok(CompactionUnitOutcome::Published {
                 group: loonfs_core::MetadataFamilyGroup::Bindings,
                 input_runs: 2,
-                manifest: loonfs_types::format::control::ManifestRef {
-                    owner_namespace_id: loonfs_types::NamespaceId::parse("demo")
-                        .expect("valid namespace id"),
-                    manifest_no: loonfs_types::ManifestNo(1),
-                    head_seq: loonfs_types::ChangeSeq(1),
-                    payload_checksum: String::new(),
+                manifest: loonfs_core::PublishedManifest {
+                    manifest: loonfs_types::format::control::ManifestRef {
+                        owner_namespace_id: loonfs_types::NamespaceId::parse("demo")
+                            .expect("valid namespace id"),
+                        manifest_no: loonfs_types::ManifestNo(1),
+                        head_seq: loonfs_types::ChangeSeq(1),
+                        payload_checksum: String::new(),
+                    },
+                    writer_epoch: loonfs_types::WriterEpoch(1),
+                    status: loonfs_types::format::control::NamespaceStatus::Active {},
+                    folded_wal_no: loonfs_types::WalNo(1),
+                    started: None,
                 },
                 rows_read: 20,
                 rows_written: 10,

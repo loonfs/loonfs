@@ -112,7 +112,8 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             retention_floor_seq: floor,
         },
-        published: advanced.then(|| PublishedManifest::SameHead(current.state.manifest())),
+        published: advanced
+            .then(|| PublishedManifest::new(&current.state.envelope, Some(deadline.origin()))),
     })
 }
 

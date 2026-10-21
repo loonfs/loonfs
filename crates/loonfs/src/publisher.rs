@@ -288,7 +288,7 @@ impl HeadPositions for RegistryShared {
         Box::pin(async move {
             if let Some(publisher) = self.live_publisher(namespace_id) {
                 publisher
-                    .change_position(PositionChange::Reanchor(published))
+                    .change_position(PositionChange::Move(published))
                     .await;
             }
         })
@@ -451,7 +451,7 @@ impl PublisherRegistry {
     ) {
         if let Some(publisher) = self.live_publisher(namespace_id) {
             publisher
-                .change_position(PositionChange::Reanchor(published))
+                .change_position(PositionChange::Move(published))
                 .await;
         }
     }
@@ -571,7 +571,7 @@ impl NamespaceChange {
 enum PositionChange {
     /// Moves the position onto a manifest above it under the session's
     /// writer epoch, or drops the position when it can't move there.
-    Reanchor(PublishedManifest),
+    Move(PublishedManifest),
     /// Drops the position.
     Drop,
 }
@@ -579,7 +579,7 @@ enum PositionChange {
 impl PositionChange {
     fn apply(self, engine: &mut NamespaceCommitEngine) {
         match self {
-            Self::Reanchor(published) => engine.record_manifest_published(published),
+            Self::Move(published) => engine.record_manifest_published(published),
             Self::Drop => engine.invalidate_projection(),
         }
     }
@@ -641,15 +641,6 @@ impl EngineSlot {
         self.engine
             .as_ref()
             .and_then(NamespaceCommitEngine::wal_tail_inline_bytes)
-    }
-
-    fn record_fold_outcome(
-        &mut self,
-        folded: std::result::Result<&loonfs_core::FoldedWalTail, &CoreError>,
-    ) {
-        if let Some(engine) = self.engine.as_mut() {
-            engine.record_wal_fold(folded);
-        }
     }
 }
 
@@ -1916,7 +1907,7 @@ impl NamespacePublisher {
         };
         let _permit = writer.execution_budget.fold_permit().await;
         let input = {
-            let mut slot = self.lock_engine().await;
+            let slot = self.lock_engine().await;
             if slot.engine.as_ref().is_some_and(|engine| {
                 engine
                     .wal_tail_objects()
@@ -1930,8 +1921,8 @@ impl NamespacePublisher {
                 return false;
             }
             slot.engine
-                .as_mut()
-                .and_then(NamespaceCommitEngine::begin_wal_fold)
+                .as_ref()
+                .and_then(NamespaceCommitEngine::wal_fold_input)
         };
         let started_at_ms = self.timer.monotonic_now_ms();
         let segment_cache = self.runtime_core.metadata_segment_cache();
@@ -1954,9 +1945,13 @@ impl NamespacePublisher {
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
-        self.lock_engine()
-            .await
-            .record_fold_outcome(result.as_ref());
+        // The fold moves the position onto the manifest that covers its tail,
+        // whether it published that manifest or found it current. A fold
+        // that failed leaves the position where it was.
+        if let Ok(folded) = &result {
+            self.change_position(PositionChange::Move(folded.manifest.clone()))
+                .await;
+        }
         match result {
             Ok(folded) => {
                 let published = folded.response.outcome == FoldWalOutcome::Published;

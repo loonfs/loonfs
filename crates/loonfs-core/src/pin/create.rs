@@ -56,7 +56,14 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
                 .expect("the published-fold slot should not be poisoned") = Some(manifest);
         }
 
-        match create_pin_at_basis(store, namespace_id, owner.clone(), folded.basis.0, context).await
+        match create_pin_at_basis(
+            store,
+            namespace_id,
+            owner.clone(),
+            folded.manifest.manifest,
+            context,
+        )
+        .await
         {
             Ok(pin) => Ok(CasOutcome::Settled(pin)),
             Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasOutcome::Contended(error)),

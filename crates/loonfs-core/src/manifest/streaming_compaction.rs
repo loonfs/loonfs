@@ -20,6 +20,7 @@ use super::compaction_step::{
 };
 use super::index_block_load::segment_object_bytes;
 use super::publish::{update_manifest, ManifestChange};
+use super::published::PublishedManifest;
 use super::runs::{runs_newest_first, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::bloom_filter::BloomFilter;
@@ -326,7 +327,10 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         Ok((Some(outcome), _, _)) => Ok(outcome),
         Ok((None, published, _)) => Ok(CompactionUnitOutcome::Published {
             group: spec.group(),
-            manifest: published.state.manifest(),
+            manifest: PublishedManifest::new(
+                &published.state.envelope,
+                Some(publication.publication.origin()),
+            ),
             input_runs: spec.input_runs(),
             rows_read: result.rows_read,
             rows_written: result.rows_written,

@@ -92,7 +92,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         head: position.head.clone(),
         basis: position.basis().clone(),
         tail_state: Arc::clone(&position.tail),
-        wal_tail_objects: position.wal_tail_objects,
+        wal_tail_objects: position.head.unfolded_wal_objects(),
     };
     let response = fold::fold_wal_tail(
         &store,

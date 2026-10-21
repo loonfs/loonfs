@@ -109,6 +109,16 @@ impl Observation {
     }
 }
 
+/// Two observations are equal when they're the same reading of the same
+/// timer.
+impl PartialEq for Observation {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.timer, &other.timer) && self.at_ms == other.at_ms
+    }
+}
+
+impl Eq for Observation {}
+
 /// Reads the wall clock as unix milliseconds.
 ///
 /// Every timestamp that reaches durable state — commit, checkpoint, upload

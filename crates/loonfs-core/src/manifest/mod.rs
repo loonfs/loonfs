@@ -62,6 +62,7 @@ pub use self::error::ManifestLoadError;
 pub use self::fold::{
     fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
 };
+pub(crate) use self::published::same_head;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::RetentionTarget;
 pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};

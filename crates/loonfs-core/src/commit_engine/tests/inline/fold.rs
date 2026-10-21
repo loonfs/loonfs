@@ -28,8 +28,11 @@ fn content_assemblies(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
         .collect()
 }
 
+/// Checks that a session's fold moves a position that the session loaded
+/// again while the fold ran, so the position keeps only the commit after the
+/// fold, and a retried commit finds its receipt there without reading the WAL.
 #[tokio::test]
-async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() {
+async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
     let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
@@ -39,7 +42,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     publish(&mut engine, &store, &context, before)
         .await
         .expect("before");
-    let input = engine.begin_wal_fold().expect("fold input");
+    let input = engine.wal_fold_input().expect("fold input");
     engine.invalidate_projection();
     let during = candidate(
         "during",
@@ -48,19 +51,6 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     publish(&mut engine, &store, &context, during.clone())
         .await
         .expect("during");
-    let expected = store
-        .snapshot()
-        .into_iter()
-        .rev()
-        .find_map(|operation| match operation {
-            RecordedOperation::Put { key, .. }
-                if key.starts_with(&wal_prefix(&engine.namespace_id)) =>
-            {
-                Some(key)
-            }
-            _ => None,
-        })
-        .expect("published WAL");
     let folded = fold_wal_tail(
         &store,
         None,
@@ -72,39 +62,24 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     )
     .await
     .expect("fold");
-    engine.record_wal_fold(Ok(&folded));
-    assert!(engine.publish_tail.is_none());
+    engine.record_manifest_published(folded.manifest.clone());
+    let moved = engine.wal_fold_input().expect("the position moved");
+    assert_eq!(moved.basis.0, folded.manifest.manifest);
+    assert_eq!(moved.head.folded_wal_no, input.head.wal_no);
+    assert_eq!(moved.wal_tail_objects, 1);
     store.reset();
     publish(&mut engine, &store, &context, during)
         .await
         .expect("retained receipt");
     let operations = store.take();
-    let wal_gets = operations
-        .iter()
-        .filter(|operation| {
-            matches!(operation, RecordedOperation::Get { .. })
-                && operation
+    assert!(
+        !operations.iter().any(|operation| {
+            matches!(operation, RecordedOperation::Put { .. })
+                || operation
                     .key()
                     .starts_with(&wal_prefix(&engine.namespace_id))
-        })
-        .map(RecordedOperation::key)
-        .collect::<Vec<_>>();
-    assert!(wal_gets.contains(&expected.as_str()), "{operations:?}");
-    assert!(wal_gets.iter().all(|key| {
-        loonfs_objectstore::layout::wal_no_of(key).expect("WAL number") > input.head.wal_no
-    }));
-    assert!(
-        !operations
-            .iter()
-            .any(|operation| matches!(operation, RecordedOperation::Put { .. })),
+        }),
         "{operations:?}"
-    );
-    assert_eq!(
-        engine
-            .wal_fold_input()
-            .expect("projection")
-            .wal_tail_objects,
-        1
     );
 }
 
@@ -131,7 +106,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .expect("before fold");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
         engine = engine.monotonic_timer(timer.clone());
-        let input = engine.begin_wal_fold().expect("fold input");
+        let input = engine.wal_fold_input().expect("fold input");
         let during = directory("/during");
         engine
             .publish_batch(
@@ -158,7 +133,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         .await
         .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        engine.record_wal_fold(Ok(&folded));
+        engine.record_manifest_published(folded.manifest);
         timer.advance_ms(100);
         store.reset();
 
@@ -245,7 +220,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     publish(&mut engine, &store, &context, before)
         .await
         .expect("before fold");
-    let input = engine.begin_wal_fold().expect("fold input");
+    let input = engine.wal_fold_input().expect("fold input");
     engine.invalidate_projection();
     let folded = fold_wal_tail(
         &store,
@@ -259,7 +234,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_wal_fold(Ok(&folded));
+    engine.record_manifest_published(folded.manifest);
     NamespaceCommitEngine::new(
         engine.namespace_id.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -615,7 +590,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     publish(&mut engine, &store, &context, before)
         .await
         .expect("before fold");
-    let input = engine.begin_wal_fold().expect("fold input");
+    let input = engine.wal_fold_input().expect("fold input");
     let mut expected = crate::wal::ProjectedWalTail::default();
     for name in ["during-one", "during-two"] {
         let value = inline(&engine.namespace_id, Bytes::from_static(b"during"));
@@ -667,10 +642,10 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
-    engine.record_wal_fold(Ok(&folded));
+    engine.record_manifest_published(folded.manifest.clone());
     let position = engine.publish_tail.as_ref().expect("retained position");
-    assert_eq!(position.basis(), &folded.basis);
-    assert_eq!(position.wal_tail_objects, 2);
+    assert_eq!(position.basis().0, folded.manifest.manifest);
+    assert_eq!(position.head.unfolded_wal_objects(), 2);
     assert_eq!(position.head.folded_wal_no, input.head.wal_no);
     let reanchored = engine
         .wal_fold_input()
@@ -746,7 +721,7 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
 
     engine.record_manifest_published(published.clone());
     let moved = engine.read_position().expect("the position moved");
-    assert_eq!(moved.basis.manifest(), published.manifest());
+    assert_eq!(moved.basis.manifest(), &published.manifest);
     assert_eq!(moved.tail.chunks().len(), 1);
     assert_eq!(engine.wal_tail_objects(), Some(1));
     assert_eq!(engine.wal_tail_inline_bytes(), Some(kept.bytes().len()));

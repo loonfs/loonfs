@@ -408,6 +408,10 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
 /// it. These tests split the rebuild from the driver, so they create the
 /// lease themselves — every later write compare-and-swaps against the etag
 /// this one returns, so a lease that was never created cannot be refreshed.
+#[allow(
+    clippy::result_large_err,
+    reason = "returns the outcome that stopped the rebuild as its error, as the merge does"
+)]
 async fn run_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -492,7 +496,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &MetadataMergeReport,
 ) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, input_keys, result).await {
-        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest_no,
+        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest.manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -2478,7 +2482,7 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     )
     .await
     {
-        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest_no,
+        CompactionUnitOutcome::Published { manifest, .. } => manifest.manifest.manifest_no,
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
@@ -2725,9 +2729,9 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             panic!("{publication:?}: the unit must publish over the winner, got {outcome:?}");
         };
         assert_eq!(merged, group);
-        assert_eq!(manifest, after.state.manifest(), "{publication:?}");
+        assert_eq!(manifest.manifest, after.state.manifest(), "{publication:?}");
         assert!(
-            manifest.manifest_no.0 > before.state.manifest().manifest_no.0 + 1,
+            manifest.manifest.manifest_no.0 > before.state.manifest().manifest_no.0 + 1,
             "{publication:?}: the unit's first put lost"
         );
         assert!(
@@ -3187,11 +3191,13 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     );
     assert_matches!(
         second_outcome.expect("second publication"),
-        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 1
+        CompactionUnitOutcome::Published { manifest, .. }
+            if manifest.manifest.manifest_no.0 == before.0 + 1
     );
     assert_matches!(
         first_outcome.expect("retried publication"),
-        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no.0 == before.0 + 2
+        CompactionUnitOutcome::Published { manifest, .. }
+            if manifest.manifest.manifest_no.0 == before.0 + 2
     );
     assert_eq!(store.inner().counts().create_if_absent_puts, 3);
     assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
@@ -3289,7 +3295,7 @@ async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
     .await;
     assert_matches!(
         outcome,
-        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest_no == next
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest.manifest_no == next
     );
     let hint = hint(&namespace);
     let manifest = |number| metadata_manifest_object(&namespace, &number);
@@ -3360,7 +3366,7 @@ async fn a_finalization_that_loses_to_its_own_group_abandons() {
     assert_matches!(
         won,
         CompactionUnitOutcome::Published { manifest, .. }
-            if manifest.manifest_no == before.successor().expect("next number")
+            if manifest.manifest.manifest_no == before.successor().expect("next number")
     );
     assert_eq!(lost, CompactionUnitOutcome::Abandoned);
     assert_eq!(store.inner().counts().create_if_absent_puts, 2);
@@ -3410,7 +3416,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published { manifest, .. }
-            if manifest.manifest_no == before.successor().expect("next number")
+            if manifest.manifest.manifest_no == before.successor().expect("next number")
     );
     let puts = store
         .take()

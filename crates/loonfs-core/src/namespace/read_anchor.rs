@@ -165,8 +165,8 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
         .is_some())
 }
 
-/// Returns the moves of a position at `basis` onto the manifests above it,
-/// oldest first, while each is an active manifest of `writer_epoch`.
+/// Returns the manifests above `basis`, oldest first, for a position at
+/// `basis` to move onto, while each is an active manifest of `writer_epoch`.
 ///
 /// Manifest numbers are consecutive, so the walk loads each successor until
 /// one is missing. It returns `None` when `basis` has no successor, when it
@@ -180,7 +180,7 @@ pub async fn same_epoch_manifests_above<S: ObjectStore + ?Sized>(
     writer_epoch: WriterEpoch,
 ) -> Result<Option<Vec<PublishedManifest>>, ControlObjectLoadError> {
     let mut moves = Vec::new();
-    let (mut manifest_no, mut head_seq) = (basis.manifest_no, basis.head_seq);
+    let mut manifest_no = basis.manifest_no;
     while moves.len() <= MAX_POSITION_MOVES {
         let Ok(next) = manifest_no.successor() else {
             break;
@@ -192,8 +192,8 @@ pub async fn same_epoch_manifests_above<S: ObjectStore + ?Sized>(
         if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
             break;
         }
-        moves.push(PublishedManifest::above(&loaded.state, head_seq));
-        (manifest_no, head_seq) = (next, loaded.state.manifest().head_seq);
+        moves.push(PublishedManifest::new(&loaded.state.envelope, None));
+        manifest_no = next;
     }
     Ok(None)
 }
