@@ -44,7 +44,7 @@ fn fail_content_blob_puts_store(root: &Path) -> FailStore<LocalFsStore> {
         LocalFsStore::new(root).expect("create local-fs store"),
         KeyPredicate::content_blob(),
         OperationSelector::Put,
-        InjectedError::Transport("injected content write failure".to_owned()),
+        InjectedError::RetryableTransport("injected content write failure".to_owned()),
     )
 }
 

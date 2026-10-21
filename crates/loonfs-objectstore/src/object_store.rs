@@ -290,6 +290,21 @@ impl ObjectStoreError {
         }
     }
 
+    /// Marks a retryable transport failure as one whose retry budget is
+    /// spent, so that no outer retry loop sends the request again.
+    ///
+    /// Every other error is returned unchanged.
+    pub(crate) fn exhausted(self) -> Self {
+        match self {
+            Self::Transport {
+                object_key,
+                message,
+                retryable: true,
+            } => Self::transport(object_key, message),
+            error => error,
+        }
+    }
+
     /// Returns this error's provider-independent category.
     pub fn kind(&self) -> ObjectStoreErrorKind {
         match self {
@@ -552,8 +567,9 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Creates an immutable object and accepts an occupied key only when its stored
-    /// checksum equals the checksum of `bytes`. Transport failures retry under
-    /// one operation deadline. Missing stored checksums fail verification.
+    /// checksum equals the checksum of `bytes`. Retryable transport failures
+    /// retry under one operation deadline. Missing stored checksums fail
+    /// verification.
     async fn put_immutable_verified(
         &self,
         key: &str,
