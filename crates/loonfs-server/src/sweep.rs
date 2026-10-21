@@ -12,13 +12,13 @@ use loonfs::{
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
 };
-use loonfs_http::{HeldNamespace, Namespaces};
+use loonfs_http::{HeldNamespace, Namespaces, SweepRetry};
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::EffectiveLimit;
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
@@ -34,15 +34,10 @@ mod passes;
 /// Grep build steps one visit runs while each step publishes.
 const MAX_GREP_BUILD_STEPS_PER_VISIT: usize = 16;
 
-/// Longest wait before the sweep retries a call that keeps failing on one
-/// namespace. The first retry waits one tick interval, and each later failure
-/// doubles the wait up to this bound.
+/// Longest failure backoff for a call that keeps failing on a held
+/// namespace. The backoff after the first failure is one tick interval, and
+/// each later failure in a row doubles it up to this bound.
 const MAX_SWEEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
-
-/// Most `(namespace, call)` pairs the sweep backs off at once. At the bound,
-/// a new failure evicts the entry whose retry is due first, so that call is
-/// retried at its next chance.
-const MAX_SWEEP_BACKOFF_ENTRIES: usize = 10_000;
 
 const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
     &[1.0, 10.0, 60.0, 300.0, 900.0, 3_600.0, 14_400.0, 86_400.0];
@@ -62,21 +57,26 @@ pub enum GarbageCollection {
 /// first due step: metadata, index, collection, or close. Quiet sessions cost
 /// no store requests. Metadata that remains unfinished waits
 /// `maintenance_interval_ms` before retrying. Collection requires a moved seq
-/// and `gc_interval_ms` elapsed. A call that fails on a namespace waits one
-/// tick interval before its next try there, each failure in a row doubles the
-/// wait up to [`MAX_SWEEP_BACKOFF_MS`], and a success clears it. A call that
-/// panics counts as a `server_error` failure. The panic stops neither the sweep
-/// nor the visits to other namespaces. Quiet sessions close after
-/// `idle_session_close_after_ms` without an open, when no caller holds a
-/// handle. An open during close waits for its drain. A failing call keeps an
-/// idle session held, so ticks retry it, until its wait reaches
-/// [`MAX_SWEEP_BACKOFF_MS`].
+/// and `gc_interval_ms` elapsed. Each held entry keeps one retry time per
+/// call, which ticks wait for. A call that fails waits its failure backoff:
+/// one tick interval, doubled for each failure in a row up to
+/// [`MAX_SWEEP_BACKOFF_MS`]. A failed metadata call waits the later of its
+/// backoff and `maintenance_interval_ms`, because its work remains. A success
+/// clears the backoff. A call that panics counts as a `server_error` failure.
+/// The panic stops neither the sweep nor the visits to other namespaces.
+/// Quiet sessions close after `idle_session_close_after_ms` without an open,
+/// when no caller holds a handle. An open during close waits for its drain. A
+/// failing call keeps an idle session held, so ticks retry it, until its
+/// backoff reaches [`MAX_SWEEP_BACKOFF_MS`].
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage
-/// still inside its grace window. Both share `max_concurrent_maintenance`
-/// visit slots and never visit the same namespace concurrently. Listing
-/// failures stop new visits; already started visits finish before returning.
+/// still inside its grace window. It makes every call on every namespace it
+/// lists without waiting for a held entry's retry times, and a namespace
+/// without a held entry keeps no retry state, because the next pass is its
+/// retry. The pass and the ticks share `max_concurrent_maintenance` visit
+/// slots and never visit the same namespace concurrently. Listing failures
+/// stop new visits; already started visits finish before returning.
 /// Hosts can call [`Self::run_pass`] and [`Self::tick`] directly.
 #[derive(Clone)]
 pub struct Sweep {
@@ -95,30 +95,51 @@ struct SweepInner {
     full_interval: Duration,
     idle_session_close_after_ms: u64,
     visiting: Mutex<HashSet<NamespaceId>>,
-    /// The calls that failed on a namespace and when the sweep retries each
-    /// one. At most [`MAX_SWEEP_BACKOFF_ENTRIES`] entries; a success removes
-    /// its entry.
-    backoff: Mutex<HashMap<(NamespaceId, SweepCall), Backoff>>,
     slots: Semaphore,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
     metrics: SweepMetrics,
 }
 
-/// One call that keeps failing on one namespace.
-#[derive(Debug, Clone, Copy)]
-struct Backoff {
-    /// The code of the latest failure.
-    code: ErrorCode,
-    /// Failures in a row, counting the first.
-    attempts: u32,
-    /// When the sweep may make the call again, on the namespace table's clock.
-    next_at_ms: u64,
+/// How one call failed on one namespace.
+enum CallFailure {
+    /// The call returned an error.
+    Error { code: ErrorCode, error: String },
+    /// The call panicked, which counts as a `server_error` failure.
+    Panic { panic: String },
 }
 
-/// Where a call that just failed stands in its backoff.
+impl CallFailure {
+    fn error(code: ErrorCode, error: impl std::fmt::Display) -> Self {
+        Self::Error {
+            code,
+            error: error.to_string(),
+        }
+    }
+
+    fn code(&self) -> ErrorCode {
+        match self {
+            Self::Error { code, .. } => *code,
+            Self::Panic { .. } => ErrorCode::ServerError,
+        }
+    }
+
+    /// Whether the failure counts against the call. A namespace that is
+    /// gone, or a server that is shutting down, doesn't.
+    fn counts(&self) -> bool {
+        !matches!(
+            self.code(),
+            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted | ErrorCode::ShuttingDown
+        )
+    }
+}
+
+/// Where a call stands on a held namespace after one attempt.
+#[derive(Debug, Clone, Copy)]
 struct Retry {
-    /// Failures in a row, counting this one.
+    /// Failures in a row before the attempt.
+    failures_before: u32,
+    /// Failures in a row after it, zero when it didn't fail.
     attempts: u32,
     /// How long the sweep waits before it makes the call again.
     wait_ms: u64,
@@ -130,7 +151,7 @@ struct GrepIndexing {
 }
 
 /// The calls one visit makes. Failures are counted by these names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepCall {
     Metadata,
     GrepIndex,
@@ -147,6 +168,23 @@ impl SweepCall {
             Self::Metadata => "metadata",
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
+        }
+    }
+
+    /// The call's retry state on a held entry.
+    fn retry(self, held: &HeldNamespace) -> SweepRetry {
+        match self {
+            Self::Metadata => held.metadata_retry,
+            Self::GrepIndex => held.index_retry,
+            Self::Gc => held.gc_retry,
+        }
+    }
+
+    fn retry_mut(self, held: &mut HeldNamespace) -> &mut SweepRetry {
+        match self {
+            Self::Metadata => &mut held.metadata_retry,
+            Self::GrepIndex => &mut held.index_retry,
+            Self::Gc => &mut held.gc_retry,
         }
     }
 }
@@ -191,7 +229,6 @@ impl Sweep {
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
                 idle_session_close_after_ms: config.idle_session_close_after_ms,
                 visiting: Mutex::default(),
-                backoff: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance.get()),
                 page_limit: EffectiveLimit::new(
                     NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE)
@@ -308,74 +345,51 @@ impl Sweep {
             return;
         };
         let entry = inner.namespaces.entry(&namespace_id);
-        let seq = entry
-            .as_ref()
-            .and_then(|entry| lock(entry).handle.last_published_seq());
-        if !self.backed_off(&namespace_id, SweepCall::Metadata) {
-            let outcome = self.maintain_metadata(&namespace_id).await;
-            if let Some(entry) = &entry {
-                self.record_metadata(entry, seq, outcome);
-            }
-        }
+        let entry = entry.as_deref();
+        let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
+        self.maintain_metadata(&namespace_id, entry, seq).await;
         if let Some(grep) = &inner.grep {
-            if !self.backed_off(&namespace_id, SweepCall::GrepIndex) {
-                self.maintain_index(grep, &namespace_id, entry.as_deref(), seq)
-                    .await;
-            }
+            self.maintain_index(grep, &namespace_id, entry, seq).await;
         }
-        if garbage == GarbageCollection::Collect && self.gc(&namespace_id).await {
-            if let Some(entry) = &entry {
-                self.record_collection(entry, seq);
-            }
+        if garbage == GarbageCollection::Collect {
+            self.gc(&namespace_id, entry, seq).await;
         }
     }
 
-    async fn maintain_metadata(&self, namespace_id: &NamespaceId) -> MetadataMaintenanceOutcome {
-        let inner = &self.inner;
-        let call = SweepCall::Metadata;
-        let result = self.contain(
-            namespace_id,
-            call,
-            inner
-                .maintenance
-                .maintain_metadata_while_due(namespace_id, &inner.stop),
-        );
-        match result.await {
-            Some(Ok(response)) => {
-                self.record_success(namespace_id, call);
-                response.outcome
-            }
-            Some(Err(error)) => {
-                self.record_failure(namespace_id, call, error.code(), &error);
-                MetadataMaintenanceOutcome::Due
-            }
-            None => MetadataMaintenanceOutcome::Due,
-        }
-    }
-
-    fn record_metadata(
+    /// Makes one metadata call. Unfinished work, or a failure, leaves the
+    /// call due again after `maintenance_interval_ms`.
+    async fn maintain_metadata(
         &self,
-        entry: &Mutex<HeldNamespace>,
+        namespace_id: &NamespaceId,
+        entry: Option<&Mutex<HeldNamespace>>,
         seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
     ) {
         let inner = &self.inner;
-        let mut held = lock(entry);
-        held.handle.record_metadata_maintenance(seq, outcome);
-        held.metadata_retry_at_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
+        let result = contain(
+            inner
+                .maintenance
+                .maintain_metadata_while_due(namespace_id, &inner.stop)
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        let outcome = result
+            .as_ref()
+            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
+        if let Some(entry) = entry {
+            lock(entry).handle.record_metadata_maintenance(seq, outcome);
+        }
+        let work_wait_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
             0
         } else {
-            inner
-                .namespaces
-                .now_ms()
-                .saturating_add(inner.metadata_retry_interval_ms)
+            inner.metadata_retry_interval_ms
         };
-    }
-
-    fn record_collection(&self, entry: &Mutex<HeldNamespace>, seq: Option<ChangeSeq>) {
-        let mut held = lock(entry);
-        held.collected_seq = seq;
-        held.collected_at_ms = self.inner.namespaces.now_ms();
+        self.record_call(
+            namespace_id,
+            entry,
+            SweepCall::Metadata,
+            result,
+            work_wait_ms,
+        );
     }
 
     async fn maintain_index(
@@ -392,21 +406,14 @@ impl Sweep {
             entry,
             caught_up: false,
         };
-        let call = SweepCall::GrepIndex;
-        build.caught_up = match self
-            .contain(namespace_id, call, self.build_index(grep, namespace_id))
-            .await
-        {
-            Some(Ok(caught_up)) => {
-                self.record_success(namespace_id, call);
-                caught_up
-            }
-            Some(Err(error)) => {
-                self.record_failure(namespace_id, call, error.code(), &error);
-                false
-            }
-            None => false,
-        };
+        let result = contain(
+            self.build_index(grep, namespace_id)
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        build.caught_up = self
+            .record_call(namespace_id, entry, SweepCall::GrepIndex, result, 0)
+            .unwrap_or(false);
         if build.caught_up {
             if let Some(entry) = entry {
                 lock(entry).indexed_seq = seq;
@@ -434,88 +441,47 @@ impl Sweep {
         Some((visit, permit))
     }
 
-    /// Whether `call` failed on the namespace and its retry isn't due yet.
-    fn backed_off(&self, namespace_id: &NamespaceId, call: SweepCall) -> bool {
-        let now_ms = self.inner.namespaces.now_ms();
-        lock(&self.inner.backoff)
-            .get(&(namespace_id.clone(), call))
-            .is_some_and(|backoff| now_ms < backoff.next_at_ms)
+    /// Whether `retry` is a call that keeps failing on a held namespace and
+    /// whose backoff has reached [`MAX_SWEEP_BACKOFF_MS`]. An idle session
+    /// doesn't wait for such a call before it closes. Below the cap, the
+    /// session stays held so that ticks retry the call on its backoff,
+    /// instead of the next full pass.
+    fn backoff_at_cap(&self, retry: SweepRetry) -> bool {
+        retry.attempts > 0
+            && backoff_ms(self.first_backoff_ms(), retry.attempts) >= MAX_SWEEP_BACKOFF_MS
     }
 
-    /// Whether `call` keeps failing on the namespace and its wait has reached
-    /// [`MAX_SWEEP_BACKOFF_MS`]. An idle session doesn't wait for such a call
-    /// before it closes. Below the cap, the session stays held so that ticks
-    /// retry the call on its backoff, instead of the next full pass.
-    fn backoff_at_cap(&self, namespace_id: &NamespaceId, call: SweepCall) -> bool {
-        let first_backoff_ms = self.first_backoff_ms();
-        lock(&self.inner.backoff)
-            .get(&(namespace_id.clone(), call))
-            .is_some_and(|backoff| {
-                backoff_ms(first_backoff_ms, backoff.attempts) >= MAX_SWEEP_BACKOFF_MS
-            })
-    }
-
-    /// The wait after a call's first failure: one tick interval.
+    /// The backoff after a call's first failure: one tick interval.
     fn first_backoff_ms(&self) -> u64 {
         loonfs_types::saturating_duration_ms(self.inner.tick_interval)
     }
 
-    /// Runs one call on a namespace, and contains a panic in it. The panic
-    /// counts as a `server_error` failure of `call`, so the call backs off
-    /// and is retried like any failed call, and the sweep goes on with its
-    /// other calls and namespaces. Returns `None` after a panic.
-    async fn contain<T>(
+    async fn gc(
         &self,
         namespace_id: &NamespaceId,
-        call: SweepCall,
-        work: impl Future<Output = T>,
-    ) -> Option<T> {
-        let payload = match AssertUnwindSafe(work).catch_unwind().await {
-            Ok(output) => return Some(output),
-            Err(payload) => payload,
-        };
-        self.inner.metrics.panics.increment(1);
-        let code = ErrorCode::ServerError;
-        let backoff = self.back_off(namespace_id, call, code);
-        tracing::error!(
-            namespace_id = %namespace_id,
-            call = call.as_str(),
-            code = %code,
-            attempts = backoff.attempts,
-            backoff_ms = backoff.wait_ms,
-            panic = panic_message(payload.as_ref()),
-            "maintenance sweep call panicked; the sweep retries it after a backoff"
-        );
-        None
-    }
-
-    async fn gc(&self, namespace_id: &NamespaceId) -> bool {
+        entry: Option<&Mutex<HeldNamespace>>,
+        seq: Option<ChangeSeq>,
+    ) {
         let inner = &self.inner;
-        let call = SweepCall::Gc;
-        if inner.stop.is_cancelled() || self.backed_off(namespace_id, call) {
-            return false;
+        if inner.stop.is_cancelled() {
+            return;
         }
         let options = GcOptions::default();
-        let result = self.contain(
-            namespace_id,
-            call,
+        let result = contain(
             loonfs_http::gc_namespace(
                 &inner.maintenance,
                 inner.grep.as_ref().map(|grep| &grep.worker),
                 namespace_id,
                 &options,
-            ),
-        );
-        match result.await {
-            Some(Ok(_)) => {
-                self.record_success(namespace_id, call);
-                true
-            }
-            Some(Err(error)) => {
-                self.record_failure(namespace_id, call, error.code(), &error);
-                false
-            }
-            None => false,
+            )
+            .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        let collected = self.record_call(namespace_id, entry, SweepCall::Gc, result, 0);
+        if let (Some(_), Some(entry)) = (collected, entry) {
+            let mut held = lock(entry);
+            held.collected_seq = seq;
+            held.collected_at_ms = inner.namespaces.now_ms();
         }
     }
 
@@ -550,107 +516,132 @@ impl Sweep {
         Ok(false)
     }
 
-    /// Counts a failed call and backs it off on that namespace. No code ends
-    /// the sweep's maintenance of a namespace: every failure is retried once
-    /// its backoff passes.
+    /// Records how one call ended on a namespace, and returns the call's
+    /// output when it succeeded. A failure counts in `sweep_visit_failures`,
+    /// and no code ends the sweep's maintenance of a namespace.
+    fn record_call<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        entry: Option<&Mutex<HeldNamespace>>,
+        call: SweepCall,
+        result: Result<T, CallFailure>,
+        work_wait_ms: u64,
+    ) -> Option<T> {
+        let (output, failure) = match result {
+            Ok(output) => (Some(output), None),
+            Err(failure) => (None, Some(failure).filter(CallFailure::counts)),
+        };
+        let retry = entry.map(|entry| self.schedule(entry, call, failure.is_some(), work_wait_ms));
+        match (&failure, retry) {
+            (Some(failure), retry) => self.record_failure(namespace_id, call, failure, retry),
+            (None, Some(retry)) if output.is_some() && retry.failures_before > 0 => {
+                tracing::info!(
+                    namespace_id = %namespace_id,
+                    call = call.as_str(),
+                    attempts = retry.failures_before,
+                    "maintenance sweep call succeeded after failing; its backoff is cleared"
+                );
+            }
+            (None, _) => {}
+        }
+        output
+    }
+
+    /// Sets when the sweep next makes `call` on a held namespace, the one
+    /// place that computes it.
+    ///
+    /// The call waits `work_wait_ms`, the wait its own work asks for. After
+    /// a failure, it waits the later of that and its failure backoff
+    /// ([`backoff_ms`]), so a failed metadata call, whose work remains, waits
+    /// at least `maintenance_interval_ms`.
+    fn schedule(
+        &self,
+        entry: &Mutex<HeldNamespace>,
+        call: SweepCall,
+        failed: bool,
+        work_wait_ms: u64,
+    ) -> Retry {
+        let now_ms = self.inner.namespaces.now_ms();
+        let first_backoff_ms = self.first_backoff_ms();
+        let mut held = lock(entry);
+        let state = call.retry_mut(&mut held);
+        let failures_before = state.attempts;
+        let (attempts, wait_ms) = if failed {
+            let attempts = failures_before.saturating_add(1);
+            let backoff_ms = backoff_ms(first_backoff_ms, attempts);
+            (attempts, work_wait_ms.max(backoff_ms))
+        } else {
+            (0, work_wait_ms)
+        };
+        *state = SweepRetry {
+            retry_at_ms: now_ms.saturating_add(wait_ms),
+            attempts,
+        };
+        Retry {
+            failures_before,
+            attempts,
+            wait_ms,
+        }
+    }
+
+    /// Counts a failed call, and logs it with where the call stands on a
+    /// held namespace.
+    ///
+    /// On a held namespace, the first failure in a row logs at error level
+    /// and later ones at warning level, and the doubling backoff limits how
+    /// often they repeat. A namespace that no host holds keeps no retry
+    /// state, because the next full pass is its retry. Each full pass that
+    /// finds it failing logs one error line, so the namespace logs once per
+    /// `full_sweep_interval_ms` (a day by default). The rule of logging a
+    /// repeating failure once allows one line per interval, so a failure
+    /// that's retried once a day can log on every retry. Every panic logs
+    /// at error level.
     fn record_failure(
         &self,
         namespace_id: &NamespaceId,
         call: SweepCall,
-        code: ErrorCode,
-        error: &dyn std::fmt::Display,
+        failure: &CallFailure,
+        retry: Option<Retry>,
     ) {
-        if matches!(
-            code,
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted | ErrorCode::ShuttingDown
-        ) {
-            return;
-        }
-        let backoff = self.back_off(namespace_id, call, code);
-        if backoff.attempts == 1 {
-            tracing::error!(
-                namespace_id = %namespace_id,
-                call = call.as_str(),
-                code = %code,
-                attempts = backoff.attempts,
-                backoff_ms = backoff.wait_ms,
-                error = %error,
-                "maintenance sweep call failed; the sweep retries it after a backoff"
-            );
-        } else {
-            tracing::warn!(
-                namespace_id = %namespace_id,
-                call = call.as_str(),
-                code = %code,
-                attempts = backoff.attempts,
-                backoff_ms = backoff.wait_ms,
-                error = %error,
-                "maintenance sweep call failed again; the sweep doubles its backoff"
-            );
-        }
-    }
-
-    /// Counts a failed call and backs it off on that namespace.
-    fn back_off(&self, namespace_id: &NamespaceId, call: SweepCall, code: ErrorCode) -> Retry {
-        let inner = &self.inner;
-        inner.metrics.visit_failures[call as usize].increment(1);
-        let now_ms = inner.namespaces.now_ms();
-        let first_backoff_ms = self.first_backoff_ms();
-        let (backoff, entries) = {
-            let mut entries = lock(&inner.backoff);
-            let key = (namespace_id.clone(), call);
-            let attempts = entries
-                .get(&key)
-                .map_or(1, |backoff| backoff.attempts.saturating_add(1));
-            if !entries.contains_key(&key) && entries.len() >= MAX_SWEEP_BACKOFF_ENTRIES {
-                let oldest = entries
-                    .iter()
-                    .min_by_key(|(_, backoff)| backoff.next_at_ms)
-                    .map(|(key, _)| key.clone());
-                if let Some(oldest) = oldest {
-                    entries.remove(&oldest);
-                }
+        let metrics = &self.inner.metrics;
+        metrics.visit_failures[call as usize].increment(1);
+        let code = failure.code();
+        let attempts = retry.map(|retry| retry.attempts);
+        let retry_after_ms = retry.map(|retry| retry.wait_ms);
+        match failure {
+            CallFailure::Panic { panic } => {
+                metrics.panics.increment(1);
+                tracing::error!(
+                    namespace_id = %namespace_id,
+                    call = call.as_str(),
+                    code = %code,
+                    attempts,
+                    retry_after_ms,
+                    panic = panic.as_str(),
+                    "maintenance sweep call panicked; the sweep retries it"
+                );
             }
-            let backoff = Backoff {
-                code,
+            CallFailure::Error { error, .. } if attempts.is_none_or(|attempts| attempts == 1) => {
+                tracing::error!(
+                    namespace_id = %namespace_id,
+                    call = call.as_str(),
+                    code = %code,
+                    attempts,
+                    retry_after_ms,
+                    error = error.as_str(),
+                    "maintenance sweep call failed; the sweep retries it"
+                );
+            }
+            CallFailure::Error { error, .. } => tracing::warn!(
+                namespace_id = %namespace_id,
+                call = call.as_str(),
+                code = %code,
                 attempts,
-                next_at_ms: now_ms.saturating_add(backoff_ms(first_backoff_ms, attempts)),
-            };
-            entries.insert(key, backoff);
-            (backoff, entries.len())
-        };
-        inner
-            .metrics
-            .backoff_entries
-            .set(i64::try_from(entries).unwrap_or(i64::MAX));
-        Retry {
-            attempts: backoff.attempts,
-            wait_ms: backoff.next_at_ms.saturating_sub(now_ms),
+                retry_after_ms,
+                error = error.as_str(),
+                "maintenance sweep call failed again; the sweep retries it"
+            ),
         }
-    }
-
-    /// Clears the backoff of a call that succeeded, and logs the recovery.
-    fn record_success(&self, namespace_id: &NamespaceId, call: SweepCall) {
-        let inner = &self.inner;
-        let (recovered, entries) = {
-            let mut entries = lock(&inner.backoff);
-            let recovered = entries.remove(&(namespace_id.clone(), call));
-            (recovered, entries.len())
-        };
-        let Some(recovered) = recovered else {
-            return;
-        };
-        inner
-            .metrics
-            .backoff_entries
-            .set(i64::try_from(entries).unwrap_or(i64::MAX));
-        tracing::info!(
-            namespace_id = %namespace_id,
-            call = call.as_str(),
-            code = %recovered.code,
-            attempts = recovered.attempts,
-            "maintenance sweep call succeeded after failing; its backoff is cleared"
-        );
     }
 }
 
@@ -680,8 +671,8 @@ impl Drop for Visiting<'_> {
     }
 }
 
-/// The wait after the `attempts`th failure in a row: `first_backoff_ms`,
-/// doubled for each failure after the first, at most
+/// The failure backoff after the `attempts`th failure in a row:
+/// `first_backoff_ms`, doubled for each failure after the first, at most
 /// [`MAX_SWEEP_BACKOFF_MS`].
 fn backoff_ms(first_backoff_ms: u64, attempts: u32) -> u64 {
     let doublings = attempts.saturating_sub(1);
@@ -689,6 +680,20 @@ fn backoff_ms(first_backoff_ms: u64, attempts: u32) -> u64 {
         .checked_shl(doublings)
         .map_or(u64::MAX, |factor| first_backoff_ms.saturating_mul(factor))
         .min(MAX_SWEEP_BACKOFF_MS)
+}
+
+/// Runs one call on a namespace, and contains a panic in it as a
+/// `server_error` failure, so the call backs off and is retried like any
+/// failed call, and the sweep goes on with its other calls and namespaces.
+async fn contain<T>(work: impl Future<Output = Result<T, CallFailure>>) -> Result<T, CallFailure> {
+    AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|payload| {
+            Err(CallFailure::Panic {
+                panic: panic_message(payload.as_ref()).to_owned(),
+            })
+        })
 }
 
 /// The message a panic carried, when it carried a string.
@@ -758,7 +763,6 @@ struct SweepMetrics {
     pass_seconds: Arc<dyn HistogramHandle>,
     visit_failures: [Arc<dyn CounterHandle>; 3],
     panics: Arc<dyn CounterHandle>,
-    backoff_entries: Arc<dyn GaugeHandle>,
     namespaces: Arc<dyn GaugeHandle>,
 }
 
@@ -790,11 +794,6 @@ impl SweepMetrics {
             panics: recorder.register_counter(
                 "loonfs.maintenance.sweep_panics",
                 "Maintenance sweep calls and idle-session closes that panicked",
-                &[],
-            ),
-            backoff_entries: recorder.register_gauge(
-                "loonfs.maintenance.sweep_backoff_entries",
-                "Namespace calls the maintenance sweep is backing off after a failure",
                 &[],
             ),
             namespaces: recorder.register_gauge(

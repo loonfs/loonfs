@@ -14,6 +14,6 @@ pub use http::request_limit::RequestLimit;
 pub use http::{authenticate_routes, error_response, observe_routes, router};
 pub use state::{
     transfer_permits, AuthPolicy, BindingConfig, BindingState, GrepBinding, HeldNamespace, JobMode,
-    Namespaces, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,
+    Namespaces, SweepRetry, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,
     DEFAULT_REQUEST_DEADLINE_MS,
 };
