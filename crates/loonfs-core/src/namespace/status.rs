@@ -8,6 +8,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, Observation};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
     ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
 };
@@ -102,7 +103,22 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     let retention_floor_seq = anchor.retention_floor_seq();
     let head = anchor.read_state;
     super::control::ensure_namespace_live(&head)?;
-    Ok(NamespaceMetadata {
+    Ok(namespace_metadata(head, retention_floor_seq))
+}
+
+/// Returns the state of a namespace that this call created with `manifest`.
+pub(crate) fn created_namespace(manifest: &NamespaceManifestPayload) -> NamespaceMetadata {
+    namespace_metadata(
+        NamespaceReadState::from(manifest),
+        manifest.retention_floor_seq,
+    )
+}
+
+fn namespace_metadata(
+    head: NamespaceReadState,
+    retention_floor_seq: ChangeSeq,
+) -> NamespaceMetadata {
+    NamespaceMetadata {
         access: (&head.access).into(),
         naming: head.naming,
         created_at_ms: head.created_at_ms,
@@ -111,7 +127,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq,
-    })
+    }
 }
 
 impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {

@@ -3,6 +3,7 @@
 use super::{bootstrap::bootstrap_namespace, control::load_current_manifest, fork::fork_namespace};
 use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
+use crate::manifest::tests::control_requests;
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
@@ -81,6 +82,76 @@ async fn two_creations_race_at_manifest_one() {
     });
     winner.expect("winner");
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
+}
+
+/// Checks that a create and a fork each return the state that their manifest
+/// 1 records, and that neither reads the new namespace after its absence
+/// check.
+#[tokio::test]
+async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
+    let content_writes = tokio::sync::Semaphore::new(32);
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let created = create(&store, &source, &context()).await.expect("create");
+    assert_eq!(
+        control_requests(&source, &store.take()),
+        vec![
+            ("get", hint(&source)),
+            ("put", hint(&source)),
+            ("put", metadata_manifest_object(&source, &ManifestNo(1))),
+        ]
+    );
+    assert_eq!(
+        created,
+        super::status::load_namespace(&store, &source, crate::test_support::std_timer())
+            .await
+            .expect("load the created namespace")
+    );
+    publish(
+        &mut NamespaceCommitEngine::new(
+            source.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        ),
+        &store,
+        "inherited",
+    )
+    .await
+    .expect("source data");
+    store.reset();
+    let forked = fork_namespace(
+        &store,
+        &source,
+        &target,
+        &loonfs_test_support::test_actor(),
+        None,
+        &context(),
+        Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
+        &content_writes,
+    )
+    .await
+    .expect("fork");
+    assert_eq!(
+        control_requests(&target, &store.take()),
+        vec![
+            ("get", hint(&target)),
+            ("put", hint(&target)),
+            ("put", metadata_manifest_object(&target, &ManifestNo(1))),
+        ]
+    );
+    assert!(forked.fork_basis.is_some());
+    assert_eq!(
+        forked,
+        super::status::load_namespace(&store, &target, crate::test_support::std_timer())
+            .await
+            .expect("load the fork")
+    );
 }
 
 #[tokio::test]
@@ -296,7 +367,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
-        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline),
+        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline),
         async {
             store.wait_until_blocked().await;
             crate::manifest::fold_wal(store.inner(), &namespace_id)
@@ -337,7 +408,10 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("read committed state");
-    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), None, &deadline)
+    let known = super::control::load_hint(&store, &namespace_id)
+        .await
+        .expect("hint");
+    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), known, &deadline)
         .await
         .expect("refresh hint");
     let aged = MutationContext {

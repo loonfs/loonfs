@@ -34,7 +34,7 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
             metadata
         },
     );
-    let error = crate::manifest::publish::publish_manifest(&store, manifest, &deadline)
+    let error = publish_once_within(&store, manifest, &deadline)
         .await
         .expect_err("late put must not acknowledge publication");
     assert_matches!(
@@ -83,7 +83,7 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
         InjectedError::Transport("lost request".to_owned()),
     );
     store.fail_next(1);
-    let error = publish_manifest(&store, encode_manifest(payload))
+    let error = publish_once(&store, encode_manifest(payload))
         .await
         .expect_err("a put nobody can confirm has no answer");
     assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
@@ -126,18 +126,6 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let mut payload = current.state.envelope.payload().clone();
             if fork {
                 payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
-                let bytes = encode_control_state(
-                    ControlObjectKind::Hint,
-                    &HintPayload {
-                        namespace_id: payload.namespace_id.clone(),
-                        manifest_no: ManifestNo(1),
-                    },
-                )
-                .expect("hint");
-                store
-                    .put_if_absent(&hint(&payload.namespace_id), Bytes::from(bytes))
-                    .await
-                    .expect("fork hint");
                 payload.fork_basis = Some(ForkBasis {
                     manifest: current.state.manifest(),
                     source_pin_id: PinId::generate(ManifestNo(1)),
@@ -146,7 +134,6 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 payload.manifest_no = ManifestNo(2);
             }
             let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-            let manifest = encode_manifest(payload);
             let timer = Arc::new(ManualClock::new(0));
             let deadline = Deadline::start(timer.clone());
             store.reset();
@@ -163,8 +150,17 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             )
             .apply_then_fail();
             store.fail_next(1);
-            let outcome =
-                crate::manifest::publish::publish_manifest(&store, manifest, &deadline).await;
+            // A fork's first manifest is created, and any other manifest
+            // is published over its predecessor.
+            let outcome = if fork {
+                super::super::publish::create_manifest(&store, payload, &deadline)
+                    .await
+                    .map(|()| None)
+            } else {
+                publish_once_within(&store, encode_manifest(payload), &deadline)
+                    .await
+                    .map(Some)
+            };
             if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
                 assert_matches!(
                     outcome,
@@ -176,12 +172,19 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                     )
                 );
             } else if fork {
-                assert_matches!(outcome, Ok(ManifestPublicationOutcome::Published(_)));
+                assert_matches!(outcome, Ok(None));
             } else {
-                assert_matches!(outcome, Ok(ManifestPublicationOutcome::CoveredByCurrent(_)));
+                assert_matches!(
+                    outcome,
+                    Ok(Some(ManifestPublicationOutcome::CoveredByCurrent(_)))
+                );
             }
             assert_eq!(store.remaining(), 0);
-            assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
+            // A creation also writes the hint.
+            assert_eq!(
+                store.inner().inner().counts().create_if_absent_puts,
+                1 + usize::from(fork)
+            );
             assert_eq!(store.inner().inner().counts().compare_and_swaps, 0);
             assert!(store
                 .inner()
@@ -216,17 +219,17 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         );
         let (losing, winning) = if race_at_put {
             blocked.block_next();
-            let losing = publish_manifest(&blocked, claim.clone());
+            let losing = publish_once(&blocked, claim.clone());
             let winning = async {
                 blocked.wait_until_blocked().await;
-                let outcome = publish_manifest(&store, claim.clone()).await;
+                let outcome = publish_once(&store, claim.clone()).await;
                 blocked.release();
                 outcome
             };
             futures::join!(losing, winning)
         } else {
-            let winning = publish_manifest(&store, claim.clone()).await;
-            (publish_manifest(&store, claim).await, winning)
+            let winning = publish_once(&store, claim.clone()).await;
+            (publish_once(&store, claim).await, winning)
         };
         assert_matches!(
             winning.expect("winner"),
@@ -330,10 +333,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             OperationSelector::Put,
         );
         blocked.block_next();
-        let losing = publish_manifest(&blocked, second.clone());
+        let losing = publish_once(&blocked, second.clone());
         let winning = async {
             blocked.wait_until_blocked().await;
-            let result = publish_manifest(&store, first).await;
+            let result = publish_once(&store, first).await;
             blocked.release();
             result
         };
@@ -358,7 +361,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             let mut retry = second.into_parts().0.into_payload();
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert_matches!(
-                publish_manifest(&store, encode_manifest(retry))
+                publish_once(&store, encode_manifest(retry))
                     .await
                     .expect("publish retry"),
                 ManifestPublicationOutcome::Published(_)
@@ -520,9 +523,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         )
         .apply_then_fail();
         store.fail_next(1);
-        let outcome = publish_manifest(&store, candidate)
-            .await
-            .expect("published");
+        let outcome = publish_once(&store, candidate).await.expect("published");
         if fail_hint {
             assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
         } else {
@@ -555,9 +556,10 @@ async fn a_manifest_update_returns_the_hint_it_raised() {
         &store,
         &namespace_id,
         &deadline,
-        |payload| async move {
+        crate::limits::MAX_CONTENTION_ATTEMPTS,
+        |current: crate::namespace::control::LoadedManifest| async move {
             Ok(crate::manifest::publish::ManifestChange::Next(
-                Box::new(payload),
+                Box::new(current.state.envelope.payload().clone()),
                 (),
             ))
         },
@@ -589,23 +591,30 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
             .expect("bootstrap");
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let mut attempts = 0;
-        let result = update_manifest(&store, &namespace_id, &deadline, |payload| {
-            attempts += 1;
-            let store = &store;
-            async move {
-                if !rival_publishes {
-                    return Ok(ManifestChange::Again);
+        let result = update_manifest(
+            &store,
+            &namespace_id,
+            &deadline,
+            crate::limits::MAX_CONTENTION_ATTEMPTS,
+            |current: crate::namespace::control::LoadedManifest| {
+                attempts += 1;
+                let store = &store;
+                let payload = current.state.envelope.payload().clone();
+                async move {
+                    if !rival_publishes {
+                        return Ok(ManifestChange::Again);
+                    }
+                    let mut rival = payload.clone();
+                    rival.manifest_no = rival.manifest_no.successor().expect("next number");
+                    let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
+                    store
+                        .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
+                        .await
+                        .expect("rival manifest");
+                    Ok(ManifestChange::Next(Box::new(payload), ()))
                 }
-                let mut rival = payload.clone();
-                rival.manifest_no = rival.manifest_no.successor().expect("next number");
-                let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
-                store
-                    .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
-                    .await
-                    .expect("rival manifest");
-                Ok(ManifestChange::Next(Box::new(payload), ()))
-            }
-        })
+            },
+        )
         .await;
         let Err(CoreError::StoreContention { object_key }) = result else {
             panic!("expected StoreContention, got {:?}", result.map(|_| ()));

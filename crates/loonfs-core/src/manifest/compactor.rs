@@ -3,6 +3,8 @@
 use super::publish::{update_manifest, ManifestChange};
 use super::published::{PublicationReport, PublishedManifest};
 use crate::error::Result;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::{control::ensure_namespace_live, state::NamespaceReadState};
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
@@ -17,17 +19,22 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
 ) -> Result<PublicationReport<CompactorEpoch>> {
     let deadline = Deadline::start(timer);
     let (epoch, claimed, _) =
-        update_manifest(store, namespace_id, &deadline, |mut payload| async move {
-            ensure_namespace_live(&NamespaceReadState::from(&payload))?;
-            payload.compactor_epoch =
-                CompactorEpoch(
-                    payload.compactor_epoch.0.checked_add(1).expect(
+        update_manifest(
+            store,
+            namespace_id,
+            &deadline,
+            MAX_CONTENTION_ATTEMPTS,
+            |current: LoadedManifest| async move {
+                let mut payload = current.state.envelope.payload().clone();
+                ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+                payload.compactor_epoch =
+                    CompactorEpoch(payload.compactor_epoch.0.checked_add(1).expect(
                         "compactor epoch should be bounded by the manifest number write stop",
-                    ),
-                );
-            let epoch = payload.compactor_epoch;
-            Ok(ManifestChange::Next(Box::new(payload), epoch))
-        })
+                    ));
+                let epoch = payload.compactor_epoch;
+                Ok(ManifestChange::Next(Box::new(payload), epoch))
+            },
+        )
         .await?;
     Ok(PublicationReport {
         response: epoch,

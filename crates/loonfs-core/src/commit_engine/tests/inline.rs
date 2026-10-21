@@ -528,14 +528,9 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                     value.bytes().as_ref()
                 );
             }
-        } else if index == 1 {
-            assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
-            fold::assert_content_before_metadata(&store, values.len());
-            assert!(!store.snapshot().iter().any(|operation| {
-                matches!(operation, RecordedOperation::Put { key, .. }
-                    if loonfs_objectstore::layout::manifest_no_of(key).is_some())
-            }));
         } else {
+            // The first attempt loads the manifest that folded the tail, so
+            // the fold writes nothing.
             assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
             assert_no_writes(&store);
         }

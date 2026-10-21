@@ -437,7 +437,7 @@ async fn input_keys_now<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
 ) -> BTreeSet<String> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    input_segment_keys(&segments, spec).expect("the input must be present")
+    input_segment_keys(&segments.scan_runs, spec).expect("the input must be present")
 }
 
 /// The production finalizer, called the way the job driver calls it.
@@ -2831,7 +2831,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         ),
         async {
             blocked.wait_until_blocked().await;
-            let published = publish_manifest(&store, encode_manifest(winner.clone()))
+            let published = publish_once(&store, encode_manifest(winner.clone()))
                 .await
                 .expect("competing publication");
             assert_matches!(published, ManifestPublicationOutcome::Published(_));
@@ -3059,7 +3059,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         .expect("tombstone");
     let mut successor = tombstone.state.envelope.payload().clone();
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
-    let error = super::super::publish::publish_manifest(
+    let error = publish_once_within(
         &store,
         super::super::publish::encode_manifest(successor),
         &Deadline::start(timer.clone()),
@@ -3180,6 +3180,129 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             .compactor_epoch(),
         epoch
     );
+}
+
+/// Checks that a finalization attempt loads the current manifest and the
+/// hint once, and raises the hint from the hint it loaded.
+#[tokio::test]
+async fn a_finalization_attempt_loads_the_current_manifest_once() {
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("finalization-requests").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let input = input_keys_now(&store, &namespace, &spec).await;
+    let result = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("merge");
+    let current = current_manifest_number(&store, &namespace).await;
+    assert_eq!(
+        crate::namespace::control::load_hint(&store, &namespace)
+            .await
+            .expect("hint")
+            .state
+            .manifest_no,
+        current,
+        "the hint points to the current manifest"
+    );
+    let next = current.successor().expect("next manifest number");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let manifest_no =
+        publish_streaming_compaction(&store, &namespace, &spec, &input, &result).await;
+    assert_eq!(manifest_no, next);
+    let hint = hint(&namespace);
+    let manifest = |number| metadata_manifest_object(&namespace, &number);
+    let operations = store.take();
+    assert_eq!(
+        control_requests(&namespace, &operations),
+        vec![
+            ("get", hint.clone()),
+            ("get", manifest(current)),
+            ("get", manifest(next)),
+            ("get", hint.clone()),
+            ("put", manifest(next)),
+            ("cas", hint),
+        ]
+    );
+    assert_eq!(operations.len(), 6, "{operations:?}");
+}
+
+/// Checks that a finalization whose put loses to a compaction of the same
+/// group abandons its output at the next attempt, because its input runs are
+/// gone from the manifest that won.
+#[tokio::test]
+async fn a_finalization_that_loses_to_its_own_group_abandons() {
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("same-group").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let before = current_manifest_number(&store, &namespace).await;
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let input = input_keys_now(&store, &namespace, &spec).await;
+    let cancellation = MetadataCompactionCancellation::default();
+    let losing = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("first merge");
+    let winning = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("second merge");
+    let store = BlockingStore::new(
+        RecordingStore::new(store, KeyPredicate::manifest(&namespace)),
+        KeyPredicate::exact(metadata_manifest_object(
+            &namespace,
+            &before.successor().expect("next number"),
+        )),
+        OperationSelector::Put,
+    );
+    store.block_next();
+    let (lost, won) = tokio::join!(
+        finalize_streaming_compaction(&store, &namespace, &spec, &input, &losing),
+        async {
+            store.wait_until_blocked().await;
+            let outcome =
+                finalize_streaming_compaction(&store, &namespace, &spec, &input, &winning).await;
+            store.release();
+            outcome
+        }
+    );
+    assert_matches!(
+        won,
+        MetadataCompactionJobOutcome::Published { manifest, .. }
+            if manifest.manifest_no == before.successor().expect("next number")
+    );
+    assert_eq!(lost, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(store.inner().counts().create_if_absent_puts, 2);
+    let referenced = referenced_segment_keys(&store, &namespace).await;
+    assert!(winning
+        .output_segments
+        .iter()
+        .all(|segment| referenced.contains(&metadata_segment_object_key(segment))));
+    assert!(losing
+        .output_segments
+        .iter()
+        .all(|segment| !referenced.contains(&metadata_segment_object_key(segment))));
 }
 
 #[tokio::test]

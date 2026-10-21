@@ -2,7 +2,9 @@
 
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::{update_manifest, ManifestChange};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::{
     load_read_anchor, load_read_anchor_from_manifest, NamespaceReadAnchor,
 };
@@ -40,8 +42,13 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<(AcquiredWriter, NamespaceReadAnchor)> {
     let deadline = Deadline::start(timer);
-    let (acquired, manifest, hint) =
-        update_manifest(store, namespace_id, &deadline, |mut payload| async move {
+    let (acquired, manifest, hint) = update_manifest(
+        store,
+        namespace_id,
+        &deadline,
+        MAX_CONTENTION_ATTEMPTS,
+        |current: LoadedManifest| async move {
+            let mut payload = current.state.envelope.payload().clone();
             super::control::ensure_namespace_live(&NamespaceReadState::from(&payload))?;
             payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
                 CoreError::NamespaceCorrupt(format!(
@@ -59,8 +66,9 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
                 writer_epoch: payload.writer_epoch,
             };
             Ok(ManifestChange::Next(Box::new(payload), acquired))
-        })
-        .await?;
+        },
+    )
+    .await?;
     let mut tip = deadline.observe();
     let mut anchor = load_read_anchor_from_manifest(
         store,

@@ -170,11 +170,14 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             // its predecessor. The exact pass grace applies, even below the
             // longer namespace retirement grace.
             store.clear();
+            let known = crate::namespace::control::load_hint(&store, &namespace_id)
+                .await
+                .expect("hint");
             raise_hint(
                 &store,
                 &namespace_id,
                 current.state.manifest().manifest_no,
-                None,
+                known,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await

@@ -856,12 +856,63 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     Ok(envelope)
 }
 
-async fn publish_manifest<S: ObjectStore + ?Sized>(
+/// The requests in `operations` to the namespace's hint and manifests, in
+/// order, as a request kind and an object key.
+pub(crate) fn control_requests(
+    namespace_id: &NamespaceId,
+    operations: &[loonfs_test_support::stores::RecordedOperation],
+) -> Vec<(&'static str, String)> {
+    use loonfs_test_support::stores::RecordedOperation;
+    let manifests = metadata_manifest_prefix(namespace_id);
+    let hint = hint(namespace_id);
+    operations
+        .iter()
+        .filter(|operation| operation.key() == hint || operation.key().starts_with(&manifests))
+        .map(|operation| {
+            let kind = match operation {
+                RecordedOperation::Head { .. } => "head",
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+                RecordedOperation::CompareAndSwap { .. } => "cas",
+                RecordedOperation::Put {
+                    mode: PutMode::CompareAndSwap { .. },
+                    ..
+                } => "cas",
+                RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. } => "put",
+                RecordedOperation::Assemble { .. } => "assemble",
+                RecordedOperation::Delete { .. } => "delete",
+                RecordedOperation::List { .. } => "list",
+            };
+            (kind, operation.key().to_owned())
+        })
+        .collect()
+}
+
+/// Publishes `manifest` with one attempt of the publication loop, over the
+/// current manifest and hint that it loads first.
+async fn publish_once<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    super::publish::publish_manifest(store, manifest, &deadline).await
+    publish_once_within(store, manifest, &deadline).await
+}
+
+/// The same, under the caller's deadline.
+async fn publish_once_within<S: ObjectStore + ?Sized>(
+    store: &S,
+    manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
+    deadline: &Deadline,
+) -> crate::error::Result<ManifestPublicationOutcome> {
+    let namespace_id = manifest.envelope().payload().namespace_id.clone();
+    let (current, hint) =
+        crate::namespace::control::load_current_manifest_with_hint(store, &namespace_id)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+    Ok(
+        super::publish::publish_manifest_from(store, manifest, deadline, Some(current), Some(hint))
+            .await?
+            .0,
+    )
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

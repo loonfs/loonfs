@@ -22,13 +22,14 @@ use super::compaction_step::{
 };
 use super::index_block_load::segment_object_bytes;
 use super::load::load_manifest_segments;
-use super::publish::{publish_manifest, ManifestPublicationOutcome};
-use super::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
+use super::publish::{update_manifest, ManifestChange};
+use super::runs::{runs_newest_first, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::bloom_filter::BloomFilter;
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
-use crate::namespace::control::load_current_manifest_if_present;
+use crate::namespace::control::{load_current_manifest_if_present, LoadedManifest};
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -318,7 +319,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     // What the job is about to read, recorded before it reads anything.
     // Finalization compares the manifest against this, so the run it publishes
     // stands in for exactly the segments it merged.
-    let Some(input_keys) = input_segment_keys(&segments, spec) else {
+    let Some(input_keys) = input_segment_keys(&segments.scan_runs, spec) else {
         log_metadata_compaction_outcome(
             namespace_id,
             spec,
@@ -429,12 +430,14 @@ impl CompactionPublication {
 
 /// Swaps the rebuilt run in for the input it replaces.
 ///
-/// The current manifest must still contain the segments used by the job. New
-/// runs are preserved. Unrelated manifest publication conflicts are retried, while
-/// changes to the job's input abandon the output.
+/// Each attempt checks the current manifest that `update_manifest` loaded.
+/// That manifest must still contain the segments used by the job, and the
+/// replacement keeps every run published meanwhile. A lost manifest put is
+/// retried over the manifest that won, while changes to the job's input
+/// abandon the output.
 ///
 /// The publication budget starts during finalization rather than at the start
-/// of the potentially long rebuild. Each attempt reloads the current manifest.
+/// of the potentially long rebuild.
 pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -444,113 +447,96 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
     publication: &CompactionPublication,
 ) -> Result<MetadataCompactionJobOutcome> {
-    let rows_read = result.rows_read;
-    let rows_written = result.rows_written;
-    let input_bytes = result.input_bytes;
-    let output_bytes = result.output_bytes;
-    let output_segments = result.output_segments.len();
-    for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
-        if publication.expired() {
-            return Ok(MetadataCompactionJobOutcome::Abandoned);
-        }
-        if cancellation.is_cancelled() {
-            return Ok(MetadataCompactionJobOutcome::Cancelled);
-        }
-        let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
-            .filter(|loaded| !loaded.state.envelope.payload().status.is_deleted())
-            .map(|loaded| loaded.state)
-        else {
-            return Ok(MetadataCompactionJobOutcome::Abandoned);
-        };
-        if current_manifest.compactor_epoch() != publication.compactor_epoch {
-            return Ok(MetadataCompactionJobOutcome::Fenced);
-        }
-        let segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
-        if input_segment_keys(&segments, spec).as_ref() != Some(input_keys) {
+    let output_segments = &result.output_segments;
+    // `None` stands for the publication, and `Some` for every other outcome.
+    let finalized = update_manifest(
+        store,
+        namespace_id,
+        &publication.publication,
+        MAX_FINALIZATION_ATTEMPTS,
+        |current: LoadedManifest| async move {
+            let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
+            if publication.expired() {
+                return settled(MetadataCompactionJobOutcome::Abandoned);
+            }
+            if cancellation.is_cancelled() {
+                return settled(MetadataCompactionJobOutcome::Cancelled);
+            }
+            let previous = current.state.envelope.payload();
+            if previous.status.is_deleted() {
+                return settled(MetadataCompactionJobOutcome::Abandoned);
+            }
+            if previous.compactor_epoch != publication.compactor_epoch {
+                return settled(MetadataCompactionJobOutcome::Fenced);
+            }
+            if input_segment_keys(&runs_newest_first(previous), spec).as_ref() != Some(input_keys) {
+                tracing::info!(
+                    namespace_id = namespace_id.as_str(),
+                    families = ?spec.families(),
+                    "streaming metadata compaction abandoned: its input runs moved while it ran"
+                );
+                return settled(MetadataCompactionJobOutcome::Abandoned);
+            }
+            let surviving = previous
+                .runs
+                .iter()
+                .filter_map(|run| {
+                    let mut run = run.clone();
+                    run.segments.retain(|descriptor| {
+                        !input_keys.contains(&metadata_segment_object_key(descriptor))
+                    });
+                    (!run.segments.is_empty()).then_some(run)
+                })
+                .collect();
+            let manifest = build_replacement_manifest(
+                namespace_id,
+                previous,
+                surviving,
+                ReplacementOutput {
+                    segments: output_segments.clone(),
+                    placement: spec.placement,
+                },
+                spec.frozen_floor_seq(),
+            )?;
+            // The last check before the swap that makes this output reader
+            // truth. Everything above it is reads and objects nothing references.
+            if cancellation.is_cancelled() {
+                return settled(MetadataCompactionJobOutcome::Cancelled);
+            }
+            if publication.expired() {
+                return settled(MetadataCompactionJobOutcome::Abandoned);
+            }
+            Ok(ManifestChange::Next(Box::new(manifest), None))
+        },
+    )
+    .await;
+    match finalized {
+        Ok((Some(outcome), _, _)) => Ok(outcome),
+        Ok((None, published, _)) => Ok(MetadataCompactionJobOutcome::Published {
+            manifest: published.state.manifest(),
+            rows_read: result.rows_read,
+            rows_written: result.rows_written,
+            input_bytes: result.input_bytes,
+            output_bytes: result.output_bytes,
+            output_segments: result.output_segments.len(),
+        }),
+        // Every attempt lost its manifest number to another publication.
+        Err(CoreError::StoreContention { .. }) => {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 families = ?spec.families(),
-                "streaming metadata compaction abandoned: its input runs moved while it ran"
+                attempts = MAX_FINALIZATION_ATTEMPTS,
+                "streaming metadata compaction lost every publication attempt; a later step plans it \
+                 again"
             );
-            return Ok(MetadataCompactionJobOutcome::Abandoned);
+            Ok(MetadataCompactionJobOutcome::Abandoned)
         }
-
-        let previous = segments.manifest();
-        let surviving = previous
-            .payload()
-            .runs
-            .iter()
-            .filter_map(|run| {
-                let mut run = run.clone();
-                run.segments.retain(|descriptor| {
-                    !input_keys.contains(&metadata_segment_object_key(descriptor))
-                });
-                (!run.segments.is_empty()).then_some(run)
-            })
-            .collect();
-        let manifest = build_replacement_manifest(
-            namespace_id,
-            previous,
-            surviving,
-            ReplacementOutput {
-                segments: result.output_segments.clone(),
-                placement: spec.placement,
-            },
-            spec.frozen_floor_seq(),
-        )?;
-
-        // The last check before the swap that makes this output reader
-        // truth. Everything above it is reads and objects nothing references.
-        if cancellation.is_cancelled() {
-            return Ok(MetadataCompactionJobOutcome::Cancelled);
+        // The namespace's objects were removed while the job ran.
+        Err(CoreError::ControlObjectLoad(ControlObjectLoadError::MissingObject { .. })) => {
+            Ok(MetadataCompactionJobOutcome::Abandoned)
         }
-        if publication.expired() {
-            return Ok(MetadataCompactionJobOutcome::Abandoned);
-        }
-        publication
-            .publication
-            .ensure_metadata_publication_budget(namespace_id)?;
-        let published = publish_manifest(store, manifest, &publication.publication).await?;
-        drop(segments);
-        let lost_to = match published {
-            ManifestPublicationOutcome::Published(current) => {
-                return Ok(MetadataCompactionJobOutcome::Published {
-                    manifest: current.manifest(),
-                    rows_read,
-                    rows_written,
-                    input_bytes,
-                    output_bytes,
-                    output_segments,
-                })
-            }
-            ManifestPublicationOutcome::CoveredByCurrent(current)
-            | ManifestPublicationOutcome::PredecessorChanged(current)
-                if current.compactor_epoch() != publication.compactor_epoch =>
-            {
-                return Ok(MetadataCompactionJobOutcome::Fenced);
-            }
-            ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
-            ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
-        };
-        tracing::debug!(
-            namespace_id = namespace_id.as_str(),
-            families = ?spec.families(),
-            attempt,
-            attempts = MAX_FINALIZATION_ATTEMPTS,
-            lost_to,
-            "a streaming metadata compaction lost its finalizing publication; reloading"
-        );
+        Err(error) => Err(error),
     }
-    tracing::info!(
-        namespace_id = namespace_id.as_str(),
-        families = ?spec.families(),
-        attempts = MAX_FINALIZATION_ATTEMPTS,
-        "streaming metadata compaction lost every publication attempt; a later step plans it \
-         again"
-    );
-    Ok(MetadataCompactionJobOutcome::Abandoned)
 }
 
 /// Loads the current manifest segments, or `None` if the namespace is absent.
@@ -577,16 +563,13 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
 /// agreeing on this set agree on every row the job read. Runs the manifest
 /// gained meanwhile are not in it — the job never read them, and they survive
 /// the publication untouched.
-pub(super) fn input_segment_keys<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
+pub(super) fn input_segment_keys(
+    runs: &[MetadataRunManifest],
     spec: &MetadataCompactionSpec,
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
     for run_no in spec.inputs() {
-        let run = segments
-            .scan_runs
-            .iter()
-            .find(|run| run.run_no == *run_no)?;
+        let run = runs.iter().find(|run| run.run_no == *run_no)?;
         keys.extend(group_run_descriptors(run, spec.group()).map(metadata_segment_object_key));
     }
     Some(keys)

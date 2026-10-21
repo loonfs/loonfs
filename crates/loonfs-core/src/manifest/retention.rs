@@ -7,8 +7,9 @@ use super::publish::{update_manifest, ManifestChange};
 use super::published::{PublicationReport, PublishedManifest};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::manifest_index::commits_after_page;
-use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
+use crate::namespace::control::{ensure_namespace_live, load_current_manifest, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use futures::{stream, StreamExt, TryStreamExt};
@@ -85,8 +86,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         }
     };
     let deadline = Deadline::start(timer);
-    let ((floor, advanced), current, _) =
-        update_manifest(store, namespace_id, &deadline, |mut payload| async move {
+    let ((floor, advanced), current, _) = update_manifest(
+        store,
+        namespace_id,
+        &deadline,
+        MAX_CONTENTION_ATTEMPTS,
+        |current: LoadedManifest| async move {
+            let mut payload = current.state.envelope.payload().clone();
             ensure_namespace_live(&NamespaceReadState::from(&payload))?;
             let target = target_seq.map_or(payload.head_seq, |seq| seq.min(payload.head_seq));
             if payload.retention_floor_seq >= target {
@@ -98,8 +104,9 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             verify_manifest_segments_exist(store, &payload).await?;
             payload.retention_floor_seq = target;
             Ok(ManifestChange::Next(Box::new(payload), (target, true)))
-        })
-        .await?;
+        },
+    )
+    .await?;
     Ok(PublicationReport {
         response: AdvanceRetentionResponse {
             namespace_id: namespace_id.clone(),
