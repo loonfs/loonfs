@@ -966,7 +966,8 @@ impl ServerConfig {
             ),
             (
                 "segment output ((`max_concurrent_folds` + `max_concurrent_compactions`) x 32 MiB)",
-                (self.max_concurrent_folds as u128 + self.max_concurrent_compactions as u128)
+                (self.max_concurrent_folds.get() as u128
+                    + self.max_concurrent_compactions.get() as u128)
                     * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
             ),
             (
