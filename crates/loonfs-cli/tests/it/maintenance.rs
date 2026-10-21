@@ -522,13 +522,16 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
         1
     );
 
-    let collected = harness.run(&["--json", "maintenance", "grep-gc"]);
+    let collected = harness.run(&["--json", "maintenance", "gc"]);
     assert_success(&collected);
-    assert_eq!(json_data(&collected)["namespace_reaped"], false);
+    assert_eq!(
+        json_data(&collected)["extensions"]["grep"]["namespace_reaped"],
+        false
+    );
 }
 
 #[test]
-fn grep_gc_reports_collection_counts_in_both_modes() {
+fn gc_reports_grep_collection_counts_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
     let remote_server = harness.start_external_server(harness.write_server_config_with(
@@ -551,29 +554,33 @@ fn grep_gc_reports_collection_counts_in_both_modes() {
         assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
         assert_success(&harness.run(&["maintenance", "index", "enable", "--profile", profile]));
 
-        let collected = harness.run(&["--json", "maintenance", "grep-gc", "--profile", profile]);
+        let collected = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);
         assert_success(&collected);
         let data = json_data(&collected);
-        assert_eq!(data["kind"], "grep_gc");
+        assert_eq!(data["kind"], "gc");
         assert_eq!(data["namespace_id"], "demo");
-        assert_eq!(data["deleted_segments"], 0);
-        assert_eq!(data["deleted_other_objects"], 0);
-        assert_eq!(data["namespace_reaped"], false);
+        let grep = &data["extensions"]["grep"];
+        assert_eq!(grep["deleted_segments"], 0);
+        assert_eq!(grep["deleted_other_objects"], 0);
+        assert_eq!(grep["namespace_reaped"], false);
         assert!(
-            data["retained_candidates"]
+            grep["retained_candidates"]
                 .as_u64()
                 .expect("retained count")
                 > 0
         );
-        assert_eq!(data.as_object().expect("collection result").len(), 6);
+        assert_eq!(grep.as_object().expect("grep collection counts").len(), 4);
 
-        let human = harness.run(&["maintenance", "grep-gc", "--profile", profile]);
+        let human = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&human);
         assert_eq!(
-            stdout_string(&human).trim(),
-            format!(
-                "grep gc for demo: 0 segments, 0 other objects deleted, {} retained",
-                data["retained_candidates"]
+            stdout_string(&human).trim().lines().last(),
+            Some(
+                format!(
+                    "grep index gc deleted 0 segments, 0 other objects ({} retained)",
+                    grep["retained_candidates"]
+                )
+                .as_str()
             )
         );
     }
@@ -622,8 +629,13 @@ fn maintenance_store_probe_renders_the_profile_stores_report() {
 fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
-    let remote_server =
-        harness.start_external_server(harness.write_server_config("remote", "maintenance-parity"));
+    // An embedded profile maintains the grep index, so the server does too,
+    // and both modes' `gc` results include the grep counts.
+    let remote_server = harness.start_external_server(harness.write_server_config_with(
+        "remote",
+        "maintenance-parity",
+        "\n[grep]\nmode = \"serve_and_maintain\"\n",
+    ));
     let add_remote = harness.run(&[
         "--json",
         "profile",

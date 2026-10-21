@@ -334,7 +334,6 @@ impl Command {
                         | MaintenanceCommand::Fold(_)
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Gc(_)
-                        | MaintenanceCommand::GrepGc(_)
                         | MaintenanceCommand::RecoverAdministrator(_),
                 }
         )
@@ -1337,10 +1336,9 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceRetentionCommand,
     },
-    /// Collect aged, unreferenced objects.
+    /// Collect aged, unreferenced objects, including gram index objects when the deployment
+    /// maintains the index.
     Gc(MaintenanceGcArgs),
-    /// Collect the namespace's unreferenced gram-index objects.
-    GrepGc(MaintenanceNamespaceArgs),
     /// Inspect and manage the profile's object store.
     Store {
         #[command(subcommand)]
@@ -1578,7 +1576,6 @@ command_kinds! {
     MaintenanceIndexEnable => "maintenance_index_enable",
     MaintenanceIndexDisable => "maintenance_index_disable",
     MaintenanceIndexStatus => "maintenance_index_status",
-    MaintenanceGrepGc => "maintenance_grep_gc",
     ConfigPath => "config_path",
     ConfigShow => "config_show",
     Version => "version",
@@ -1667,7 +1664,6 @@ impl Command {
                     }
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
-                MaintenanceCommand::GrepGc(_) => CommandKind::MaintenanceGrepGc,
                 MaintenanceCommand::Store { command } => match command {
                     MaintenanceStoreCommand::Probe(_) => CommandKind::MaintenanceStoreProbe,
                 },
@@ -1995,7 +1991,6 @@ mod tests {
                 "index",
                 "retention",
                 "gc",
-                "grep-gc",
                 "store",
             ],
         );

@@ -2,9 +2,11 @@
 //! LoonFS runtime, and the OpenAPI document that describes them.
 //! Hosts own configuration, listeners, shutdown, and operational routes.
 
+mod gc;
 mod http;
 mod state;
 
+pub use gc::gc_namespace;
 pub use http::metrics::HttpMetrics;
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;

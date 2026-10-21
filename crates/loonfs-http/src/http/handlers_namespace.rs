@@ -4,7 +4,7 @@
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_filesystem::PageQuery;
-use super::handlers_query::{grep_index_not_maintained, map_grep_error};
+use super::handlers_query::map_grep_error;
 use super::query_params::{
     checked_cursor, effective_page_limit, parse_path_id, parse_public_ordinal,
 };
@@ -777,7 +777,7 @@ pub(super) struct CheckpointPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc` and `grep_gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `grep_gc` job deletes aged, unreferenced grep index objects, and it requires `maintenance.grep.index`. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -787,7 +787,6 @@ pub(super) struct CheckpointPathParams {
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
-            (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -813,10 +812,17 @@ pub(super) async fn run_maintenance(
                 .await
                 .map(RunMaintenanceResponse::Metadata)
         }
-        RunMaintenanceRequest::Gc(request) => maintenance
-            .gc_with_options(&namespace_id, &GcOptions::from_request(request))
+        RunMaintenanceRequest::Gc(request) => {
+            return crate::gc_namespace(
+                maintenance,
+                state.grep.worker(),
+                &namespace_id,
+                &GcOptions::from_request(request),
+            )
             .await
-            .map(RunMaintenanceResponse::Gc),
+            .map(|collected| Json(RunMaintenanceResponse::Gc(collected)))
+            .map_err(|error| map_grep_error(&namespace_id, error));
+        }
         RunMaintenanceRequest::Retention(request) => {
             let options = AdvanceRetentionFloorOptions::from_request(request)
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -824,16 +830,6 @@ pub(super) async fn run_maintenance(
                 .advance_retention_floor_with_options(&namespace_id, &options)
                 .await
                 .map(RunMaintenanceResponse::Retention)
-        }
-        RunMaintenanceRequest::GrepGc {} => {
-            let Some(worker) = state.grep.worker() else {
-                return Err(grep_index_not_maintained().await);
-            };
-            let now_ms = maintenance.now_ms();
-            return loonfs_grep::gc_grep(worker, &namespace_id, now_ms)
-                .await
-                .map(Json)
-                .map_err(|error| map_grep_error(&namespace_id, error));
         }
         RunMaintenanceRequest::RecoverAdministrator(request) => {
             let actor_id = actor_id.ok_or_else(missing_actor)?;

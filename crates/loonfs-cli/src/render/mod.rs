@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn gc_summaries_report_counts_retention_and_namespace_retirement() {
         use super::summaries::gc_summary;
-        use loonfs_types::{GcResponse, RetainedReason};
+        use loonfs_types::{GcResponse, GrepGcReport, RetainedReason};
 
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         pass.deleted.wal_objects = 2;
@@ -693,6 +693,21 @@ mod tests {
         );
         assert!(summary.contains("2 fork checkpoints"), "{summary}");
         assert!(!summary.contains("namespace can be reclaimed"), "{summary}");
+        assert!(!summary.contains("grep index"), "{summary}");
+
+        pass.extensions.grep = Some(GrepGcReport {
+            deleted_segments: 3,
+            deleted_other_objects: 1,
+            namespace_reaped: true,
+            retained_candidates: 4,
+        });
+        let summary = gc_summary(&pass);
+        assert!(
+            summary.ends_with(
+                "\ngrep index gc deleted 3 segments, 1 other objects (4 retained); the namespace's grep state was reaped"
+            ),
+            "{summary}"
+        );
 
         pass.reclaimable_at_ms = Some(1_700_000_000_000);
         for next in [

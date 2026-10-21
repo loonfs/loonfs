@@ -323,7 +323,7 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs.publisher.write_stop_wait_seconds` | Histogram | How long a namespace's queue waited at the write stop, until a fold published, the fold task ended, or the write-stop wait passed. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` if it listed every namespace, or `error` if the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run when the server starts and every `full_sweep_interval_ms`. |
-| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The sweep tries the call again after a backoff. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, or `gc`. The `gc` call runs the core collector and then, if the server maintains the grep index, the grep index's collector, so a failure of either one counts as a `gc` failure. The sweep tries the call again after a backoff. |
 | `loonfs.maintenance.sweep_panics` | Counter | A sweep call or an idle-session close panicked. The sweep contains the panic, counts a panicked call as a `server_error` failure, and goes on. A nonzero count is a bug to report. |
 | `loonfs.maintenance.sweep_backoff_entries` | Gauge | The calls that failed on a namespace and are waiting for their next try. Each pair of a namespace and a call counts once, up to 10,000. |
 | `loonfs.maintenance.sweep_namespaces` | Gauge | The number of namespaces that the last finished full sweep pass listed, including deleted namespaces. |

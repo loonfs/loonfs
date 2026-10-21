@@ -15,12 +15,12 @@ The CLI runs the same steps one command at a time:
 
 ```console
 loonfs maintenance index enable --namespace docs
-loonfs maintenance grep-gc --namespace docs
+loonfs maintenance gc --namespace docs
 ```
 
 On an embedded profile, `maintenance index enable` runs build steps until the index reaches the namespace's sequence number from when the command started. On a remote profile, it waits for the server to get there. `--max-steps` and `--deadline-ms` limit the wait. A write through an embedded profile doesn't update the index, so to bring an active index up to the namespace head, run `maintenance index enable` again.
 
-`loonfs maintenance grep-gc` runs one collection pass for one namespace. The namespace can be absent or deleted, as long as its old index data is still stored. Every pass reads the current manifest and hint before it deletes anything. Grep manifests are numbered without gaps (1, 2, 3, and so on) and published with put-if-absent. `hint.json` is where forward discovery starts, and it can lag behind the newest manifest. A query checks that a cached manifest is still current with one HEAD request for the next manifest number. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the stored layout and the collection rules.
+`loonfs maintenance gc` runs the core garbage collector for one namespace, and then one grep collection pass, which reports its counts in the result's `extensions.grep` object. A host built on `loonfs-http` runs the same pair through `loonfs_http::gc_namespace`. The grep pass also runs for a deleted namespace, and for a namespace that doesn't exist, as long as its old index data is still stored. For a namespace that doesn't exist, the command reports `namespace_not_found` after the pass. Every pass reads the current manifest and hint before it deletes anything. Grep manifests are numbered without gaps (1, 2, 3, and so on) and published with put-if-absent. `hint.json` is where forward discovery starts, and it can lag behind the newest manifest. A query checks that a cached manifest is still current with one HEAD request for the next manifest number. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the stored layout and the collection rules.
 
 `GrepWorkerConfig` controls how much work one step can do, and how many steps can read and process content at once. A server reads these values from its `[grep]` table:
 

@@ -123,7 +123,7 @@ This section defines every feature key and the operations it gates. The registry
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the `grep_gc` run kind. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes and for the run kind. |
+| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the grep collection in a `gc` run. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Its `gc` runs return the core collector's result without an `extensions.grep` report. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
@@ -742,7 +742,7 @@ This section describes the grep index routes, and the jobs that `run_maintenance
 
 #### Grep index
 
-Grep index garbage collection runs through `run_maintenance`, with the request body `{"kind":"grep_gc"}`. Each call reads the durable roots and completes one pass over the namespace's grep manifests and segments. The response includes `namespace_id`, `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates`. If a root is unreadable or invalid, the call fails before it deletes anything. For a tombstoned or absent namespace, the pass reaps the namespace's aged grep prefix. [Grep extension format](format.md#appendix-d-grep-extension-format) defines the retention and age rules.
+A `gc` run also collects the namespace's grep index objects, as described in [Garbage collection runs](#garbage-collection-runs).
 
 The status, enable, and disable routes all return the same flat grep index object. It contains `namespace_id`, the lifecycle fields for its `status`, `next_run_no`, and `reorganize_pending`. No two lifecycle statuses share a sequence field:
 
@@ -771,12 +771,11 @@ A maintenance run request body identifies exactly one job with `kind`:
 | `kind` | Fields | Result |
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_objects` | `outcome` and `compaction_units` |
-| `gc` | Optional `grace_window_ms` | The collection result |
-| `grep_gc` | None | `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates` |
+| `gc` | Optional `grace_window_ms` | The collection result, which includes the grep collector's counts in `extensions.grep` when the deployment maintains a grep index |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
 
-The `metadata`, `retention`, `gc`, and `grep_gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
+The `metadata`, `retention`, and `gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
 
 The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a pin. For example, this request body runs one GC pass:
 
@@ -786,7 +785,7 @@ The response includes the same `kind`, the addressed `namespace_id`, and the job
 
 A run that loses a race with another process, or whose work is superseded, reports that as an outcome in its result, not as an error.
 
-A deleted namespace accepts only `gc` and `grep_gc` runs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
+A deleted namespace accepts only `gc` runs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
 A `metadata` run [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit merges one [family group](glossary.md#family-group)'s oldest eligible window of at most eight runs and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The run stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later GC pass can delete them.
 
@@ -860,6 +859,16 @@ Every core GC response also includes `retained`, which counts the candidates the
 Each pass counts the candidates that it examined and kept, not the objects in the namespace, so an object that two passes both examine is counted by each pass.
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
+
+When the deployment maintains a grep index (it advertises `maintenance.grep.index`), a `gc` run then runs the grep index's collector, which completes one pass over the namespace's grep manifests and segments. The response reports each extension's collector under the extension's name in an `extensions` object, so the grep pass's counts are in `extensions.grep`, which contains `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates`. A run that runs no extension collector leaves `extensions` out, and a client ignores an extension name it doesn't know. For example, a run that deletes three WAL objects and two grep segments returns this result:
+
+```json
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"manifests":0,"upload_sessions":0,"content_objects":0,"retired_content_objects":0,"temporary_objects":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0,"upload_session_window":0,"upload_session_undecided":0},"extensions":{"grep":{"deleted_segments":2,"deleted_other_objects":0,"namespace_reaped":false,"retained_candidates":14}}}
+```
+
+The grep collector keeps its own age rules, so `grace_window_ms` doesn't change them. [Grep extension format](format.md#appendix-d-grep-extension-format) defines those rules. If a grep root is unreadable or invalid, the grep collector fails before it deletes anything. For a deleted namespace, the grep collector deletes the namespace's aged grep prefix, and `namespace_reaped` reports whether it deleted any of it.
+
+The two collectors delete separate objects, so the grep collector runs even when the core collector fails. A run that fails returns the core collector's error if there is one, and otherwise the grep collector's. For example, a `gc` run on a namespace that doesn't exist deletes the namespace's aged grep prefix, if any is left, and then returns `namespace_not_found`. A deployment that doesn't maintain a grep index leaves out `extensions.grep`.
 
 ### Snapshots
 

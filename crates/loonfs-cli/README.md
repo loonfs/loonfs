@@ -414,6 +414,12 @@ Maintenance
     content prefix reports zero.
     deleted.temporary_objects counts store temporary objects older than the
     window.
+    When the profile's deployment maintains the gram content index, the
+    run then collects the index's unreferenced objects and reports their
+    counts in extensions.grep. The index keeps its own age rules, so
+    --grace-window-ms doesn't apply to it. For a deleted namespace, the
+    run deletes the index's aged objects. For a namespace that doesn't
+    exist, it deletes them too, and then reports namespace_not_found.
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
@@ -434,12 +440,6 @@ Maintenance
 
   loonfs maintenance index disable
     Disable the gram content index
-
-  loonfs maintenance grep-gc
-    Collect the namespace's unreferenced gram-index objects in one complete
-    pass. The pass reads the current manifest and hint before it deletes
-    anything. For an absent or deleted namespace, it deletes aged index
-    objects.
 
 Profile create options
   Used by:

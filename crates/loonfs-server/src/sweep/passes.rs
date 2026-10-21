@@ -80,7 +80,6 @@ impl Sweep {
                 && seq != held.collected_seq
                 && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
                 && !self.backed_off(&namespace_id, SweepCall::Gc)
-                && !self.backed_off(&namespace_id, SweepCall::GrepGc)
             {
                 Due::Collection
             } else if metadata_caught_up || self.backoff_at_cap(&namespace_id, SweepCall::Metadata)
@@ -149,8 +148,7 @@ impl Sweep {
                                 .now_ms()
                                 .saturating_sub(held.collected_at_ms)
                                 < inner.collection_interval_ms
-                            || self.backoff_at_cap(namespace_id, SweepCall::Gc)
-                            || self.backoff_at_cap(namespace_id, SweepCall::GrepGc))
+                            || self.backoff_at_cap(namespace_id, SweepCall::Gc))
                 },
             )
             .await

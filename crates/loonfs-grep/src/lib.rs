@@ -40,4 +40,5 @@ pub use worker::{
     GrepReorganizeOutcome, GrepWorker,
 };
 
-pub use gc::{gc_grep, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};
+pub use gc::GREP_GC_GRACE_WINDOW_MS;
+pub use loonfs_types::GrepGcReport;

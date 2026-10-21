@@ -149,21 +149,6 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
         RunMaintenanceResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
-        RunMaintenanceResponse::GrepGc {
-            namespace_id,
-            deleted_segments,
-            deleted_other_objects,
-            namespace_reaped,
-            retained_candidates,
-        } => {
-            let mut summary = format!(
-                "grep gc for {namespace_id}: {deleted_segments} segments, {deleted_other_objects} other objects deleted, {retained_candidates} retained"
-            );
-            if *namespace_reaped {
-                summary.push_str("; the namespace's grep state was reaped");
-            }
-            summary
-        }
         RunMaintenanceResponse::Retention(retention) => {
             let state = if ran
                 .retention_floor_before
