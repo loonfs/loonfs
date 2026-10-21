@@ -12,6 +12,7 @@
 //! every scope.
 
 use super::runs::MetadataRunManifest;
+use super::segment_block_cache::{MemorySegmentBlocks, SegmentBlockCache};
 use crate::block_cache::{
     CheckStart, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
     DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
@@ -117,7 +118,7 @@ pub(crate) fn read_working_memory(
 /// Decoded segment blocks and manifests for every object store, under one
 /// byte budget.
 pub struct SharedSegmentBlocks {
-    blocks:
+    pub(super) blocks:
         DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
     filter_stats: MetadataSegmentFilterStatsInner,
 }
@@ -168,7 +169,12 @@ impl SharedSegmentBlocks {
 /// One runtime's view of shared segment blocks, under the scope of the
 /// runtime's object store, with the runtime's shared read working memory.
 pub struct MetadataSegmentCache {
-    blocks: Arc<SharedSegmentBlocks>,
+    /// The block cache that every read of a data, index, or filter block
+    /// goes through.
+    blocks: Arc<dyn SegmentBlockCache>,
+    /// The shared segment blocks, which keep this view's manifests under
+    /// `scope`.
+    shared: Arc<SharedSegmentBlocks>,
     scope: ObjectStoreScope,
     read_working_memory: Arc<ReadWorkingMemory>,
 }
@@ -184,13 +190,16 @@ impl std::fmt::Debug for MetadataSegmentCache {
 }
 
 impl MetadataSegmentCache {
+    /// Returns a view whose block cache is the memory implementation over
+    /// `shared`.
     pub fn new(
-        blocks: Arc<SharedSegmentBlocks>,
+        shared: Arc<SharedSegmentBlocks>,
         scope: ObjectStoreScope,
         read_working_memory: Arc<ReadWorkingMemory>,
     ) -> Self {
         Self {
-            blocks,
+            blocks: Arc::new(MemorySegmentBlocks::new(Arc::clone(&shared), scope)),
+            shared,
             scope,
             read_working_memory,
         }
@@ -207,7 +216,27 @@ impl MetadataSegmentCache {
         )
     }
 
-    /// Resolves one block access through a single-flight cell.
+    /// Returns a view whose data, index, and filter blocks go through
+    /// `blocks`, and whose manifests no other view reads.
+    #[cfg(test)]
+    pub(super) fn with_blocks(blocks: Arc<dyn SegmentBlockCache>) -> Self {
+        Self {
+            blocks,
+            shared: Arc::new(SharedSegmentBlocks::new(usize::MAX)),
+            scope: ObjectStoreScope::new(0),
+            read_working_memory: Arc::default(),
+        }
+    }
+
+    /// Returns the block cache that every read of a data, index, or filter
+    /// block goes through.
+    pub(super) fn blocks(&self) -> &dyn SegmentBlockCache {
+        self.blocks.as_ref()
+    }
+
+    /// Resolves one access to the shared segment blocks through a
+    /// single-flight cell. Manifests are loaded this way, and blocks are
+    /// loaded through [`Self::blocks`].
     pub(super) async fn get_or_load<E, F, Fut>(
         &self,
         cache_key: &MetadataSegmentCacheKey,
@@ -217,7 +246,7 @@ impl MetadataSegmentCache {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<DecodedMetadataSegmentBlock, E>>,
     {
-        self.blocks
+        self.shared
             .blocks
             .get_or_load(&(self.scope, cache_key.clone()), load)
             .await
@@ -225,29 +254,32 @@ impl MetadataSegmentCache {
 
     /// Counters for the whole shared cache, across every scope.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
-        self.blocks.stats()
+        self.shared.stats()
     }
 
     pub(super) fn record_filter_skip(&self) {
-        self.blocks
+        self.shared
             .filter_stats
             .filter_skips
             .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_filter_false_positive(&self) {
-        self.blocks
+        self.shared
             .filter_stats
             .filter_false_positives
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
-        self.blocks.blocks.get(&(self.scope, key.clone()))
+        self.shared.blocks.get(&(self.scope, key.clone()))
     }
 
+    /// Inserts an entry into the shared segment blocks. Manifests are
+    /// inserted this way, and blocks are inserted through [`Self::blocks`].
     pub(super) fn insert(&self, key: MetadataSegmentCacheKey, block: DecodedMetadataSegmentBlock) {
-        self.blocks.blocks.insert((self.scope, key), block);
+        self.shared.blocks.insert((self.scope, key), block);
     }
 }
 
