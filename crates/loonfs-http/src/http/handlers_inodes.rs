@@ -68,7 +68,7 @@ pub(super) struct StatInodeQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
-        description = "Returns the path entry for a visible inode, from the current state or a live snapshot. An unknown or hidden inode returns `inode_not_found`.",
+        description = "Returns the path entry for a visible inode, from the current state or an unexpired snapshot. An unknown or hidden inode returns `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
@@ -143,7 +143,7 @@ pub(super) struct ListInodeChildrenQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
-        description = "Lists one page of a directory's children, in canonical name key order, from the current state or a live snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
+        description = "Lists one page of a directory's children, in canonical name key order, from the current state or an unexpired snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The directory's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
@@ -266,7 +266,7 @@ pub(super) async fn list_file_revisions_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
         summary = "Read file by inode",
-        description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that a live snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
+        description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),

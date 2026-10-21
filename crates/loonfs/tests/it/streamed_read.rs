@@ -180,7 +180,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
 
 #[tokio::test]
 async fn historical_and_snapshot_reads_stream_the_selected_revision() {
-    use loonfs::{RevisionNo, SnapshotPolicy};
+    use loonfs::{CreateSnapshotOptions, RevisionNo};
 
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
@@ -192,7 +192,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot("before-replace", u64::MAX, &SnapshotPolicy::default())
+        .create_snapshot("before-replace", &CreateSnapshotOptions::default())
         .await
         .expect("snapshot");
     namespace_writer

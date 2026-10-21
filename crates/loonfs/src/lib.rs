@@ -93,19 +93,19 @@ pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
     Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition, ContentId,
-    ContentRef, ContentRefKind, DeleteCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
-    DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor, DisplayName, EffectiveLimit,
-    EntryInodeKind, FileRevision, FileRevisionsPageCursor, GcResponse, InodeId, InodeKind,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOutcome, MetadataMaintenanceResponse,
-    MetadataPassReport, NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page,
-    PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId, RetainedCandidates,
-    RetainedReason, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, Snapshot,
-    TrashEntry, UploadId, WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
+    DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
+    FileRevisionsPageCursor, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionResponse,
+    MetadataMaintenanceOutcome, MetadataMaintenanceResponse, MetadataPassReport, NameKey,
+    NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PaginationPolicy,
+    PathEntry, PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo,
+    RunMaintenanceRequest, RunMaintenanceResponse, Snapshot, TrashEntry, UploadId,
+    WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -130,8 +130,8 @@ pub mod engine {
 /// Request shapes a serving host decodes before converting them to runtime options.
 pub mod requests {
     pub use loonfs_types::{
-        AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
-        ExtendSnapshotRequest, GcRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
+        AdvanceRetentionRequest, CreateSnapshotRequest, ExtendSnapshotRequest, GcRequest,
+        MetadataMaintenanceRequest, RunMaintenanceRequest,
     };
 }
 
@@ -214,7 +214,7 @@ pub use execution_budget::{
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
+    PathEntriesPager, ReadView, SnapshotsPager, TrashPager,
 };
 pub use handle::{
     LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,
@@ -228,8 +228,8 @@ pub use metadata_cache::{
 };
 pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
-    AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
+    AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
+    CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
     DownloadOptions, ForkNamespaceOptions, ListChangesOptions, ListOptions,
     MaintainMetadataOptions, MoveOptions, PutFileOptions, ReadFileOptions, ReadFileStreamOptions,
     StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
@@ -317,7 +317,7 @@ impl Error {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
-            Self::Core(CoreError::InvalidCheckpointRequest(_)) => Some("/name".to_owned()),
+            Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
             Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {
                 operation_index,

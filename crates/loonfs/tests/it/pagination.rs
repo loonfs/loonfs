@@ -84,7 +84,7 @@ fn directory_pages_use_canonical_name_key_order() {
         )
         .expect("put file");
     }
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
 
     let limit = page_limit(2);
@@ -144,7 +144,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         &replace,
     )
     .expect("put v2");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint after v2");
     fs.put_file_with_options_blocking(
         &namespace_id,
@@ -313,7 +313,7 @@ fn directory_cursor_resumes_across_a_wal_fold() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put later file");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint newer snapshot");
 
     // Materializing the newer state into the manifest does not retire the
@@ -851,7 +851,7 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
                 .expect("put revision");
             committed.push(commit.committed_seq);
         }
-        fs.create_checkpoint(&namespace_id)
+        fs.create_snapshot(&namespace_id)
             .await
             .expect("fold the revisions into a run");
     }

@@ -183,7 +183,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let (writer, namespace) = published_namespace(store.clone() as SharedStore).await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    let options = crate::CreateSnapshotOptions::default();
     let before = writer
         .core
         .writer_position(&namespace_id)
@@ -195,9 +195,8 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         ))),
         async {
             store.wait_until_blocked().await;
-            let (checkpoint, ()) = futures::join!(
-                maintenance.create_checkpoint(&namespace_id, "during"),
-                async {
+            let (checkpoint, ()) =
+                futures::join!(namespace.create_snapshot("during", &options), async {
                     // The checkpoint's manifest is durable, and its move of
                     // the position waits for the publish's engine.
                     bounded(Duration::from_secs(10), async {
@@ -216,8 +215,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         .expect("reads keep the position while the publish runs");
                     assert_eq!(kept.basis.manifest_no(), before.basis.manifest_no());
                     store.release();
-                }
-            );
+                });
             checkpoint.expect("checkpoint")
         }
     );
@@ -226,7 +224,10 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .core
         .writer_position(&namespace_id)
         .expect("a position after the publish");
-    assert_eq!(after.basis.manifest_no(), checkpoint.manifest_no);
+    assert_eq!(
+        after.basis.manifest_no(),
+        checkpoint.snapshot_id.manifest_no()
+    );
     assert_eq!(after.head.seq, during.committed_seq);
     writer.shutdown().await.expect("shutdown");
 }

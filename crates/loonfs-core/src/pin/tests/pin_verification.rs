@@ -70,6 +70,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 limit: loonfs_test_support::ids::page_limit(10),
             },
             crate::pin::ListCheckpointFilesOptions::default(),
+            context.now_ms,
         )
         .await
         .expect("acknowledged checkpoint remains readable");
@@ -313,8 +314,11 @@ async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
         .is_empty());
 }
 
+/// Checks that a snapshot read accepts a user pin with or without an
+/// expiry, and that every snapshot operation refuses a fork pin's ID with
+/// `snapshot_not_found` and leaves the pin in place.
 #[tokio::test]
-async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
+async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -329,9 +333,9 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
             name: "user".to_owned(),
             expires_at_ms: None,
         },
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "snapshot".to_owned(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: Some(u64::MAX),
         },
         PinOwner::Fork {
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
@@ -358,49 +362,35 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
     let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
         .await
         .expect("head");
-    let checkpoint_read = |id| crate::pin::load_checkpoint_read_basis(&store, None, &head, id);
     let snapshot_read =
         |id| crate::pin::load_snapshot_read_basis(&store, None, &head, id, setup.now_ms);
+    snapshot_read(user)
+        .await
+        .expect("read a pin without an expiry");
+    snapshot_read(snapshot)
+        .await
+        .expect("read a pin with an expiry");
     let cases = [
+        ("read of a fork pin", snapshot_read(fork).await.map(drop)),
         (
-            "checkpoint read of a snapshot",
-            checkpoint_read(snapshot).await.map(drop),
-            ErrorCode::CheckpointNotFound,
-        ),
-        (
-            "checkpoint read of a fork pin",
-            checkpoint_read(fork).await.map(drop),
-            ErrorCode::CheckpointNotFound,
-        ),
-        (
-            "checkpoint delete of a snapshot",
-            crate::pin::delete_checkpoint(&store, &namespace_id, snapshot)
+            "retrieve of a fork pin",
+            crate::pin::get_snapshot(&store, &namespace_id, fork)
                 .await
                 .map(drop),
-            ErrorCode::CheckpointNotFound,
         ),
         (
-            "checkpoint delete of a fork pin",
-            crate::pin::delete_checkpoint(&store, &namespace_id, fork)
+            "delete of a fork pin",
+            crate::pin::delete_snapshot(&store, &namespace_id, fork)
                 .await
                 .map(drop),
-            ErrorCode::CheckpointNotFound,
-        ),
-        (
-            "snapshot read of a user pin",
-            snapshot_read(user).await.map(drop),
-            ErrorCode::SnapshotNotFound,
-        ),
-        (
-            "snapshot delete of a user pin",
-            crate::pin::delete_snapshot(&store, &namespace_id, user)
-                .await
-                .map(drop),
-            ErrorCode::SnapshotNotFound,
         ),
     ];
-    for (label, result, expected) in cases {
-        assert_eq!(result.expect_err(label).code(), expected, "{label}");
+    for (label, result) in cases {
+        assert_eq!(
+            result.expect_err(label).code(),
+            ErrorCode::SnapshotNotFound,
+            "{label}"
+        );
     }
     assert_eq!(
         store

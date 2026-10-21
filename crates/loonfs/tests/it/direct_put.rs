@@ -654,7 +654,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
     fs.put_file_with_options_blocking(
         &namespace_id,

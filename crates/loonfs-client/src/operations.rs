@@ -37,14 +37,12 @@ pub(crate) const CREATE_SNAPSHOT: SendPolicy = SendPolicy::Once;
 pub(crate) const LIST_SNAPSHOTS: SendPolicy = SendPolicy::Retry;
 pub(crate) const GET_SNAPSHOT: SendPolicy = SendPolicy::Retry;
 pub(crate) const EXTEND_SNAPSHOT: SendPolicy = SendPolicy::Retry;
-pub(crate) const DELETE_SNAPSHOT: SendPolicy = SendPolicy::Once;
+pub(crate) const DELETE_SNAPSHOT: SendPolicy = SendPolicy::Retry;
 pub(crate) const FORK_NAMESPACE: SendPolicy = SendPolicy::Once;
 pub(crate) const DELETE_NAMESPACE: SendPolicy = SendPolicy::Once;
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_CHECKPOINT: SendPolicy = SendPolicy::Once;
 pub(crate) const LIST_CHECKPOINTS: SendPolicy = SendPolicy::Retry;
 pub(crate) const GET_CHECKPOINT: SendPolicy = SendPolicy::Retry;
-pub(crate) const DELETE_CHECKPOINT: SendPolicy = SendPolicy::Once;
 pub(crate) const RUN_MAINTENANCE: SendPolicy = SendPolicy::Once;
 pub(crate) const PROBE_STORE: SendPolicy = SendPolicy::Once;
 pub(crate) const GREP: SendPolicy = SendPolicy::Retry;
@@ -99,10 +97,8 @@ mod tests {
         ("fork_namespace", FORK_NAMESPACE),
         ("delete_namespace", DELETE_NAMESPACE),
         ("get_namespace_diagnostics", GET_NAMESPACE_DIAGNOSTICS),
-        ("create_checkpoint", CREATE_CHECKPOINT),
         ("list_checkpoints", LIST_CHECKPOINTS),
         ("get_checkpoint", GET_CHECKPOINT),
-        ("delete_checkpoint", DELETE_CHECKPOINT),
         ("run_maintenance", RUN_MAINTENANCE),
         ("probe_store", PROBE_STORE),
         ("grep", GREP),

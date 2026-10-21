@@ -11,9 +11,9 @@ use loonfs_types::api::v0::{
     StoreProbeResponse,
 };
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteCheckpointResponse,
-    DeleteNamespaceResponse, FileRevision, GrepMatch, InodeId, ListCheckpointsResponse,
-    NamespaceId, NamespaceMetadata, PathEntry, RunMaintenanceResponse,
+    AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse, FileRevision,
+    GrepMatch, InodeId, ListCheckpointsResponse, NamespaceId, NamespaceMetadata, PathEntry,
+    RunMaintenanceResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -189,9 +189,7 @@ pub(crate) enum CommandData {
     SnapshotsListed(ListSnapshotsResponse),
     SnapshotExtended(Snapshot),
     SnapshotDeleted(DeleteSnapshotResponse),
-    CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
-    CheckpointDeleted(DeleteCheckpointResponse),
     GrepIndexEnabled {
         /// The lifecycle and bookkeeping last observed: what enable read
         /// with `--no-wait`, otherwise the status after waiting stopped.

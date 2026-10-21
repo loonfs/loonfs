@@ -8,7 +8,7 @@ use loonfs_client::{
 };
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::api::v0::{
-    AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
+    AdvanceRetentionRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
 use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
@@ -759,13 +759,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     // Pin the head, then give up incremental replay below it.
     harness
         .client
-        .create_checkpoint(
-            &namespace,
-            &CreateCheckpointRequest {
-                name: "trimmed".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_snapshot(&namespace, "trimmed", None)
         .await
         .expect("create checkpoint");
     let advanced = harness

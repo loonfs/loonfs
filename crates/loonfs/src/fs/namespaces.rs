@@ -86,7 +86,7 @@ impl LoonFs<Writable> {
         .await
     }
 
-    /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
+    /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or unexpired snapshot.
     ///
     /// A fork of the current head folds the source's WAL tail first when it
     /// is not folded, and waits for a fold permit from the runtime's

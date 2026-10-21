@@ -1,5 +1,5 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
-//! uploads, checkpoints, and maintenance.
+//! uploads, snapshots, and maintenance.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::cache::{HeadStateCache, MetadataSegmentCache, ObjectCache};
@@ -20,7 +20,7 @@ use crate::path::read::{
 };
 use crate::pin::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    ListCheckpointFilesOptions,
+    ListCheckpointFilesOptions, SnapshotPageCursor,
 };
 use crate::protocol::{
     CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
@@ -41,11 +41,10 @@ use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptio
 use loonfs_types::CompactorEpoch;
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
-    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
-    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, FileRevision,
-    FileRevisionsPageCursor, InodeId, ListPageCursor, NamespaceAccess, NamespaceId,
-    NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Snapshot, Subject,
-    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    AdvanceRetentionResponse, ChangeSeq, CommitId, ContentRef, DeleteNamespaceResponse,
+    DeleteSnapshotResponse, FileRevision, FileRevisionsPageCursor, InodeId, ListPageCursor,
+    NamespaceAccess, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId,
+    RevisionNo, Snapshot, Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -464,7 +463,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Creates a new namespace at this namespace's current head or a live snapshot.
+    /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point.
@@ -709,19 +708,21 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         view.list_trash_page(request, &access).await
     }
 
-    /// Lists files from the manifest pinned by `checkpoint_id`, ordered by inode
-    /// ID.
+    /// Lists files from the manifest pinned by the snapshot `checkpoint_id`,
+    /// ordered by inode ID.
     ///
     /// The method ignores the current metadata basis and WAL tail, so every page
-    /// comes from the same checkpoint snapshot even when new commits arrive. The
-    /// read context is used only to validate the namespace identity and confirm
-    /// that it has not been deleted.
+    /// comes from the same snapshot even when new commits arrive. The read
+    /// context is used only to validate the namespace identity and confirm that
+    /// it has not been deleted. A snapshot that expired at or before `now_ms`
+    /// returns `snapshot_not_found`.
     pub async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
         options: ListCheckpointFilesOptions,
         context: &RuntimeReadContext,
+        now_ms: u64,
     ) -> Result<CheckpointFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
         self.ensure_live_context(context)?;
@@ -732,6 +733,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             checkpoint_id,
             request,
             options,
+            now_ms,
         )
         .await
     }
@@ -1222,51 +1224,25 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a new user checkpoint for the current namespace head.
+    /// Creates a snapshot of the current namespace head.
     ///
-    /// Every call generates a fresh `PinId`; `name` is a label, not a key.
-    /// When WAL objects follow the current manifest's `folded_wal_no`, the
-    /// method first folds them into a new manifest without compacting
-    /// metadata. `ttl_ms` sets `expires_at_ms`; an expired checkpoint stays
-    /// listed and readable, and keeps its manifest retained, until collection
-    /// deletes it. `None` keeps the checkpoint until it is deleted. The report
-    /// includes the manifest the fold published.
-    pub async fn create_checkpoint(
-        &self,
-        name: String,
-        ttl_ms: Option<u64>,
-    ) -> Result<PublicationReport<Checkpoint>> {
-        let context = self.mutation_context();
-        let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
-        crate::pin::create_pin(
-            &self.store,
-            &self.namespace_id,
-            PinOwner::User {
-                name,
-                expires_at_ms,
-            },
-            &context,
-            self.effective_run_policy(),
-            self.segment_cache.as_deref(),
-            &self.content_writes,
-            Arc::clone(&self.timer),
-        )
-        .await
-        .map(|report| report.map(crate::pin::checkpoint_summary))
-    }
-
-    /// Creates a snapshot of the current namespace state. The report includes
-    /// the manifest that folding the WAL tail first published.
+    /// Every call generates a fresh `PinId`, and `name` is a label, not a
+    /// key. When WAL objects follow the current manifest's `folded_wal_no`,
+    /// the method first folds them into a new manifest without compacting
+    /// metadata. A snapshot with `expires_at_ms` can't be read after that
+    /// time, and it stays listed until collection deletes it. `None` keeps
+    /// the snapshot until it's deleted. The report includes the manifest the
+    /// fold published.
     pub async fn create_snapshot(
         &self,
         name: String,
-        expires_at_ms: u64,
+        expires_at_ms: Option<u64>,
     ) -> Result<PublicationReport<Snapshot>> {
         let context = self.mutation_context();
         crate::pin::create_pin(
             &self.store,
             &self.namespace_id,
-            PinOwner::Snapshot {
+            PinOwner::User {
                 name,
                 expires_at_ms,
             },
@@ -1291,55 +1267,53 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::pin::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
 
-    /// Loads one existing checkpoint by id, as the listing returns it. An
-    /// expired record stays readable until garbage collection deletes it. A
-    /// missing pin returns `checkpoint_not_found`.
+    /// Loads one existing pin of any owner by id, as the checkpoint listing
+    /// returns it. An expired record stays readable until garbage collection
+    /// deletes it. A missing pin returns `snapshot_not_found`.
     pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<loonfs_types::Checkpoint> {
         crate::pin::get_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
-    /// Loads one live snapshot by id. A missing id returns
-    /// `snapshot_not_found`, and a snapshot that expired at or before `now_ms`
-    /// returns `snapshot_gone`.
-    pub async fn get_snapshot(&self, snapshot_id: &PinId, now_ms: u64) -> Result<Snapshot> {
-        crate::pin::get_snapshot(&self.store, &self.namespace_id, snapshot_id, now_ms).await
+    /// Lists one page of snapshots in ascending id order, including expired
+    /// snapshots that garbage collection hasn't deleted.
+    pub async fn list_snapshots_page(
+        &self,
+        request: PageRequest<SnapshotPageCursor>,
+    ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+        crate::pin::list_snapshots_page(&self.store, &self.namespace_id, request).await
+    }
+
+    /// Loads one snapshot by id, as the snapshot listing returns it,
+    /// including an expired snapshot that garbage collection hasn't deleted.
+    /// A missing id, or the id of a fork pin, returns `snapshot_not_found`.
+    pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
+        crate::pin::get_snapshot(&self.store, &self.namespace_id, snapshot_id).await
     }
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Deletes a user-owned checkpoint by id.
-    ///
-    /// A missing pin returns `checkpoint_not_found`.
-    /// Deletion makes its unreferenced manifest and runs collectable.
-    pub async fn delete_checkpoint(
-        &self,
-        checkpoint_id: &PinId,
-    ) -> Result<DeleteCheckpointResponse> {
-        crate::pin::delete_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
-    }
-
-    /// Extends a live snapshot without passing its lifetime ceiling.
+    /// Moves an unexpired snapshot's expiry to `requested_expires_at_ms`,
+    /// never earlier. A snapshot without an expiry is returned unchanged.
     pub async fn extend_snapshot(
         &self,
-        checkpoint_id: &PinId,
+        snapshot_id: &PinId,
         requested_expires_at_ms: u64,
-        max_age_ms: u64,
     ) -> Result<Snapshot> {
         crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,
-            checkpoint_id,
+            snapshot_id,
             requested_expires_at_ms,
-            max_age_ms,
             &self.mutation_context(),
             Arc::clone(&self.timer),
         )
         .await
     }
 
-    /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
-    pub async fn delete_snapshot(&self, checkpoint_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        crate::pin::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
+    /// Deletes a snapshot. Deleting a missing snapshot succeeds, and the id
+    /// of a fork pin returns `snapshot_not_found`.
+    pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
+        crate::pin::delete_snapshot(&self.store, &self.namespace_id, snapshot_id).await
     }
 
     /// Folds the visible WAL tail and publishes a

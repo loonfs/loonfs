@@ -139,21 +139,19 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
 
 /// Formats a checkpoint owner for the table view.
 ///
-/// User checkpoints show their label. Fork checkpoints show their target
-/// namespace because users cannot delete them, and snapshots say what they
-/// are for the same reason.
+/// Snapshots show their label. Fork checkpoints show their target namespace
+/// because users can't delete them.
 pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
     match owner {
         CheckpointOwner::User { name } => name.clone(),
         CheckpointOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
-        CheckpointOwner::Snapshot { name } => format!("snapshot {name}"),
         CheckpointOwner::Unknown => "owner unknown to this CLI".to_owned(),
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
@@ -161,8 +159,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
         ("metadata segments", deleted.metadata_segments),
         ("manifests", deleted.manifests),
         ("fork checkpoints", checkpoints.fork),
-        ("user checkpoints", checkpoints.user),
-        ("snapshot checkpoints", checkpoints.snapshot),
+        ("snapshots", checkpoints.user),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),

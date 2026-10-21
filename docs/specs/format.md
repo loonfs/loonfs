@@ -284,7 +284,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | WAL object | Commits, or a writer fence, after the materialized boundary | A new WAL object is created at the next number. |
 | Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
-| Pin | A reference that keeps one manifest for a user, a snapshot, or a fork | Created and deleted. A snapshot's expiry time can be extended by compare-and-swap. |
+| Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
 | Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | Conditional status changes. |
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
@@ -299,7 +299,7 @@ Each number refers to exactly one immutable object. A publisher creates the next
 
 Other objects use generated IDs:
 
-- A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user, snapshot, and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a snapshot pin's ID is also its `snapshot_id`.
+- A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
 - A content ID is `con_` followed by 32 random lowercase hexadecimal characters.
 - A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
 
@@ -465,7 +465,7 @@ A failed or cancelled multipart transfer MUST attempt a provider-side abort. An 
 
 ### 3.3 Timing assumptions
 
-Writer fencing and commit order don't depend on clocks. They use epochs, sequence numbers, and conditional writes. Upload admission, snapshot expiry, and reclamation do use deadlines.
+Writer fencing and commit order don't depend on clocks. They use epochs, sequence numbers, and conditional writes. Upload admission, pin expiry, and reclamation do use deadlines.
 
 Garbage collection assumes that clock error is bounded, and that publications and provider operations finish within bounded times. [Appendix C](#appendix-c-timing-and-size-reference) states these bounds. A client-side timeout isn't proof that a remote change had no effect, so an operation with an ambiguous outcome MUST keep its documented unknown-outcome behavior.
 
@@ -547,7 +547,7 @@ The reader also runs discovery again if an answer to either probe arrives `READ_
 
 An `eventual` warm read (see [Read consistency](api.md#read-consistency)) reads the cached view without a WAL probe or a successor probe while the cached tip was confirmed less than the read's maximum staleness ago. The tip's confirmation time is taken before the WAL probe or the load that confirmed the tip is sent, so the read sees every commit that was acknowledged before then. The read also requires the previous successor probe to be less than `READ_REVALIDATION_BOUND_MS` old. After that, an `eventual` read runs the probes the way a `strong` read does. The reference runtime replaces a cached view only with a newer one, so an `eventual` read never reads an older head than a read that completed before it. When the runtime makes or learns of a change whose effect on the head it can't identify (it creates, forks, or deletes the namespace, a mutation's outcome is unknown, or it finds its writer session fenced), it drops the cached view, and the next read loads the namespace by discovery. A load that started before the drop doesn't install its result, because it might have read the namespace before the change.
 
-In a runtime with an open writer session for the namespace, reads start from the session's [writer position](glossary.md#writer-position) instead of a cached view. The runtime moves the position to each commit before it acknowledges the commit, and to each manifest that it publishes itself (a fold, a compaction, a checkpoint, a snapshot, or a retention advance). A read from the position sends no WAL probe, because another writer has to publish a claim manifest before it can write a WAL object. Instead, the session checks the position with the successor probe. An `eventual` read starts from the position without a probe while the previous successor probe is younger than the read's maximum staleness, and after that it waits for the session's probe. A `strong` read always waits for the session's probe. A probe counts for a read only if it was sent after the read started, and the session runs one probe at a time, so a read that finds a probe running waits for it and then for the next one, which every read that arrives during the first probe shares. The previous successor probe of a new position is the writer's last confirmation of its manifest (see [Publication and group commit](#63-publication-and-group-commit)), or a later probe of the session. If the probe finds a successor, the reader loads the manifests above the position's manifest. While the newest is an active manifest with the position's writer epoch (a fold, a compaction, a checkpoint, a snapshot, or a retention advance, whether this runtime or another process published it), each describes the head the session wrote, so the position moves onto them the way it moves onto the manifests this runtime publishes, and the read starts from the position. The walk that ends on the newest manifest is that manifest's successor probe, so a position that moved onto it records the probe. A manifest with a later writer epoch is another writer's claim, and a tombstone ends the namespace, so the walk stops at either one. The reader then drops the position and runs discovery, and the session's next publish runs discovery too. The reader does the same when the walk finds more than eight manifests above the position's. A read doesn't start from a position whose previous successor probe is `READ_REVALIDATION_BOUND_MS` old or older. The reader drops the position and runs discovery instead, because a probe's answer couldn't confirm the position then. A runtime without the namespace's writer session, or a session that's fenced, closed, or hasn't published yet, reads from a cached view. When a session's position is dropped or the session ends, the position becomes the runtime's cached view of the namespace, so the next read starts from a head at least as new as the reads from the position returned. If the position was dropped because its probe found a successor, or because the session was fenced, the runtime drops that cached view too, and the next read runs discovery.
+In a runtime with an open writer session for the namespace, reads start from the session's [writer position](glossary.md#writer-position) instead of a cached view. The runtime moves the position to each commit before it acknowledges the commit, and to each manifest that it publishes itself (a fold, a compaction, a pin, or a retention advance). A read from the position sends no WAL probe, because another writer has to publish a claim manifest before it can write a WAL object. Instead, the session checks the position with the successor probe. An `eventual` read starts from the position without a probe while the previous successor probe is younger than the read's maximum staleness, and after that it waits for the session's probe. A `strong` read always waits for the session's probe. A probe counts for a read only if it was sent after the read started, and the session runs one probe at a time, so a read that finds a probe running waits for it and then for the next one, which every read that arrives during the first probe shares. The previous successor probe of a new position is the writer's last confirmation of its manifest (see [Publication and group commit](#63-publication-and-group-commit)), or a later probe of the session. If the probe finds a successor, the reader loads the manifests above the position's manifest. While the newest is an active manifest with the position's writer epoch (a fold, a compaction, a pin, or a retention advance, whether this runtime or another process published it), each describes the head the session wrote, so the position moves onto them the way it moves onto the manifests this runtime publishes, and the read starts from the position. The walk that ends on the newest manifest is that manifest's successor probe, so a position that moved onto it records the probe. A manifest with a later writer epoch is another writer's claim, and a tombstone ends the namespace, so the walk stops at either one. The reader then drops the position and runs discovery, and the session's next publish runs discovery too. The reader does the same when the walk finds more than eight manifests above the position's. A read doesn't start from a position whose previous successor probe is `READ_REVALIDATION_BOUND_MS` old or older. The reader drops the position and runs discovery instead, because a probe's answer couldn't confirm the position then. A runtime without the namespace's writer session, or a session that's fenced, closed, or hasn't published yet, reads from a cached view. When a session's position is dropped or the session ends, the position becomes the runtime's cached view of the namespace, so the next read starts from a head at least as new as the reads from the position returned. If the position was dropped because its probe found a successor, or because the session was fenced, the runtime drops that cached view too, and the next read runs discovery.
 
 For example, after another writer takes over the namespace, an `eventual` read in the old writer's runtime that starts within its maximum staleness of the position's last successor probe returns the old writer's head. The first `eventual` read after that waits for the session's probe, finds the new writer's claim manifest, and returns the new writer's commits, including any access changes. A `strong` read waits for the probe too, so it finds the claim and returns the new writer's commits on that read.
 
@@ -557,7 +557,7 @@ At sequence `N`, a reader ignores events after `N`. A visible inode MUST have be
 
 A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child, and an unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index.
 
-Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no active subtree tombstone covers it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. Snapshots and user pins apply these rules through their pinned manifests, at their captured sequences.
+Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no active subtree tombstone covers it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. User pins apply these rules through their pinned manifests, at their captured sequences.
 
 A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing recoverable deletions uses the derived active-deletion state, while evaluating a tombstone at a past sequence uses the tombstone events.
 
@@ -794,7 +794,7 @@ A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the 
 
 If both find nothing, and the second answer arrives less than `READ_REVALIDATION_BOUND_MS` after the previous basis confirmation, the writer keeps its position and the position's tail. The attempt's start (before both probes) becomes the new tip observation and basis confirmation, even if the batch ends up writing nothing, and the put's budget runs from that start. If a probe finds an object or fails, or an answer arrives late, the writer runs discovery instead. A basis that's already at the revalidation bound when the attempt starts is dropped without probing. [Publication and collection timing](#c1-publication-and-collection-timing) records the bounds.
 
-Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction by another process also publishes a successor, so the manifest probe finds both, and the writer runs discovery. A manifest this runtime publishes itself (a fold, a compaction, a checkpoint, a snapshot, or a retention advance) moves the session to it, so the probe doesn't find it as a successor.
+Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction by another process also publishes a successor, so the manifest probe finds both, and the writer runs discovery. A manifest this runtime publishes itself (a fold, a compaction, a pin, or a retention advance) moves the session to it, so the probe doesn't find it as a successor.
 
 Why probe the WAL too? The WAL probe directly checks for a put by this same session that the session didn't observe, which wouldn't create a claim manifest. (The current unknown-outcome and cancelled-publication paths already discard the retained position, so the probe is a defensive check in case those paths change.) For other writers, the claim-manifest rule is enough, whatever order the probes are sent in. The implementation sends the WAL probe first, and any WAL object created after that probe is still too young to be deleted when the following put-if-absent runs, so the put collides with it.
 
@@ -1025,7 +1025,7 @@ Grep reports its own referenced segment bytes (see [Appendix D](#appendix-d-grep
 
 ## 8. Pins
 
-A "pin" is a durable record that keeps one manifest, and the segments it lists, after newer manifests are published. Without a pin, garbage collection deletes a superseded manifest once its successor is old enough. Ordinary folds don't create pins. Applications, operators, and forks create pins when they need a stable view of the namespace.
+A "pin" is a durable record that keeps one manifest, and the segments it lists, after newer manifests are published. Without a pin, garbage collection deletes a superseded manifest once its successor is old enough. Ordinary folds don't create pins. Callers create pins when they need a stable view of the namespace (the API calls these pins snapshots), and forks create pins on their source.
 
 ### 8.1 Records and owners
 
@@ -1033,13 +1033,14 @@ Each pin is stored at `pins/{pin_id}.json`. Its ID includes the pinned manifest'
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
-| `user` | `name`, optional `expires_at_ms` | Readable while the record exists, even after its expiry time. | Explicit deletion, or garbage collection after expiry plus the grace. Without an expiry, only explicit deletion removes it from an active namespace. |
-| `snapshot` | `name`, required `expires_at_ms` | Readable only before it expires. | Explicit deletion, or garbage collection after expiry plus the grace. |
+| `user` | `name`, optional `expires_at_ms` | Readable before its expiry time. A pin without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace. Without an expiry, only explicit deletion removes it from an active namespace. |
 | `fork` | `target_namespace_id` | Not read through the pin. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Pin cleanup](#117-pin-cleanup)). |
+
+A reader MUST also accept a record whose owner kind is `snapshot`, with a `name` and a required `expires_at_ms`, and read it as a `user` pin with the same name and expiry. A writer MUST NOT write that owner kind.
 
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. A pin has no lifecycle status. Creating the record creates the pin, and deleting the record ends it. Fork pins have no expiry and no renewal protocol.
 
-Expiry, read eligibility, eligibility for garbage collection, and removal are separate. An expired record still exists. It appears in the complete pin listing, and it keeps its manifest and segments until garbage collection deletes it. [Pin cleanup](#117-pin-cleanup) defines when each kind of pin can be collected.
+Expiry, read eligibility, eligibility for garbage collection, and removal are separate. An expired user pin can't be read, but the record still exists. It appears in the complete pin listing, and it keeps its manifest and segments until garbage collection deletes it. [Pin cleanup](#117-pin-cleanup) defines when each kind of pin can be collected.
 
 ### 8.2 Creating and verifying a pin
 
@@ -1058,27 +1059,27 @@ Once a pin is acknowledged, it keeps its manifest's files, even if the retention
 
 Why write the pin before checking the manifest again? A garbage collection pass that runs at the same time either captured the pinned manifest as current, or captured a successor after the pin was written, and in that case the pass's complete pin listing includes the pin. Either way, the pinned manifest is protected.
 
-A fork of a snapshot is protected by the snapshot instead. It doesn't require the snapshot's historical manifest to still be current. The fork:
+A fork of a user pin is protected by the user pin instead. It doesn't require the user pin's historical manifest to still be current. The fork:
 
-1. Checks that the source namespace is active, and that the snapshot pin exists and hasn't expired.
-2. Writes a fork pin on the snapshot's manifest.
+1. Checks that the source namespace is active, and that the user pin exists and hasn't expired.
+2. Writes a fork pin on the user pin's manifest.
 3. Checks the same two conditions again.
 
-Both expiry checks use the request clock plus the monotonic time elapsed since the fork call began. A snapshot that no longer exists returns `snapshot_not_found`, an expired one returns `snapshot_gone`, and a deleted source returns `namespace_deleted`. If the fork pin write or the second check fails, the fork deletes the new fork pin, under the same best-effort rule. Verification has no time limit of its own. Pins are never recreated, so if the snapshot pin still exists after the fork pin is written, it existed the whole time. So every garbage collection pass that listed pins before that write also listed the snapshot pin, and it protected the same manifest.
+Both expiry checks use the request clock plus the monotonic time elapsed since the fork call began. A user pin that no longer exists or has expired returns `snapshot_not_found`, and a deleted source returns `namespace_deleted`. If the fork pin write or the second check fails, the fork deletes the new fork pin, under the same best-effort rule. Verification has no time limit of its own. Pins are never recreated, so if the user pin still exists after the fork pin is written, it existed the whole time. So every garbage collection pass that listed pins before that write also listed the user pin, and it protected the same manifest.
 
 ### 8.3 Reads, deletion, and expiry
 
-An operation that takes a pin ID looks up the pin for the owner the operation serves. An ID with no pin, or with a pin that has another owner, returns `checkpoint_not_found` from a checkpoint operation and `snapshot_not_found` from a snapshot operation, so an ID doesn't reveal a pin of another owner.
+An operation that reads, forks, or extends through a pin ID serves user pins only. An ID with no pin, an ID of a fork pin, and an ID of an expired user pin all return `snapshot_not_found`.
 
-A read through a pin takes the manifest number from the ID, confirms that the pin exists and has the right owner, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. Reads follow the owner rules in [Records and owners](#81-records-and-owners), and extending a snapshot also requires that the snapshot hasn't expired.
+A read through a user pin takes the manifest number from the ID, confirms that the pin exists, is a user pin, and hasn't expired, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. The expiry check uses the reader's own clock.
 
-Explicit deletion looks up the pin the same way and deletes it. Deleting it again returns not found. Fork pins can't be deleted explicitly. [Reference roots](#112-reference-roots) defines which pins protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
+Explicit deletion looks up the pin and deletes a user pin. Deleting an ID with no pin succeeds without a write, so a retried deletion returns the same result as the first one. Fork pins can't be deleted explicitly, and their IDs return `snapshot_not_found`. [Reference roots](#112-reference-roots) defines which pins protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
 
-### 8.4 Extending a snapshot
+### 8.4 Extending a pin
 
-An unexpired snapshot's expiry time can be extended by compare-and-swap. The manifest reference, the identity, and the owner don't change. An extension can't recreate a deleted pin, or make an expired snapshot usable again. The API specification defines the duration and request limits.
+An unexpired user pin's expiry time can be moved later by compare-and-swap. The manifest reference, the identity, and the owner don't change. An extension never moves the expiry earlier, so extending a user pin without an expiry leaves it unchanged. An extension can't recreate a deleted pin, or make an expired pin readable again.
 
-Each renewal attempt checks the expiry after it loads the pin, using the request clock plus the monotonic time elapsed across the whole extension call. If the snapshot expires while a compare-and-swap that already started is in progress, a successful extension still stands.
+Each extension attempt checks the expiry after it loads the pin, using the request clock plus the monotonic time elapsed across the whole extension call. If the pin expires while a compare-and-swap that already started is in progress, a successful extension still stands.
 
 ## 9. Namespace lifecycle and forks
 
@@ -1098,7 +1099,7 @@ If two processes create the same namespace at the same time, the one whose manif
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from a live snapshot (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
+1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
 3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and naming mode. The inherited runs determine the same base sequence. Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
@@ -1352,11 +1353,11 @@ The publication protocol depends on one assumption that the implementation can't
 
 Two budget checks make this true. The check before a put stops a stale observation from being used, and the check after a put turns a late success into an unknown outcome, so every acknowledged put was applied within its budget. The same two checks cover the epoch claim and other manifest puts (under `METADATA_PUBLICATION_BUDGET_MS`), and the fence and data puts (under `WAL_PUBLISH_BUDGET_MS`). ([Alternatives considered](#13-alternatives-considered) explains why the format doesn't keep a record of used numbers instead.)
 
-Direct expiry checks don't add the grace to the requested lifetime. A host whose clock is `E` milliseconds ahead can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. The reclamation grace protects concurrent publication, and it doesn't synchronize expiry decisions across hosts.
+Direct expiry checks don't add the grace to the requested lifetime. A host whose clock is `E` milliseconds ahead can reject an expired upload or user pin up to `E` milliseconds earlier than the creating host would. The reclamation grace protects concurrent publication, and it doesn't synchronize expiry decisions across hosts.
 
 ### 11.5 Publication during collection
 
-A new pin from the current head is acknowledged only after LoonFS checks its manifest's identity again, after the pin write. This closes the race between garbage collection's read of the current manifest and its complete pin listing (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). A snapshot fork is protected by the snapshot pin, or by the new fork pin written before the snapshot is checked again.
+A new pin from the current head is acknowledged only after LoonFS checks its manifest's identity again, after the pin write. This closes the race between garbage collection's read of the current manifest and its complete pin listing (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). A fork of a user pin is protected by the user pin, or by the new fork pin written before the user pin is checked again.
 
 A collector protects every WAL number above its captured folded boundary. Writers MUST observe a cached tip within the publication budget before they try to write its successor, by discovery or by the confirmation in [Publication and group commit](#63-publication-and-group-commit). So a writer can't treat a much later WAL number, whose object was deleted, as a free slot.
 
@@ -1407,7 +1408,7 @@ Every token issue checks the original completion time, so a retained receipt can
 
 ### 11.7 Pin cleanup
 
-User and snapshot pins become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user pin with no expiry stays in an active namespace until it's explicitly deleted. A retained user or snapshot pin reports the earlier of those times in `next_reclamation_at_ms`. Pins are deleted directly, and pin IDs are never reused.
+User pins become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user pin with no expiry stays in an active namespace until it's explicitly deleted. A retained user pin reports the earlier of those times in `next_reclamation_at_ms`. Pins are deleted directly, and pin IDs are never reused.
 
 A fork pin is cleaned up based on its target namespace:
 
@@ -2183,7 +2184,7 @@ Grep discovery works like core discovery:
 1. Load the hinted manifest, and probe the following numbers until one returns not found. A missing hint, or a missing manifest 1, means grep isn't enabled. A missing higher hinted manifest is corruption.
 2. After any not-found result, read the hint again, because garbage collection might have deleted manifests below a newer hint. Start again from that hint when it points to a later manifest, or when its answer arrives `READ_REVALIDATION_BOUND_MS` or more after a time read before discovery loaded the hint it started from.
 
-A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a newly pinned checkpoint. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
+A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a new user pin. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
 
 A query validates a cached manifest with a HEAD request for its successor:
 
@@ -2199,7 +2200,7 @@ A step writes segments first, and then it publishes the next manifest with put-i
 
 - If that manifest has an identical payload and the publication budget hasn't expired, the publication succeeded.
 - If it has another payload, the publisher lost, and it reloads and plans its next step from the current state.
-- If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill checkpoint that the step pinned, because the put might still succeed and refer to it.
+- If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill's user pin that the step created, because the put might still succeed and refer to it.
 
 A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
 
@@ -2211,13 +2212,13 @@ The manifest's `status` contains the position fields for its lifecycle state:
 
 | Kind | Status fields |
 | --- | --- |
-| `backfilling` | `captured_seq`, `checkpoint_id`, optional `cursor_inode_id` |
+| `backfilling` | `captured_seq`, `checkpoint_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
 | `active` | `built_through_seq`, `next_event_index` |
 | `disabled` | No other status fields |
 
-Backfill's `captured_seq` is the pinned checkpoint's sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
+Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
-The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
+The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
 
 Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
 

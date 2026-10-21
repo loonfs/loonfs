@@ -227,19 +227,6 @@ pub struct ServerConfig {
     /// `download.service_proxied.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
-    /// Largest `ttl_ms` accepted by snapshot create and extend requests.
-    /// Advertised as the `snapshot.max_ttl_ms` capability limit.
-    #[serde(default = "default_snapshot_max_ttl_ms")]
-    pub snapshot_max_ttl_ms: u64,
-    /// Largest snapshot lifetime measured from its creation time. Extensions
-    /// cannot pass this ceiling. Advertised as the
-    /// `snapshot.max_age_ms` capability limit.
-    #[serde(default = "default_snapshot_max_age_ms")]
-    pub snapshot_max_age_ms: u64,
-    /// Maximum live snapshots per namespace. Advertised as
-    /// the `snapshot.max_live_per_namespace` capability limit.
-    #[serde(default = "default_snapshot_max_live_per_namespace")]
-    pub snapshot_max_live_per_namespace: NonZeroUsize,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap answer `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
@@ -398,19 +385,6 @@ fn default_max_upload_bytes() -> u64 {
 
 fn default_max_download_bytes() -> u64 {
     loonfs::DEFAULT_MAX_READ_CONTENT_BYTES
-}
-
-fn default_snapshot_max_ttl_ms() -> u64 {
-    loonfs::SnapshotPolicy::default().max_ttl_ms
-}
-
-fn default_snapshot_max_age_ms() -> u64 {
-    loonfs::SnapshotPolicy::default().max_age_ms
-}
-
-fn default_snapshot_max_live_per_namespace() -> NonZeroUsize {
-    NonZeroUsize::new(loonfs::SnapshotPolicy::default().max_live_per_namespace)
-        .expect("the default live snapshot limit should be nonzero")
 }
 
 fn default_max_in_flight_requests() -> NonZeroUsize {
@@ -657,8 +631,6 @@ impl ServerConfig {
             ("request_deadline_ms", self.request_deadline_ms),
             ("shutdown_deadline_ms", self.shutdown_deadline_ms),
             ("max_download_bytes", self.max_download_bytes),
-            ("snapshot_max_ttl_ms", self.snapshot_max_ttl_ms),
-            ("snapshot_max_age_ms", self.snapshot_max_age_ms),
             (
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes
@@ -693,12 +665,6 @@ impl ServerConfig {
                     ),
                 }));
             }
-        }
-        if self.snapshot_max_ttl_ms > self.snapshot_max_age_ms {
-            return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
-                field: "snapshot_max_ttl_ms",
-                reason: "must not exceed `snapshot_max_age_ms`".to_owned(),
-            }));
         }
         for (field, value) in [
             ("tick_interval_ms", self.tick_interval_ms),
@@ -2125,7 +2091,6 @@ root = "/tmp/loonfs-server"
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",
-            "snapshot_max_live_per_namespace",
         ] {
             let path = write_config(&format!(
                 r#"

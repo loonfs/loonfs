@@ -103,7 +103,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         let counter: DeletedCounter = match decision {
             PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
             PinSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
-            PinSweep::DeleteSnapshot => |report| &mut report.deleted_checkpoints_by_owner.snapshot,
             PinSweep::Gone => return Ok(Decision::Gone),
             PinSweep::Retain { reclaimable_at_ms } => {
                 return Ok(self.retain(RetainedReason::CheckpointNotDeletable, reclaimable_at_ms));

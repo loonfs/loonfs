@@ -627,7 +627,7 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
 
     raw_store.reset();
@@ -664,9 +664,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     )
     .await
     .expect("put file");
-    fs.create_checkpoint(&namespace_id)
-        .await
-        .expect("checkpoint");
+    fs.create_snapshot(&namespace_id).await.expect("checkpoint");
 
     let heads = read_heads(&recorder);
     let (stat, list) = tokio::join!(
@@ -699,7 +697,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
     block_on(fs.writer.drain()).expect("finish hints");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -856,7 +854,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-    fs.create_checkpoint_blocking(&namespace_id)
+    fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
     // A write after the checkpoint moves the head, so the reads below
     // resolve against the published manifest and touch its segments.

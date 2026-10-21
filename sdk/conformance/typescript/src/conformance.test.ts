@@ -163,6 +163,7 @@ interface SnapshotsRequest {
     directory: string;
     actor_id: LoonFS.ActorId;
     snapshot_name: string;
+    unexpiring_snapshot_name: string;
     replaced_file_name: string;
     deleted_file_name: string;
     added_file_name: string;
@@ -511,6 +512,7 @@ const SNAPSHOTS_REQUEST_FIELDS = [
     "directory",
     "actor_id",
     "snapshot_name",
+    "unexpiring_snapshot_name",
     "replaced_file_name",
     "deleted_file_name",
     "added_file_name",
@@ -2172,6 +2174,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(snapshot.namespace_id, namespaceId);
     assert.equal(snapshot.name, request.snapshot_name);
     assert.equal(snapshot.captured_seq, expected.snapshot_head_seq);
+    assert.ok(snapshot.expires_at_ms !== undefined);
     assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
 
     await client.files.upload(
@@ -2266,6 +2269,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(extended.snapshot_id, snapshot.snapshot_id);
     assert.equal(extended.captured_seq, expected.snapshot_head_seq);
     assert.equal(extended.name, request.snapshot_name);
+    assert.ok(extended.expires_at_ms !== undefined);
     assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
 
     const retrieved = await client.snapshots.retrieve({
@@ -2295,12 +2299,8 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const firstDelete = await client.snapshots.delete(deleteRequest);
     assert.equal(firstDelete.namespace_id, namespaceId);
     assert.equal(firstDelete.snapshot_id, snapshot.snapshot_id);
-    await assert.rejects(client.snapshots.delete(deleteRequest), (error: unknown) => {
-        assert.ok(error instanceof LoonFS.NotFoundError);
-        assert.equal(error.statusCode, expected.snapshot_not_found.status);
-        assert.equal(error.body.code, expected.snapshot_not_found.code);
-        return true;
-    });
+    const secondDelete = await client.snapshots.delete(deleteRequest);
+    assert.deepEqual(secondDelete, firstDelete);
 
     await assert.rejects(
         client.files.retrieve({
@@ -2369,6 +2369,24 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             return true;
         },
     );
+
+    const unexpiring = await client.snapshots.create({
+        namespace_id: namespaceId,
+        name: request.unexpiring_snapshot_name,
+    });
+    assert.equal(unexpiring.name, request.unexpiring_snapshot_name);
+    assert.equal(unexpiring.expires_at_ms, undefined);
+    const unexpiringExtended = await client.snapshots.extend({
+        namespace_id: namespaceId,
+        snapshot_id: unexpiring.snapshot_id,
+        ttl_ms: request.extend_ttl_ms,
+    });
+    assert.deepEqual(unexpiringExtended, unexpiring);
+    const unexpiringDeleted = await client.snapshots.delete({
+        namespace_id: namespaceId,
+        snapshot_id: unexpiring.snapshot_id,
+    });
+    assert.equal(unexpiringDeleted.snapshot_id, unexpiring.snapshot_id);
 });
 
 test("proxy requires an authorize function", () => {

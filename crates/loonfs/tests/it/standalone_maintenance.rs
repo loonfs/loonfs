@@ -2,7 +2,7 @@
 //! namespace.
 
 use loonfs::{
-    CreateCheckpointOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore, WalFoldStepOutcome,
+    CreateSnapshotOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore, WalFoldStepOutcome,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -136,23 +136,24 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .await
         .expect("system maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("system"));
-    let future = LoonFs::builder_with_store(store.clone())
+    let future_runtime = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("future"))
         .wall_clock(clock.clone())
         .build()
         .await
-        .expect("future maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("future"));
-    let checkpoint = future
-        .create_checkpoint_with_options(
-            &namespace_id,
+        .expect("future maintenance");
+    let future = future_runtime.maintenance(loonfs_test_support::ids::writer_id("future"));
+    let checkpoint = future_runtime
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .create_snapshot(
             "pinned",
-            &CreateCheckpointOptions {
+            &CreateSnapshotOptions {
                 ttl_ms: Some(1_000),
             },
         )
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     assert_eq!(checkpoint.created_at_ms, clock.now_ms());
     assert_eq!(checkpoint.expires_at_ms, Some(clock.now_ms() + 1_000));
     let derived = writer.maintenance(loonfs_test_support::ids::writer_id("derived"));

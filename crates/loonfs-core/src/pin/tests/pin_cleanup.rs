@@ -8,9 +8,9 @@ use loonfs_types::format::control::PinOwner;
 #[tokio::test]
 async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup() {
     for owner in [
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "abandoned".to_owned(),
-            expires_at_ms: 2_000,
+            expires_at_ms: Some(2_000),
         },
         PinOwner::Fork {
             target_namespace_id: NamespaceId::parse("never-published").expect("target"),
@@ -112,7 +112,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         .await
         .expect("reap abandoned pin once owner rules permit deletion");
         assert_eq!(
-            collected.deleted_checkpoints_by_owner.snapshot
+            collected.deleted_checkpoints_by_owner.user
                 + collected.deleted_checkpoints_by_owner.fork,
             1
         );

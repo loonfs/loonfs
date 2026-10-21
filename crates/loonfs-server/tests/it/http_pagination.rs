@@ -7,9 +7,8 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    api::v0::FilesystemChange, ChangeSeq, CommitId, CreateCheckpointRequest, DestinationBehavior,
-    ErrorCode, ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
-    DEFAULT_MAX_PAGE_LIMIT,
+    api::v0::FilesystemChange, ChangeSeq, CommitId, DestinationBehavior, ErrorCode, ErrorResponse,
+    ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo, DEFAULT_MAX_PAGE_LIMIT,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -56,16 +55,10 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         expected_ids.push(
             harness
                 .client
-                .create_checkpoint(
-                    &demo,
-                    &CreateCheckpointRequest {
-                        name: format!("pin-{index}"),
-                        ttl_ms: None,
-                    },
-                )
+                .create_snapshot(&demo, &format!("pin-{index}"), None)
                 .await
                 .expect("create checkpoint")
-                .checkpoint_id,
+                .snapshot_id,
         );
     }
     expected_ids.sort();

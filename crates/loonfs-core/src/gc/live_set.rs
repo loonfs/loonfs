@@ -236,7 +236,6 @@ impl LiveSet {
                     }
                     super::reap::PinSweep::Gone
                     | super::reap::PinSweep::DeleteUser
-                    | super::reap::PinSweep::DeleteSnapshot
                     | super::reap::PinSweep::DeleteFork => {}
                 }
             }

@@ -808,9 +808,6 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         shutdown_deadline_ms: 600_000,
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
-        snapshot_max_ttl_ms: 86_400_000,
-        snapshot_max_age_ms: 604_800_000,
-        snapshot_max_live_per_namespace: const { std::num::NonZeroUsize::new(16).unwrap() },
         max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
         max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
         max_concurrent_uploads: const { std::num::NonZeroUsize::new(2).unwrap() },
@@ -1031,16 +1028,15 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build reader");
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(actor));
+        .expect("build writer");
     GrepWorker::new(
         store.clone(),
         reader,
-        maintenance,
+        writer,
         loonfs_grep::GrepStepBudget::default(),
     )
 }

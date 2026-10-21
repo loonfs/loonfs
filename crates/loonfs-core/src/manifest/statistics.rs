@@ -61,15 +61,15 @@ pub async fn load_namespace_statistics<S: ObjectStore + ?Sized>(
 }
 
 /// Reads the exact manifest a pin of any owner references. Later namespace
-/// activity is excluded. A missing pin returns `checkpoint_not_found`.
+/// activity is excluded. A missing pin returns `snapshot_not_found`.
 pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> Result<NamespaceStatistics> {
     let Some(loaded) = load_pin(store, namespace_id, checkpoint_id).await? else {
-        return Err(CoreError::CheckpointNotFound {
-            checkpoint_id: checkpoint_id.clone(),
+        return Err(CoreError::SnapshotNotFound {
+            snapshot_id: checkpoint_id.clone(),
         });
     };
     let pinned = load_pin_basis(store, None, loaded.state).await?;

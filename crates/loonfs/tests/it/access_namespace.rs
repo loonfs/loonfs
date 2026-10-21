@@ -1,7 +1,7 @@
 //! Namespace administration and recovery under ACL access.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, LoonFs, SnapshotPolicy, Writable};
+use loonfs::{CreateNamespaceOptions, CreateSnapshotOptions, LoonFs, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::api::v0::FilesystemChange;
@@ -116,17 +116,26 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .stat("/")
         .await
         .expect("inherited member grant");
-    let now_ms = loonfs_core::time::current_time_ms();
     assert_eq!(
         member_namespace_writer
-            .create_snapshot("snapshot", now_ms + 60_000, &SnapshotPolicy::default())
+            .create_snapshot(
+                "snapshot",
+                &CreateSnapshotOptions {
+                    ttl_ms: Some(60_000),
+                },
+            )
             .await
             .expect_err("member snapshot")
             .code(),
         ErrorCode::Forbidden
     );
     let snapshot = root_namespace_writer
-        .create_snapshot("snapshot", now_ms + 60_000, &SnapshotPolicy::default())
+        .create_snapshot(
+            "snapshot",
+            &CreateSnapshotOptions {
+                ttl_ms: Some(60_000),
+            },
+        )
         .await
         .expect("root snapshot");
     assert_eq!(
@@ -327,9 +336,13 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         create_namespace_with(|builder| builder.manifest_revalidation_interval_ms(0)).await;
     let root = writer.with_subject(subject("root", "prn_root"));
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
-    let now_ms = loonfs_core::time::current_time_ms();
     let snapshot = namespace_writer
-        .create_snapshot("protected", now_ms + 60_000, &SnapshotPolicy::default())
+        .create_snapshot(
+            "protected",
+            &CreateSnapshotOptions {
+                ttl_ms: Some(60_000),
+            },
+        )
         .await
         .expect("create snapshot");
     let snapshot_id = snapshot.snapshot_id;
@@ -455,8 +468,9 @@ async fn snapshot_after_administrator_change() -> (
     let snapshot = namespace_writer
         .create_snapshot(
             "old-admin",
-            loonfs_core::time::current_time_ms() + 60_000,
-            &SnapshotPolicy::default(),
+            &CreateSnapshotOptions {
+                ttl_ms: Some(60_000),
+            },
         )
         .await
         .expect("snapshot");

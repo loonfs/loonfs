@@ -13,9 +13,8 @@ use loonfs_types::RetainedReason;
 pub(super) enum PinSweep {
     DeleteFork,
     DeleteUser,
-    DeleteSnapshot,
     Gone,
-    /// Kept; a user or snapshot pin says when it becomes deletable.
+    /// Kept. `reclaimable_at_ms` is when a user pin becomes deletable.
     Retain {
         reclaimable_at_ms: Option<u64>,
     },
@@ -35,7 +34,6 @@ pub(super) async fn sweep_pin<S: ObjectStore + ?Sized>(
     };
     let deletion = match &record.owner {
         PinOwner::User { .. } => PinSweep::DeleteUser,
-        PinOwner::Snapshot { .. } => PinSweep::DeleteSnapshot,
         PinOwner::Fork {
             target_namespace_id,
         } => {

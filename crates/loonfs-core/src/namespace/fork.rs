@@ -7,8 +7,8 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::create_manifest;
 use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy};
-use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
-use crate::pin::{classify_live_snapshot, create_pin};
+use crate::pin::record::{delete_failed_pin, load_user_pin, write_pin};
+use crate::pin::{create_pin, ensure_unexpired};
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
@@ -147,7 +147,7 @@ async fn create_snapshot_fork_pin<S: ObjectStore + ?Sized>(
     Ok(record)
 }
 
-/// Loads a live snapshot of a live source namespace.
+/// Loads an unexpired snapshot of a live source namespace.
 async fn load_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
@@ -164,14 +164,8 @@ async fn load_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     .map_err(CoreError::ControlObjectLoad)?
     .read_state;
     crate::namespace::control::ensure_namespace_live(&source_head)?;
-    let snapshot = load_owned_pin(
-        store,
-        source_namespace_id,
-        snapshot_id,
-        PinOwnerKind::Snapshot,
-    )
-    .await?;
-    Ok(classify_live_snapshot(snapshot, context.now_at(deadline))?.state)
+    let snapshot = load_user_pin(store, source_namespace_id, snapshot_id).await?;
+    Ok(ensure_unexpired(snapshot, context.now_at(deadline))?.state)
 }
 
 pub(crate) async fn target_retains_pin<S: ObjectStore + ?Sized>(

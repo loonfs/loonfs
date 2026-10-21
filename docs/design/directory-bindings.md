@@ -25,7 +25,7 @@ Key order isn't position order, because a slot's rows sort by child first, and a
 
 LoonFS checks two rules when it validates a commit: a slot has at most one child, and a child has at most one parent. A commit fails validation if it binds into a slot that already has another child, or binds a child that already has a binding, unless the same operation unbinds that binding first. A move unbinds the old slot before it binds the new one, and an undelete binds a deletion root, which has no binding. So the two indexes agree at every readable sequence.
 
-A path lookup reads the slot index once for each path component. A listing scans the parent's binding prefix, selects one visible value for each name, and includes the entries that are bound. Inode visibility and covering subtree tombstones also apply. Neither operation joins bindings with a separate family of removals. Snapshots and checkpoints read through their pinned manifests, at their captured sequences.
+A path lookup reads the slot index once for each path component. A listing scans the parent's binding prefix, selects one visible value for each name, and includes the entries that are bound. Inode visibility and covering subtree tombstones also apply. Neither operation joins bindings with a separate family of removals. Snapshots read through their pinned manifests, at their captured sequences.
 
 ## Retention
 

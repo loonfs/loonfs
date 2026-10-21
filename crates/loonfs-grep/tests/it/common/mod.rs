@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore};
+use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
@@ -23,6 +23,8 @@ use std::sync::Arc;
 pub(crate) struct GrepHost {
     pub(crate) store: SharedObjectStore,
     pub(crate) reader: LoonFs<ReadOnly>,
+    /// The runtime that creates and deletes the worker's backfill snapshots.
+    pub(crate) writer: LoonFs<Writable>,
     pub(crate) maintenance: Maintenance,
     pub(crate) service: GrepService,
     pub(crate) worker: GrepWorker<SharedObjectStore>,
@@ -44,26 +46,27 @@ impl GrepHost {
             .build()
             .await
             .expect("build reader");
-        let maintenance = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id(actor))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(actor));
+            .expect("build maintenance");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
         let block_cache = Arc::new(GrepBlockCache::new(
             loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
         Self {
             store: store.clone(),
             reader: reader.clone(),
-            maintenance: maintenance.clone(),
+            maintenance,
             service: GrepService::new(Arc::clone(&block_cache), reader.monotonic_timer()),
             worker: GrepWorker::new(
                 store.clone(),
                 reader,
-                maintenance,
+                writer.clone(),
                 GrepStepBudget::default(),
             ),
+            writer,
             block_cache,
         }
     }

@@ -120,10 +120,7 @@ error_codes! {
     NamespaceNotFound => "namespace_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
-    CheckpointNotFound => "checkpoint_not_found",
     SnapshotNotFound => "snapshot_not_found",
-    SnapshotGone => "snapshot_gone",
-    SnapshotQuotaExceeded => "snapshot_quota_exceeded",
     ContentNotPrepared => "content_not_prepared",
     PathNotFound => "path_not_found",
     InodeNotFound => "inode_not_found",
@@ -181,7 +178,6 @@ impl ErrorCode {
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
-            | ErrorCode::CheckpointNotFound
             | ErrorCode::SnapshotNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::InodeNotFound
@@ -189,7 +185,7 @@ impl ErrorCode {
             | ErrorCode::UploadNotFound
             | ErrorCode::RouteNotFound => ErrorKind::NotFound,
             ErrorCode::MethodNotAllowed => ErrorKind::MethodNotAllowed,
-            ErrorCode::NamespaceDeleted | ErrorCode::SnapshotGone => ErrorKind::Gone,
+            ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             ErrorCode::CommitQueueFull
@@ -230,8 +226,7 @@ impl ErrorCode {
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired
-            | ErrorCode::SnapshotQuotaExceeded => ErrorKind::Conflict,
+            | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
         }
     }
 
@@ -259,10 +254,7 @@ impl ErrorCode {
             | ErrorCode::NamespaceNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
-            | ErrorCode::CheckpointNotFound
             | ErrorCode::SnapshotNotFound
-            | ErrorCode::SnapshotGone
-            | ErrorCode::SnapshotQuotaExceeded
             | ErrorCode::ContentNotPrepared
             | ErrorCode::PathNotFound
             | ErrorCode::InodeNotFound

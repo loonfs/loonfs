@@ -201,7 +201,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
     .expect("namespace state");
 
     engine
-        .create_checkpoint("test-pin".to_owned(), None)
+        .create_snapshot("test-pin".to_owned(), None)
         .await
         .expect("checkpoint");
     engine

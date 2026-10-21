@@ -3,17 +3,15 @@
 use super::reads::ReadSource;
 use super::RuntimeCore;
 use crate::{Consistency, CoreError, Error, NamespaceId, Result, SharedObjectStore};
-use loonfs_core::control::{
-    load_checkpoint_read_basis, load_namespace_current_manifest, load_snapshot_read_basis,
-};
+use loonfs_core::control::{load_namespace_current_manifest, load_snapshot_read_basis};
 use loonfs_core::{
     ManifestLoadError, MetadataProjectionLoadError, NamespaceReaderEngine, RuntimeReadContext,
 };
 use tracing::Instrument;
 
-/// A read that finds a segment missing answers what a new read of `source`
-/// would. A checkpoint or snapshot that still admits roots the segment, so
-/// the original error stands as corruption.
+/// A read that finds a segment missing returns what a new read of `source`
+/// would. A snapshot that still admits a read keeps the segment, so the
+/// original error stands as corruption.
 pub(super) async fn classify_read_result<T>(
     core: &RuntimeCore,
     context: &RuntimeReadContext,
@@ -42,9 +40,6 @@ pub(super) async fn classify_read_result<T>(
                     actual_manifest_no,
                 });
             }
-        }
-        ReadSource::Checkpoint(checkpoint_id) => {
-            load_checkpoint_read_basis(store, None, &context.head, checkpoint_id).await?;
         }
         ReadSource::Snapshot(snapshot_id) => {
             let now_ms = core.now_ms();

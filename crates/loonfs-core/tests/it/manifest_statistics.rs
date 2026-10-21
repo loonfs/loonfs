@@ -219,7 +219,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .expect("write");
     let engine = namespace_engine(&store, &parent, &context);
     let snapshot = engine
-        .create_snapshot("baseline".to_owned(), u64::MAX / 2)
+        .create_snapshot("baseline".to_owned(), Some(u64::MAX / 2))
         .await
         .expect("snapshot")
         .response;
@@ -244,7 +244,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     engine.fold_wal().await.expect("fold parent");
     let layout_snapshot = engine
-        .create_snapshot("layout".to_owned(), u64::MAX / 2)
+        .create_snapshot("layout".to_owned(), Some(u64::MAX / 2))
         .await
         .expect("layout snapshot")
         .response;

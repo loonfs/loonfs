@@ -184,7 +184,7 @@
           },
           "checkpoint_id": {
             "$ref": "#/components/schemas/PinId",
-            "description": "The checkpoint's durable ID. Use it to delete the checkpoint."
+            "description": "The checkpoint's durable ID. For a user pin, it's also the snapshot's `snapshot_id`."
           },
           "created_at_ms": {
             "description": "The time the checkpoint record was created, in Unix milliseconds.",
@@ -226,7 +226,6 @@
         "discriminator": {
           "mapping": {
             "fork": "#/components/schemas/CheckpointOwnerFork",
-            "snapshot": "#/components/schemas/CheckpointOwnerSnapshot",
             "user": "#/components/schemas/CheckpointOwnerUser"
           },
           "propertyName": "kind"
@@ -237,9 +236,6 @@
           },
           {
             "$ref": "#/components/schemas/CheckpointOwnerFork"
-          },
-          {
-            "$ref": "#/components/schemas/CheckpointOwnerSnapshot"
           }
         ]
       },
@@ -263,28 +259,8 @@
         ],
         "type": "object"
       },
-      "CheckpointOwnerSnapshot": {
-        "description": "A pin that an application created as a snapshot. It's readable until it expires.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "snapshot"
-            ],
-            "type": "string"
-          },
-          "name": {
-            "description": "The snapshot's label, which doesn't need to be unique.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "kind"
-        ],
-        "type": "object"
-      },
       "CheckpointOwnerUser": {
-        "description": "A pin that an operator created. It's deleted by its ID or after it expires.",
+        "description": "A snapshot, which a caller created. It's deleted by its ID or after it expires.",
         "properties": {
           "kind": {
             "enum": [
@@ -838,26 +814,6 @@
         ],
         "type": "object"
       },
-      "CreateCheckpointRequest": {
-        "additionalProperties": false,
-        "description": "A request to create a durable checkpoint pin.",
-        "properties": {
-          "name": {
-            "description": "A label to record on the checkpoint. Labels don't need to be unique.",
-            "type": "string"
-          },
-          "ttl_ms": {
-            "description": "The checkpoint's lifetime in milliseconds. Omit it to keep the checkpoint until it's\ndeleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "type": "object"
-      },
       "CreateDownloadByInodeRequest": {
         "additionalProperties": false,
         "description": "The options for downloading a file inode's current revision.",
@@ -1019,15 +975,14 @@
             "type": "string"
           },
           "ttl_ms": {
-            "description": "The snapshot's lifetime in milliseconds, counted from the server's current time.",
+            "description": "The snapshot's lifetime in milliseconds, counted from the server's current time. Omit it to\nkeep the snapshot until it's deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
-          "name",
-          "ttl_ms"
+          "name"
         ],
         "type": "object"
       },
@@ -1110,24 +1065,6 @@
         ],
         "type": "object"
       },
-      "DeleteCheckpointResponse": {
-        "description": "The checkpoint record that was deleted.",
-        "properties": {
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The ID of the deleted checkpoint record."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the checkpoint belonged to."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoint_id"
-        ],
-        "type": "object"
-      },
       "DeleteDirectoryBehavior": {
         "description": "Whether a delete can remove a non-empty directory.",
         "enum": [
@@ -1181,12 +1118,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "snapshot": {
-            "description": "The snapshot pins that the pass deleted after they expired or their namespace was deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "user": {
             "description": "The user pins that the pass deleted after they expired or their namespace was deleted.",
             "format": "int64",
@@ -1196,7 +1127,6 @@
         },
         "required": [
           "user",
-          "snapshot",
           "fork"
         ],
         "type": "object"
@@ -2649,7 +2579,7 @@
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
-            "description": "A live snapshot to fork from. Without it, the fork starts from the current head."
+            "description": "An unexpired snapshot to fork from. Without it, the fork starts from the current head."
           }
         },
         "required": [
@@ -3062,7 +2992,7 @@
         "type": "object"
       },
       "ListSnapshotsResponse": {
-        "description": "One page of live snapshots.",
+        "description": "One page of snapshots, including expired snapshots that garbage collection hasn't deleted yet.",
         "properties": {
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3073,7 +3003,7 @@
             "type": "string"
           },
           "snapshots": {
-            "description": "The live snapshot records, in ascending snapshot ID order.",
+            "description": "The snapshot records, in ascending snapshot ID order.",
             "items": {
               "$ref": "#/components/schemas/Snapshot"
             },
@@ -3272,12 +3202,6 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The sequence of the namespace's newest visible commit."
           },
-          "live_checkpoints": {
-            "description": "The number of user checkpoints, including expired records that garbage collection hasn't\ndeleted yet.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "live_snapshots": {
             "description": "The number of snapshots that hadn't expired when the diagnostics read began.",
             "format": "int64",
@@ -3306,8 +3230,7 @@
           "head_seq",
           "retention_floor_seq",
           "wal_tail_objects",
-          "live_snapshots",
-          "live_checkpoints"
+          "live_snapshots"
         ],
         "type": "object"
       },
@@ -4158,7 +4081,7 @@
         "type": "object"
       },
       "Snapshot": {
-        "description": "A live snapshot.",
+        "description": "A snapshot, which keeps one version of a namespace readable until it's deleted or expires.",
         "properties": {
           "captured_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4171,7 +4094,7 @@
             "type": "integer"
           },
           "expires_at_ms": {
-            "description": "The time the snapshot expires, in Unix milliseconds.",
+            "description": "The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.\nAn expired snapshot can't be read, and it's listed until garbage collection deletes it.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4194,8 +4117,7 @@
           "namespace_id",
           "name",
           "captured_seq",
-          "created_at_ms",
-          "expires_at_ms"
+          "created_at_ms"
         ],
         "type": "object"
       },
@@ -4697,7 +4619,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints": {
       "get": {
-        "description": "Lists existing pins in checkpoint ID order. An expired pin stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
+        "description": "Lists every pin, snapshots and fork pins, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
         "operationId": "list_checkpoints",
         "parameters": [
           {
@@ -4793,198 +4715,11 @@
         ],
         "x-fern-sdk-method-name": "list",
         "x-loonfs-retry": "idempotent"
-      },
-      "post": {
-        "description": "Creates a user checkpoint record that pins the current namespace view. The server first folds any WAL tail after the current manifest. Every call creates a new record with a new ID, and the name is a label, not a key. The record keeps its manifest until the record is deleted, either explicitly or by garbage collection after the record expires and its grace window passes. Because of that, routine maintenance should fold the WAL instead of creating checkpoints. This is a maintenance operation, not a file change.",
-        "operationId": "create_checkpoint",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateCheckpointRequest"
-              }
-            }
-          },
-          "description": "Checkpoint name and optional lifetime",
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Checkpoint"
-                }
-              }
-            },
-            "description": "The created checkpoint"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace ID, name, or lifetime"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace not found"
-          },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace deleted"
-          },
-          "413": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "JSON body exceeds the 2 MiB limit"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Create checkpoint",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-retries": {
-          "disabled": true
-        },
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
-        ],
-        "x-fern-sdk-method-name": "create",
-        "x-loonfs-retry": "not_idempotent"
       }
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}": {
-      "delete": {
-        "description": "Deletes a user checkpoint pin. A missing ID returns `checkpoint_not_found`. Garbage collection can then reclaim the pin's unreferenced manifest and runs.",
-        "operationId": "delete_checkpoint",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The checkpoint ID.",
-            "in": "path",
-            "name": "checkpoint_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeleteCheckpointResponse"
-                }
-              }
-            },
-            "description": "Checkpoint pin deleted"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid ID, or the checkpoint belongs to another operation"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace or checkpoint not found"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Delete checkpoint",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-request-name": "DeleteCheckpointRequest",
-        "x-fern-retries": {
-          "disabled": true
-        },
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
-        ],
-        "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "not_idempotent"
-      },
       "get": {
-        "description": "Returns one existing pin, as the checkpoint listing returns it, including an expired pin that garbage collection hasn't deleted. A missing ID returns `checkpoint_not_found`.",
+        "description": "Returns one existing pin, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         "operationId": "get_checkpoint",
         "parameters": [
           {
@@ -6178,7 +5913,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/content": {
       "get": {
-        "description": "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
+        "description": "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot.",
         "operationId": "get_file_content",
         "parameters": [
           {
@@ -6439,7 +6174,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/entries": {
       "get": {
-        "description": "Lists a directory from the current state or a live snapshot.",
+        "description": "Lists a directory from the current state or an unexpired snapshot.",
         "operationId": "list_path_entries",
         "parameters": [
           {
@@ -6612,7 +6347,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/entry": {
       "get": {
-        "description": "Returns path metadata from the current state or a live snapshot.",
+        "description": "Returns path metadata from the current state or an unexpired snapshot.",
         "operationId": "get_path_entry",
         "parameters": [
           {
@@ -6975,7 +6710,7 @@
     },
     "/v0/namespaces/{namespace_id}/forks": {
       "post": {
-        "description": "Creates a new namespace from the source namespace's current head or from a live snapshot.",
+        "description": "Creates a new namespace from the source namespace's current head or from an unexpired snapshot.",
         "operationId": "fork_namespace",
         "parameters": [
           {
@@ -7037,7 +6772,7 @@
                 }
               }
             },
-            "description": "Source namespace or snapshot not found"
+            "description": "Source namespace not found, or the snapshot is missing or expired"
           },
           "409": {
             "content": {
@@ -7057,7 +6792,7 @@
                 }
               }
             },
-            "description": "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`), or the snapshot is gone"
+            "description": "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`)"
           },
           "413": {
             "content": {
@@ -7278,7 +7013,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}": {
       "get": {
-        "description": "Returns the path entry for a visible inode, from the current state or a live snapshot. An unknown or hidden inode returns `inode_not_found`.",
+        "description": "Returns the path entry for a visible inode, from the current state or an unexpired snapshot. An unknown or hidden inode returns `inode_not_found`.",
         "operationId": "get_inode",
         "parameters": [
           {
@@ -7416,7 +7151,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children": {
       "get": {
-        "description": "Lists one page of a directory's children, in canonical name key order, from the current state or a live snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
+        "description": "Lists one page of a directory's children, in canonical name key order, from the current state or an unexpired snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
         "operationId": "list_inode_children",
         "parameters": [
           {
@@ -7601,7 +7336,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content": {
       "get": {
-        "description": "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that a live snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
+        "description": "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
         "operationId": "get_file_content_by_inode",
         "parameters": [
           {
@@ -7754,7 +7489,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         "operationId": "create_download_by_inode",
         "parameters": [
           {
@@ -8310,7 +8045,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists live snapshots in snapshot ID order. The list leaves out deleted and expired snapshots.",
+        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork pins, which the maintenance checkpoint inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -8354,7 +8089,7 @@
                 }
               }
             },
-            "description": "Live snapshots"
+            "description": "Snapshots"
           },
           "400": {
             "content": {
@@ -8407,7 +8142,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a snapshot of the current namespace state. Every accepted call creates a new snapshot.",
+        "description": "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until it's deleted, either explicitly or by garbage collection after it expires and its grace window passes.",
         "operationId": "create_snapshot",
         "parameters": [
           {
@@ -8471,16 +8206,6 @@
             },
             "description": "Namespace not found"
           },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Snapshot quota exceeded"
-          },
           "410": {
             "content": {
               "application/json": {
@@ -8521,7 +8246,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "delete": {
-        "description": "Deletes a snapshot pin. A missing ID returns `snapshot_not_found`.",
+        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork pin returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         "operationId": "delete_snapshot",
         "parameters": [
           {
@@ -8552,7 +8277,7 @@
                 }
               }
             },
-            "description": "Snapshot record deleted"
+            "description": "Snapshot deleted, or already absent"
           },
           "400": {
             "content": {
@@ -8562,7 +8287,7 @@
                 }
               }
             },
-            "description": "Invalid ID or non-snapshot record"
+            "description": "Invalid namespace or snapshot ID"
           },
           "401": {
             "content": {
@@ -8582,7 +8307,7 @@
                 }
               }
             },
-            "description": "Snapshot not found"
+            "description": "Namespace not found, or the ID belongs to a fork pin"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8593,17 +8318,14 @@
           "namespaces"
         ],
         "x-fern-request-name": "DeleteSnapshotRequest",
-        "x-fern-retries": {
-          "disabled": true
-        },
         "x-fern-sdk-group-name": [
           "snapshots"
         ],
         "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one live snapshot, as the snapshot listing returns it. A missing ID, or the ID of a pin that isn't a snapshot, returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.",
         "operationId": "get_snapshot",
         "parameters": [
           {
@@ -8634,7 +8356,7 @@
                 }
               }
             },
-            "description": "Live snapshot"
+            "description": "Snapshot"
           },
           "400": {
             "content": {
@@ -8666,16 +8388,6 @@
             },
             "description": "Namespace or snapshot not found"
           },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Snapshot expired"
-          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }
@@ -8694,7 +8406,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {
       "post": {
-        "description": "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
+        "description": "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
         "operationId": "extend_snapshot",
         "parameters": [
           {
@@ -8765,17 +8477,7 @@
                 }
               }
             },
-            "description": "Snapshot not found"
-          },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Snapshot expired"
+            "description": "Snapshot not found or expired"
           },
           "413": {
             "content": {

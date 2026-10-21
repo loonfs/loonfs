@@ -33,15 +33,15 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
                 basis.pin_id.manifest_no().0
             ))
             .expect("pin id"),
-            owner: PinOwner::Snapshot {
+            owner: PinOwner::User {
                 name: "expired".to_owned(),
-                expires_at_ms: 2_000,
+                expires_at_ms: Some(2_000),
             },
             ..basis.clone()
         };
         crate::pin::record::write_pin(&store, &record)
             .await
-            .expect("snapshot pin");
+            .expect("expired pin");
     }
     let session = UploadSessionPayload {
         namespace_id: namespace_id.clone(),
@@ -83,7 +83,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     .await
     .expect("complete pass");
     assert_eq!(report.deleted.upload_sessions, 1);
-    assert_eq!(report.deleted_checkpoints_by_owner.snapshot, 1025);
+    assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
     assert_eq!(store.counts().deletes, 1027);
     let operations = store.take();

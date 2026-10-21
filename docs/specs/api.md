@@ -19,7 +19,7 @@ An "API group" is a coherent area of responsibility with its own set of endpoint
 | API group | Operations | Status |
 | --- | --- | --- |
 | `filesystem/v0` | Path and inode reads, path and inode mutations, uploads, namespace lifecycle, snapshots, the change feed, namespace state, capability discovery, and standard errors. Inline commit content and direct transfers are features. | Mandatory for any conforming deployment |
-| `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance (as a feature). | Optional |
+| `maintenance/v0` | Namespace diagnostics, the checkpoint inventory, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance (as a feature). | Optional |
 | `query/v0` | Content search over derived indexes, as the `query.grep` feature. | Optional |
 
 API groups are client contracts, and they don't describe node roles or deployment topology.
@@ -112,9 +112,6 @@ Registered limit keys:
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the direct transfer capability lifetime, rather than tuned. |
-| `snapshot.max_ttl_ms` | The largest `ttl_ms` that snapshot create and extend requests accept. A larger value returns `invalid_request`. |
-| `snapshot.max_age_ms` | The longest snapshot lifetime, measured from the time the snapshot record was created. Extending a snapshot never moves its expiry past this limit. |
-| `snapshot.max_live_per_namespace` | The largest number of live, unexpired snapshots that one namespace can have. Creating a snapshot past this limit returns `snapshot_quota_exceeded`. |
 | `query.grep.default_limit` | The number of matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | The largest grep page limit accepted. An invalid limit is rejected with `invalid_request`. These query keys identify the operation's contract, even though grep uses the same values as standard pagination. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
@@ -223,19 +220,16 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `checkpoint_not_found` | 404 | The checkpoint ID doesn't identify a user checkpoint. Either no pin exists under it, or the pin belongs to a snapshot or a fork. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot. Either no pin exists under it, or the pin belongs to a user checkpoint or a fork. Refresh state or choose another snapshot. |
-| `snapshot_gone` | 410 | The snapshot exists and has expired. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no pin exists under it, the pin is a fork pin, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no pin. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session exists with this ID. The server also returns this code for an aborted session, and for an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither session will ever select content, so the server reports each one as missing, as it will once the session is deleted. |
 | `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID). |
-| `snapshot_quota_exceeded` | 409 | Creating the snapshot would exceed the namespace's live-snapshot limit. Delete a snapshot or wait for one to expire. |
 | `content_not_prepared` | 409 | A path put or an explicit create or replace operation references external content without a matching admission, or it includes a relevant token that was rejected. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children, and the operation isn't recursive. |
-| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` doesn't match the head. Retry against fresh state. A read also returns this code when its manifest's segments were garbage collected and a newer manifest exists. Read again against current state. A read at a snapshot or checkpoint that finds a segment missing returns what a new read of its pin would return: `snapshot_not_found` or `checkpoint_not_found` when the pin was deleted during the read, `snapshot_gone` when it expired, and `namespace_corrupt` when the pin still exists. |
+| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` doesn't match the head. Retry against fresh state. A read also returns this code when its manifest's segments were garbage collected and a newer manifest exists. Read again against current state. A read at a snapshot that finds a segment missing returns what a new read of the snapshot would return: `snapshot_not_found` when the snapshot was deleted or expired during the read, and `namespace_corrupt` when it can still be read. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision changed while the update was being decided. Two cases return this code: a caller-supplied expected attribute revision that's no longer current, and the revision precondition that every attribute update includes even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision changed while the update was being decided. Re-read the access row and retry. |
@@ -248,7 +242,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't select other content and can't be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload ID, or another staging request has the session's staging claim (one still in flight, one that was cancelled, or one whose write might still take effect). Open a new session. |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index can't narrow the candidates. Rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | A change feed's `after_seq` is below the retention floor, so the feed no longer contains the changes after it. Rebuild state from a fresh listing or checkpoint. |
+| `rebootstrap_required` | 409 | A change feed's `after_seq` is below the retention floor, so the feed no longer contains the changes after it. Rebuild state from a fresh listing or snapshot. |
 | `not_supported` | 501 | The deployment doesn't implement the requested operation or feature. |
 | `commit_outcome_unknown` | 503 | The outcome of the publication wasn't observed, so the commit might or might not be visible. Retry with the same commit ID, or reconcile. |
 | `outcome_unknown` | 503 | The outcome of a write other than a commit wasn't observed, so the operation might or might not have taken effect. Read the resource before retrying. |
@@ -327,7 +321,7 @@ The runtime and the client also follow these rules:
 - A mutation takes the actor as an argument, and the remote client sends it in the `Loonfs-Actor` header. An option struct contains only optional settings and has a default, so each mutation has a plain form and a form that takes options.
 - Unsupported operations and features are typed. An individual operation returns the `not_supported` error with its `feature` name, so the gating logic (check the capability document, and fall back on `not_supported`) is the same with either backend.
 
-Generated SDKs group operations by resource, not by API group. `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` are at the client root. The `maintenance` API group keeps its prefix as a nested group, as in `maintenance.checkpoints.create`, because a hosted deployment can hide the whole API group. Methods follow these naming rules:
+Generated SDKs group operations by resource, not by API group. `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` are at the client root. The `maintenance` API group keeps its prefix as a nested group, as in `maintenance.checkpoints.list`, because a hosted deployment can hide the whole API group. Methods follow these naming rules:
 
 - A method on a group's own resource is a bare verb: `create`, `retrieve`, `list`, `delete`, or the action, as in `fork` and `grep`.
 - A method for a sub-resource of one file or inode is a verb plus a noun on the parent, as in `files.listRevisions` and `inodes.listChildren`.
@@ -656,7 +650,7 @@ GET routes identify resources, so their paths use nouns such as `entry`, `entrie
 
 `/v0/maintenance/` is the only API group prefix, and routes under it belong to the `maintenance/v0` API group. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`, which belongs to the `query/v0` group. Every other route shown in this section belongs to `filesystem/v0`.
 
-Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `delete_checkpoint`. Operation IDs are identifiers in the wire registry, and they don't determine SDK names. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, and every operation MUST appear in that table or be explicitly excluded from it.
+Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `extend_snapshot`. Operation IDs are identifiers in the wire registry, and they don't determine SDK names. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, and every operation MUST appear in that table or be explicitly excluded from it.
 
 The examples in the following sections are representative, not exhaustive. Responses might gain fields within v0, and clients MUST ignore JSON fields they don't recognize. An optional response field that has no value is left out, and it's never encoded as `null`.
 
@@ -724,18 +718,16 @@ The following table lists v0 operations, with their retry classes and representa
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`. A completed session returns a new `content_token`. |
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable, and a completed session can't be aborted) |
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
-| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Requires `name` and `ttl_ms`. |
+| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Requires `name`, and accepts `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
-| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (a missing ID returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`) |
-| Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and clamps the expiry to the lifetime ceiling. |
-| Delete a snapshot | `delete_snapshot` | `not_idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID returns `snapshot_not_found`) |
+| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
+| Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
+| Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
-| Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`. Requires `name`, and accepts `ttl_ms`. |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `checkpoint_not_found`) |
-| Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin, and a missing ID, or the ID of a snapshot or fork pin, returns `checkpoint_not_found`) |
+| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `snapshot_not_found`) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`. The body identifies one job with `kind`. |
 | Probe the store contract | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe`. The body contains the probe options, and `{}` uses the defaults. |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`. Requires the `query.grep` feature and an active index. |
@@ -757,7 +749,7 @@ The status, enable, and disable routes all return the same flat grep index objec
 | `status` | Fields | Means |
 | --- | --- | --- |
 | `disabled` | None | No index is maintained for the namespace. This is also the status of a namespace that has never enabled an index. |
-| `backfilling` | `captured_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over a pinned checkpoint is running. `captured_seq` is the namespace sequence that the checkpoint captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
+| `backfilling` | `captured_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over the files of a snapshot is running, and `checkpoint_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
 | `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except when `next_event_index` is non-zero. In that case, the rest of the commit at `built_through_seq` isn't indexed yet. |
 
 For example:
@@ -837,7 +829,7 @@ Every GC call reads the current manifest and uses one clock reading for the whol
 A GC response includes `next_reclamation_at_ms` when the pass finds any of these future times:
 
 - a deleted namespace that's still inside its retirement grace,
-- a retained user or snapshot pin with a future deletion time, or
+- a retained snapshot with a future deletion time, or
 - an upload session with a future cleanup time.
 
 Upload cleanup times include the lease plus grace, the abort grace, and the completed-content grace. The value is the earliest of those future times that the pass examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
@@ -847,7 +839,7 @@ A GC response also includes `reclaimable_at_ms` when the current manifest is del
 A GC response groups related counts:
 
 - `deleted` contains `wal_objects`, `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, `retired_content_objects`, and `temporary_objects`.
-- `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for the pins deleted in the pass. Their sum is the total number of pins deleted.
+- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the pass. `user` counts snapshots. Their sum is the total number of pins deleted.
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
 
@@ -869,59 +861,31 @@ Each pass counts the candidates that it examined and kept, not the objects in th
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 
-### Checkpoint inventory
-
-A checkpoint's name is a label, not a key. Every create call writes a new record, so several checkpoints can have the same name. Creating a checkpoint first folds any WAL tail after the current manifest, and then pins the resulting manifest.
-
-Create and list use the same checkpoint object, which contains `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For a checkpoint created through the API, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record's timestamp.
-
-A checkpoint ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the manifest that checkpoint and snapshot reads use, and every pin is assigned a new ID.
-
-For example, a create response looks like this:
-
-```json
-{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9}
-```
-
-`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing checkpoints in ascending `checkpoint_id` order, and each entry is the same checkpoint object that create returns. User checkpoints can be deleted by ID. A fork checkpoint keeps its `fork` owner, and it stays while its target namespace still reads through it.
-
-```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9}]}
-```
-
-Deleting a checkpoint removes its pin record and returns the addressed namespace and checkpoint. The success response is:
-
-```json
-{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009"}
-```
-
-A missing ID, including the ID of a checkpoint that was already deleted, returns `checkpoint_not_found`.
-
-`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing checkpoint, as the same object the listing returns for it, including an expired record that collection hasn't deleted. A missing ID returns `checkpoint_not_found`.
-
-`limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
-
-The checkpoint listing is live, not a point-in-time view. Checkpoints that are created, deleted, or collected while a client is paging can change later pages.
-
-An expired user pin stays listed and readable until GC deletes it, after its expiry plus the grace window. A user pin without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each pin owner.
-
 ### Snapshots
 
-A snapshot is a time-bounded view of a namespace. Its `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured. A create request requires `name` and `ttl_ms`, and the TTL can't exceed `snapshot.max_ttl_ms` or `snapshot.max_age_ms`.
+A "snapshot" is a pin that a caller creates to keep one version of a namespace readable (see [Pins](format.md#8-pins)). It's the only kind of pin that a caller creates and deletes. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured.
 
-An extension measures its requested TTL from the server's current time, and it never moves the expiry more than `snapshot.max_age_ms` past the record's `created_at_ms`. A namespace can have at most `snapshot.max_live_per_namespace` live snapshots.
+A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then pins the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
 
-To enforce that limit when it creates a snapshot, the server:
+Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `name`, `captured_seq`, `created_at_ms`, and an optional `expires_at_ms`. For example:
 
-1. Counts the live, unexpired snapshots. If the request passes the limit at this count, the server returns `snapshot_quota_exceeded` and writes nothing.
-2. Writes the new pin.
-3. Counts the live, unexpired snapshots again. If the request passes the limit at this count, the server deletes the pin it wrote and returns `snapshot_quota_exceeded`. If that delete fails, the pin stays until it expires, and it counts toward the limit until then.
+```json
+{"snapshot_id":"pin_00000000000000000009-0000000000000009","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
+```
 
-Two requests that race at the limit can both be refused.
+An expired snapshot can't be read, forked, or extended. Each of those requests returns `snapshot_not_found`, the same as for a deleted snapshot. The expired snapshot stays in the snapshot listing, with its past `expires_at_ms`, until garbage collection deletes it after its expiry plus the grace window, and retrieving it by ID returns it until then.
 
-The snapshot listing returns snapshot-owned pins whose lifetimes haven't expired, and it leaves out expired snapshots and pins with other owners. (The maintenance checkpoint listing, by contrast, shows expired records until collection deletes them.) Deleting a snapshot removes its pin, and a second delete returns `snapshot_not_found`.
+An extension measures its requested `ttl_ms` from the server's current time, and it moves an unexpired snapshot's expiry to that time. It never moves the expiry earlier, so extending a snapshot without an expiry returns the snapshot unchanged.
 
-`GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one live snapshot, as the same object the listing returns. A missing ID, or the ID of a pin with another owner, returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`.
+`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork pins. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.
+
+Deleting a snapshot removes its pin and returns the addressed namespace and snapshot:
+
+```json
+{"namespace_id":"demo","snapshot_id":"pin_00000000000000000009-0000000000000009"}
+```
+
+Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork pin returns `snapshot_not_found`, because only garbage collection deletes a fork pin. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
@@ -929,9 +893,33 @@ The operations above manage a snapshot's lifetime. Path stat, inode stat, path d
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
-An embedded caller can also open a read view of a checkpoint. A directory cursor from a read view of a checkpoint or snapshot identifies that pin. A read view of the same checkpoint or snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
+A directory cursor from a read view of a snapshot identifies that snapshot. A read view of the same snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
-A snapshot read requires a live snapshot. A read of a missing snapshot, including one that was deleted, returns `snapshot_not_found`. A read of an expired snapshot returns `snapshot_gone` while its pin still exists. In neither case does the read fall back to the current namespace state.
+A snapshot read requires an unexpired snapshot. A read of a missing, deleted, or expired snapshot returns `snapshot_not_found`, and the read never falls back to the current namespace state.
+
+Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes its pin later, after the grace window. Until then, the pin still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
+
+### Checkpoint inventory
+
+The checkpoint inventory lists every pin of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes snapshots, whose `owner.kind` is `user`, and fork pins, whose `owner.kind` is `fork`. The inventory has no create or delete routes. Snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork pin once its target namespace no longer reads through it.
+
+Each entry is a checkpoint object, which contains `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a snapshot, `checkpoint_id` is its `snapshot_id`, and `owner` contains its `name`.
+
+A checkpoint ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the manifest that a snapshot read uses, and every pin is assigned a new ID.
+
+`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing pins in ascending `checkpoint_id` order. For example, a namespace with one snapshot and one fork returns:
+
+```json
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-00000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+```
+
+`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing pin, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
+
+`limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
+
+The checkpoint listing is live, not a point-in-time view. Pins that are created, deleted, or collected while a client is paging can change later pages.
+
+An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each pin owner.
 
 ### Deleting, retaining, and reclaiming
 
@@ -1258,8 +1246,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
 | `wal_tail_objects` | The WAL tip minus the current manifest's folded WAL number, including fences. |
-| `live_snapshots` | The number of snapshots that hadn't expired when the diagnostics read began. |
-| `live_checkpoints` | The number of user checkpoints, including expired records that are waiting to be collected. |
+| `live_snapshots` | The number of snapshots that hadn't expired when the diagnostics read began, including snapshots without an expiry. |
 
 ```json
 {
@@ -1270,8 +1257,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
   "retention_floor_seq": 120,
   "current_manifest_no": 410,
   "wal_tail_objects": 3,
-  "live_snapshots": 2,
-  "live_checkpoints": 4
+  "live_snapshots": 2
 }
 ```
 
@@ -1300,7 +1286,7 @@ Neither the maximum staleness nor the manifest check interval can exceed `READ_R
 
 In a runtime with the namespace's writer session, a read with either setting starts from the [writer position](glossary.md#writer-position), and the session confirms the position with a HEAD for the next manifest number. An `eventual` read sends no request while the session's last check is younger than the read's maximum staleness, and after that it waits for the session's check. A `strong` read always waits for the session's check, so it sees another writer's claim before it reads. A check counts for a read only if it started after the read did. The session runs one check at a time, so a read that finds a check running waits for it and then for the next one, which every read that arrives during the first check shares, and a wave of concurrent `strong` reads costs at most two checks.
 
-A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the pin selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`, and so does a Rust read of a pinned view that sets a consistency. LoonFS confirms the live head that a pinned read finds its snapshot or checkpoint in, and the head that a read view captures, the way a `strong` read does.
+A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the pin selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`, and so does a Rust read of a pinned view that sets a consistency. LoonFS confirms the live head that a pinned read finds its snapshot in, and the head that a read view captures, the way a `strong` read does.
 
 An `eventual` read can read an older head than one that a caller learned from a fresher read, such as a `strong` read or a response from another server. An `after_seq` above the head that a change feed request reads returns `invalid_request` (see [`GET /changes`](#611-get-changes)), and so does a directory cursor issued at a newer head. So a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
 
@@ -1318,7 +1304,7 @@ Deletes a namespace. In an ACL namespace, this operation requires an administrat
 
 Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
 
-Checkpoint listing and user-checkpoint deletion are explicit exceptions, and they stay available after deletion. Releasing a fork-owned checkpoint is still rejected.
+The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork pin's ID through the snapshot route still returns `snapshot_not_found`.
 
 Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content) defines the content sweep.
 
@@ -1339,7 +1325,7 @@ A commit can succeed without its acknowledgement reaching the caller, and deleti
 - Requests admitted after the delete fail with `namespace_deleted`.
 - If the delete ends up failing its precondition, no request is rejected because of it.
 
-Why do checkpoint listing and user-checkpoint deletion still work after deletion? User pins with no expiry time have to stay discoverable and releasable after the namespace is deleted.
+Why do the checkpoint inventory and snapshot deletion still work after deletion? A snapshot without an expiry keeps its manifest until it's deleted, so it has to stay discoverable and deletable after the namespace is deleted.
 
 ### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`
 
@@ -1960,7 +1946,7 @@ Names belong to the directory, so a subject with `read` on a directory sees ever
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
-When a subject is supplied, change feed reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. Checkpoint and maintenance operations still read as the service.
+When a subject is supplied, change feed reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
 
 ### 6.9 Upload transport
 
@@ -2319,7 +2305,7 @@ The commit `limit` is an upper bound, and a page can contain fewer commits when 
 
 If either bound ends the page before the namespace head, the response includes `next_after_seq`, set to the last returned change's `committed_seq`. The client resumes with `after_seq={next_after_seq}`. Clients MUST follow `next_after_seq`, instead of counting commits, to decide whether another page remains.
 
-`after_seq` can equal the current namespace head, which returns an empty page. An `after_seq` above the head that the request reads returns `invalid_request`. The lowest `after_seq` the feed accepts is `retention_floor_seq`, and a lower `after_seq` returns `rebootstrap_required`. The client then rebuilds its state from a fresh listing or checkpoint, and follows the feed from that state's head.
+`after_seq` can equal the current namespace head, which returns an empty page. An `after_seq` above the head that the request reads returns `invalid_request`. The lowest `after_seq` the feed accepts is `retention_floor_seq`, and a lower `after_seq` returns `rebootstrap_required`. The client then rebuilds its state from a fresh listing or snapshot, and follows the feed from that state's head.
 
 ### 6.12 `POST /forks`
 
@@ -2364,10 +2350,9 @@ The `fork_basis` object identifies the captured source:
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 
-The snapshot and the source namespace have to stay live while the server verifies the fork-owned checkpoint, which it does after it writes that checkpoint. The server returns these errors:
+The snapshot has to stay unexpired, and the source namespace has to stay live, while the server verifies the fork pin, which it does after it writes that pin. The server returns these errors:
 
-- A missing snapshot (including one deleted during fork verification), or an ID owned by another namespace or another checkpoint kind, returns `snapshot_not_found`.
-- An expired snapshot returns `snapshot_gone`.
+- A missing or expired snapshot (including one that's deleted or expires during fork verification), a fork pin's ID, or an ID owned by another namespace returns `snapshot_not_found`.
 - A source deleted during fork verification returns `namespace_deleted`.
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
@@ -2375,13 +2360,13 @@ Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn'
 The new namespace reads inherited content at each reference's owner key, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
-2. Creates a fork-owned checkpoint of the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
-3. Verifies the checkpoint.
-4. Installs the target namespace with a conditional manifest write. The manifest records the source checkpoint for the target's lifetime.
+2. Creates a fork pin in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
+3. Verifies the fork pin.
+4. Installs the target namespace with a conditional manifest write. The manifest records the fork pin for the target's lifetime.
 
 The response contains the new namespace's initial state. Its head sequence and retention floor equal the captured basis sequence, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
 
-If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the source checkpoint can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
+If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
 
 ### 6.13 `GET /grep`
 
@@ -2473,7 +2458,7 @@ A conforming server MUST:
 4. Preserve `(namespace_id, inode_id)` as the canonical identity of an item, and preserve the namespace lifetime described in [Namespaces and identity](format.md#11-namespaces-and-identity).
 5. Resolve content through the reference's owner namespace and content ID.
 6. Implement tombstone-first delete.
-7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Checkpoints pin manifest versions for retention, stable reads, restore, and forks.
+7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys by each namespace's naming mode, and apply each mode's rule exactly (see [Names and paths](format.md#14-names-and-paths)).
 9. Keep upload sessions out of namespace history and the change feed.
 10. Preserve per-commit idempotency, ordering, and change-feed identity, even when it physically batches logical commits in one WAL object.

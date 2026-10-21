@@ -367,15 +367,11 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}/changes", "get"),
         (
             "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-            "post",
-        ),
-        (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             "get",
         ),
         (
             "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
-            "delete",
+            "get",
         ),
         ("/v0/maintenance/namespaces/{namespace_id}/runs", "post"),
         (
@@ -872,7 +868,6 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
             "created_at_ms",
             "created_by",
             "head_seq",
-            "live_checkpoints",
             "live_snapshots",
             "namespace_id",
             "retention_floor_seq",
@@ -1184,11 +1179,7 @@ fn openapi_names_tagged_one_of_alternatives() {
         ),
         (
             "CheckpointOwner",
-            &[
-                "CheckpointOwnerUser",
-                "CheckpointOwnerFork",
-                "CheckpointOwnerSnapshot",
-            ][..],
+            &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
         ),
         (
             "CompleteUploadBody",
@@ -1222,10 +1213,10 @@ fn openapi_names_tagged_one_of_alternatives() {
         );
     }
 
-    let snapshot_owner = schemas
-        .get("CheckpointOwnerSnapshot")
-        .expect("snapshot checkpoint-owner schema");
-    assert!(!required_fields(snapshot_owner).contains("expires_at_ms"));
+    let user_owner = schemas
+        .get("CheckpointOwnerUser")
+        .expect("user checkpoint-owner schema");
+    assert!(!required_fields(user_owner).contains("expires_at_ms"));
 }
 
 /// Responses that flatten a Rust enum, and the fields their envelope adds to

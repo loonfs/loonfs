@@ -1510,7 +1510,7 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&pinned_key).await.expect("head").is_some());
 
-    crate::pin::delete_checkpoint(&store, &namespace_id, &checkpoint.checkpoint_id)
+    crate::pin::delete_snapshot(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("release the pin");
     let report = gc_namespace(
@@ -2196,7 +2196,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("advance past the shared basis");
 
-    crate::pin::delete_checkpoint(&store, &namespace_id, &second.checkpoint_id)
+    crate::pin::delete_snapshot(&store, &namespace_id, &second.checkpoint_id)
         .await
         .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -3565,9 +3565,9 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
             name: "expiring".to_owned(),
             expires_at_ms: Some(2_000),
         },
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "snapshot".to_owned(),
-            expires_at_ms: 2_000,
+            expires_at_ms: Some(2_000),
         },
         PinOwner::Fork {
             target_namespace_id: target.clone(),
@@ -3644,8 +3644,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     )
     .await
     .expect("expiry grace");
-    assert_eq!(expired.deleted_checkpoints_by_owner.user, 1);
-    assert_eq!(expired.deleted_checkpoints_by_owner.snapshot, 1);
+    assert_eq!(expired.deleted_checkpoints_by_owner.user, 2);
     assert!(pin_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
     assert!(!pin_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
     assert!(!pin_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);

@@ -282,7 +282,7 @@ pub(crate) enum Command {
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
     Capabilities(CapabilitiesArgs),
-    /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the store.
+    /// Maintenance operations: metadata, the checkpoint inventory, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
@@ -826,7 +826,7 @@ pub(crate) struct NamespaceForkArgs {
     pub source_namespace_id: NamespaceId,
     #[arg(value_hint = ValueHint::Other)]
     pub new_namespace_id: NamespaceId,
-    /// Fork from a live snapshot instead of the current head.
+    /// Fork from an unexpired snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
     pub snapshot_id: Option<PinId>,
 }
@@ -1239,13 +1239,17 @@ pub(crate) struct ChangesArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SnapshotCommand {
-    /// Save the namespace's current state for a limited time.
+    /// Save the namespace's current state as a new snapshot.
+    ///
+    /// Every call creates a new snapshot. The name is a label, not a key.
     Create(SnapshotCreateArgs),
-    /// List snapshots that are still available.
+    /// List snapshots in snapshot ID order.
+    ///
+    /// Expired snapshots remain listed until garbage collection deletes them.
     List(SnapshotListArgs),
-    /// Keep a snapshot available for longer.
+    /// Keep an unexpired snapshot available for longer.
     Extend(SnapshotExtendArgs),
-    /// Delete the snapshot record. A second call returns not found.
+    /// Delete the snapshot record. Deleting a missing snapshot succeeds.
     Delete(SnapshotDeleteArgs),
 }
 
@@ -1269,9 +1273,10 @@ pub(crate) struct SnapshotCreateArgs {
     /// Snapshot label. Labels don't need to be unique.
     #[arg(long)]
     pub name: String,
-    /// How long the snapshot remains available, in milliseconds.
+    /// How long the snapshot remains available, in milliseconds. Without
+    /// it, the snapshot lasts until it's deleted.
     #[arg(long)]
-    pub ttl_ms: u64,
+    pub ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -1289,7 +1294,8 @@ pub(crate) struct SnapshotExtendArgs {
     /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: PinId,
-    /// New lifetime from now, in milliseconds.
+    /// New lifetime from now, in milliseconds. The expiry never moves
+    /// earlier.
     #[arg(long)]
     pub ttl_ms: u64,
 }
@@ -1316,7 +1322,7 @@ pub(crate) enum MaintenanceCommand {
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
     Fold(MaintenanceNamespaceArgs),
-    /// Create, list, or delete checkpoint pins.
+    /// List the checkpoint inventory: every pin, snapshots and fork pins.
     Checkpoint {
         #[command(subcommand)]
         command: MaintenanceCheckpointCommand,
@@ -1354,16 +1360,10 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCheckpointCommand {
-    /// Pin the namespace's current state in a new checkpoint.
+    /// List every pin in checkpoint ID order, snapshots and fork pins.
     ///
-    /// Every call creates a new checkpoint. The name is a label, not a key.
-    Create(MaintenanceCheckpointArgs),
-    /// List existing checkpoint pins in checkpoint ID order.
-    ///
-    /// Expired pins remain listed until garbage collection deletes them.
+    /// Expired snapshots remain listed until garbage collection deletes them.
     List(MaintenanceCheckpointListArgs),
-    /// Delete the checkpoint record. A second call returns not found.
-    Delete(MaintenanceCheckpointDeleteArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1433,33 +1433,11 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceCheckpointArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    /// Label recorded on the checkpoint record (a label, not a key).
-    #[arg(long)]
-    pub name: String,
-    /// Optional lifetime. The record expires this many milliseconds from
-    /// now. Without it, the pin lasts until it's deleted.
-    #[arg(long)]
-    pub ttl_ms: Option<u64>,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct MaintenanceCheckpointListArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MaintenanceCheckpointDeleteArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    /// Checkpoint ID to delete.
-    #[arg(value_hint = ValueHint::Other)]
-    pub checkpoint_id: PinId,
 }
 
 #[derive(Debug, Args)]
@@ -1591,9 +1569,7 @@ command_kinds! {
     Changes => "changes",
     Capabilities => "capabilities",
     Doctor => "doctor",
-    MaintenanceCheckpointCreate => "maintenance_checkpoint_create",
     MaintenanceCheckpointList => "maintenance_checkpoint_list",
-    MaintenanceCheckpointDelete => "maintenance_checkpoint_delete",
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceMetadata => "maintenance_metadata",
@@ -1678,13 +1654,7 @@ impl Command {
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold(_) => CommandKind::MaintenanceFold,
                 MaintenanceCommand::Checkpoint { command } => match command {
-                    MaintenanceCheckpointCommand::Create(_) => {
-                        CommandKind::MaintenanceCheckpointCreate
-                    }
                     MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
-                    MaintenanceCheckpointCommand::Delete(_) => {
-                        CommandKind::MaintenanceCheckpointDelete
-                    }
                 },
                 MaintenanceCommand::Index { command } => match command {
                     MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,
@@ -2029,10 +1999,7 @@ mod tests {
                 "store",
             ],
         );
-        assert_subcommands(
-            subcommand(maintenance, "checkpoint"),
-            &["create", "list", "delete"],
-        );
+        assert_subcommands(subcommand(maintenance, "checkpoint"), &["list"]);
         assert_subcommands(
             subcommand(maintenance, "index"),
             &["enable", "disable", "status"],

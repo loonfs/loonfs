@@ -94,9 +94,9 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let snapshot = create_pin(
         &store,
         &namespace_id,
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "before reuse".into(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: Some(u64::MAX),
         },
         &context,
         Default::default(),

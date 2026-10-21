@@ -58,12 +58,6 @@ memory_limit_bytes = 4294967296
 # as the `download.service_proxied.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_download_bytes = 268435456
 
-# Snapshot request ttl, total lifetime from creation, and live quota per
-# namespace. These are advertised through the matching `snapshot.*` limits.
-#snapshot_max_ttl_ms = 86400000
-#snapshot_max_age_ms = 604800000
-#snapshot_max_live_per_namespace = 16
-
 # Requests hold a slot through response completion; health and readiness are
 # exempt. A full request cap returns 503 server_busy before reading the body.
 #max_in_flight_requests = 256

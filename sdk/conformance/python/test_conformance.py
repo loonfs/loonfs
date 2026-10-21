@@ -374,6 +374,7 @@ class SnapshotsRequest:
     directory: str
     actor_id: ActorId
     snapshot_name: str
+    unexpiring_snapshot_name: str
     replaced_file_name: str
     deleted_file_name: str
     added_file_name: str
@@ -1458,6 +1459,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert snapshot.namespace_id == namespace_id
     assert snapshot.name == request.snapshot_name
     assert snapshot.captured_seq == expected.snapshot_head_seq
+    assert snapshot.expires_at_ms is not None
     assert snapshot.expires_at_ms > snapshot.created_at_ms
 
     client.files.upload(
@@ -1571,10 +1573,8 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert first_delete.namespace_id == namespace_id
     assert first_delete.snapshot_id == snapshot.snapshot_id
-    with pytest.raises(NotFoundError) as second_delete:
-        client.snapshots.delete(namespace_id, snapshot.snapshot_id)
-    assert second_delete.value.status_code == expected.snapshot_not_found.status
-    assert second_delete.value.body.code == expected.snapshot_not_found.code
+    second_delete = client.snapshots.delete(namespace_id, snapshot.snapshot_id)
+    assert second_delete == first_delete
 
     with pytest.raises(NotFoundError) as deleted_read:
         client.files.retrieve(
@@ -1625,6 +1625,21 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         )
     assert zero_ttl.value.status_code == expected.zero_ttl.status
     assert zero_ttl.value.body.code == expected.zero_ttl.code
+
+    unexpiring = client.snapshots.create(
+        namespace_id,
+        name=request.unexpiring_snapshot_name,
+    )
+    assert unexpiring.name == request.unexpiring_snapshot_name
+    assert unexpiring.expires_at_ms is None
+    unexpiring_extended = client.snapshots.extend(
+        namespace_id,
+        unexpiring.snapshot_id,
+        ttl_ms=request.extend_ttl_ms,
+    )
+    assert unexpiring_extended == unexpiring
+    unexpiring_deleted = client.snapshots.delete(namespace_id, unexpiring.snapshot_id)
+    assert unexpiring_deleted.snapshot_id == unexpiring.snapshot_id
 
 
 def test_proxy_requires_authorize() -> None:

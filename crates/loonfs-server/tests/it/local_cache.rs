@@ -5,7 +5,6 @@ use crate::common::{collect_path_entries, scrape, series, start_graceful_server}
 use loonfs_client::NamespacePath;
 use loonfs_server::{JobMode, LocalCacheConfig, ServerConfig};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::CreateCheckpointRequest;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -81,13 +80,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     }
     writer
         .client
-        .create_checkpoint(
-            &namespace,
-            &CreateCheckpointRequest {
-                name: "warm".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_snapshot(&namespace, "warm", None)
         .await
         .expect("create checkpoint");
     // One write after the checkpoint moves the head, so reads resolve

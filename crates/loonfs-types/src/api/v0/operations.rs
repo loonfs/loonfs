@@ -194,7 +194,7 @@ pub struct CreateNamespaceRequest {
 pub struct ForkNamespaceRequest {
     /// The durable ID of the new namespace that the fork creates.
     pub new_namespace_id: NamespaceId,
-    /// A live snapshot to fork from. Without it, the fork starts from the current head.
+    /// An unexpired snapshot to fork from. Without it, the fork starts from the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
@@ -291,9 +291,6 @@ pub struct NamespaceDiagnostics {
     pub wal_tail_objects: u64,
     /// The number of snapshots that hadn't expired when the diagnostics read began.
     pub live_snapshots: u64,
-    /// The number of user checkpoints, including expired records that garbage collection hasn't
-    /// deleted yet.
-    pub live_checkpoints: u64,
 }
 
 /// The result of deleting a namespace.
@@ -1143,20 +1140,6 @@ pub struct ListFileRevisionsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// A request to create a durable checkpoint pin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CreateCheckpointRequest {
-    /// A label to record on the checkpoint. Labels don't need to be unique.
-    pub name: String,
-    /// The checkpoint's lifetime in milliseconds. Omit it to keep the checkpoint until it's
-    /// deleted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub ttl_ms: Option<u64>,
-}
-
 /// A request to create a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1164,8 +1147,11 @@ pub struct CreateCheckpointRequest {
 pub struct CreateSnapshotRequest {
     /// The snapshot's label, which doesn't need to be unique.
     pub name: String,
-    /// The snapshot's lifetime in milliseconds, counted from the server's current time.
-    pub ttl_ms: u64,
+    /// The snapshot's lifetime in milliseconds, counted from the server's current time. Omit it to
+    /// keep the snapshot until it's deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub ttl_ms: Option<u64>,
 }
 
 /// A request to extend a snapshot.
@@ -1177,22 +1163,12 @@ pub struct ExtendSnapshotRequest {
     pub ttl_ms: u64,
 }
 
-/// The checkpoint record that was deleted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DeleteCheckpointResponse {
-    /// The namespace that the checkpoint belonged to.
-    pub namespace_id: NamespaceId,
-    /// The ID of the deleted checkpoint record.
-    pub checkpoint_id: PinId,
-}
-
 /// The owner of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckpointOwner {
-    /// A pin that an operator created. It's deleted by its ID or after it expires.
+    /// A snapshot, which a caller created. It's deleted by its ID or after it expires.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
     User {
         /// The label that the creator recorded. Labels don't need to be unique.
@@ -1205,12 +1181,6 @@ pub enum CheckpointOwner {
         /// namespace exists.
         target_namespace_id: NamespaceId,
     },
-    /// A pin that an application created as a snapshot. It's readable until it expires.
-    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerSnapshot"))]
-    Snapshot {
-        /// The snapshot's label, which doesn't need to be unique.
-        name: String,
-    },
     /// An owner kind from a newer server. This variant doesn't include the kind's own fields.
     #[serde(other)]
     Unknown,
@@ -1222,7 +1192,7 @@ pub enum CheckpointOwner {
 pub struct Checkpoint {
     /// The namespace that the checkpoint belongs to.
     pub namespace_id: NamespaceId,
-    /// The checkpoint's durable ID. Use it to delete the checkpoint.
+    /// The checkpoint's durable ID. For a user pin, it's also the snapshot's `snapshot_id`.
     pub checkpoint_id: PinId,
     /// The checkpoint's owner. For a user pin, the owner includes the label.
     pub owner: CheckpointOwner,
@@ -1239,7 +1209,7 @@ pub struct Checkpoint {
     pub manifest_no: ManifestNo,
 }
 
-/// A live snapshot.
+/// A snapshot, which keeps one version of a namespace readable until it's deleted or expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Snapshot {
@@ -1253,32 +1223,18 @@ pub struct Snapshot {
     pub captured_seq: ChangeSeq,
     /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// The time the snapshot expires, in Unix milliseconds.
-    pub expires_at_ms: u64,
+    /// The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.
+    /// An expired snapshot can't be read, and it's listed until garbage collection deletes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expires_at_ms: Option<u64>,
 }
 
 impl Snapshot {
-    /// Converts a snapshot-owned checkpoint to a snapshot summary.
-    ///
-    /// Returns `None` for another owner. A snapshot owner always carries the
-    /// checkpoint's top-level `expires_at_ms`.
-    pub fn from_checkpoint(checkpoint: Checkpoint) -> Option<Self> {
-        let CheckpointOwner::Snapshot { name } = checkpoint.owner else {
-            return None;
-        };
-        Some(Self {
-            snapshot_id: checkpoint.checkpoint_id,
-            namespace_id: checkpoint.namespace_id,
-            name,
-            captured_seq: checkpoint.captured_seq,
-            created_at_ms: checkpoint.created_at_ms,
-            expires_at_ms: checkpoint.expires_at_ms?,
-        })
-    }
-
-    /// Reports whether the snapshot is still live at `now_ms`.
+    /// Reports whether the snapshot can still be read at `now_ms`.
     pub fn is_live(&self, now_ms: u64) -> bool {
-        self.expires_at_ms > now_ms
+        self.expires_at_ms
+            .is_none_or(|expires_at_ms| expires_at_ms > now_ms)
     }
 }
 
@@ -1297,13 +1253,13 @@ pub struct ListCheckpointsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// One page of live snapshots.
+/// One page of snapshots, including expired snapshots that garbage collection hasn't deleted yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListSnapshotsResponse {
     /// The namespace that the snapshots belong to.
     pub namespace_id: NamespaceId,
-    /// The live snapshot records, in ascending snapshot ID order.
+    /// The snapshot records, in ascending snapshot ID order.
     pub snapshots: Vec<Snapshot>,
     /// An opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1409,8 +1365,6 @@ impl DeletedObjectCounts {
 pub struct DeletedCheckpointsByOwner {
     /// The user pins that the pass deleted after they expired or their namespace was deleted.
     pub user: u64,
-    /// The snapshot pins that the pass deleted after they expired or their namespace was deleted.
-    pub snapshot: u64,
     /// The fork pins that the pass deleted because their target namespaces no longer exist.
     pub fork: u64,
 }
@@ -1418,13 +1372,8 @@ pub struct DeletedCheckpointsByOwner {
 impl DeletedCheckpointsByOwner {
     /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
-        let Self {
-            user,
-            snapshot,
-            fork,
-        } = other;
+        let Self { user, fork } = other;
         self.user += user;
-        self.snapshot += snapshot;
         self.fork += fork;
     }
 }
@@ -1987,7 +1936,6 @@ mod tests {
             current_manifest_no: Some(ManifestNo(8)),
             wal_tail_objects: 3,
             live_snapshots: 2,
-            live_checkpoints: 5,
         };
         assert_eq!(
             serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
@@ -1999,8 +1947,7 @@ mod tests {
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
                 "wal_tail_objects": 3,
-                "live_snapshots": 2,
-                "live_checkpoints": 5
+                "live_snapshots": 2
             })
         );
     }
@@ -2693,17 +2640,6 @@ mod tests {
                 "checkpoints": [checkpoint_json],
             }),
         );
-        assert_eq!(
-            serde_json::to_value(DeleteCheckpointResponse {
-                namespace_id,
-                checkpoint_id: checkpoint.checkpoint_id,
-            })
-            .expect("serialize delete checkpoint response"),
-            serde_json::json!({
-                "namespace_id": "demo",
-                "checkpoint_id": "pin_00000000000000000001-0000000000000001",
-            }),
-        );
     }
 
     #[test]
@@ -2732,7 +2668,7 @@ mod tests {
         assert!(gc_json.get("reclaimable_at_ms").is_none());
         assert_eq!(
             gc_json["deleted_checkpoints_by_owner"],
-            serde_json::json!({"user": 0, "snapshot": 0, "fork": 0})
+            serde_json::json!({"user": 0, "fork": 0})
         );
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
@@ -2895,11 +2831,13 @@ mod tests {
             }
         }
 
-        serde_json::from_value::<CreateCheckpointRequest>(
+        serde_json::from_value::<CreateSnapshotRequest>(
             serde_json::json!({"name": "nightly", "ttl_ms": 60_000}),
         )
-        .expect("the same checkpoint body without a typo decodes");
-        serde_json::from_value::<CreateCheckpointRequest>(
+        .expect("the same snapshot body without a typo decodes");
+        serde_json::from_value::<CreateSnapshotRequest>(serde_json::json!({"name": "nightly"}))
+            .expect("a snapshot body without a lifetime decodes");
+        serde_json::from_value::<CreateSnapshotRequest>(
             serde_json::json!({"name": "nightly", "ttlMs": 60_000}),
         )
         .expect_err("a camel-case field should be rejected");

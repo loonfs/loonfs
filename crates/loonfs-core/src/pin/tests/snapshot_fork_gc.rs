@@ -43,9 +43,9 @@ impl Fixture {
         let snapshot = crate::pin::create_pin(
             &store,
             &source,
-            PinOwner::Snapshot {
+            PinOwner::User {
                 name: "historical".into(),
-                expires_at_ms: u64::MAX,
+                expires_at_ms: Some(u64::MAX),
             },
             &setup,
             Default::default(),
@@ -376,9 +376,9 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     let snapshot = crate::pin::create_pin(
         &inner,
         &source,
-        PinOwner::Snapshot {
+        PinOwner::User {
             name: "short".into(),
-            expires_at_ms: context.now_ms + 10,
+            expires_at_ms: Some(context.now_ms + 10),
         },
         &context,
         Default::default(),
@@ -416,7 +416,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             store.release();
         }
     );
-    assert_matches!(fork, Err(CoreError::SnapshotGone { .. }));
+    assert_matches!(fork, Err(CoreError::SnapshotNotFound { .. }));
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
         0,

@@ -26,9 +26,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
-/// Rejects a directory cursor that another read minted. A checkpoint or
-/// snapshot implies its head, so the head test does work only for a view of
-/// the live head.
+/// Rejects a directory cursor that another read minted. A snapshot implies
+/// its head, so the head test does work only for a view of the live head.
 fn validate_view_directory_cursor(
     cursor: Option<&ListPageCursor>,
     captured_seq: ChangeSeq,
@@ -88,7 +87,7 @@ fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()>
         return Ok(());
     };
     Err(CoreError::InvalidCursor(format!(
-        "directory cursor is bound to pin `{pin_id}`; resume it from the same snapshot or checkpoint"
+        "directory cursor is bound to pin `{pin_id}`, so resume it from the same snapshot"
     ))
     .into())
 }
@@ -99,7 +98,7 @@ fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()>
 /// keeps related reads on one captured state, even when new commits publish.
 /// A durable snapshot preserves a state for later use. A read view retains
 /// nothing in the store and is meant to live for one request or unit of
-/// work. It can capture the current state, a checkpoint, or a live snapshot.
+/// work. It can capture the current state or an unexpired snapshot.
 #[must_use]
 #[derive(Clone)]
 pub struct ReadView {
@@ -112,7 +111,6 @@ pub struct ReadView {
 #[derive(Clone)]
 pub(super) enum ReadSource {
     Head,
-    Checkpoint(PinId),
     Snapshot(PinId),
 }
 
@@ -130,13 +128,6 @@ impl ReadView {
     fn snapshot_id(&self) -> Option<&PinId> {
         match &self.source {
             ReadSource::Snapshot(snapshot_id) => Some(snapshot_id),
-            ReadSource::Head | ReadSource::Checkpoint(_) => None,
-        }
-    }
-
-    fn pin_id(&self) -> Option<&PinId> {
-        match &self.source {
-            ReadSource::Checkpoint(pin_id) | ReadSource::Snapshot(pin_id) => Some(pin_id),
             ReadSource::Head => None,
         }
     }
@@ -267,7 +258,7 @@ impl ReadView {
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
-                self.pin_id(),
+                self.snapshot_id(),
             )?;
             let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
             let mut page = self
@@ -275,7 +266,7 @@ impl ReadView {
                 .list_path_page(listed_path.as_str(), request, options, &self.context)
                 .await?;
             if let Some(cursor) = page.next_cursor.as_mut() {
-                *cursor.pin_id_mut() = self.pin_id().cloned();
+                *cursor.pin_id_mut() = self.snapshot_id().cloned();
             }
             Ok(ListPathEntriesResponse {
                 namespace_id: self.namespace_id().clone(),
@@ -360,14 +351,14 @@ impl ReadView {
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
-                self.pin_id(),
+                self.snapshot_id(),
             )?;
             let mut page = self
                 .engine
                 .list_inode_children_page(inode_id, request, options, &self.context)
                 .await?;
             if let Some(cursor) = page.next_cursor.as_mut() {
-                *cursor.pin_id_mut() = self.pin_id().cloned();
+                *cursor.pin_id_mut() = self.snapshot_id().cloned();
             }
             Ok(ListInodeChildrenResponse {
                 namespace_id: self.namespace_id().clone(),
@@ -610,7 +601,7 @@ pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Err
 pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
-/// A pager over the files a checkpoint pins.
+/// A pager over the files a snapshot pins.
 pub type CheckpointFilesPager = loonfs_types::Pager<CheckpointFilesPage, Error>;
 
 impl<M: crate::Mode> Namespace<M> {
@@ -656,37 +647,8 @@ impl<M: crate::Mode> Namespace<M> {
         Ok(self.read_view_from(engine, context, ReadSource::Head))
     }
 
-    /// Captures the namespace state a checkpoint preserves.
-    ///
-    /// An id that names no user checkpoint returns `checkpoint_not_found`.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.read_view_at_checkpoint",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "read_view_at_checkpoint",
-            namespace_id = %self.namespace_id,
-            checkpoint_id = %checkpoint_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn read_view_at_checkpoint(&self, checkpoint_id: &PinId) -> Result<ReadView> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
-        self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self
-            .core
-            .pinned_read_at_checkpoint(&self.namespace_id, checkpoint_id)
-            .await?;
-        Ok(self.read_view_from(
-            engine,
-            context,
-            ReadSource::Checkpoint(checkpoint_id.clone()),
-        ))
-    }
-
-    /// Captures the namespace state a live snapshot preserves.
+    /// Captures the namespace state an unexpired snapshot preserves. A
+    /// missing or expired snapshot returns `snapshot_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_view_at_snapshot",
@@ -1340,11 +1302,11 @@ impl<M: crate::Mode> Namespace<M> {
             .await
     }
 
-    /// Lists files visible at a checkpoint in ascending inode-ID order.
+    /// Lists files visible at a snapshot in ascending inode-ID order.
     ///
     /// The pinned manifest is read without replaying later WAL entries.
-    /// Directories are omitted. An id that names no user checkpoint returns
-    /// `checkpoint_not_found` rather than falling back to current state.
+    /// Directories are omitted. A missing or expired snapshot returns
+    /// `snapshot_not_found` rather than falling back to current state.
     pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
         self.list_checkpoint_files_with_options(
             checkpoint_id,
@@ -1352,7 +1314,7 @@ impl<M: crate::Mode> Namespace<M> {
         )
     }
 
-    /// Lists files at a checkpoint as `options` asks. With
+    /// Lists files at a snapshot as `options` asks. With
     /// [`ListCheckpointFilesOptions::include_deleted`], the pages also list
     /// deleted files and files under a deleted directory.
     pub fn list_checkpoint_files_with_options(
@@ -1399,7 +1361,13 @@ impl<M: crate::Mode> Namespace<M> {
             .pinned_read(&self.namespace_id, Consistency::Strong)
             .await?;
         engine
-            .list_checkpoint_files_page(checkpoint_id, request, options, &read_context)
+            .list_checkpoint_files_page(
+                checkpoint_id,
+                request,
+                options,
+                &read_context,
+                self.core.now_ms(),
+            )
             .await
             .map_err(crate::Error::from)
     }

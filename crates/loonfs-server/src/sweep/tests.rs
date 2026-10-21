@@ -57,7 +57,7 @@ impl SweepServer {
             GrepWorker::new(
                 runtime.object_store(),
                 runtime.read_only(),
-                maintenance.clone(),
+                runtime.clone(),
                 loonfs_grep::GrepStepBudget::default(),
             )
         });

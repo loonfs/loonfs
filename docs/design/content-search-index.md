@@ -94,11 +94,11 @@ An index is in one of three lifecycle states, and the current grep manifest reco
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No segment set that queries can see, and no pending reorganization. |
-| `backfilling` | A checkpoint ID, `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `backfilling` | The ID of the backfill's snapshot (`checkpoint_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
 | `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 ```text
-                             +-- rebuild from a new checkpoint --+
+                             +--- rebuild from a new snapshot ---+
                              v                                   |
 +----------+  enable  +-------------+  final backfill step  +--------+
 | disabled | -------> | backfilling | --------------------> | active |
@@ -116,23 +116,23 @@ Disabling the index publishes a `disabled` manifest with no segment references. 
 
 ## Building the index
 
-A worker builds the index in two phases, first with a backfill from a checkpoint, and then incrementally from the change feed.
+A worker builds the index in two phases, first with a backfill from a [snapshot](../specs/glossary.md#pin), and then incrementally from the change feed.
 
 ### Initial backfill
 
-Enabling the index creates an expiring user checkpoint at the namespace head, and then publishes a `backfilling` manifest with that checkpoint ID, the target sequence, and no inode cursor.
+Enabling the index creates a snapshot of the namespace head with a 24-hour lifetime, and then publishes a `backfilling` manifest with that snapshot's ID, the target sequence, and no inode cursor.
 
 Each bounded build step:
 
-1. Lists files from the checkpoint in ascending inode order.
+1. Lists files from the snapshot in ascending inode order.
 2. Reads one current revision of each retained file, including deleted files.
 3. Applies the eligibility rule and extracts grams.
 4. Writes new delta segments.
 5. Publishes the segment set and the last inode it consumed together, in the next numbered grep manifest.
 
-The final backfill step changes the lifecycle state to `active` at the captured sequence, and releases the checkpoint. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
+The final backfill step changes the lifecycle state to `active` at the captured sequence, and deletes the snapshot. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
 
-If the checkpoint, or change history that the worker needs, becomes unavailable, the worker abandons the incomplete build and starts another backfill from a new checkpoint. It doesn't report the partial index as complete.
+If the snapshot is deleted or expires, or the change history that the worker needs becomes unavailable, the worker abandons the incomplete build and starts another backfill from a new snapshot. It doesn't report the partial index as complete.
 
 ### Incremental builds
 
@@ -142,7 +142,7 @@ Moves, deletes, and undeletes don't publish new content revisions in those event
 
 By default, the build budget is 256 files or 64 MiB per step. Each batch is bounded, but the total cost of backfilling a namespace still depends on how much eligible content it has. Failed attempts, or a restarted backfill, can read content again.
 
-The index doesn't stop the namespace's retention floor from advancing. If the change history that the worker needs has been removed, the worker rebuilds the index from a new checkpoint.
+The index doesn't stop the namespace's retention floor from advancing. If the change history that the worker needs has been removed, the worker rebuilds the index from a new snapshot.
 
 ## Maintenance scheduling
 
@@ -249,7 +249,7 @@ If the tail is larger than the query's budget:
 - By default, the query fails with an `index_lagging` error.
 - With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
 
-If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new checkpoint.
+If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot.
 
 Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 

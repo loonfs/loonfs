@@ -212,10 +212,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 );
             }
             "forked" => {
-                let captured = runtime
-                    .create_checkpoint(&source)
-                    .await
-                    .expect("checkpoint");
+                let captured = runtime.create_snapshot(&source).await.expect("checkpoint");
                 assert_eq!(captured.captured_seq, head_seq);
                 let target = writer
                     .fork_namespace(&source, &fork, &test_actor())
@@ -353,7 +350,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             }
             if let Some(checkpoint) = &checkpoint {
                 let view = source_namespace
-                    .read_view_at_checkpoint(&checkpoint.checkpoint_id)
+                    .read_view_at_snapshot(&checkpoint.snapshot_id)
                     .await
                     .expect("checkpoint view");
                 let historical = view

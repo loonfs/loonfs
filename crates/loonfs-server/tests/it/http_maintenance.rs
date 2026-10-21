@@ -1,4 +1,5 @@
-//! HTTP checkpoint, retention, garbage collection, and maintenance operations.
+//! HTTP checkpoint inventory, retention, garbage collection, and maintenance
+//! operations.
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
@@ -10,31 +11,44 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
-    ChangeSeq, Checkpoint, CheckpointOwner, DeleteCheckpointResponse, ErrorResponse, ManifestNo,
-    PinId,
+    ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorResponse, ManifestNo,
+    PinId, Snapshot,
 };
 use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ErrorResponse>>;
 
+/// Creates a snapshot without an expiry, and returns its row in the
+/// checkpoint inventory.
 fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
-    post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints"),
+    let snapshot: Snapshot = post_maintenance_json_body(
+        &format!("{server_url}/v0/namespaces/{namespace}/snapshots"),
         "test-token",
         serde_json::json!({ "name": "nightly" }),
-    )
+    )?;
+    retry_result_on_macos_teardown_einval(|| {
+        decode_maintenance_response(
+            raw_agent()
+                .get(&format!(
+                    "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{}",
+                    snapshot.snapshot_id
+                ))
+                .set("authorization", "Bearer test-token")
+                .call(),
+        )
+    })
 }
 
-fn delete_checkpoint(
+fn delete_snapshot(
     server_url: &str,
     namespace: &str,
-    checkpoint_id: &str,
-) -> ApiResult<loonfs_types::DeleteCheckpointResponse> {
+    snapshot_id: &str,
+) -> ApiResult<DeleteSnapshotResponse> {
     retry_result_on_macos_teardown_einval(|| {
         decode_maintenance_response(
             raw_agent()
                 .delete(&format!(
-                    "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}"
+                    "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
                 ))
                 .set("authorization", "Bearer test-token")
                 .call(),
@@ -267,35 +281,29 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .get_namespace_diagnostics(&namespace)
         .await
         .expect("read checkpoint diagnostics");
-    assert_eq!(diagnostics.live_snapshots, 0);
-    assert_eq!(diagnostics.live_checkpoints, 2);
+    assert_eq!(diagnostics.live_snapshots, 2);
 
-    let deleted = delete_checkpoint(
-        &server_url,
-        namespace.as_str(),
-        first.checkpoint_id.as_str(),
-    )
-    .expect("delete checkpoint");
-    assert_eq!(
-        deleted,
-        DeleteCheckpointResponse {
-            namespace_id: namespace.clone(),
-            checkpoint_id: first.checkpoint_id.clone(),
-        }
-    );
-    let deleted_again = delete_checkpoint(
-        &server_url,
-        namespace.as_str(),
-        first.checkpoint_id.as_str(),
-    )
-    .expect_err("repeat delete");
-    assert_eq!(deleted_again.code, "checkpoint_not_found");
+    for attempt in 0..2 {
+        let deleted = delete_snapshot(
+            &server_url,
+            namespace.as_str(),
+            first.checkpoint_id.as_str(),
+        )
+        .unwrap_or_else(|error| panic!("delete attempt {attempt}: {error:?}"));
+        assert_eq!(
+            deleted,
+            DeleteSnapshotResponse {
+                namespace_id: namespace.clone(),
+                snapshot_id: first.checkpoint_id.clone(),
+            }
+        );
+    }
     let diagnostics = client
         .get_namespace_diagnostics(&namespace)
         .await
         .expect("read diagnostics after delete");
-    assert_eq!(diagnostics.live_checkpoints, 1);
-    let bogus_delete = delete_checkpoint(&server_url, namespace.as_str(), "not-a-checkpoint-id")
+    assert_eq!(diagnostics.live_snapshots, 1);
+    let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-checkpoint-id")
         .expect_err("malformed checkpoint id");
     assert_eq!(bogus_delete.code, "invalid_request");
 

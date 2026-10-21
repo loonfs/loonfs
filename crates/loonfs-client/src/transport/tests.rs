@@ -104,30 +104,6 @@ fn send_errors_surface_the_root_cause_and_the_url() {
     assert_eq!(rendered.matches("inner detail").count(), 1, "{rendered}");
 }
 
-#[tokio::test]
-async fn pin_deletes_send_once_after_transport_failure() {
-    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
-    let pin_id =
-        loonfs_types::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
-    for snapshot in [true, false] {
-        let transport = scripted_transport::failures(2);
-        let mut client = deadline_client(&transport);
-        client.timer = Arc::new(StdMonotonicTimer::default());
-        if snapshot {
-            client
-                .delete_snapshot(&namespace_id, &pin_id)
-                .await
-                .expect_err("transport failure");
-        } else {
-            client
-                .delete_checkpoint(&namespace_id, &pin_id)
-                .await
-                .expect_err("transport failure");
-        }
-        assert_eq!(transport.attempts(), 1);
-    }
-}
-
 /// Checks that the client retries the codes that clear on their own, and sends a request that
 /// fails with `store_contention` once, because the server already retried its compare-and-swap.
 #[tokio::test]

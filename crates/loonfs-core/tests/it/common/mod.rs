@@ -228,9 +228,9 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_types::Checkpoint, CoreError> {
+    ) -> Result<loonfs_types::Snapshot, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .create_checkpoint("test-pin".to_owned(), None)
+            .create_snapshot("test-pin".to_owned(), None)
             .await
             .map(|report| report.response)
     }

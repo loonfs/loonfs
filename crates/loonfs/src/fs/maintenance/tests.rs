@@ -127,7 +127,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         gc.retained.total(),
         "the maintenance pass records its retained count exactly once"
     );
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
     for (category, reclaimed) in [
         ("deleted_wal_objects", gc.deleted.wal_objects),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
@@ -142,10 +142,6 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         ),
         ("deleted_upload_sessions", gc.deleted.upload_sessions),
         ("deleted_content_objects", gc.deleted.content_objects),
-        (
-            "deleted_snapshot_checkpoints",
-            gc.deleted_checkpoints_by_owner.snapshot,
-        ),
         ("deleted_temporary_objects", gc.deleted.temporary_objects),
         (
             "deleted_retired_content_objects",
@@ -241,10 +237,10 @@ async fn namespace_with_a_frozen_base(
 
     // Now the floor moves past that churn, so the next bottom-anchored rebuild
     // is the one that may drop it.
-    maintenance
-        .create_checkpoint(namespace_id, "retention")
+    namespace
+        .create_snapshot("retention", &crate::CreateSnapshotOptions::default())
         .await
-        .expect("checkpoint the namespace");
+        .expect("snapshot the namespace");
     maintenance
         .advance_retention_floor(namespace_id)
         .await
@@ -719,16 +715,19 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let maintenance = LoonFs::builder_with_store(shared.clone())
+    let maintenance_runtime = LoonFs::builder_with_store(shared.clone())
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .build()
         .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance
-        .create_checkpoint(&namespace, "basis")
+        .expect("maintenance");
+    let maintenance =
+        maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    maintenance_runtime
+        .open_namespace(&namespace)
+        .expect("open namespace")
+        .create_snapshot("basis", &crate::CreateSnapshotOptions::default())
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     let before = current_manifest_payload(store.as_ref(), &namespace).await;
     store.reset();
     assert_eq!(

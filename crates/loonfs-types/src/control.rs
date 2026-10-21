@@ -92,13 +92,17 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PinOwner {
-    /// An operator-created pin, deleted explicitly by checkpoint id or by
-    /// its declared expiry. The name is a label, not a key: several records
-    /// may carry the same name over different bases.
+    /// A pin that a caller created, which the API calls a snapshot. It's
+    /// deleted by its ID, or by garbage collection after its expiry. The name
+    /// is a label, not a key, so several records can have the same name.
+    ///
+    /// A record whose owner kind is `snapshot` (with a required expiry)
+    /// decodes as this owner, with the same name and expiry.
+    #[serde(alias = "snapshot")]
     User {
-        /// Operator-facing label that need not be unique.
+        /// The label that the creator recorded. Labels don't need to be unique.
         name: String,
-        /// When garbage collection may delete the pin without an explicit request.
+        /// When the pin expires. A pin without an expiry doesn't expire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },
@@ -107,23 +111,15 @@ pub enum PinOwner {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
     },
-    /// An application-created read view with a required expiry.
-    Snapshot {
-        /// Application-facing label that need not be unique.
-        name: String,
-        /// When garbage collection may release the pin.
-        expires_at_ms: u64,
-    },
 }
 
 impl PinOwner {
-    /// Returns when garbage collection may release this record without asking
-    /// its owner.
+    /// Returns when this record expires. A fork pin and a user pin without
+    /// an expiry return `None`.
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
             Self::Fork { .. } => None,
-            Self::Snapshot { expires_at_ms, .. } => Some(*expires_at_ms),
         }
     }
 }

@@ -349,7 +349,7 @@ impl ResolvedTarget {
         let grep_worker = GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
+            runtime.clone(),
             GrepStepBudget::default(),
         );
         let maintenance = MaintenanceHost {

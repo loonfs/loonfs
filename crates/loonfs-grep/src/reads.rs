@@ -61,13 +61,13 @@ impl NamespaceReads {
         Ok(self.namespace.metadata().await?)
     }
 
-    /// Lists the files a checkpoint pins, in ascending inode-id order.
+    /// Lists the files a snapshot pins, in ascending inode-id order.
     /// Deleted files are included so an undelete needs no new postings;
     /// queries decide visibility.
     ///
-    /// A page returns `checkpoint_not_found` if the checkpoint was deleted or
-    /// collected, and `checkpoint_unavailable` if its manifest is gone. The
-    /// caller must then restart the backfill from a new checkpoint.
+    /// A page returns `snapshot_not_found` if the snapshot was deleted,
+    /// expired, or collected, and `checkpoint_unavailable` if its manifest is
+    /// gone. The caller must then restart the backfill from a new snapshot.
     pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
         self.namespace.list_checkpoint_files_with_options(
             checkpoint_id,

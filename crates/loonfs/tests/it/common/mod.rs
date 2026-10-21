@@ -4,12 +4,12 @@
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::{
-    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, CompleteUploadBody,
-    ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
-    FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
-    LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace,
-    NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
-    SharedObjectStore, UploadId, UploadSession, Writable,
+    ActorId, AdvanceRetentionResponse, ChangeSeq, Commit, CompleteUploadBody, ContentRef,
+    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager,
+    FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder,
+    MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace, NamespaceDiagnostics,
+    NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore,
+    Snapshot, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
@@ -407,12 +407,12 @@ impl TestRuntime {
             .list_file_revisions(absolute_path)
     }
 
-    pub(crate) async fn create_checkpoint(
+    pub(crate) async fn create_snapshot(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<Checkpoint> {
-        self.maintenance
-            .create_checkpoint(namespace_id, "test-pin")
+    ) -> loonfs::Result<Snapshot> {
+        self.namespace_writer(namespace_id)?
+            .create_snapshot("test-pin", &loonfs::CreateSnapshotOptions::default())
             .await
     }
 
@@ -561,7 +561,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ListChangesResponse>;
-    fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint>;
+    fn create_snapshot_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Snapshot>;
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -779,8 +779,8 @@ impl RuntimeTestExt for TestRuntime {
         block_on(namespace.list_changes(after_seq).page(first_page()))
     }
 
-    fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint> {
-        block_on(self.create_checkpoint(namespace_id))
+    fn create_snapshot_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Snapshot> {
+        block_on(self.create_snapshot(namespace_id))
     }
 
     fn advance_retention_floor_blocking(

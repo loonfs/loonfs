@@ -1,13 +1,12 @@
-//! `loonfs maintenance` commands: checkpoints, retention, GC, indexes, and the
-//! change feed.
+//! `loonfs maintenance` commands: the checkpoint inventory, retention, GC,
+//! indexes, and the change feed.
 
 use super::context::{resolve_command_context, resolve_mutation_context, resolve_profile_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
-    ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
-    MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
-    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
+    ChangesArgs, CommandKind, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs,
+    MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
     MaintenanceMetadataArgs, MaintenanceNamespaceArgs, MaintenanceRecoverAdministratorArgs,
     MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
     MaintenanceStoreProbeArgs,
@@ -15,8 +14,8 @@ use crate::args::{
 use crate::backend::StepBudget;
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{
-    AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, GcRequest,
-    MetadataMaintenanceRequest, RecoverAdministratorRequest, RunMaintenanceRequest,
+    AdvanceRetentionRequest, ChangeSeq, GcRequest, MetadataMaintenanceRequest,
+    RecoverAdministratorRequest, RunMaintenanceRequest,
 };
 use std::path::Path;
 
@@ -34,14 +33,8 @@ pub(crate) async fn run_maintenance_command(
         }
         MaintenanceCommand::Fold(args) => run_maintenance_fold(kind, config_path, args).await,
         MaintenanceCommand::Checkpoint { command } => match command {
-            MaintenanceCheckpointCommand::Create(args) => {
-                run_maintenance_checkpoint(kind, config_path, args).await
-            }
             MaintenanceCheckpointCommand::List(args) => {
                 run_maintenance_checkpoint_list(kind, config_path, args).await
-            }
-            MaintenanceCheckpointCommand::Delete(args) => {
-                run_maintenance_checkpoint_delete(kind, config_path, args).await
             }
         },
         MaintenanceCommand::Index { command } => match command {
@@ -138,26 +131,6 @@ async fn run_maintenance_gc(
     ))
 }
 
-async fn run_maintenance_checkpoint(
-    kind: CommandKind,
-    config_path: &Path,
-    args: MaintenanceCheckpointArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let request = CreateCheckpointRequest {
-        name: args.name,
-        ttl_ms: args.ttl_ms,
-    };
-    let response = context
-        .target
-        .client
-        .create_checkpoint(context.namespace(), &request)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(kind, CommandData::CheckpointCreated(response)))
-}
-
 async fn run_maintenance_checkpoint_list(
     kind: CommandKind,
     config_path: &Path,
@@ -185,23 +158,6 @@ async fn run_maintenance_checkpoint_list(
     };
 
     Ok(context.output(kind, CommandData::CheckpointsListed(response)))
-}
-
-async fn run_maintenance_checkpoint_delete(
-    kind: CommandKind,
-    config_path: &Path,
-    args: MaintenanceCheckpointDeleteArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let checkpoint_id = args.checkpoint_id.clone();
-    let response = context
-        .target
-        .client
-        .delete_checkpoint(context.namespace(), &checkpoint_id)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(kind, CommandData::CheckpointDeleted(response)))
 }
 
 /// One metadata-upkeep pass at a threshold of one WAL object.
