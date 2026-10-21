@@ -1474,6 +1474,8 @@ Lists the namespace's recoverable deletions, oldest deletion first (in ascending
 
 The listing is a range scan over the derived active-deletions family (see [File and subtree deletion](format.md#16-file-and-subtree-deletion)), so the cost of a page depends on the page, not on the namespace's deletion history. Those rows represent current state, and they aren't removed when the retention floor advances.
 
+In a fork, the scan starts above the fork point, which is the sequence of the source state that the fork copied and the fork's initial retention floor (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). The family's keys begin with the deletion sequence, so the fork point is where the scan starts, not a filter on its results, and a deletion that the fork inherited from its source never appears in the fork's listing. For example, if a namespace's trash lists a deletion at sequence 80 and the namespace is forked at sequence 100, the fork's listing starts above sequence 100 and leaves the deletion out, and the source's listing still includes it.
+
 Each entry includes the inode ID and the deletion sequence that `undelete` requires, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed binding (`deleted_binding`). As with path entries, a client MUST tolerate an `inode_kind` it doesn't know. Nested deletions stay separate entries, and recovering an outer deletion doesn't remove an inner deletion from the list.
 
 ```json
@@ -1496,6 +1498,8 @@ Each entry includes the inode ID and the deletion sequence that `undelete` requi
   ]
 }
 ```
+
+Why does a fork's listing start above the fork point? A fork's history starts at its fork point, so its trash lists the deletions committed in that history. Starting the scan there, instead of filtering the rows it reads, keeps the cost of a page independent of how many deletions the fork inherited.
 
 ### 6.7 `GET /filesystem/content` and `GET /inodes/{inode_id}/content`
 
@@ -1536,7 +1540,7 @@ For example, a revision listing returns:
 }
 ```
 
-The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path. Deleted files stay readable while their revision rows are kept. A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`.
+The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path, so a file under a recoverable deletion stays readable while its revision rows are kept. Once the namespace's writer expires a deletion, this route and the inode revision listing return `inode_not_found` for every inode that the deletion hides, as they do for an unknown inode, whatever rights the subject has, and they keep returning it after a compaction removes the bindings under the deletion (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`.
 
 `GET /inodes/{inode_id}/content` reads the current revision of a visible file inode, wherever the inode is bound, and streams and verifies it like the path route. Like the path route without `revision_no`, it requires only the `read` right. A deleted or unknown inode returns `inode_not_found`, and a directory returns `path_conflict`. With `snapshot_id`, the route reads the revision that the snapshot captured, and like every snapshot read, it also requires `history`.
 
@@ -1945,17 +1949,19 @@ The same not-found and forbidden rule applies to reads. A subject with no right 
 | Recursive directory listing, by path or inode | `read` on the target inode. The listing descends only into the directories below it where the subject also has `read`. |
 | Older content revision or historical download, by path or inode | `read` and `history` on the target inode. |
 | Revision listing, by path or inode | `read` and `history` on the target inode. |
-| Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. |
+| Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. Administrator, when an expired deletion hides the inode at the current head, or the inode's ancestry there is disconnected. |
 | Trash listing | `read` on each deletion's saved original parent. |
 | Batch file resolution and grep candidates | `read` on the candidate inode. Snapshot resolution also requires `history`. |
 | Change feed or bare content reference read | Administrator. |
 | Bare content reference import | Administrator on the reference's owner namespace. |
 
-Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection is left out, even when attributes were requested. A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`.
+Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection is left out, even when attributes were requested. A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`. If an expired deletion hides that inode at the current head, or the inode's ancestry there is disconnected (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)), a snapshot read of it requires an administrator, and any other subject receives `path_not_found` or `inode_not_found`, as a live read of the inode does. For example, if a snapshot captured `/team/hr/salaries.csv` before `/team/hr` was deleted, then once that deletion expires, a principal with `read` and `history` on `/team/hr` can no longer read the file through the snapshot, but an administrator can.
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
 When a subject is supplied, change feed reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
+
+Why does a snapshot read of an expired subtree require an administrator? LoonFS evaluates a snapshot read's rights on the access rows at the current head, and once a deletion expires, base compactions remove the head's rows under it a family group at a time. So at the head, a boundary row can be gone while a grant above it is still stored, and evaluating another subject's rights on those rows could widen them. An administrator's rights don't depend on those rows.
 
 ### 6.9 Upload transport
 
@@ -2205,7 +2211,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with two fields: `snapshot_id` grants the revision that the snapshot captured instead, and `start_offset` is the first byte to read.
 
-The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename or a deletion, as long as the revision is retained. The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
+The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename, and after a deletion while the deletion is recoverable and the revision is retained. Once the namespace's writer expires the deletion, the route returns `inode_not_found`, as it does for an unknown inode (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
 
 These five properties follow from the response's shape, and clients can rely on all of them:
 

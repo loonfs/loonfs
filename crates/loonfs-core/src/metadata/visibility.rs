@@ -222,6 +222,44 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     Ok(None)
 }
 
+/// Whether the ancestry of `inode_id` allows a read by inode ID
+/// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
+///
+/// The walk follows current bound edges up from the inode and stops at the
+/// first tombstone that hides the inode or an ancestor. An `expire` refuses
+/// the read, and a `set` allows it, because a recoverable deletion's rights
+/// are judged on its saved ancestry, so the walk doesn't continue above a
+/// recoverable root. Reaching the root inode without a tombstone allows the
+/// read. Reaching an inode with no bound edge before any tombstone means the
+/// ancestry is disconnected, which refuses the read. Every live inode has
+/// bound edges up to the root, and every deleted inode has them up to its
+/// deletion's root, which has a tombstone, so a chain that breaks before
+/// either belongs to nothing the namespace can show. And base compactions
+/// remove an expired subtree's rows a family group at a time, so the
+/// bindings that lead to the expired root can be gone while the revisions
+/// remain. A walk that revisits an inode found a parent-binding
+/// cycle, which is corrupt stored metadata.
+pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
+    reads: &mut R,
+    inode_id: InodeId,
+) -> Result<bool, R::Error> {
+    let mut current = inode_id;
+    let mut visited = BTreeSet::new();
+    while current != ROOT_INODE_ID {
+        if !visited.insert(current.0) {
+            return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
+        }
+        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(current).await? {
+            return Ok(tombstone.action.is_recoverable());
+        }
+        match reads.current_parent_binding_for_child(current).await? {
+            Some(binding) => current = binding.parent_inode_id,
+            None => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 /// Whether binding `inode_id` under `new_parent_inode_id` would make the
 /// directory graph cyclic: true iff `inode_id` is `new_parent_inode_id` or
 /// one of its current ancestors. Same ancestor walk (and cycle error) as

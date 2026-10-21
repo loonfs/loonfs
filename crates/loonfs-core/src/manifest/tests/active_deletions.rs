@@ -27,7 +27,11 @@ fn position(seq: u64) -> DeltaPosition {
     }
 }
 
-fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombstoneRecord {
+pub(super) fn tombstone_set(
+    root_inode_id: InodeId,
+    seq: u64,
+    name: &str,
+) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
         committed_seq: ChangeSeq(seq),
@@ -59,7 +63,11 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
     }
 }
 
-fn tombstone_expire(root_inode_id: InodeId, seq: u64, target_seq: u64) -> SubtreeTombstoneRecord {
+pub(super) fn tombstone_expire(
+    root_inode_id: InodeId,
+    seq: u64,
+    target_seq: u64,
+) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         action: TombstoneRowAction::Expire {
             target: position(target_seq),

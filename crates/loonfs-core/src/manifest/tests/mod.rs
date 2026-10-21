@@ -7,6 +7,7 @@ mod bounded_pages;
 mod cache;
 mod cas_recovery;
 mod directory_bindings;
+mod expired_subtrees;
 mod fold_races;
 mod index_parity;
 pub(crate) mod inspection_materialization;

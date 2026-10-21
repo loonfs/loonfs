@@ -12,8 +12,9 @@ use crate::manifest::{
     VerifiedMetadataSegments, WalTailCacheKey,
 };
 use crate::metadata::{
-    DirentryBindingRecord, LeafRevisionPreload, MetadataView, MetadataViewSession,
-    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    ancestry_allows_read, DirentryBindingRecord, LeafRevisionPreload, MetadataView,
+    MetadataViewSession, ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
+    METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
@@ -581,6 +582,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<RevisionRecord> {
         let mut session = self.metadata_view().session();
+        ensure_ancestry_allows_read(&mut session, inode_id).await?;
         access
             .require(
                 &mut session,
@@ -694,9 +696,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 Absence::Path(absolute_path),
             )
             .await?;
-        let page = self
-            .list_file_revisions_by_inode_page(entry.inode_id, request, access)
-            .await?;
+        let page = self.file_revisions_page(entry.inode_id, request).await?;
         Ok((entry.inode_id, page))
     }
 
@@ -704,11 +704,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// first, as one bounded range scan over the derived active-deletion
     /// family.
     ///
-    /// The materializer keeps that family in step with the tombstone family —
-    /// a delete adds the row, an undelete removes it — so the page reads only
-    /// the deletions it returns, never the namespace's whole deletion
-    /// history. Rows are never dropped at the retention floor, so a deletion
-    /// stays listed and recoverable however far the floor advances.
+    /// The materializer keeps that family in step with the tombstone family
+    /// (a delete adds the row, and an undelete or an expiry removes it), so
+    /// the page reads only the deletions it returns, never the namespace's
+    /// whole deletion history. In a fork, the scan starts above the fork
+    /// point, so a deletion the fork inherited is never listed
+    /// ([API section 6.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#66-get-filesystemtrash)).
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
@@ -722,6 +723,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .cursor
             .as_ref()
             .map(|cursor| (cursor.last_deletion_seq, cursor.last_root_inode_id));
+        let fork_seq = self
+            .head
+            .fork_basis
+            .as_ref()
+            .map_or(ChangeSeq(0), |basis| basis.manifest.head_seq);
         let mut session = self.metadata_view().session();
         let cursor = |seq: ChangeSeq, inode_id: InodeId| TrashPageCursor {
             head_seq: self.head.seq,
@@ -730,7 +736,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         let (deletions, next_cursor) = if access.is_unrestricted() {
             let mut deletions = session
-                .active_deletions_page(start_after, request.limit.limit_plus_one())
+                .active_deletions_page(fork_seq, start_after, request.limit.limit_plus_one())
                 .await?;
             let next_cursor = request.limit.finish_page(&mut deletions, |last| {
                 cursor(last.deletion_seq, last.root_inode_id)
@@ -745,7 +751,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             let mut exhausted = false;
             while !exhausted && kept.len() < limit && scanned < MAX_TRASH_ROWS_SCANNED_PER_PAGE {
                 let wanted = (limit - kept.len()).min(MAX_TRASH_ROWS_SCANNED_PER_PAGE - scanned);
-                let batch = session.active_deletions_page(start_after, wanted).await?;
+                let batch = session
+                    .active_deletions_page(fork_seq, start_after, wanted)
+                    .await?;
                 exhausted = batch.len() < wanted;
                 for deletion in batch {
                     scanned += 1;
@@ -794,6 +802,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let mut session = self.metadata_view().session();
+        ensure_ancestry_allows_read(&mut session, inode_id).await?;
         access
             .require(
                 &mut session,
@@ -810,6 +819,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 Absence::Inode,
             )
             .await?;
+        self.file_revisions_page(inode_id, request).await
+    }
+
+    /// One page of a file inode's retained revisions, newest first, for a
+    /// caller that has already authorized the listing.
+    async fn file_revisions_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let inode = self
             .metadata_view()
             .inode_at_seq(inode_id)
@@ -1301,6 +1320,22 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail)
     }
+}
+
+/// Refuses a read by inode ID of an inode that an expired deletion hides, or
+/// whose ancestry is disconnected, with the error of an unknown inode and
+/// before any access decision. See [`ancestry_allows_read`] for the walk.
+///
+/// A read that requires a visible inode doesn't need this check, because its
+/// path walk already requires bound edges up to the root.
+async fn ensure_ancestry_allows_read<S: ObjectStore + ?Sized>(
+    session: &mut MetadataViewSession<'_, '_, S>,
+    inode_id: InodeId,
+) -> Result<()> {
+    if !ancestry_allows_read(session, inode_id).await? {
+        return Err(CoreError::InodeNotFound(inode_id));
+    }
+    Ok(())
 }
 
 /// Refuses a buffered content read whose resolved size exceeds the caller's

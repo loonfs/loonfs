@@ -42,6 +42,9 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "service"] }
 loonfs-client.workspace = true
+# The expiry tests commit a writer's expiry through the commit engine, which
+# the runtime doesn't expose.
+loonfs-core.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }

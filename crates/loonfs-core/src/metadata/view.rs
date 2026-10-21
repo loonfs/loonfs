@@ -855,7 +855,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     /// One page of the namespace's recoverable deletions, oldest deletion
-    /// first, resuming strictly after `start_after`.
+    /// first, resuming strictly after `start_after` and leaving out every
+    /// deletion at or below `after_seq`.
     ///
     /// Manifest rows merge with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
@@ -865,6 +866,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// entry. Reads stop as soon as `limit` entries are in hand.
     pub(super) async fn active_deletions_page(
         &self,
+        after_seq: ChangeSeq,
         start_after: Option<(ChangeSeq, InodeId)>,
         limit: usize,
     ) -> Result<Vec<RecoverableDeletion>> {
@@ -872,11 +874,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
+        let lower_bound = lookup_keys::active_deletion_key_after_seq(after_seq);
         let lower_bound = match start_after {
             Some((deletion_seq, root_inode_id)) => {
-                lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id)
+                lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id).max(lower_bound)
             }
-            None => lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned(),
+            None => lower_bound,
         };
         let upper_bound = string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX);
 
