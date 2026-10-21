@@ -7,9 +7,9 @@ use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, ManifestNo,
-    MetadataCache, Namespace, NamespaceId, PinId, ReadFileOptions, ReadFileStreamOptions, ReadOnly,
-    SharedObjectStore, StatOptions, Writable,
+    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, MetadataCache,
+    Namespace, NamespaceId, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions,
+    ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -20,7 +20,6 @@ use loonfs_test_support::stores::{
 use loonfs_types::{ChecksumAlgorithm, PageRequest, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// The manifest check interval of the fixture's reader runtime.
 const INTERVAL_MS: u64 = 1_000;
@@ -123,14 +122,14 @@ impl Fixture {
 
 fn eventual(max_staleness_ms: u64) -> Option<Consistency> {
     Some(Consistency::Eventual {
-        max_staleness: Some(Duration::from_millis(max_staleness_ms)),
+        max_staleness_ms: Some(max_staleness_ms),
     })
 }
 
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Some(Consistency::Strong),
+        at: ReadAt::Live(Some(Consistency::Strong)),
         ..StatOptions::default()
     }
 }
@@ -152,11 +151,11 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
     let reader = &fixture.reader;
     let consistency = eventual(READ_REVALIDATION_BOUND_MS + 1);
     let stat = StatOptions {
-        consistency,
+        at: ReadAt::Live(consistency),
         ..StatOptions::default()
     };
     let list = ListOptions {
-        consistency,
+        at: ReadAt::Live(consistency),
         ..ListOptions::default()
     };
     let file = ReadFileOptions { consistency };
@@ -210,69 +209,41 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
     fixture.shutdown().await;
 }
 
-/// Checks that an eventual read with a `snapshot_id` fails with
-/// `invalid_request` for `consistency` before the read sends a request, and
-/// that a read view refuses an eventual read too, because a pinned read has no
-/// consistency setting.
+/// Checks that a read view refuses an eventual read with `invalid_request`
+/// for `consistency` before the read sends a request, because a pinned read
+/// has no consistency setting.
 #[tokio::test]
 async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
-    let fixture = fixture("eventual-snapshot").await;
+    let fixture = fixture("eventual-view").await;
     let reader = &fixture.reader;
     let consistency = eventual(INTERVAL_MS);
-    let snapshot_id = Some(PinId::generate(ManifestNo(1)));
+    let view = reader.read_view().await.expect("read view");
     let stat = StatOptions {
-        snapshot_id: snapshot_id.clone(),
-        consistency,
+        at: ReadAt::Live(consistency),
         ..StatOptions::default()
     };
     let list = ListOptions {
-        snapshot_id,
-        consistency,
+        at: ReadAt::Live(consistency),
         ..ListOptions::default()
-    };
-    fixture.recording.reset();
-    let errors = [
-        reader.stat_with_options("/file.txt", &stat).await.err(),
-        reader
-            .stat_by_inode_with_options(ROOT_INODE_ID, &stat)
-            .await
-            .err(),
-        reader
-            .list_with_options("/", &list)
-            .next()
-            .await
-            .and_then(Result::err),
-        reader
-            .list_by_inode_with_options(ROOT_INODE_ID, &list)
-            .next()
-            .await
-            .and_then(Result::err),
-    ];
-    for error in errors {
-        assert_invalid_request(error, "consistency");
-    }
-    assert_eq!(fixture.recording.take(), []);
-
-    let view = reader.read_view().await.expect("read view");
-    let stat = StatOptions {
-        consistency,
-        ..StatOptions::default()
     };
     let stream = ReadFileStreamOptions {
         consistency,
         ..ReadFileStreamOptions::default()
     };
     fixture.recording.reset();
-    assert_invalid_request(
+    let errors = [
         view.stat_with_options("/file.txt", &stat).await.err(),
-        "consistency",
-    );
-    assert_invalid_request(
+        view.list_with_options("/", &list)
+            .next()
+            .await
+            .and_then(Result::err),
         view.read_file_stream_with_options("/file.txt", &stream)
             .await
             .err(),
-        "consistency",
-    );
+    ];
+    for error in errors {
+        assert_invalid_request(error, "consistency");
+    }
     assert_eq!(fixture.recording.take(), []);
     fixture.shutdown().await;
 }
@@ -294,7 +265,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .list_with_options(
             "/",
             &ListOptions {
-                consistency: Some(Consistency::Strong),
+                at: ReadAt::Live(Some(Consistency::Strong)),
                 ..ListOptions::default()
             },
         )
@@ -319,7 +290,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                consistency,
+                at: ReadAt::Live(consistency),
                 ..StatOptions::default()
             },
         )
@@ -329,7 +300,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .list_with_options(
             "/",
             &ListOptions {
-                consistency,
+                at: ReadAt::Live(consistency),
                 ..ListOptions::default()
             },
         )
@@ -350,7 +321,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                consistency,
+                at: ReadAt::Live(consistency),
                 ..StatOptions::default()
             },
         )
@@ -384,7 +355,7 @@ async fn a_strong_default_confirms_reads_that_set_no_consistency() {
     let reader = LoonFs::builder_with_store(store)
         .read_only()
         .monotonic_timer(fixture.clock.clone())
-        .consistency(Consistency::Strong)
+        .consistency(ReadConsistency::Strong)
         .build()
         .await
         .expect("reader")
@@ -415,7 +386,7 @@ async fn a_strong_default_confirms_reads_that_set_no_consistency() {
         .expect("commit");
     fixture.recording.reset();
     let options = StatOptions {
-        consistency: eventual(READ_REVALIDATION_BOUND_MS),
+        at: ReadAt::Live(eventual(READ_REVALIDATION_BOUND_MS)),
         ..StatOptions::default()
     };
     let missing = reader.stat_with_options("/later.txt", &options).await;
@@ -437,7 +408,7 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
     let fixture = fixture("eventual-monotonic").await;
     let reader = &fixture.reader;
     let long = StatOptions {
-        consistency: eventual(READ_REVALIDATION_BOUND_MS),
+        at: ReadAt::Live(eventual(READ_REVALIDATION_BOUND_MS)),
         ..StatOptions::default()
     };
     let before = reader
@@ -515,7 +486,7 @@ async fn keeps_the_head(
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                at: ReadAt::Live(eventual(READ_REVALIDATION_BOUND_MS)),
                 ..StatOptions::default()
             },
         )
@@ -602,7 +573,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .stat_with_options(
             "/file.txt",
             &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                at: ReadAt::Live(eventual(READ_REVALIDATION_BOUND_MS)),
                 ..StatOptions::default()
             },
         )
@@ -674,7 +645,7 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
         .stat_with_options(
             "/during.txt",
             &StatOptions {
-                consistency: eventual(writer_position_reads::MAX_STALENESS_MS),
+                at: ReadAt::Live(eventual(writer_position_reads::MAX_STALENESS_MS)),
                 ..StatOptions::default()
             },
         )
@@ -734,7 +705,7 @@ async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
         .stat_with_options(
             "/small.txt",
             &StatOptions {
-                consistency: eventual(READ_REVALIDATION_BOUND_MS),
+                at: ReadAt::Live(eventual(READ_REVALIDATION_BOUND_MS)),
                 ..StatOptions::default()
             },
         )

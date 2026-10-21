@@ -204,7 +204,7 @@ pub use loonfs_objectstore::{
 };
 
 pub use config::{
-    InlineContentPolicy, PublicationPolicy, DEFAULT_IDLE_FOLD_AFTER_MS,
+    InlineContentPolicy, PublicationPolicy, ReadConsistency, DEFAULT_IDLE_FOLD_AFTER_MS,
     DEFAULT_MAX_READ_CONTENT_BYTES,
 };
 pub use execution_budget::{
@@ -231,9 +231,10 @@ pub use options::{
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
     DownloadOptions, ForkNamespaceOptions, ListChangesOptions, ListOptions,
-    MaintainMetadataOptions, MoveOptions, PutFileOptions, ReadFileOptions, ReadFileStreamOptions,
-    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    MaintainMetadataOptions, MoveOptions, PutFileOptions, ReadAt, ReadFileOptions,
+    ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use trace::TraceMode;

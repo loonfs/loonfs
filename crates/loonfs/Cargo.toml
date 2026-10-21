@@ -16,6 +16,7 @@ futures.workspace = true
 loonfs-types.workspace = true
 loonfs-core.workspace = true
 loonfs-objectstore.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true

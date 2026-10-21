@@ -3,7 +3,7 @@
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
 use futures::StreamExt;
-use loonfs_client::{DownloadOptions, NamespacePath, ReadFileOptions};
+use loonfs_client::{DownloadOptions, NamespacePath, ReadAt, ReadFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::api::v0::ListChangesResponse;
@@ -288,7 +288,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
             &namespace,
             captured_entry.inode_id,
             &loonfs_client::StatOptions {
-                snapshot_id: Some(snapshot.snapshot_id.clone()),
+                at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
                 ..Default::default()
             },
         )
@@ -296,7 +296,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .expect("snapshot inode stat");
     assert_eq!(inode_entry, pinned_entry);
     let options = loonfs_client::ListOptions {
-        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     let first = harness
@@ -399,8 +399,7 @@ async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
         .expect("replace file");
 
     let pinned = ReadFileOptions {
-        snapshot_id: Some(snapshot.snapshot_id.clone()),
-        ..Default::default()
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
     };
     assert_eq!(
         harness
@@ -625,8 +624,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 &namespace,
                 inode_id,
                 &ReadFileOptions {
-                    snapshot_id: Some(deleted.snapshot_id.clone()),
-                    ..Default::default()
+                    at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
                 },
             )
             .await

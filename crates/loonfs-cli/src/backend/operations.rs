@@ -8,7 +8,7 @@ use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
 use loonfs_client::{
     ChangesPager, DownloadOptions, ListChangesOptions, ListOptions, NamespacePath,
-    PathEntriesPager, PutFileOptions, ReadFileOptions, StatOptions,
+    PathEntriesPager, PutFileOptions, ReadAt, ReadFileOptions, StatOptions,
 };
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, InodeId, NamespaceId, PathEntry, PinId, RevisionNo,
@@ -24,7 +24,7 @@ impl ResolvedTarget {
         self.client.list_with_options(
             spec,
             &ListOptions {
-                snapshot_id: snapshot_id.cloned(),
+                at: ReadAt::from(snapshot_id.cloned()),
                 ..ListOptions::default()
             },
         )
@@ -41,7 +41,7 @@ impl ResolvedTarget {
             spec,
             &ListOptions {
                 recursive: true,
-                snapshot_id: snapshot_id.cloned(),
+                at: ReadAt::from(snapshot_id.cloned()),
                 ..ListOptions::default()
             },
         )
@@ -55,7 +55,7 @@ impl ResolvedTarget {
         self.stat_with_options(
             spec,
             &StatOptions {
-                snapshot_id: snapshot_id.cloned(),
+                at: ReadAt::from(snapshot_id.cloned()),
                 ..StatOptions::default()
             },
         )
@@ -74,7 +74,7 @@ impl ResolvedTarget {
                 namespace_id,
                 inode_id,
                 &StatOptions {
-                    snapshot_id: snapshot_id.cloned(),
+                    at: ReadAt::from(snapshot_id.cloned()),
                     ..StatOptions::default()
                 },
             )
@@ -97,8 +97,7 @@ impl ResolvedTarget {
             spec,
             &StatOptions {
                 include_attributes: loonfs_types::AttributeInclusion::Omit,
-                snapshot_id: snapshot_id.cloned(),
-                ..StatOptions::default()
+                at: ReadAt::from(snapshot_id.cloned()),
             },
         )
         .await
@@ -162,8 +161,7 @@ impl ResolvedTarget {
                     .read_file_stream_with_options(
                         spec,
                         &ReadFileOptions {
-                            snapshot_id: snapshot_id.cloned(),
-                            ..Default::default()
+                            at: ReadAt::from(snapshot_id.cloned()),
                         },
                     )
                     .await?
@@ -205,8 +203,7 @@ impl ResolvedTarget {
             namespace_id,
             after_seq,
             &ListChangesOptions {
-                snapshot_id: snapshot_id.cloned(),
-                ..Default::default()
+                at: ReadAt::from(snapshot_id.cloned()),
             },
         )
     }

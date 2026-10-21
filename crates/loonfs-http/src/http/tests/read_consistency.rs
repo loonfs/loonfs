@@ -6,7 +6,7 @@ use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, SharedObjectStore};
+use loonfs::{ReadConsistency, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -34,7 +34,7 @@ struct Fixture {
 /// default maximum staleness is the revalidation bound, so an eventual read
 /// stays inside it for the whole test, and `consistency` sets the runtime's
 /// default consistency, or keeps the runtime's own default when `None`.
-async fn fixture(name: &str, consistency: Option<Consistency>) -> Fixture {
+async fn fixture(name: &str, consistency: Option<ReadConsistency>) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -210,7 +210,7 @@ async fn consistency_rejections_identify_the_parameter() {
 async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() {
     let entry = "/v0/namespaces/demo/filesystem/entry?path=/file.txt";
     let children = "/v0/namespaces/demo/inodes/ino_1/children?include_attributes=false";
-    for (setting, unset_confirms) in [(None, false), (Some(Consistency::Strong), true)] {
+    for (setting, unset_confirms) in [(None, false), (Some(ReadConsistency::Strong), true)] {
         let fixture = fixture("consistency-no-request", setting).await;
         for uri in [entry, children] {
             let (status, _) = fixture.get(uri).await;

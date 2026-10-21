@@ -8,7 +8,6 @@ use crate::{
     DestinationBehavior, DisplayName, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 /// Whether a path or inode read includes the attribute projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,7 +33,7 @@ impl std::fmt::Display for AttributeInclusion {
 /// A read option that leaves its consistency unset (`None`) takes the
 /// runtime's default, which is eventual unless the host sets `strong`. A
 /// read of a snapshot has no consistency setting, because the snapshot
-/// selects the state it reads.
+/// selects the state it reads (see [`ReadAt`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
     /// Confirm the head before the read, so the read sees every commit
@@ -45,11 +44,38 @@ pub enum Consistency {
     /// that. The read sees every commit acknowledged before the last
     /// confirmation, and it may miss commits acknowledged since.
     Eventual {
-        /// How old the last confirmation can be, or `None` for the runtime's
-        /// default maximum staleness. No maximum staleness may exceed the
-        /// revalidation bound (`READ_REVALIDATION_BOUND_MS`).
-        max_staleness: Option<Duration>,
+        /// How old the last confirmation can be, in milliseconds, or `None`
+        /// for the runtime's default maximum staleness. No maximum staleness
+        /// may exceed the revalidation bound (`READ_REVALIDATION_BOUND_MS`).
+        max_staleness_ms: Option<u64>,
     },
+}
+
+/// The state that a read reads: the namespace's live head, or a snapshot.
+///
+/// A snapshot selects the state that a read of it sees, so only a live read
+/// has a consistency setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadAt {
+    /// The live head, confirmed as the consistency asks, or as the runtime's
+    /// default consistency when it's `None`.
+    Live(Option<Consistency>),
+    /// The state that this snapshot captured.
+    Snapshot(PinId),
+}
+
+impl Default for ReadAt {
+    fn default() -> Self {
+        Self::Live(None)
+    }
+}
+
+impl From<Option<PinId>> for ReadAt {
+    /// Returns a read of the snapshot, or of the live head at the runtime's
+    /// default consistency when there's no snapshot.
+    fn from(snapshot_id: Option<PinId>) -> Self {
+        snapshot_id.map_or(Self::Live(None), Self::Snapshot)
+    }
 }
 
 /// Commit settings shared by every filesystem mutation.
@@ -70,19 +96,16 @@ pub struct CommitOptions {
 pub struct StatOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
     pub include_attributes: AttributeInclusion,
-    /// Read the entry from this snapshot.
-    pub snapshot_id: Option<PinId>,
-    /// How recently the read confirms the live head, or `None` for the
-    /// runtime's default. A snapshot read takes only `None`.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that the read reads, by default the live
+    /// head at the runtime's default consistency.
+    pub at: ReadAt,
 }
 
 impl Default for StatOptions {
     fn default() -> Self {
         Self {
             include_attributes: AttributeInclusion::Include,
-            snapshot_id: None,
-            consistency: None,
+            at: ReadAt::default(),
         }
     }
 }
@@ -95,11 +118,9 @@ pub struct ListOptions {
     /// Whether to list the directory's whole subtree, depth first in name-key
     /// order, instead of its children only, disabled by default.
     pub recursive: bool,
-    /// Read the directory from this snapshot.
-    pub snapshot_id: Option<PinId>,
-    /// How recently each page confirms the live head, or `None` for the
-    /// runtime's default. A snapshot read takes only `None`.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that each page reads, by default the
+    /// live head at the runtime's default consistency.
+    pub at: ReadAt,
 }
 
 /// The attribute writes and removals one update applies.
@@ -387,7 +408,8 @@ mod tests {
 
     #[test]
     fn read_options_leave_the_consistency_to_the_runtime() {
-        assert_eq!(StatOptions::default().consistency, None);
-        assert_eq!(ListOptions::default().consistency, None);
+        assert_eq!(StatOptions::default().at, ReadAt::Live(None));
+        assert_eq!(ListOptions::default().at, ReadAt::Live(None));
+        assert_eq!(ReadAt::from(None), ReadAt::Live(None));
     }
 }

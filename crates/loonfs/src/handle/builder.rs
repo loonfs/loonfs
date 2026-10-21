@@ -8,8 +8,8 @@ use crate::metrics::{
 };
 use crate::publisher::{FoldTrigger, PublisherRegistry};
 use crate::{
-    Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, Result,
-    SharedObjectStore, StoreConfig, TraceMode,
+    Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, ReadConsistency,
+    Result, SharedObjectStore, StoreConfig, TraceMode,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
@@ -50,7 +50,7 @@ struct CoreConfig {
     metadata_cache: Option<MetadataCache>,
     manifest_revalidation_interval_ms: u64,
     max_staleness_ms: u64,
-    consistency: crate::Consistency,
+    consistency: ReadConsistency,
     execution_budget: Option<ExecutionBudget>,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
@@ -88,9 +88,7 @@ impl<M> LoonFsBuilder<M> {
                 manifest_revalidation_interval_ms:
                     crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
                 max_staleness_ms: crate::config::DEFAULT_MAX_STALENESS_MS,
-                consistency: crate::Consistency::Eventual {
-                    max_staleness: None,
-                },
+                consistency: ReadConsistency::Eventual,
                 execution_budget: None,
                 timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
@@ -174,14 +172,11 @@ impl<M> LoonFsBuilder<M> {
     /// Sets the consistency of a read that doesn't set its own, including
     /// every read that takes no options.
     ///
-    /// Defaults to [`Consistency::Eventual`](crate::Consistency::Eventual)
-    /// with the runtime's maximum staleness. A host whose readers follow
-    /// writes made in other processes sets
-    /// [`Consistency::Strong`](crate::Consistency::Strong). A maximum
-    /// staleness above
-    /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
-    /// fails the build with [`Error::Config`].
-    pub fn consistency(mut self, consistency: crate::Consistency) -> Self {
+    /// Defaults to [`ReadConsistency::Eventual`], whose reads take the
+    /// maximum staleness that [`Self::max_staleness_ms`] sets. A host whose
+    /// readers follow writes made in other processes sets
+    /// [`ReadConsistency::Strong`].
+    pub fn consistency(mut self, consistency: ReadConsistency) -> Self {
         self.core.consistency = consistency;
         self
     }
@@ -420,19 +415,12 @@ impl CoreConfig {
         // revalidation bound, whatever the setting, so a longer interval or
         // maximum staleness would promise something that the runtime doesn't
         // do.
-        let consistency_staleness_ms = match self.consistency {
-            crate::Consistency::Eventual {
-                max_staleness: Some(max_staleness),
-            } => u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX),
-            _ => 0,
-        };
         for (setting, interval_ms) in [
             (
                 "manifest_revalidation_interval_ms",
                 self.manifest_revalidation_interval_ms,
             ),
             ("max_staleness_ms", self.max_staleness_ms),
-            ("consistency", consistency_staleness_ms),
         ] {
             if interval_ms > READ_REVALIDATION_BOUND_MS {
                 return Err(Error::Config(format!(

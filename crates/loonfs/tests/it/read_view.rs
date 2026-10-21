@@ -736,7 +736,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("create snapshot");
     let snapshot_options = loonfs::StatOptions {
-        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     assert_eq!(
@@ -934,7 +934,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         view.stat_with_options(
             "/pinned.txt",
             &loonfs::StatOptions {
-                snapshot_id: Some(other.clone()),
+                at: loonfs::ReadAt::Snapshot(other.clone()),
                 ..Default::default()
             },
         )
@@ -945,7 +945,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         view.stat_by_inode_with_options(
             root,
             &loonfs::StatOptions {
-                snapshot_id: Some(other.clone()),
+                at: loonfs::ReadAt::Snapshot(other.clone()),
                 ..Default::default()
             },
         )
@@ -956,7 +956,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         view.list_with_options(
             "/",
             &loonfs::ListOptions {
-                snapshot_id: Some(other.clone()),
+                at: loonfs::ReadAt::Snapshot(other.clone()),
                 ..Default::default()
             },
         )
@@ -971,7 +971,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         view.list_by_inode_with_options(
             root,
             &loonfs::ListOptions {
-                snapshot_id: Some(other),
+                at: loonfs::ReadAt::Snapshot(other),
                 ..Default::default()
             },
         )

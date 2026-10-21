@@ -10,7 +10,7 @@ use super::handlers_uploads::{
 };
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, parse_boolean_query_param,
-    parse_consistency, parse_include_attributes, parse_public_ordinal, parse_revision_no,
+    parse_include_attributes, parse_public_ordinal, parse_read_at, parse_revision_no,
     required_query_param,
 };
 #[cfg(feature = "openapi")]
@@ -25,7 +25,7 @@ use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
     ChangeSeq, Consistency, DownloadOptions, ErrorCode, InodeId, ListChangesOptions, ListOptions,
-    Namespace, PinId, ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
+    Namespace, PinId, ReadAt, ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -99,9 +99,15 @@ pub(super) struct ChangesQuery {
     max_staleness_ms: Option<String>,
 }
 
+/// The state that a read request reads: a view of a snapshot, or the live
+/// namespace with the request's consistency.
+///
+/// A handler builds a read's options without `at`, and the target sets `at`
+/// for a live read. A download has no consistency setting, so a download's
+/// live target has none.
 pub(super) enum ReadTarget {
     Snapshot(Box<ReadView>),
-    Live(Namespace<ReadOnly>),
+    Live(Namespace<ReadOnly>, Option<Consistency>),
 }
 
 impl ReadTarget {
@@ -112,7 +118,13 @@ impl ReadTarget {
     ) -> loonfs::PathEntriesPager {
         match self {
             Self::Snapshot(view) => view.list_with_options(path, options),
-            Self::Live(namespace) => namespace.list_with_options(path, options),
+            Self::Live(namespace, consistency) => namespace.list_with_options(
+                path,
+                &ListOptions {
+                    at: ReadAt::Live(*consistency),
+                    ..options.clone()
+                },
+            ),
         }
     }
 
@@ -123,7 +135,17 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
             Self::Snapshot(view) => view.stat_with_options(path, options).await,
-            Self::Live(namespace) => namespace.stat_with_options(path, options).await,
+            Self::Live(namespace, consistency) => {
+                namespace
+                    .stat_with_options(
+                        path,
+                        &StatOptions {
+                            at: ReadAt::Live(*consistency),
+                            ..options.clone()
+                        },
+                    )
+                    .await
+            }
         }
     }
 
@@ -134,7 +156,13 @@ impl ReadTarget {
     ) -> loonfs::InodeChildrenPager {
         match self {
             Self::Snapshot(view) => view.list_by_inode_with_options(inode_id, options),
-            Self::Live(namespace) => namespace.list_by_inode_with_options(inode_id, options),
+            Self::Live(namespace, consistency) => namespace.list_by_inode_with_options(
+                inode_id,
+                &ListOptions {
+                    at: ReadAt::Live(*consistency),
+                    ..options.clone()
+                },
+            ),
         }
     }
 
@@ -145,9 +173,15 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
             Self::Snapshot(view) => view.stat_by_inode_with_options(inode_id, options).await,
-            Self::Live(namespace) => {
+            Self::Live(namespace, consistency) => {
                 namespace
-                    .stat_by_inode_with_options(inode_id, options)
+                    .stat_by_inode_with_options(
+                        inode_id,
+                        &StatOptions {
+                            at: ReadAt::Live(*consistency),
+                            ..options.clone()
+                        },
+                    )
                     .await
             }
         }
@@ -157,46 +191,54 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
-        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
-        let options = ReadFileStreamOptions {
-            consistency,
-            ..ReadFileStreamOptions::default()
-        };
         match self {
-            Self::Snapshot(view) => view.read_file_stream_with_options(path, &options).await,
-            Self::Live(namespace) => match revision_no {
-                Some(revision_no) => {
-                    namespace
-                        .read_file_revision_stream_with_options(path, revision_no, &options)
-                        .await
+            Self::Snapshot(view) => {
+                view.read_file_stream_with_options(path, &ReadFileStreamOptions::default())
+                    .await
+            }
+            Self::Live(namespace, consistency) => {
+                let options = ReadFileStreamOptions {
+                    consistency: *consistency,
+                    ..ReadFileStreamOptions::default()
+                };
+                match revision_no {
+                    Some(revision_no) => {
+                        namespace
+                            .read_file_revision_stream_with_options(path, revision_no, &options)
+                            .await
+                    }
+                    None => {
+                        namespace
+                            .read_file_stream_with_options(path, &options)
+                            .await
+                    }
                 }
-                None => {
-                    namespace
-                        .read_file_stream_with_options(path, &options)
-                        .await
-                }
-            },
+            }
         }
     }
 
     pub(super) async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
-        consistency: Option<Consistency>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
-        let options = ReadFileStreamOptions {
-            consistency,
-            ..ReadFileStreamOptions::default()
-        };
         match self {
             Self::Snapshot(view) => {
-                view.read_file_stream_by_inode_with_options(inode_id, &options)
-                    .await
+                view.read_file_stream_by_inode_with_options(
+                    inode_id,
+                    &ReadFileStreamOptions::default(),
+                )
+                .await
             }
-            Self::Live(namespace) => {
+            Self::Live(namespace, consistency) => {
                 namespace
-                    .read_file_stream_by_inode_with_options(inode_id, &options)
+                    .read_file_stream_by_inode_with_options(
+                        inode_id,
+                        &ReadFileStreamOptions {
+                            consistency: *consistency,
+                            ..ReadFileStreamOptions::default()
+                        },
+                    )
                     .await
             }
         }
@@ -210,7 +252,7 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
             Self::Snapshot(view) => view.create_download_with_options(path, options).await,
-            Self::Live(namespace) => match revision_no {
+            Self::Live(namespace, _) => match revision_no {
                 Some(revision_no) => {
                     namespace
                         .create_revision_download_with_options(path, revision_no, options)
@@ -231,7 +273,7 @@ impl ReadTarget {
                 view.create_download_by_inode_with_options(inode_id, options)
                     .await
             }
-            Self::Live(namespace) => {
+            Self::Live(namespace, _) => {
                 namespace
                     .create_download_by_inode_with_options(inode_id, options)
                     .await
@@ -239,18 +281,15 @@ impl ReadTarget {
         }
     }
 
-    /// A snapshot's feed has no consistency setting, and the handler rejects
-    /// `consistency` with a `snapshot_id` before it reads.
-    fn list_changes(
-        &self,
-        after_seq: ChangeSeq,
-        consistency: Option<Consistency>,
-    ) -> loonfs::ChangesPager {
+    fn list_changes(&self, after_seq: ChangeSeq) -> loonfs::ChangesPager {
         match self {
             Self::Snapshot(view) => view.list_changes(after_seq),
-            Self::Live(namespace) => {
-                namespace.list_changes_with_options(after_seq, &ListChangesOptions { consistency })
-            }
+            Self::Live(namespace, consistency) => namespace.list_changes_with_options(
+                after_seq,
+                &ListChangesOptions {
+                    consistency: *consistency,
+                },
+            ),
         }
     }
 }
@@ -315,13 +354,12 @@ pub(super) async fn list_path_entries(
         limit: effective_page_limit(query.limit)?,
         cursor: checked_list_cursor(query.cursor, &options)?,
     };
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let listing = target
         .list_with_options(&path, &options)
         .page(request)
@@ -374,13 +412,12 @@ pub(super) async fn get_path_entry(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let entry = target
         .stat_with_options(&path, &options)
         .await
@@ -436,15 +473,15 @@ pub(super) async fn get_file_content(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no, "revision_no")?;
-    let consistency = parse_consistency(
+    let at = parse_read_at(
+        snapshot_id,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream(&path, revision_no, consistency)
+        .read_file_stream(&path, revision_no)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -722,15 +759,14 @@ pub(super) async fn list_changes(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = effective_page_limit(query.limit)?;
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let response = target
-        .list_changes(after_seq, consistency)
+        .list_changes(after_seq)
         .page(PageRequest {
             limit,
             cursor: None,
@@ -742,11 +778,12 @@ pub(super) async fn list_changes(
 
 pub(super) async fn read_target(
     namespace: Namespace<ReadOnly>,
-    snapshot_id: Option<PinId>,
+    at: ReadAt,
     snapshot_param: &str,
 ) -> Result<ReadTarget, ApiResponseError> {
-    let Some(snapshot_id) = snapshot_id else {
-        return Ok(ReadTarget::Live(namespace));
+    let snapshot_id = match at {
+        ReadAt::Live(consistency) => return Ok(ReadTarget::Live(namespace, consistency)),
+        ReadAt::Snapshot(snapshot_id) => snapshot_id,
     };
     namespace
         .read_view_at_snapshot(&snapshot_id)

@@ -212,9 +212,7 @@ fn test_runtime_core(
             max_read_content_bytes: crate::DEFAULT_MAX_READ_CONTENT_BYTES,
             manifest_revalidation_interval_ms: 1000,
             max_staleness_ms: 1000,
-            consistency: crate::Consistency::Eventual {
-                max_staleness: None,
-            },
+            consistency: crate::ReadConsistency::Eventual,
             metadata_run_policy,
             trace_mode: TraceMode::Remote,
             store_kind: Some(ConfiguredObjectStoreKind::LocalFs),

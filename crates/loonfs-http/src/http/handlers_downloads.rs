@@ -9,7 +9,7 @@ use super::query_params::parse_revision_no;
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
-use loonfs::DownloadOptions;
+use loonfs::{DownloadOptions, ReadAt};
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
@@ -70,7 +70,7 @@ pub(super) async fn create_download(
     )?;
     let target = read_target(
         runtime.namespace(&namespace_id),
-        request.snapshot_id,
+        ReadAt::from(request.snapshot_id),
         "/snapshot_id",
     )
     .await?;
@@ -140,7 +140,7 @@ pub(super) async fn create_download_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let target = read_target(
         runtime.namespace(&namespace_id),
-        request.snapshot_id,
+        ReadAt::from(request.snapshot_id),
         "/snapshot_id",
     )
     .await?;

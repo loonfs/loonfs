@@ -4,6 +4,7 @@ use super::reads::ReadSource;
 use super::RuntimeCore;
 use crate::{Consistency, CoreError, Error, NamespaceId, Result, SharedObjectStore};
 use loonfs_core::control::{load_namespace_current_manifest, load_snapshot_read_basis};
+use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::{
     ManifestLoadError, MetadataProjectionLoadError, NamespaceReaderEngine, RuntimeReadContext,
 };
@@ -50,6 +51,12 @@ pub(super) async fn classify_read_result<T>(
 }
 
 impl RuntimeCore {
+    /// Runs `read` at the namespace's live head, confirmed as `consistency`
+    /// asks, and once more at a reloaded head if a newer manifest replaced
+    /// the read's basis.
+    ///
+    /// A maximum staleness longer than the revalidation bound returns
+    /// `invalid_request` before the read sends a request.
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
@@ -60,6 +67,20 @@ impl RuntimeCore {
         F: Fn(NamespaceReaderEngine<SharedObjectStore>, RuntimeReadContext) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
+        if let Some(Consistency::Eventual {
+            max_staleness_ms: Some(max_staleness_ms),
+        }) = consistency
+        {
+            if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
+                return Err(Error::InvalidRequest {
+                    message: format!(
+                        "an eventual read's maximum staleness may not exceed the revalidation \
+                         bound ({READ_REVALIDATION_BOUND_MS} ms)"
+                    ),
+                    param: "max_staleness_ms",
+                });
+            }
+        }
         let (engine, context) = self
             .pinned_read(namespace_id, consistency)
             .instrument(

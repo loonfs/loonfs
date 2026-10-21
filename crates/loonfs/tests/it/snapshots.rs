@@ -354,7 +354,7 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
             .stat_with_options(
                 "/file",
                 &loonfs::StatOptions {
-                    snapshot_id: Some(snapshot.snapshot_id.clone()),
+                    at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
                     ..Default::default()
                 },
             )
@@ -437,7 +437,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("delete");
     let options = loonfs::StatOptions {
-        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     assert_eq!(
@@ -464,7 +464,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .list_with_options(
             "/",
             &loonfs::ListOptions {
-                snapshot_id: Some(snapshot.snapshot_id.clone()),
+                at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
                 ..Default::default()
             },
         )
@@ -475,7 +475,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .list_by_inode_with_options(
             root.inode_id,
             &loonfs::ListOptions {
-                snapshot_id: Some(snapshot.snapshot_id),
+                at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id),
                 ..Default::default()
             },
         )
