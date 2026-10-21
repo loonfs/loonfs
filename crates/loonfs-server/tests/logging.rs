@@ -262,7 +262,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         "logging-expected-errors",
     );
     config.maintenance = JobMode::ServeOnly;
-    config.max_concurrent_uploads = 1;
+    config.max_concurrent_uploads = std::num::NonZeroUsize::MIN;
     let (router, state) = app(config, AppConfig::default()).await.expect("build app");
     let writer = state.runtime;
     let namespace = namespace_id("demo");

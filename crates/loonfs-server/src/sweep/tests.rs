@@ -801,7 +801,7 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.max_concurrent_maintenance = 2;
+    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
     let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(2));
@@ -858,7 +858,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.max_concurrent_maintenance = 2;
+    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
     let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(1));

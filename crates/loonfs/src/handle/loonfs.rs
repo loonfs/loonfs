@@ -4,12 +4,15 @@ use super::{LoonFsBuilder, Maintenance, Namespace};
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::{NamespaceSession, PublisherRegistry};
 use crate::{
-    CapabilityDocument, ExecutionBudget, MetadataCache, NamespaceId, Result, SharedObjectStore,
-    StoreConfig,
+    CapabilityDocument, ExecutionBudget, InlineContentPolicy, MetadataCache, NamespaceId, Result,
+    SharedObjectStore, StoreConfig,
 };
 #[cfg(test)]
 use loonfs_core::cache::MetadataSegmentCache;
-use loonfs_types::{Subject, WriterId};
+use loonfs_types::{
+    Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+};
 use std::fmt;
 use std::sync::Arc;
 
@@ -134,12 +137,6 @@ impl<M> LoonFs<M> {
         Namespace::new(self.core.clone(), namespace_id.clone())
     }
 
-    /// Returns the capability document for this embedded build (API spec,
-    /// "Capability discovery").
-    pub fn capabilities(&self) -> CapabilityDocument {
-        self.core.capabilities()
-    }
-
     /// Returns the metadata cache this runtime reads through, which
     /// [`Maintenance`] work fills too.
     pub fn metadata_cache(&self) -> &MetadataCache {
@@ -175,7 +172,38 @@ impl<M> LoonFs<M> {
     }
 }
 
+impl LoonFs<ReadOnly> {
+    /// Returns the capability document for this embedded build (API spec,
+    /// "Capability discovery").
+    pub fn capabilities(&self) -> CapabilityDocument {
+        self.core.capabilities()
+    }
+}
+
 impl LoonFs<Writable> {
+    /// Returns the capability document for this embedded build (API spec,
+    /// "Capability discovery"), with inline commit content when this runtime
+    /// prepares it.
+    pub fn capabilities(&self) -> CapabilityDocument {
+        let mut capabilities = self.core.capabilities();
+        if let Some(threshold) = self.inline_content_policy().inline_content_threshold_bytes {
+            capabilities
+                .features
+                .insert(FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true);
+            capabilities.limits.insert(
+                LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
+                threshold as u64,
+            );
+        }
+        capabilities
+    }
+
+    /// Returns the inline content policy that this runtime's commits use (see
+    /// [`LoonFsBuilder::inline_content`]).
+    pub fn inline_content_policy(&self) -> &InlineContentPolicy {
+        &self.mode.bits.inline_content
+    }
+
     /// Starts a writable runtime builder that constructs its object-store
     /// client from configuration inside this runtime's ownership domain.
     pub fn builder(store_config: StoreConfig) -> LoonFsBuilder<Writable> {

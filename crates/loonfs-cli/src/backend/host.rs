@@ -3,7 +3,7 @@
 use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use http_body_util::BodyExt as _;
-use loonfs::{InlineContentPolicy, LoonFs, Maintenance, SharedObjectStore, Writable};
+use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable};
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
@@ -29,7 +29,6 @@ pub(crate) fn client(
     host: &MaintenanceHost,
     grep_service: GrepService,
     store_kind: ConfiguredObjectStoreKind,
-    inline_content: InlineContentPolicy,
     no_retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
@@ -39,7 +38,6 @@ pub(crate) fn client(
         max_upload_bytes: None,
         max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
         max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-        inline_content,
         content_token_secret: CONTENT_TOKEN_SECRET
             .get_or_init(|| loonfs_types::generated_id("content-token").into())
             .clone(),

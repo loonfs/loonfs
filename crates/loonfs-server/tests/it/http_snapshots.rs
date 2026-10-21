@@ -273,7 +273,7 @@ async fn http_snapshots_enforce_quota_and_delete_frees_a_slot() {
         "snapshot-quota",
         "snapshot-quota",
     );
-    config.snapshot_max_live_per_namespace = 1;
+    config.snapshot_max_live_per_namespace = std::num::NonZeroUsize::MIN;
     let harness = start_server(config).await;
     let namespace = namespace_id("quota");
     harness

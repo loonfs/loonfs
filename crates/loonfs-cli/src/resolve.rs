@@ -361,7 +361,6 @@ impl ResolvedTarget {
             &maintenance,
             GrepService::new(grep_block_cache, maintenance.runtime.monotonic_timer()),
             store_kind,
-            inline_content,
             no_retry,
         )?;
         Ok(Self {

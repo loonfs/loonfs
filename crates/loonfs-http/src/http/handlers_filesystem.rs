@@ -611,7 +611,10 @@ pub(super) async fn create_commit(
     let inline_content = super::commit_content::prepare_inline_content(
         &namespace_id,
         &mut operations,
-        state.options.inline_content.inline_content_threshold_bytes,
+        state
+            .runtime
+            .inline_content_policy()
+            .inline_content_threshold_bytes,
         state.probe_store.checksum_algorithm(),
     )
     .map_err(|error| error.with_commit_id(&commit_id))?;

@@ -248,13 +248,12 @@ pub async fn app(
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
             max_age_ms: config.snapshot_max_age_ms,
-            max_live_per_namespace: config.snapshot_max_live_per_namespace,
+            max_live_per_namespace: config.snapshot_max_live_per_namespace.get(),
         },
         max_download_bytes: Some(config.max_download_bytes),
         max_upload_bytes: Some(config.max_upload_bytes),
-        max_concurrent_uploads: config.max_concurrent_uploads,
-        max_concurrent_downloads: config.max_concurrent_downloads,
-        inline_content: config.inline_content.effective_policy(),
+        max_concurrent_uploads: config.max_concurrent_uploads.get(),
+        max_concurrent_downloads: config.max_concurrent_downloads.get(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
         store_kind: config.store.kind(),
@@ -265,11 +264,10 @@ pub async fn app(
     });
     let binding = BindingState {
         request_limit: Some(loonfs_http::RequestLimit::new(
-            std::num::NonZeroUsize::new(config.max_in_flight_requests)
-                .expect("validated request limit should be nonzero"),
+            config.max_in_flight_requests,
         )),
-        upload_permits: loonfs_http::transfer_permits(config.max_concurrent_uploads),
-        download_permits: loonfs_http::transfer_permits(config.max_concurrent_downloads),
+        upload_permits: loonfs_http::transfer_permits(config.max_concurrent_uploads.get()),
+        download_permits: loonfs_http::transfer_permits(config.max_concurrent_downloads.get()),
         options,
         runtime: runtime.clone(),
         namespaces,
@@ -508,7 +506,7 @@ where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
-    let max_connections = config.max_connections;
+    let max_connections = config.max_connections.get();
     let (router, state) = app(config, AppConfig::default()).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
