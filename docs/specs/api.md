@@ -947,7 +947,7 @@ In an active namespace, GC reclaims a content object once it's older than the gr
 
 [Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable.
 
-The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
+The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule when its `retention_window_ms` setting is set, as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
 Completed upload sessions in active namespaces keep their records for the derived content reclamation grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a pass after the record is removed.
 
@@ -959,6 +959,8 @@ The reference server runs a maintenance sweep with two parts:
 
 - On the collection interval, the sweep visits the namespace sessions that the server keeps open and whose published sequence has moved, and it collects their garbage.
 - A full pass lists every namespace in the store, including deleted ones, and runs GC for each one. The full pass runs when the sweep starts, and then on the full sweep interval (24 hours by default).
+
+When the server's `retention_window_ms` is set, the full pass also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the window. It uses the same advance as a `retention` run with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. The visits on the collection interval don't advance the floor on their own schedule. A visit that's in progress when the full pass reaches its namespace makes the pass's advance after its own work, so the pass doesn't wait for it. Without the setting, the server doesn't advance any floor.
 
 A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the full pass. The full pass also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between full passes.
 

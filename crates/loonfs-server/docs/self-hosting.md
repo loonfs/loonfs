@@ -326,7 +326,7 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs.publisher.write_stop_wait_seconds` | Histogram | How long a namespace's queue waited at the write stop, until a fold published, the fold task ended, or the write-stop wait passed. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` if it listed every namespace, or `error` if the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run when the server starts and every `full_sweep_interval_ms`. |
-| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, or `gc`. The `gc` call runs the core collector and then, if the server maintains the grep index, the grep index's collector, so a failure of either one counts as a `gc` failure. The sweep tries the call again after a backoff. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `retention` (the full pass's retention advance). The `gc` call runs the core collector and then, if the server maintains the grep index, the grep index's collector, so a failure of either one counts as a `gc` failure. The sweep tries the call again after a backoff, or on the next full pass for `retention`. |
 | `loonfs.maintenance.sweep_panics` | Counter | A sweep call or an idle-session close panicked. The sweep contains the panic, counts a panicked call as a `server_error` failure, and goes on. A nonzero count is a bug to report. |
 | `loonfs.maintenance.sweep_namespaces` | Gauge | The number of namespaces that the last finished full sweep pass listed, including deleted namespaces. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
@@ -553,7 +553,7 @@ helm rollback loonfs-server --namespace loonfs
 
 ## Background maintenance
 
-This section describes the background maintenance that folds, compacts, indexes, and collects garbage, and how many store requests it costs.
+This section describes the background maintenance that folds, compacts, indexes, advances retention floors, and collects garbage, and how many store requests it costs.
 
 The `maintenance` setting has four modes:
 
@@ -589,11 +589,30 @@ A tick runs the first due step for each session, in this order:
 
 Each session that the host keeps has its own publisher, engine state, head position, and allocated queue capacities. Closing the session releases them after its admitted work ends. Shared caches and execution limits have their own lifetimes. A server whose maintenance mode doesn't maintain has no sweep, so nothing closes its idle sessions.
 
-The daily pass (the full sweep pass) runs when the server starts and then every `full_sweep_interval_ms` (86400000 ms, or 24 hours, by default). It lists every namespace, runs metadata and index maintenance, and collects garbage. It covers namespaces that this host doesn't write to, forks, deleted namespaces, work left by a crashed process, and garbage that was still inside a grace window. If the host loses its in-memory scheduling facts, no durable progress is lost.
+The daily pass (the full sweep pass) runs when the server starts and then every `full_sweep_interval_ms` (86400000 ms, or 24 hours, by default). It lists every namespace, runs metadata and index maintenance, advances retention floors when `retention_window_ms` is set (as described below), and collects garbage. It covers namespaces that this host doesn't write to, forks, deleted namespaces, work left by a crashed process, and garbage that was still inside a grace window. If the host loses its in-memory scheduling facts, no durable progress is lost.
 
 The daily pass and the ticks run at the same time. They share the `max_concurrent_maintenance` visit slots (8 by default), and a per-namespace set of current visits keeps two visits to one namespace from overlapping. A long compaction uses one slot while the other free slots continue working. The daily pass lists up to 1000 namespace IDs per page, and it requests another page when its visit slots allow it. Hosts can call `Sweep::run_pass` and `Sweep::tick` directly.
 
 All the interval and idle-close settings must be positive.
+
+The retention window (`retention_window_ms`) is how long, in milliseconds, the server keeps a namespace's history before it advances the namespace's [retention floor](../../../docs/specs/glossary.md#retention-floor) past that history. It's a top-level setting, and when it's set, it must be positive. Without it (the default), the server doesn't advance any floor, and a namespace keeps its whole history until an operator advances the floor with a `retention` maintenance run or `loonfs maintenance retention advance`.
+
+```toml
+# Keep 30 days of history.
+retention_window_ms = 2592000000
+```
+
+When the window is set, each full pass advances the floor of every namespace that isn't deleted to the last commit at or before the current time minus the window. The pass uses the same advance as a `retention` run, so the cutoff rule in [Advancing the retention floor](../../../docs/specs/format.md#101-advancing-the-retention-floor) applies. The ticks don't advance the floor on their own schedule, and a server whose `maintenance` mode doesn't run the sweep doesn't advance any floor. If a tick is visiting a namespace when the full pass reaches it, the pass doesn't wait for that visit, and the tick makes the pass's advance after its own step. A failed advance counts as a `retention` failure in `loonfs.maintenance.sweep_visit_failures`, and the next full pass tries it again. The ticks don't retry a failed advance, so the server keeps no retry state for it, even for a session that the host keeps. The server logs the failure at error level on each full pass that finds it, like a failure on a namespace without a kept session, and the failure doesn't keep an idle session open.
+
+For example, with a 30-day window and the default daily pass, a deletion stays recoverable for at least 30 days. The first full pass after the deletion is 30 days old moves the floor past the deletion, and the namespace's writer expires the deletion when it finds the new floor. So if this server has a writer session open for the namespace, the deletion expires between 30 and 31 days after the commit that deleted it, and the deleted bytes are reclaimed after the next base compaction and garbage collection pass. (A namespace that nobody writes to keeps its deletions recoverable until a writer session opens. The [retention window design note](../../../docs/design/retention-window.md#advancing-the-floor-on-a-schedule) describes when deletions expire.)
+
+The cutoff is compared with commit timestamps, which come from writers' clocks. The advance stops at the first commit whose timestamp is later than the cutoff, so one commit with a late timestamp keeps the floor below that commit until the window passes the timestamp.
+
+If two servers maintain the same store with different windows (for example, during a rolling deploy that changes the setting), the shorter window takes effect, because the floor never moves back.
+
+Why doesn't every tick advance the floor? An advance checks that the manifest's segments exist and then publishes a manifest. A window measured in days doesn't need a finer schedule than the daily pass, and the full pass publishes nothing for a namespace whose floor has already reached its cutoff.
+
+Why does the pass leave its advance to a tick that's visiting the namespace? The tick might be running a long compaction, so the pass can't wait for it. If the pass skipped the advance, the window would be a day longer for the namespaces that are busiest.
 
 Grep queries stay correct while the index is behind. A query scans the commits after the index, and if it goes past its scan budget, it fails with `index_lagging` unless `allow_stale` is set.
 
@@ -625,6 +644,8 @@ An idle namespace costs no requests between full passes. A full pass costs one l
 | Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 38 GET or HEAD and 12 LIST |
 
 On a collection pass, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every full pass. Core metadata still costs 6 requests per visit, and garbage collection adds 16, for a total of 22. For example, a server with 1,000 caught-up idle namespaces and no grep sends no requests for them between full passes, and about 22,000 on each daily full pass, plus the namespace listing.
+
+With `retention_window_ms` set, the retention advance adds requests to each visit of a full pass. For an idle namespace whose floor has already reached its head, the advance adds 14 GET or HEAD requests, because it loads the current manifest three times, and it publishes nothing. For a namespace with commits above its floor, the advance also reads those commits in order, up to the first one that's newer than the cutoff. When the floor moves, the advance also sends one HEAD request for each segment that the manifest lists, and it puts one manifest. For example, with a window, the server above with 1,000 idle namespaces sends about 14,000 more requests on each daily full pass once their floors have reached their heads.
 
 The full pass also collects deleted namespaces. A deleted namespace's content becomes eligible once its retirement grace passes, about 61 minutes after the delete. The next full pass collects eligible content, and later full passes keep collecting it. Late writes through upload capabilities that were already issued, and dependent forks, can extend reclamation, and the later passes find them. In a garbage collection report, `deleted.retired_content_objects` counts the listed content objects that the pass deleted, and a pass with nothing left under the content prefix reports zero. For what can block reclamation, see the API specification's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns).
 

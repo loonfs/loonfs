@@ -386,6 +386,7 @@ pub(crate) fn test_config(
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
+        retention_window_ms: None,
         idle_session_close_after_ms: 1_800_000,
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,

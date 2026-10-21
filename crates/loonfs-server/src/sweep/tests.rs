@@ -639,6 +639,7 @@ impl SweepServer {
             .namespaces
             .visit_held(namespace_id, |held| call.retry(held))
             .expect("a held session")
+            .expect("a call that keeps retry state")
     }
 
     async fn pass_after(&self, elapsed_ms: u64) {
@@ -1059,6 +1060,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
 }
 
 mod indexing;
+mod retention;
 mod sessions;
 
 mod concurrency;

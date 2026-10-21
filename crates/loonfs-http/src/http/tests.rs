@@ -187,6 +187,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "restore_revision_by_inode",
     "retained_candidates",
     "retention_floor_seq",
+    "retention_window_ms",
     "revision_committed_at_ms",
     "revision_committed_by",
     "revision_no",
