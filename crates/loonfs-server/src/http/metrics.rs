@@ -1,7 +1,6 @@
 //! Prometheus rendering for the server's operational metrics route.
 
 use super::AppState;
-use crate::local_cache::FoyerCacheStats;
 use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS};
 use loonfs::MetadataCacheStats;
@@ -22,7 +21,6 @@ pub(super) fn render(state: &AppState) -> String {
     }
     render_scrape_gauges(
         &mut rendered,
-        state.local_cache.as_ref().map(|cache| cache.foyer_stats()),
         binding
             .grep
             .worker()
@@ -111,23 +109,15 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
     }
 }
 
-/// Appends current gauge values sampled during a scrape: local cache state,
-/// grep steps, Linux process RSS, and available transfer slots.
+/// Appends current gauge values sampled during a scrape: grep steps, Linux
+/// process RSS, and available transfer slots.
 fn render_scrape_gauges(
     rendered: &mut String,
-    local_cache: Option<FoyerCacheStats>,
     grep_steps: Option<GrepStepBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
     in_flight_requests: usize,
 ) {
-    // Omit local-cache metrics when this server has no local cache. Reporting
-    // zeros would incorrectly suggest that an enabled cache is idle.
-    if let Some(local_cache) = local_cache {
-        for (name, description, value) in local_cache_gauges(&local_cache) {
-            write_gauge(rendered, name, description, value);
-        }
-    }
     if let Some(GrepStepBudgetStats { running, waiting }) = grep_steps {
         for (name, description, value) in [
             (
@@ -467,57 +457,6 @@ fn process_resident_bytes() -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn process_resident_bytes() -> Option<u64> {
     None
-}
-
-/// Converts the current Foyer local-cache statistics into gauges.
-///
-/// These are foyer's own numbers, read at scrape time; the cache's hits,
-/// misses, and inserts are reported through the runtime's recorder like
-/// every other instrument and are already in the snapshot above.
-///
-/// Listing every field makes this code fail to compile when `FoyerCacheStats`
-/// gains a field, which ensures new statistics are considered for export.
-fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, u64); 6] {
-    let FoyerCacheStats {
-        memory_bytes,
-        memory_capacity_bytes,
-        disk_bytes,
-        disk_capacity_bytes,
-        queue_buffer_overflows,
-        queue_channel_overflows,
-    } = *stats;
-    [
-        (
-            "loonfs_local_cache_memory_bytes",
-            "Bytes the local block cache's memory tier is holding",
-            memory_bytes as u64,
-        ),
-        (
-            "loonfs_local_cache_memory_capacity_bytes",
-            "Bytes the local block cache's memory tier may hold",
-            memory_capacity_bytes as u64,
-        ),
-        (
-            "loonfs_local_cache_disk_bytes",
-            "Bytes of the local block cache's disk device claimed as blocks",
-            disk_bytes as u64,
-        ),
-        (
-            "loonfs_local_cache_disk_capacity_bytes",
-            "Bytes of disk the local block cache was opened with",
-            disk_capacity_bytes as u64,
-        ),
-        (
-            "loonfs_local_cache_queue_buffer_overflows",
-            "Inserts the local block cache dropped with a full flush buffer",
-            queue_buffer_overflows,
-        ),
-        (
-            "loonfs_local_cache_queue_channel_overflows",
-            "Inserts the local block cache dropped with a full submit queue",
-            queue_channel_overflows,
-        ),
-    ]
 }
 
 /// The exported name: dots become underscores, and a counter takes the

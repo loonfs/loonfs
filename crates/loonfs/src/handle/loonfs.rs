@@ -7,8 +7,6 @@ use crate::{
     CapabilityDocument, ExecutionBudget, InlineContentPolicy, MetadataCache, NamespaceId, Result,
     SharedObjectStore, StoreConfig,
 };
-#[cfg(test)]
-use loonfs_core::cache::MetadataSegmentCache;
 use loonfs_types::{
     Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -163,12 +161,6 @@ impl<M> LoonFs<M> {
     /// revalidation checks with, for an extension that runs beside it.
     pub fn monotonic_timer(&self) -> Arc<dyn loonfs_types::MonotonicTimer> {
         Arc::clone(&self.core.inner.timer)
-    }
-
-    /// Returns this runtime's view of the decoded segment blocks.
-    #[cfg(test)]
-    pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
-        self.core.metadata_segment_cache()
     }
 }
 
@@ -336,7 +328,6 @@ impl LoonFs<Writable> {
 #[cfg(test)]
 mod tests {
     use crate::{ErrorCode, LoonFs, MetadataCache, MetadataCacheStats, NamespaceId, Writable};
-    use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{
@@ -344,50 +335,6 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn a_runtime_carries_no_stored_block_cache_by_default() {
-        let temp_dir = tempdir().expect("tempdir");
-        let runtime = LoonFs::builder_with_store(Arc::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        ))
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "no-stored-block-cache-writer",
-        ))
-        .build()
-        .await
-        .expect("build runtime");
-
-        assert!(runtime
-            .metadata_segment_cache()
-            .stored_block_cache()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn the_builder_installs_the_stored_block_cache_on_the_decoded_cache() {
-        let temp_dir = tempdir().expect("tempdir");
-        let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-        let runtime = LoonFs::builder_with_store(Arc::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        ))
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "stored-block-cache-writer",
-        ))
-        .stored_metadata_block_cache(stored_blocks.clone())
-        .build()
-        .await
-        .expect("build runtime");
-
-        assert!(runtime
-            .metadata_segment_cache()
-            .stored_block_cache()
-            .is_some());
-        assert!(Arc::ptr_eq(
-            &runtime.metadata_segment_cache(),
-            &runtime.read_only().metadata_segment_cache()
-        ));
-    }
 
     #[tokio::test]
     async fn converting_a_builder_to_read_only_keeps_the_shared_settings() {

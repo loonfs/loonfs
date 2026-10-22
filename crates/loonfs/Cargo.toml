@@ -23,9 +23,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-# The stored-block cache double the seam tests install lives behind
-# `loonfs-core`'s `test-support` feature; test targets are the only builds
-# that turn it on.
+# Core's test helpers live behind its `test-support` feature, and test
+# targets are the only builds that turn it on.
 loonfs-core = { workspace = true, features = ["test-support"] }
 loonfs-test-support.workspace = true
 serde_json.workspace = true

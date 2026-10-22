@@ -203,7 +203,7 @@ fn test_runtime_core(
 ) -> RuntimeCore {
     let execution_budget = ExecutionBudget::default();
     let metadata_cache =
-        MetadataCache::default().bind(&store, execution_budget.read_working_memory(), None);
+        MetadataCache::default().bind(&store, execution_budget.read_working_memory());
     RuntimeCore::open(
         store,
         ReadConfig {

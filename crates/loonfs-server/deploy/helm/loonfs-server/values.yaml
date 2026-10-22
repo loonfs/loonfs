@@ -43,19 +43,6 @@ service:
 # The kubelet's grace must outlast shutdown_deadline_ms (default 600s) plus settle time.
 terminationGracePeriodSeconds: 660
 
-localCache:
-  # Mount an emptyDir at /var/cache/loonfs for the server's disk cache. The
-  # chart writes nothing into the config: the config's [local_cache] table
-  # has to name /var/cache/loonfs as its `path`.
-  # The cache holds every 16 MiB disk block file open. Set the process's
-  # open-file limit above disk_bytes divided by 16 MiB; 100 GiB needs about
-  # 6400 files.
-  enabled: false
-  # The emptyDir's sizeLimit, as a quantity such as "100Gi". The chart
-  # requires it when the cache is enabled, and it must comfortably exceed
-  # the config's `disk_bytes`.
-  sizeLimit: ""
-
 # Environment variables for the container, passed through as written. Each
 # entry is a Kubernetes EnvVar. This is how LOONFS_AUTH_TOKEN and
 # LOONFS_CONTENT_TOKEN_SECRET reach the process from a Secret you already

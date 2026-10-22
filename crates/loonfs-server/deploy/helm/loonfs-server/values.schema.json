@@ -9,8 +9,7 @@
     "image",
     "config",
     "service",
-    "terminationGracePeriodSeconds",
-    "localCache"
+    "terminationGracePeriodSeconds"
   ],
   "properties": {
     "image": {
@@ -93,21 +92,6 @@
       "type": "integer",
       "minimum": 1,
       "description": "How long the kubelet waits after SIGTERM before it sends SIGKILL."
-    },
-    "localCache": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Mount an emptyDir at /var/cache/loonfs for the server's disk cache."
-        },
-        "sizeLimit": {
-          "type": "string",
-          "description": "The emptyDir's sizeLimit, as a quantity such as 100Gi. Empty means no limit."
-        }
-      }
     },
     "extraEnv": {
       "type": "array",

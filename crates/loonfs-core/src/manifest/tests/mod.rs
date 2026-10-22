@@ -34,9 +34,6 @@ use super::runs::{
     MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
     DEFAULT_MAX_DELTA_RUNS, MANIFEST_ROW_FAMILIES,
 };
-use super::stored_block_cache::{
-    StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
-};
 use super::streaming_compaction::{
     finalize_metadata_compaction, input_segment_keys, retention_clusters, run_metadata_compaction,
     CompactionPublication, MetadataCompactionCancellation, MetadataCompactionSpec,
@@ -63,7 +60,6 @@ use crate::test_support::ops::{
     create, delete_path, move_path, put_file, restore_file_revision, write_file_bytes,
     write_files_bytes,
 };
-use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::time::{Deadline, StdMonotonicTimer};
 use crate::MutationContext;
 use async_trait::async_trait;

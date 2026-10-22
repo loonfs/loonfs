@@ -1,19 +1,13 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
 //!
-//! Point loads consult the per-view memo, the decoded block cache, and the
-//! node-local cache of stored bytes. Scan loads skip the stored-byte tier
-//! because it answers one block per awaited read, turning a wide scan into
-//! tens of thousands of serial point reads. Scans use the decoded caches and
-//! coalesced store GETs, and they do not populate the stored-byte tier.
+//! Point loads and scan loads consult the per-view memo and the decoded block
+//! cache first. A scan load fetches the blocks that neither one has with
+//! coalesced ranged GETs.
 
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
-use super::index_block_load::{
-    load_section_bytes, offer_stored_block, segment_block_cache_key, segment_codec_error,
-    stored_block_section,
-};
-use super::stored_block_cache::StoredMetadataBlockKind;
+use super::index_block_load::{load_section_bytes, segment_block_cache_key, segment_codec_error};
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -29,67 +23,6 @@ use std::sync::Arc;
 /// Longest single ranged GET issued while bulk-reading a block span; longer
 /// spans split into consecutive requests.
 pub(super) const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
-
-pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    memo: Option<&SessionBlockMemo>,
-    descriptor: &MetadataSegmentRef,
-    entry: &SegmentIndexEntry,
-) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
-    let handle = entry.block;
-    let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset);
-    if let Some(DecodedMetadataSegmentBlock::Data { block, .. }) =
-        memo.and_then(|memo| memo.get(&cache_key))
-    {
-        return Ok(block);
-    }
-    let fetch = || async {
-        if let Some(bytes) = memo.and_then(|memo| memo.stored(&cache_key)) {
-            return decode_stored_data(descriptor, &handle, &bytes);
-        }
-        // Between the decoded cache above and the store below: a local copy
-        // of the same stored bytes.
-        if let Some(decoded) = stored_block_section(
-            segment_cache,
-            descriptor,
-            StoredMetadataBlockKind::Data,
-            &handle,
-            decode_data_block,
-        )
-        .await
-        {
-            return Ok(decoded_data_cache_block(decoded));
-        }
-        let object_key = metadata_segment_object_key(descriptor);
-        let bytes = load_section_bytes(
-            store,
-            &object_key,
-            handle.offset,
-            handle.stored_bytes as u64,
-        )
-        .await?;
-        offer_stored_block(
-            segment_cache,
-            descriptor,
-            StoredMetadataBlockKind::Data,
-            &handle,
-            &bytes,
-        );
-        Ok(decoded_data_cache_block(
-            decode_data_block(&bytes, &handle)
-                .map_err(|err| segment_codec_error(&object_key, err))?,
-        ))
-    };
-    let block = match segment_cache {
-        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
-        None => fetch().await?,
-    };
-    if let Some(memo) = memo {
-        memo.record(&cache_key, &block);
-    }
-    block.into_data(&metadata_segment_object_key(descriptor))
-}
 
 pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Sized>(
     store: &S,
@@ -319,13 +252,22 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     }
 
     // Only single-flight losers still need to resolve what the winner
-    // published, with the existing point-load fallback on cache eviction.
+    // published. Each block reads through the decoded cache, and a block
+    // evicted since the winner published it is fetched alone.
     for (position, entry) in entries.iter().enumerate() {
         if blocks[position].is_some() {
             continue;
         }
-        blocks[position] =
-            Some(load_segment_data_block(store, segment_cache, memo, descriptor, entry).await?);
+        blocks[position] = Some(
+            load_segment_data_block_with_readahead(
+                store,
+                segment_cache,
+                memo,
+                descriptor,
+                std::slice::from_ref(entry),
+            )
+            .await?,
+        );
     }
 
     Ok(blocks

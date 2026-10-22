@@ -366,7 +366,6 @@ pub(crate) fn test_config(
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),
-        local_cache: None,
         grep: GrepConfig {
             mode: JobMode::ServeAndMaintain,
             ..GrepConfig::default()

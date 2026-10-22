@@ -343,7 +343,6 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             64 * 1024 * 1024,
             Some(observer),
         )),
-        None,
     );
     let floor = advance_retention_floor(
         &store,

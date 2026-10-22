@@ -42,13 +42,6 @@ fn tls_table(cert_path: &Path, key_path: &Path) -> String {
     )
 }
 
-fn local_cache_table(path: &Path) -> String {
-    format!(
-        "\n[local_cache]\npath = \"{}\"\nmemory_bytes = 4194304\ndisk_bytes = 100663296\n",
-        path.display()
-    )
-}
-
 /// Generates a self-signed identity in `dir` and returns its certificate and
 /// key paths.
 fn write_tls_identity(dir: &Path) -> (PathBuf, PathBuf) {
@@ -298,49 +291,15 @@ fn check_config_reports_a_tls_identity_it_cannot_load() {
 }
 
 #[test]
-fn check_config_reports_a_local_cache_it_cannot_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let occupied = dir.path().join("cache");
-    std::fs::write(&occupied, b"a file, not a directory").expect("occupy the cache path");
-    let config_path = write_config_with(
-        dir.path(),
-        "127.0.0.1:9400",
-        &dir.path().join("store"),
-        &local_cache_table(&occupied),
-    );
-
-    let output = run_server(&config_path, &["--check-config"]);
-
-    assert!(
-        !output.status.success(),
-        "a cache directory the server cannot open must fail the check"
-    );
-    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
-    assert!(
-        stderr.contains("local_cache.path"),
-        "the error must name the field it came from, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("cache"),
-        "the error must name the directory, got: {stderr}"
-    );
-}
-
-#[test]
-fn check_config_leaves_no_cache_files_behind() {
+fn check_config_accepts_a_valid_tls_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store_root = dir.path().join("store");
     let (cert_path, key_path) = write_tls_identity(dir.path());
-    let cache_root = dir.path().join("cache");
     let config_path = write_config_with(
         dir.path(),
         "127.0.0.1:9400",
         &store_root,
-        &format!(
-            "{}{}",
-            tls_table(&cert_path, &key_path),
-            local_cache_table(&cache_root)
-        ),
+        &tls_table(&cert_path, &key_path),
     );
 
     let output = run_server(&config_path, &["--check-config"]);
@@ -355,13 +314,6 @@ fn check_config_leaves_no_cache_files_behind() {
     assert_eq!(
         stdout.trim(),
         "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
-    );
-    assert!(
-        std::fs::read_dir(&cache_root)
-            .expect("cache directory")
-            .next()
-            .is_none(),
-        "the check must leave the cache directory empty"
     );
 }
 

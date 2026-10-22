@@ -27,8 +27,8 @@ tracing.workspace = true
 xxhash-rust.workspace = true
 
 [features]
-# Test doubles for this crate's public seams, for the test targets of crates
-# that implement or install them. No production build enables it.
+# Test helpers for the test targets of other crates. No production build
+# enables it.
 test-support = []
 
 [dev-dependencies]

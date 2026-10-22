@@ -4,7 +4,6 @@
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{JobMode, MemorySizing, ServerConfig, ServerConfigError};
-use crate::local_cache::FoyerStoredMetadataBlockCache;
 use crate::sweep::Sweep;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -12,10 +11,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
-use loonfs::{
-    LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
-    StoredMetadataBlockCacheCloseError, TraceMode, Writable, WriterId,
-};
+use loonfs::{LoonFs, Maintenance, SharedObjectStore, TraceMode, Writable, WriterId};
 use loonfs_grep::{new_grep_block_cache, GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -127,7 +123,6 @@ pub struct AppState {
     /// The maintenance sweep of a config that maintains. [`app`] does not
     /// start it.
     pub sweep: Option<Sweep>,
-    pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     /// The grep block cache of a config that serves grep, whose stats a
     /// scrape of `/metrics` reads.
     pub grep_block_cache: Option<Arc<GrepBlockCache>>,
@@ -146,9 +141,8 @@ pub struct AppConfig {
 ///
 /// The state holds the maintenance sweep when the config maintains, and
 /// this does not start it. [`serve`] starts it. After an embedded listener
-/// drains, the host must shut down [`AppState::runtime`], then close
-/// [`AppState::local_cache`] so in-memory entries are flushed. [`serve`]
-/// performs these steps automatically. The cache is optional.
+/// drains, the host must shut down [`AppState::runtime`], which [`serve`]
+/// does automatically.
 pub async fn app(
     config: ServerConfig,
     options: AppConfig,
@@ -171,10 +165,6 @@ pub async fn app(
         }
     };
     let metrics = HttpMetrics::new();
-    // Opened before the runtime, because the runtime is what it is
-    // installed on: a directory that cannot be owned fails startup here
-    // rather than after a runtime is already running on it.
-    let local_cache = open_local_cache(&config, &metrics).await?;
     // Grep reads and checkpoints through the same runtime the HTTP API
     // groups use, so it is composed after it.
     let (runtime, maintenance) = build_handles(
@@ -183,7 +173,6 @@ pub async fn app(
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
-        local_cache.clone(),
     )
     .await?;
     let probe_store = runtime.object_store();
@@ -276,22 +265,9 @@ pub async fn app(
         binding,
         runtime,
         sweep,
-        local_cache,
         grep_block_cache,
     };
     Ok((router(state.clone()), state))
-}
-
-async fn open_local_cache(
-    config: &ServerConfig,
-    metrics: &HttpMetrics,
-) -> Result<Option<Arc<FoyerStoredMetadataBlockCache>>, ServerConfigError> {
-    match &config.local_cache {
-        Some(local_cache) => Ok(Some(Arc::new(
-            FoyerStoredMetadataBlockCache::open(local_cache, metrics.recorder().as_ref()).await?,
-        ))),
-        None => Ok(None),
-    }
 }
 
 /// Builds the process runtime and its maintenance over one store and one
@@ -303,15 +279,13 @@ async fn open_local_cache(
 /// input limits and the `[publication]` totals. The execution budget reports
 /// to the recorder, and a scrape of `/metrics` reads the cache's counters
 /// from its stats. An optional JSONL recorder receives the same object-store
-/// samples. The local block cache is installed once on the runtime, so its
-/// reads and its maintenance use the same cache hierarchy.
+/// samples.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     memory: &MemorySizing,
     store: SharedObjectStore,
     metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
-    local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
@@ -345,9 +319,6 @@ pub(super) async fn build_handles(
     builder = builder.consistency(config.consistency);
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
-    }
-    if let Some(local_cache) = local_cache {
-        builder = builder.stored_metadata_block_cache(local_cache);
     }
     let runtime = builder.build().await.map_err(invalid_runtime)?;
     let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", config.writer_id))
@@ -401,8 +372,6 @@ pub enum ServeError {
     Serve(#[source] std::io::Error),
     #[error("runtime or maintenance shutdown did not settle: {0}")]
     Shutdown(#[source] loonfs::Error),
-    #[error("the local block cache did not close during shutdown: {0}")]
-    LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
 }
 
 /// Builds the rustls configuration this deployment terminates with, or
@@ -418,28 +387,16 @@ fn tls_server_config(
 
 /// Validates configuration and startup resources without starting the server.
 ///
-/// This checks the TLS identity, local cache sizes, and cache directory access.
-/// It does not bind the configured address or contact
-/// the object store. Use `loonfs-server --probe-store` or
-/// `loonfs maintenance store probe` to test storage access. Constructing a local
-/// store still creates its root directory. The cache directory is created if
-/// missing and checked with a temporary file. No cache device is opened.
+/// This checks the config fields and the TLS identity. It does not bind the
+/// configured address or contact the object store. Use
+/// `loonfs-server --probe-store` or `loonfs maintenance store probe` to test
+/// storage access. Constructing a local store still creates its root
+/// directory.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;
     // Building the identity is the whole check; nothing here serves with it.
     let _identity = tls_server_config(config).map_err(ServeError::Tls)?;
-    if let Some(local_cache) = &config.local_cache {
-        let path = std::path::Path::new(local_cache.path.trim());
-        std::fs::create_dir_all(path)
-            .and_then(|()| tempfile::tempfile_in(path))
-            .map_err(|error| {
-                ServerConfigError::Field(ConfigFieldError::Invalid {
-                    field: "local_cache.path",
-                    reason: format!("cannot write to `{}`: {error}", path.display()),
-                })
-            })?;
-    }
     Ok(())
 }
 
@@ -513,7 +470,6 @@ where
         router,
         state.runtime,
         state.sweep,
-        state.local_cache,
         shutdown_deadline_ms,
         shutdown,
     )
@@ -532,7 +488,6 @@ pub(super) async fn serve_and_settle<L>(
     router: Router,
     runtime: LoonFs<Writable>,
     sweep: Option<Sweep>,
-    local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     shutdown_deadline_ms: u64,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError>
@@ -589,18 +544,7 @@ where
     };
     served.map_err(ServeError::Serve)?;
     let runtime_settled = runtime.shutdown().await;
-    let settled = runtime_settled.and(swept).map_err(ServeError::Shutdown);
-    // Close the cache after runtime shutdown, even when runtime shutdown
-    // fails. Closing flushes retained memory entries to disk. If both steps
-    // fail, report the runtime failure.
-    let closed = match local_cache {
-        Some(local_cache) => local_cache
-            .close()
-            .await
-            .map_err(ServeError::LocalCacheClose),
-        None => Ok(()),
-    };
-    settled.and(closed)
+    runtime_settled.and(swept).map_err(ServeError::Shutdown)
 }
 
 async fn drain_with_deadline<S>(
