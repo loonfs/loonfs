@@ -5,22 +5,13 @@ use crate::common::{expect_code, open_runtime_async, store};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, CreateDirectoryOptions, CurrentFile, ErrorCode, FilesystemChange, InodeId, Namespace,
-    PageRequest, PaginationPolicy, Writable,
+    Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     DestinationPrecondition, DisplayName, MAX_PATH_BYTES, MAX_PATH_DEPTH, ROOT_INODE_ID,
 };
 use tempfile::tempdir;
-
-fn page_request() -> PageRequest<String> {
-    PageRequest {
-        limit: PaginationPolicy::default()
-            .effective_limit(None)
-            .expect("default page limit"),
-        cursor: None,
-    }
-}
 
 async fn create_directory_by_inode(
     namespace: &Namespace<Writable>,
@@ -96,7 +87,7 @@ async fn assert_inode_addressing_serves(
     );
     let listing = namespace
         .list_by_inode(directory)
-        .page(page_request())
+        .page()
         .await
         .expect("list the directory by inode");
     assert_eq!(

@@ -15,7 +15,7 @@ use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
     GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef, LoadedGrepManifest,
 };
-use crate::reads::{page_request, published_revision, NamespaceReads};
+use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, GrepStepBudget, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
@@ -753,7 +753,9 @@ async fn plan_backfill_unit(
     loop {
         let page = reads
             .list_checkpoint_files(checkpoint_id)
-            .page(page_request(cursor, files_remaining)?)
+            .page_limit(page_limit(files_remaining)?)
+            .cursor(cursor)
+            .page()
             .await?;
         if page.captured_seq != captured_seq {
             return Err(GrepError::IndexCorrupt {

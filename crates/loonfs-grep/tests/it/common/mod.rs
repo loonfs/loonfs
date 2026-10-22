@@ -16,7 +16,7 @@ use loonfs_grep::{
 };
 use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
-    ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
+    ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest, PaginationPolicy, RunNo,
 };
 use std::sync::Arc;
 
@@ -77,7 +77,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
-        limit: EffectiveLimit,
+        page: PageRequest<String>,
     ) -> Result<GrepResponse, GrepError> {
         grep_with(
             &self.service,
@@ -85,7 +85,7 @@ impl GrepHost {
             &self.store,
             namespace_id,
             request,
-            limit,
+            page,
         )
         .await
     }
@@ -257,10 +257,10 @@ pub(crate) async fn grep_with(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     request: &GrepRequest,
-    limit: EffectiveLimit,
+    page: PageRequest<String>,
 ) -> Result<GrepResponse, GrepError> {
     let reads = NamespaceReads::new(reader.namespace(namespace_id));
-    service.query(request, limit, &reads, store).await
+    service.query(request, page, &reads, store).await
 }
 
 pub(crate) fn observation() -> loonfs::engine::Observation {
@@ -269,16 +269,15 @@ pub(crate) fn observation() -> loonfs::engine::Observation {
     ))
 }
 
-pub(crate) fn default_page_limit() -> EffectiveLimit {
-    PaginationPolicy::default()
-        .effective_limit(None)
-        .expect("the pagination policy should accept its own default")
-}
-
-pub(crate) fn page_limit(matches: u32) -> EffectiveLimit {
-    PaginationPolicy::default()
-        .effective_limit(Some(matches))
-        .expect("test page limits should be within the pagination policy")
+/// Returns the page of at most `matches` matches at `cursor`, or the first
+/// such page when `cursor` is `None`.
+pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<String> {
+    PageRequest {
+        limit: PaginationPolicy::default()
+            .effective_limit(Some(matches))
+            .expect("test page limits should be within the pagination policy"),
+        cursor,
+    }
 }
 
 /// Classifies a key by durable family instead of by its spelling, so the

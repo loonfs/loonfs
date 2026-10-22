@@ -1,6 +1,6 @@
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
-use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
+use crate::common::{control, grep_with, page_request, GrepHost};
 use bytes::Bytes;
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
@@ -21,15 +21,15 @@ use loonfs_grep::{
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
-use loonfs_test_support::ids::nonzero_usize;
+use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
     OperationContext, OperationKind, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{
-    sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
-    IndexSegmentId, RunNo, MAX_PUBLIC_INTEGER,
+    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
+    RunNo, MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
 use std::collections::BTreeSet;
@@ -44,7 +44,6 @@ fn request(pattern: &str) -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         inode_id: None,
-        cursor: None,
         allow_stale: false,
         allow_scan: false,
     }
@@ -84,14 +83,14 @@ async fn new_query(
     namespace_id: &NamespaceId,
     grep_request: &GrepRequest,
 ) -> loonfs_grep::Result<GrepResponse> {
-    new_query_page(store, namespace_id, grep_request, default_page_limit()).await
+    new_query_page(store, namespace_id, grep_request, first_page()).await
 }
 
 async fn new_query_page(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     grep_request: &GrepRequest,
-    limit: EffectiveLimit,
+    page: PageRequest<String>,
 ) -> loonfs_grep::Result<GrepResponse> {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
@@ -104,7 +103,7 @@ async fn new_query_page(
         store,
         namespace_id,
         grep_request,
-        limit,
+        page,
     )
     .await
 }
@@ -168,7 +167,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
         let read = async {
             if query {
                 let response = query_host
-                    .grep(&namespace_id, &request("needle"), default_page_limit())
+                    .grep(&namespace_id, &request("needle"), first_page())
                     .await
                     .expect("query takes a new read view");
                 assert_eq!(response.head_seq, response.built_through_seq);
@@ -1864,7 +1863,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         ("indexed query", request("tree")),
     ] {
         let response = host
-            .grep(&namespace_id, &grep_request, default_page_limit())
+            .grep(&namespace_id, &grep_request, first_page())
             .await
             .unwrap_or_else(|error| panic!("{case}: {error}"));
         assert_eq!(
@@ -2068,22 +2067,28 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .expect_err("a missing inode scope must remain a missing inode");
     assert_eq!(error.code(), ErrorCode::InodeNotFound);
 
-    let mut page_request = request("shared needle");
+    let shared_needle = request("shared needle");
     let mut found_matches = BTreeSet::new();
     let mut cursors = BTreeSet::new();
+    let mut cursor = None;
     loop {
-        let page = new_query_page(&store, &namespace_id, &page_request, page_limit(1))
-            .await
-            .expect("query page");
+        let page = new_query_page(
+            &store,
+            &namespace_id,
+            &shared_needle,
+            page_request(cursor, 1),
+        )
+        .await
+        .expect("query page");
         assert_eq!(page.namespace_id, namespace_id);
         assert_eq!(page.matches.len(), 1);
         let found = &page.matches[0];
         assert!(found_matches.insert((found.path.clone(), found.line_number)));
-        let Some(cursor) = page.next_cursor else {
+        let Some(next_cursor) = page.next_cursor else {
             break;
         };
-        assert!(cursors.insert(cursor.clone()));
-        page_request.cursor = Some(cursor);
+        assert!(cursors.insert(next_cursor.clone()));
+        cursor = Some(next_cursor);
     }
     assert_eq!(found_matches.len(), 12);
     assert_eq!(cursors.len(), 11);
@@ -2399,7 +2404,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         &store,
         &namespace_id,
         &grep_request,
-        default_page_limit(),
+        first_page(),
     )
     .await
     .expect("cold query");
@@ -2410,7 +2415,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         &store,
         &namespace_id,
         &grep_request,
-        default_page_limit(),
+        first_page(),
     )
     .await
     .expect("warm query");
@@ -2436,7 +2441,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
             &store,
             &namespace_id,
             &grep_request,
-            default_page_limit()
+            first_page()
         )
         .await,
         Err(GrepError::NotEnabled)
@@ -2854,7 +2859,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .with_subject(subject(principal));
         let response = host
             .service
-            .query(&request("needle"), default_page_limit(), &reads, &store)
+            .query(&request("needle"), first_page(), &reads, &store)
             .await
             .expect("grep");
         assert_eq!(
@@ -2873,7 +2878,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         NamespaceReads::new(host.reader.namespace(&namespace_id)).with_subject(subject("viewer"));
     let scanned = host
         .service
-        .query(&scan, default_page_limit(), &reads, &store)
+        .query(&scan, first_page(), &reads, &store)
         .await
         .expect("a scan skips the folder the subject cannot read");
     assert_eq!(

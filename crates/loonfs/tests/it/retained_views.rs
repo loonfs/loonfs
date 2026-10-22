@@ -13,16 +13,14 @@ use loonfs_core::control::load_namespace_current_manifest;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ByteRange;
-use loonfs_test_support::ids::{
-    attribute_key, attribute_text, first_page, namespace_id, page_limit,
-};
+use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_test_support::test_actor;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, AccessRights, Attributes, AttributesRevisionNo,
-    ChangeSeq, ErrorCode, NamespaceAccess, PageRequest, PathEntry, PrincipalId, PrincipalScope,
-    PrincipalSet, RevisionNo, Subject, SubjectId,
+    ChangeSeq, ErrorCode, NamespaceAccess, PathEntry, PrincipalId, PrincipalScope, PrincipalSet,
+    RevisionNo, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -355,10 +353,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .expect("checkpoint view");
                 let historical = view
                     .list(path)
-                    .page(PageRequest {
-                        limit: page_limit(16),
-                        cursor: None,
-                    })
+                    .page_limit(page_limit(16))
+                    .page()
                     .await
                     .expect("checkpoint listing");
                 assert_eq!(historical.head_seq, checkpoint.captured_seq, "{stage}");
@@ -409,10 +405,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             let floor_applied = namespace == &source && matches!(stage, "rebuilt" | "gc");
             let revisions = namespace_reader
                 .list_file_revisions("/docs/renamed.txt")
-                .page(PageRequest {
-                    limit: page_limit(16),
-                    cursor: None,
-                })
+                .page_limit(page_limit(16))
+                .page()
                 .await
                 .expect("revision listing");
             assert_eq!(
@@ -449,10 +443,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             assert_eq!(attributes.attributes, Attributes::default(), "{stage}");
             let trash = namespace_reader
                 .list_trash()
-                .page(PageRequest {
-                    limit: page_limit(16),
-                    cursor: None,
-                })
+                .page_limit(page_limit(16))
+                .page()
                 .await
                 .expect("trash listing");
             assert!(trash.next_cursor.is_none());
@@ -544,10 +536,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 ErrorCode::PathNotFound,
             );
             expect_code(
-                source_namespace
-                    .list_changes(ChangeSeq(0))
-                    .page(first_page())
-                    .await,
+                source_namespace.list_changes(ChangeSeq(0)).page().await,
                 ErrorCode::RebootstrapRequired,
             );
         }

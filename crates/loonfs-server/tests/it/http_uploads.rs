@@ -6,7 +6,7 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::{
     raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
 };
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     api::v0::{
         CompleteUploadBody, CreateUploadBody, FilesystemChange, UploadMode, UploadSession,
@@ -366,7 +366,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let changes = harness
         .client
         .list_changes(&namespace, ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("list changes");
     assert_eq!(changes.namespace_id, namespace);
@@ -395,7 +395,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let empty = harness
         .client
         .list_changes(&namespace, commit.committed_seq)
-        .page(first_page())
+        .page()
         .await
         .expect("list changes after head");
     assert_eq!(empty.changes, Vec::new());

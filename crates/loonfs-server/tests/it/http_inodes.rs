@@ -6,10 +6,7 @@ use futures::StreamExt;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{DeleteByInodeOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
-use loonfs_test_support::ids::{
-    attribute_key, attribute_text, first_page, namespace_id, page_limit,
-};
-use loonfs_types::PageRequest;
+use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::{
     DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse, InodeId,
     RevisionNo,
@@ -141,10 +138,8 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     let revisions = harness
         .client
         .list_file_revisions_by_inode(&namespace, inode_id)
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        })
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("first inode revision page");
     assert_eq!(revisions.inode_id, inode_id);
@@ -207,7 +202,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         harness
             .client
             .list_file_revisions_by_inode(&namespace, inode_id)
-            .page(first_page())
+            .page()
             .await
             .expect("list retained deleted revisions")
             .revisions
@@ -259,7 +254,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         harness
             .client
             .list_file_revisions_by_inode(&namespace, directory_id)
-            .page(first_page())
+            .page()
             .await,
         409,
         ErrorCode::PathConflict,
@@ -422,10 +417,9 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
     let second = harness
         .client
         .list_by_inode(&namespace, parent_inode_id)
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: Some(cursor.clone()),
-        })
+        .page_limit(page_limit(2))
+        .cursor(Some(cursor.clone()))
+        .page()
         .await
         .expect("second children page");
     assert_eq!(second.namespace_id, namespace);
@@ -515,10 +509,8 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         harness
             .client
             .list_by_inode(&namespace, directory_id)
-            .page(PageRequest {
-                limit: page_limit(loonfs_types::DEFAULT_PAGE_LIMIT),
-                cursor: Some("not-a-cursor".to_owned()),
-            })
+            .cursor(Some("not-a-cursor".to_owned()))
+            .page()
             .await,
         400,
         ErrorCode::InvalidRequest,
@@ -527,7 +519,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         harness
             .client
             .list_by_inode(&namespace, InodeId(u64::MAX))
-            .page(first_page())
+            .page()
             .await,
         404,
         ErrorCode::InodeNotFound,
@@ -536,7 +528,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         harness
             .client
             .list_by_inode(&namespace, file_id)
-            .page(first_page())
+            .page()
             .await,
         409,
         ErrorCode::PathConflict,
@@ -558,7 +550,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         harness
             .client
             .list_by_inode(&namespace, directory_id)
-            .page(first_page())
+            .page()
             .await,
         404,
         ErrorCode::InodeNotFound,

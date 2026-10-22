@@ -1,6 +1,6 @@
 //! Publication recovery must not clean up resources a manifest may name.
 
-use crate::common::{control, default_page_limit, GrepHost};
+use crate::common::{control, GrepHost};
 use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
@@ -10,7 +10,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
-use loonfs_types::{ErrorCode, ManifestNo, PageRequest};
+use loonfs_types::{ErrorCode, ManifestNo};
 use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -147,10 +147,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let checkpoints = host
         .maintenance
         .list_checkpoints(&namespace_id)
-        .page(PageRequest {
-            limit: default_page_limit(),
-            cursor: None,
-        })
+        .page()
         .await
         .expect("list checkpoints")
         .checkpoints;

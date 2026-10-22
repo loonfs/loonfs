@@ -7,7 +7,6 @@ use loonfs_client::{DownloadOptions, NamespacePath, ReadAt, ReadFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::api::v0::ListChangesResponse;
-use loonfs_types::PageRequest;
 use loonfs_types::{ChangeSeq, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -302,10 +301,8 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let first = harness
         .client
         .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        })
+        .page_limit(page_limit(1))
+        .page()
         .await
         .expect("snapshot children first page");
     assert_eq!(first.head_seq, snapshot.captured_seq);
@@ -314,20 +311,18 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let error = harness
         .client
         .list_by_inode(&namespace, loonfs_types::InodeId(1))
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: Some(cursor.to_owned()),
-        })
+        .page_limit(page_limit(1))
+        .cursor(Some(cursor.to_owned()))
+        .page()
         .await
         .expect_err("snapshot children cursor cannot resume live");
     assert_eq!(error.code(), Some(loonfs_types::ErrorCode::InvalidRequest));
     let second = harness
         .client
         .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
-        .page(PageRequest {
-            limit: page_limit(1),
-            cursor: Some(cursor.to_owned()),
-        })
+        .page_limit(page_limit(1))
+        .cursor(Some(cursor.to_owned()))
+        .page()
         .await
         .expect("snapshot children second page");
     assert_eq!(second.head_seq, snapshot.captured_seq);

@@ -1,6 +1,6 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
-use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
+use crate::common::{control, grep_with, page_request, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
@@ -10,8 +10,8 @@ use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::nonzero_usize;
-use loonfs_types::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
+use loonfs_test_support::ids::{first_page, nonzero_usize};
+use loonfs_types::{AbsolutePath, GrepRequest, GrepResponse, PageRequest};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -22,7 +22,6 @@ fn request(pattern: &str) -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         inode_id: None,
-        cursor: None,
         allow_stale: false,
         allow_scan: false,
     }
@@ -53,13 +52,13 @@ impl ServiceHarness {
     }
 
     async fn result(&self, grep_request: &GrepRequest) -> loonfs_grep::Result<GrepResponse> {
-        self.page(grep_request, default_page_limit()).await
+        self.page(grep_request, first_page()).await
     }
 
     async fn page(
         &self,
         grep_request: &GrepRequest,
-        limit: EffectiveLimit,
+        page: PageRequest<String>,
     ) -> loonfs_grep::Result<GrepResponse> {
         grep_with(
             &self.service,
@@ -67,13 +66,28 @@ impl ServiceHarness {
             &self.store,
             &self.namespace_id,
             grep_request,
-            limit,
+            page,
         )
         .await
     }
 
     async fn success(&self, case: &str, grep_request: &GrepRequest) -> GrepResponse {
-        self.result(grep_request)
+        self.success_at(case, grep_request, None).await
+    }
+
+    /// Returns the default-size page at `cursor`, or the first page when
+    /// `cursor` is `None`.
+    async fn success_at(
+        &self,
+        case: &str,
+        grep_request: &GrepRequest,
+        cursor: Option<String>,
+    ) -> GrepResponse {
+        let page = PageRequest {
+            cursor,
+            ..first_page()
+        };
+        self.page(grep_request, page)
             .await
             .unwrap_or_else(|error| panic!("expected success for {case}, got {error:?}"))
     }
@@ -518,9 +532,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     scan_off.allow_scan = true;
     let mut scanned_paths = BTreeSet::new();
     let mut scan_pages = 0usize;
+    let mut cursor = None;
     loop {
         let scanned = harness
-            .success("allow_scan on and short pattern", &scan_off)
+            .success_at("allow_scan on and short pattern", &scan_off, cursor)
             .await;
         scan_pages += 1;
         assert!(scanned.tail_scanned);
@@ -530,10 +545,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
                 .iter()
                 .map(|found| found.path.as_str().to_owned()),
         );
-        let Some(cursor) = scanned.next_cursor else {
+        let Some(next_cursor) = scanned.next_cursor else {
             break;
         };
-        scan_off.cursor = Some(cursor);
+        cursor = Some(next_cursor);
     }
     assert!(scan_pages > 1);
     assert_eq!(
@@ -567,14 +582,15 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert!(empty.matches.is_empty());
     assert!(empty.next_cursor.is_none());
 
-    let mut paged_request = request("budget-needle");
+    let paged_request = request("budget-needle");
     let mut pages = 0usize;
     let mut matches = 0usize;
     let mut matched_paths = BTreeSet::new();
     let mut cursors = BTreeSet::new();
+    let mut cursor = None;
     loop {
         let page = harness
-            .page(&paged_request, page_limit(17))
+            .page(&paged_request, page_request(cursor, 17))
             .await
             .expect("multi-page cursor walk");
         pages += 1;
@@ -589,11 +605,11 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             assert_eq!(found.line, "budget-needle without the final letter");
             assert!(matched_paths.insert(found.path.clone()));
         }
-        let Some(cursor) = page.next_cursor else {
+        let Some(next_cursor) = page.next_cursor else {
             break;
         };
-        assert!(cursors.insert(cursor.clone()));
-        paged_request.cursor = Some(cursor);
+        assert!(cursors.insert(next_cursor.clone()));
+        cursor = Some(next_cursor);
     }
     assert!(pages > 1);
     assert_eq!(matches, 270);
@@ -602,14 +618,16 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .success("verified-file budget page", &request("budget-needle.*z"))
         .await;
     assert!(budget_page.matches.is_empty());
-    let mut budget_resume = request("budget-needle.*z");
-    budget_resume.cursor = budget_page.next_cursor.clone();
     assert!(
-        budget_resume.cursor.is_some(),
+        budget_page.next_cursor.is_some(),
         "budget exit must return a cursor"
     );
     let budget_end = harness
-        .success("verified-file budget resume", &budget_resume)
+        .success_at(
+            "verified-file budget resume",
+            &request("budget-needle.*z"),
+            budget_page.next_cursor.clone(),
+        )
         .await;
     assert!(budget_end.next_cursor.is_none());
 

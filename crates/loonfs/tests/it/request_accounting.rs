@@ -8,8 +8,8 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
-    PutFileOptions, SharedObjectStore, Writable,
+    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PaginationPolicy, PutFileOptions,
+    SharedObjectStore, Writable,
 };
 use loonfs_types::AbsolutePath;
 
@@ -237,7 +237,9 @@ async fn warm_phase_request_accounting() {
     loop {
         let page = namespace
             .list("/hot")
-            .page(PageRequest { limit, cursor })
+            .page_limit(limit)
+            .cursor(cursor)
+            .page()
             .await
             .expect("list page");
         listed += page.entries.len();

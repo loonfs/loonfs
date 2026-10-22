@@ -35,7 +35,7 @@ use loonfs_types::ErrorResponse;
 use loonfs_types::{
     api::v0::{Commit, ListChangesResponse},
     CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListFileRevisionsResponse,
-    ListTrashResponse, PageRequest, RevisionNo, TrashPageCursor,
+    ListTrashResponse, RevisionNo, TrashPageCursor,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -350,10 +350,8 @@ pub(super) async fn list_path_entries(
     if let Some(value) = query.recursive.as_deref() {
         options.recursive = parse_boolean_query_param(value, "recursive")?;
     }
-    let request = PageRequest {
-        limit: effective_page_limit(query.limit)?,
-        cursor: checked_list_cursor(query.cursor, &options)?,
-    };
+    let limit = effective_page_limit(query.limit)?;
+    let cursor = checked_list_cursor(query.cursor, &options)?;
     let at = parse_read_at(
         parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
@@ -362,7 +360,9 @@ pub(super) async fn list_path_entries(
     let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let listing = target
         .list_with_options(&path, &options)
-        .page(request)
+        .page_limit(limit)
+        .cursor(cursor)
+        .page()
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -538,10 +538,9 @@ pub(super) async fn list_trash(
     let namespace = runtime.namespace(&namespace_id);
     let response = namespace
         .list_trash()
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor: checked_cursor::<TrashPageCursor>(query.cursor)?,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(checked_cursor::<TrashPageCursor>(query.cursor)?)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -592,10 +591,9 @@ pub(super) async fn list_file_revisions(
     let path = required_query_param(query.path, "path")?;
     let response = namespace
         .list_file_revisions(&path)
-        .page(PageRequest {
-            limit: effective_page_limit(query.limit)?,
-            cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
-        })
+        .page_limit(effective_page_limit(query.limit)?)
+        .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
+        .page()
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -767,10 +765,8 @@ pub(super) async fn list_changes(
     let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let response = target
         .list_changes(after_seq)
-        .page(PageRequest {
-            limit,
-            cursor: None,
-        })
+        .page_limit(limit)
+        .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))

@@ -27,9 +27,9 @@ use loonfs_types::format::segment_blocks::{
     string_prefix_upper_bound,
 };
 use loonfs_types::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, EntryInodeKind,
-    ErrorCode, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId,
-    PathEntry, RevisionNo, ROOT_INODE_ID,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode, GrepMatch,
+    GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, PageRequest, PathEntry,
+    RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -168,6 +168,7 @@ impl GrepService {
     async fn plan_query<'a, S: ObjectStore>(
         &self,
         request: &GrepRequest,
+        cursor: Option<&str>,
         namespace_reads: &'a NamespaceReads,
         store: &S,
     ) -> Result<QueryPlan<'a>> {
@@ -198,7 +199,7 @@ impl GrepService {
         }
         let head_seq = reads.head_seq();
         let fingerprint = request.fingerprint();
-        let resume = match &request.cursor {
+        let resume = match cursor {
             Some(cursor) => {
                 let cursor: GrepPageCursor = decode_cursor(cursor)
                     .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
@@ -285,7 +286,11 @@ impl GrepService {
         })
     }
 
-    /// Content search over one namespace read view.
+    /// Content search over one namespace read view, for the page at
+    /// `page.cursor`.
+    ///
+    /// A cursor resumes only the request whose page returned it, and the
+    /// search checks it against the current namespace head.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -296,12 +301,14 @@ impl GrepService {
     pub async fn query<S: ObjectStore>(
         &self,
         request: &GrepRequest,
-        limit: EffectiveLimit,
+        page: PageRequest<String>,
         reads: &NamespaceReads,
         store: &S,
     ) -> Result<GrepResponse> {
-        let plan = self.plan_query(request, reads, store).await?;
-        let mut walk = PageWalk::new(&plan, limit.as_usize());
+        let plan = self
+            .plan_query(request, page.cursor.as_deref(), reads, store)
+            .await?;
+        let mut walk = PageWalk::new(&plan, page.limit.as_usize());
         'page: while let Some(batch) = walk.next_batch().await? {
             let contents = join_all(
                 batch

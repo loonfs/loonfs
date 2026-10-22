@@ -12,9 +12,7 @@ use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
     TrashListing,
 };
-use super::pagination::{
-    collect_or_stream_pages, page_request, visit_pages, PagePlan, PagedListing,
-};
+use super::pagination::{collect_or_stream_pages, visit_pages, PagedListing};
 use super::partial::{self, PartialDownload, PartialDownloadMetadata};
 use super::recursive;
 use crate::args::{
@@ -76,15 +74,11 @@ async fn follow_path_entry_pages(
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
     visit_pages(
-        PagePlan::new(&pagination.page_limits),
-        cursor.map(ToOwned::to_owned),
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .list_at_snapshot(spec, snapshot_id)
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context
+            .target
+            .list_at_snapshot(spec, snapshot_id)
+            .cursor(cursor.map(ToOwned::to_owned)),
+        &pagination.page_limits,
         |page: ListPathEntriesResponse| {
             heads.observe(page.head_seq);
             followed = Some(FollowedPathEntryPages {
@@ -321,28 +315,21 @@ pub(crate) async fn run_filesystem_grep(
         case_insensitive: args.ignore_case,
         path_prefix,
         inode_id: None,
-        cursor: None,
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
     };
     let mut tail_scanned = true;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        args.pagination.cursor.clone(),
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            context
-                .target
-                .client
-                .grep(context.namespace(), &request)
-                .page(page_request(cursor, limit)?)
-                .await
-                .map_err(|error| CliError::from(error).with_command_hint(kind, None))
-        },
+        context
+            .target
+            .client
+            .grep(context.namespace(), &request)
+            .cursor(args.pagination.cursor.clone()),
+        &args.pagination.page_limits,
         |page: &GrepResponse| tail_scanned &= page.tail_scanned,
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(kind, error.with_command_hint(kind, None)))?;
     let PagedListing::Collected(response) = listing else {
         if !tail_scanned {
             crate::render::write_stderr_warning(
@@ -719,17 +706,12 @@ pub(crate) async fn run_filesystem_trash(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &location.path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        args.pagination.cursor.clone(),
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .client
-                .list_trash(context.namespace())
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context
+            .target
+            .client
+            .list_trash(context.namespace())
+            .cursor(args.pagination.cursor.clone()),
+        &args.pagination.page_limits,
         |_: &loonfs_types::ListTrashResponse| {},
     )
     .await
@@ -762,17 +744,12 @@ pub(crate) async fn run_filesystem_revisions(
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination.page_limits),
-        args.pagination.cursor.clone(),
-        args.pagination.page_limits.jsonl,
-        async |cursor, limit| {
-            Ok(context
-                .target
-                .client
-                .list_file_revisions(&spec)
-                .page(page_request(cursor, limit)?)
-                .await?)
-        },
+        context
+            .target
+            .client
+            .list_file_revisions(&spec)
+            .cursor(args.pagination.cursor.clone()),
+        &args.pagination.page_limits,
         |_: &loonfs_types::ListFileRevisionsResponse| {},
     )
     .await

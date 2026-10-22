@@ -15,8 +15,8 @@ use loonfs::publish::{
 };
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
-    MaintainMetadataOptions, MetadataCache, NamespaceId, PageRequest, ReadOnly, SharedObjectStore,
-    StatOptions, DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
+    MaintainMetadataOptions, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore, StatOptions,
+    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{
@@ -378,10 +378,8 @@ async fn list_every_directory(shape: &Shape, reader: LoonFs<ReadOnly>) {
         for directory in 0..DIRECTORIES {
             namespace
                 .list_with_options(&format!("/d-{directory:04}"), &ListOptions::default())
-                .page(PageRequest {
-                    limit: page_limit(1000),
-                    cursor: None,
-                })
+                .page_limit(page_limit(1000))
+                .page()
                 .await
                 .expect("list");
         }

@@ -7,10 +7,7 @@
 //! compaction planning, and the page read — is the shipped path.
 
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
-use crate::{
-    CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
-    SharedObjectStore,
-};
+use crate::{CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, SharedObjectStore};
 use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -251,10 +248,8 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let started_at_ms = timer.monotonic_now_ms();
     let page = namespace
         .list("/directory")
-        .page(PageRequest {
-            limit: page_limit(PAGE),
-            cursor: None,
-        })
+        .page_limit(page_limit(PAGE))
+        .page()
         .await
         .expect("page");
     let elapsed_ms = timer.monotonic_now_ms() - started_at_ms;

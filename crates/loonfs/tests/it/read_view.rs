@@ -3,7 +3,7 @@
 use crate::common::{assert_core_error_kind, metadata_options, open_runtime_async, store};
 use loonfs::{
     CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId,
-    PageRequest, PaginationPolicy, PutFileOptions,
+    PaginationPolicy, PutFileOptions,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -476,10 +476,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .expect("page limit");
     let first_page = first_view
         .list("/")
-        .page(PageRequest {
-            limit,
-            cursor: None,
-        })
+        .page_limit(limit)
+        .page()
         .await
         .expect("list first snapshot page");
     let cursor = loonfs_types::decode_cursor::<loonfs::DirectoryPageCursor>(
@@ -518,30 +516,27 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     assert_core_error_kind(
         second_view
             .list("/")
-            .page(PageRequest {
-                limit,
-                cursor: Some(cursor.clone()),
-            })
+            .page_limit(limit)
+            .cursor(Some(cursor.clone()))
+            .page()
             .await,
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
         second_view
             .list("/")
-            .page(PageRequest {
-                limit,
-                cursor: Some(unbound_cursor.clone()),
-            })
+            .page_limit(limit)
+            .cursor(Some(unbound_cursor.clone()))
+            .page()
             .await,
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
         namespace
             .list("/")
-            .page(PageRequest {
-                limit,
-                cursor: Some(cursor.clone()),
-            })
+            .page_limit(limit)
+            .cursor(Some(cursor.clone()))
+            .page()
             .await,
         ErrorCode::InvalidRequest,
     );
@@ -551,10 +546,9 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     assert_core_error_kind(
         namespace
             .list_by_inode(root_inode_id)
-            .page(PageRequest {
-                limit,
-                cursor: Some(cursor.clone()),
-            })
+            .page_limit(limit)
+            .cursor(Some(cursor.clone()))
+            .page()
             .await,
         ErrorCode::InvalidRequest,
     );
@@ -562,20 +556,18 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     assert_core_error_kind(
         first_view
             .list("/")
-            .page(PageRequest {
-                limit,
-                cursor: Some(unbound_cursor),
-            })
+            .page_limit(limit)
+            .cursor(Some(unbound_cursor))
+            .page()
             .await,
         ErrorCode::InvalidRequest,
     );
 
     let second_page = first_view
         .list("/")
-        .page(PageRequest {
-            limit,
-            cursor: Some(cursor),
-        })
+        .page_limit(limit)
+        .cursor(Some(cursor))
+        .page()
         .await
         .expect("resume the original snapshot");
     assert_eq!(
@@ -660,12 +652,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
 
     let page = view
         .list("/")
-        .page(PageRequest {
-            limit: PaginationPolicy::default()
-                .effective_limit(None)
-                .expect("default page limit"),
-            cursor: None,
-        })
+        .page()
         .await
         .expect("list root through the view");
     assert_eq!(page.head_seq, view.head_seq());
@@ -960,10 +947,8 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
                 ..Default::default()
             },
         )
-        .page(PageRequest {
-            limit,
-            cursor: None,
-        })
+        .page_limit(limit)
+        .page()
         .await
         .map(drop),
     );
@@ -975,10 +960,8 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
                 ..Default::default()
             },
         )
-        .page(PageRequest {
-            limit,
-            cursor: None,
-        })
+        .page_limit(limit)
+        .page()
         .await
         .map(drop),
     );

@@ -18,9 +18,6 @@ pub struct GrepRequest {
     pub path_prefix: Option<AbsolutePath>,
     /// The inode that limits matching to its descendants. It can't be combined with `path_prefix`.
     pub inode_id: Option<InodeId>,
-    /// The cursor from the previous page. The cursor is tied to the request that returned it, and
-    /// the server evaluates it against the current namespace head.
-    pub cursor: Option<String>,
     /// Whether a lagging index returns results from the index alone, with `tail_scanned: false`,
     /// instead of returning `index_lagging`.
     pub allow_stale: bool,

@@ -4,21 +4,12 @@ use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
     AppendFileByInodeOptions, CommitId, CommitOptions, DeleteByInodeOptions,
     DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace,
-    PageRequest, PaginationPolicy, PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
+    PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::num::NonZeroU64;
 use std::path::Path;
 use tempfile::tempdir;
-
-fn page_request() -> PageRequest<String> {
-    PageRequest {
-        limit: PaginationPolicy::default()
-            .effective_limit(None)
-            .expect("default page limit"),
-        cursor: None,
-    }
-}
 
 fn display_name(value: &str) -> DisplayName {
     DisplayName::parse(value).expect("valid display name")
@@ -119,7 +110,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     );
     let revisions = namespace
         .list_file_revisions_by_inode(inode_id)
-        .page(page_request())
+        .page()
         .await
         .expect("list revisions after rename");
     assert_eq!(revisions.inode_id, inode_id);
@@ -159,7 +150,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     assert_eq!(
         namespace
             .list_file_revisions_by_inode(inode_id)
-            .page(page_request())
+            .page()
             .await
             .expect("list retained deleted revisions")
             .revisions
@@ -200,7 +191,7 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
     let directory = namespace.stat("/docs").await.expect("stat directory");
     let directory_error = namespace
         .list_file_revisions_by_inode(directory.inode_id)
-        .page(page_request())
+        .page()
         .await
         .expect_err("directory has no file revisions");
     assert_eq!(directory_error.code(), ErrorCode::PathConflict);

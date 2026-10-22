@@ -3,8 +3,8 @@
 use crate::common::*;
 use loonfs::{
     AdvanceRetentionFloorOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,
-    ErrorCode, InodeId, ListFileRevisionsResponse, PageRequest, PathEntry, PutFileOptions,
-    RetentionTarget, RevisionNo,
+    ErrorCode, InodeId, ListFileRevisionsResponse, PathEntry, PutFileOptions, RetentionTarget,
+    RevisionNo,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use tempfile::tempdir;
@@ -40,12 +40,10 @@ fn path_entries_pager_preserves_each_page_head() {
         .expect("put file");
     }
 
-    let mut pager = namespace.list("/docs");
-    let first = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: None,
-    }))
-    .expect("page succeeds");
+    let mut pager = namespace.list("/docs").page_limit(page_limit(2));
+    let first = block_on(pager.next())
+        .expect("a first page")
+        .expect("page succeeds");
     fs.put_file_blocking(
         &namespace_id,
         "/docs/z.txt",
@@ -53,11 +51,9 @@ fn path_entries_pager_preserves_each_page_head() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put later file");
-    let second = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: first.next_cursor.clone(),
-    }))
-    .expect("page succeeds");
+    let second = block_on(pager.next())
+        .expect("a second page")
+        .expect("page succeeds");
 
     assert_ne!(first.head_seq, second.head_seq);
     assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
@@ -88,18 +84,17 @@ fn directory_pages_use_canonical_name_key_order() {
         .expect("checkpoint");
 
     let limit = page_limit(2);
-    let first = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit,
-        cursor: None,
-    }))
-    .expect("first directory page");
+    let first = block_on(fs.list(&namespace_id, "/docs").page_limit(limit).page())
+        .expect("first directory page");
     assert_eq!(display_names(&first.entries), vec!["a.txt", "apple.txt"]);
 
     let cursor = first.next_cursor.clone().expect("next cursor");
-    let second = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit,
-        cursor: Some(cursor),
-    }))
+    let second = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(limit)
+            .cursor(Some(cursor))
+            .page(),
+    )
     .expect("second directory page");
     assert_eq!(display_names(&second.entries), vec!["B.txt", "Zebra.txt"]);
     assert!(second.next_cursor.is_none());
@@ -166,10 +161,8 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let limit = page_limit(2);
     let first = block_on(
         fs.list_file_revisions(&namespace_id, "/doc.txt")
-            .page(PageRequest {
-                limit,
-                cursor: None,
-            }),
+            .page_limit(limit)
+            .page(),
     )
     .expect("first revision page");
     assert_eq!(
@@ -184,10 +177,9 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let cursor = first.next_cursor.clone().expect("next cursor");
     let second = block_on(
         fs.list_file_revisions(&namespace_id, "/doc.txt")
-            .page(PageRequest {
-                limit,
-                cursor: Some(cursor),
-            }),
+            .page_limit(limit)
+            .cursor(Some(cursor))
+            .page(),
     )
     .expect("second revision page");
     assert_eq!(
@@ -219,11 +211,8 @@ fn directory_cursor_resumes_after_later_writes() {
     }
 
     let limit = page_limit(2);
-    let first = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit,
-        cursor: None,
-    }))
-    .expect("first directory page");
+    let first = block_on(fs.list(&namespace_id, "/docs").page_limit(limit).page())
+        .expect("first directory page");
     assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
     let cursor = first.next_cursor.clone().expect("next cursor");
 
@@ -238,10 +227,12 @@ fn directory_cursor_resumes_after_later_writes() {
     // The cursor is an ordering resume: the next page continues after the
     // last returned name key against the advanced head, so the entry
     // committed mid-listing appears in its canonical position.
-    let second = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit,
-        cursor: Some(cursor),
-    }))
+    let second = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(limit)
+            .cursor(Some(cursor))
+            .page(),
+    )
     .expect("second directory page resumes after head drift");
     assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
     assert!(second.next_cursor.is_none());
@@ -264,20 +255,25 @@ fn directory_cursor_from_the_future_is_rejected() {
         .expect("put file");
     }
 
-    let first = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit: page_limit(2),
-        cursor: None,
-    }))
+    let first = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(page_limit(2))
+            .page(),
+    )
     .expect("first directory page");
     let mut cursor =
         decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
     cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
 
     assert_core_error_kind(
-        block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-            limit: page_limit(2),
-            cursor: Some(loonfs_types::encode_cursor(&cursor).expect("encode cursor")),
-        })),
+        block_on(
+            fs.list(&namespace_id, "/docs")
+                .page_limit(page_limit(2))
+                .cursor(Some(
+                    loonfs_types::encode_cursor(&cursor).expect("encode cursor"),
+                ))
+                .page(),
+        ),
         ErrorCode::InvalidRequest,
     );
 }
@@ -299,10 +295,11 @@ fn directory_cursor_resumes_across_a_wal_fold() {
         .expect("put file");
     }
 
-    let first = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit: page_limit(2),
-        cursor: None,
-    }))
+    let first = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(page_limit(2))
+            .page(),
+    )
     .expect("first directory page");
     let cursor = first.next_cursor.clone().expect("next cursor");
 
@@ -318,10 +315,12 @@ fn directory_cursor_resumes_across_a_wal_fold() {
 
     // Materializing the newer state into the manifest does not retire the
     // cursor either: retained rows answer the resume at the current head.
-    let second = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit: page_limit(2),
-        cursor: Some(cursor),
-    }))
+    let second = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(page_limit(2))
+            .cursor(Some(cursor))
+            .page(),
+    )
     .expect("second directory page resumes across a fold");
     assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
     assert!(second.next_cursor.is_none());
@@ -350,10 +349,8 @@ fn revisions_cursor_resumes_after_later_writes() {
 
     let first = block_on(
         fs.list_file_revisions(&namespace_id, "/docs/report.txt")
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: None,
-            }),
+            .page_limit(page_limit(2))
+            .page(),
     )
     .expect("first revisions page");
     assert_eq!(
@@ -383,10 +380,9 @@ fn revisions_cursor_resumes_after_later_writes() {
     // is newer than the whole listing and stays out of it.
     let second = block_on(
         fs.list_file_revisions(&namespace_id, "/docs/report.txt")
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: Some(cursor),
-            }),
+            .page_limit(page_limit(2))
+            .cursor(Some(cursor))
+            .page(),
     )
     .expect("second revisions page resumes after head drift");
     assert_eq!(
@@ -417,18 +413,21 @@ fn directory_cursor_rejects_path_inode_mismatch() {
         .expect("put file");
     }
 
-    let first = block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
-        limit: page_limit(1),
-        cursor: None,
-    }))
+    let first = block_on(
+        fs.list(&namespace_id, "/docs")
+            .page_limit(page_limit(1))
+            .page(),
+    )
     .expect("first directory page");
     let cursor = first.next_cursor.clone().expect("next cursor");
 
     assert_core_error_kind(
-        block_on(fs.list(&namespace_id, "/").page(PageRequest {
-            limit: page_limit(1),
-            cursor: Some(cursor),
-        })),
+        block_on(
+            fs.list(&namespace_id, "/")
+                .page_limit(page_limit(1))
+                .cursor(Some(cursor))
+                .page(),
+        ),
         ErrorCode::InvalidRequest,
     );
 }
@@ -454,12 +453,12 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
         .stat_path_blocking(&namespace_id, "/docs")
         .expect("stat listed directory");
 
-    let mut pager = namespace.list_by_inode(docs.inode_id);
-    let first = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: None,
-    }))
-    .expect("first page succeeds");
+    let mut pager = namespace
+        .list_by_inode(docs.inode_id)
+        .page_limit(page_limit(2));
+    let first = block_on(pager.next())
+        .expect("a first page")
+        .expect("first page succeeds");
     assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
     assert_eq!(first.parent_inode_id, docs.inode_id);
 
@@ -478,11 +477,9 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
     )
     .expect("rebind the old path to a fresh directory");
 
-    let second = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: first.next_cursor.clone(),
-    }))
-    .expect("second page resumes after the rename");
+    let second = block_on(pager.next())
+        .expect("a second page")
+        .expect("second page resumes after the rename");
     assert_eq!(display_names(&second.entries), vec!["c.txt"]);
     assert_eq!(second.parent_inode_id, docs.inode_id);
     assert_eq!(second.entries[0].path.as_str(), "/renamed/c.txt");
@@ -515,12 +512,12 @@ fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
         .stat_path_blocking(&namespace_id, "/left/docs")
         .expect("stat listed directory");
 
-    let mut pager = namespace.list_by_inode(docs.inode_id);
-    let first = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: None,
-    }))
-    .expect("first page succeeds");
+    let mut pager = namespace
+        .list_by_inode(docs.inode_id)
+        .page_limit(page_limit(2));
+    let first = block_on(pager.next())
+        .expect("a first page")
+        .expect("first page succeeds");
     assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
 
     fs.move_path_blocking(
@@ -538,11 +535,9 @@ fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
     )
     .expect("rebind the old path to a fresh directory");
 
-    let second = block_on(pager.page(PageRequest {
-        limit: page_limit(2),
-        cursor: first.next_cursor.clone(),
-    }))
-    .expect("second page resumes after the move");
+    let second = block_on(pager.next())
+        .expect("a second page")
+        .expect("second page resumes after the move");
     assert_eq!(display_names(&second.entries), vec!["c.txt"]);
     assert_eq!(second.parent_inode_id, docs.inode_id);
     assert_eq!(second.entries[0].path.as_str(), "/right/docs/c.txt");
@@ -570,20 +565,16 @@ fn inode_children_rejects_files_and_missing_inodes() {
     assert_core_error_kind(
         block_on(
             fs.list_by_inode(&namespace_id, file.inode_id)
-                .page(PageRequest {
-                    limit: page_limit(2),
-                    cursor: None,
-                }),
+                .page_limit(page_limit(2))
+                .page(),
         ),
         ErrorCode::PathConflict,
     );
     assert_core_error_kind(
         block_on(
             fs.list_by_inode(&namespace_id, InodeId(4096))
-                .page(PageRequest {
-                    limit: page_limit(2),
-                    cursor: None,
-                }),
+                .page_limit(page_limit(2))
+                .page(),
         ),
         ErrorCode::InodeNotFound,
     );
@@ -604,10 +595,8 @@ fn inode_children_of_an_empty_directory_is_an_empty_page() {
 
     let page = block_on(
         fs.list_by_inode(&namespace_id, empty.inode_id)
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: None,
-            }),
+            .page_limit(page_limit(2))
+            .page(),
     )
     .expect("list empty directory");
     assert_eq!(page.parent_inode_id, empty.inode_id);
@@ -646,10 +635,8 @@ fn inode_children_rejects_a_recursively_deleted_directory() {
     assert_core_error_kind(
         block_on(
             fs.list_by_inode(&namespace_id, docs.inode_id)
-                .page(PageRequest {
-                    limit: page_limit(2),
-                    cursor: None,
-                }),
+                .page_limit(page_limit(2))
+                .page(),
         ),
         ErrorCode::InodeNotFound,
     );
@@ -684,10 +671,8 @@ fn inode_children_cursor_rejects_a_different_directory() {
         .expect("stat second directory");
     let first_page = block_on(
         fs.list_by_inode(&namespace_id, first_directory.inode_id)
-            .page(PageRequest {
-                limit: page_limit(1),
-                cursor: None,
-            }),
+            .page_limit(page_limit(1))
+            .page(),
     )
     .expect("first directory page");
     let cursor = first_page.next_cursor.clone().expect("next cursor");
@@ -695,10 +680,9 @@ fn inode_children_cursor_rejects_a_different_directory() {
     assert_core_error_kind(
         block_on(
             fs.list_by_inode(&namespace_id, second_directory.inode_id)
-                .page(PageRequest {
-                    limit: page_limit(1),
-                    cursor: Some(cursor),
-                }),
+                .page_limit(page_limit(1))
+                .cursor(Some(cursor))
+                .page(),
         ),
         ErrorCode::InvalidRequest,
     );
@@ -725,10 +709,8 @@ fn inode_children_cursor_from_the_future_is_rejected() {
         .expect("stat directory");
     let first = block_on(
         fs.list_by_inode(&namespace_id, docs.inode_id)
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: None,
-            }),
+            .page_limit(page_limit(2))
+            .page(),
     )
     .expect("first directory page");
     let mut cursor =
@@ -738,10 +720,11 @@ fn inode_children_cursor_from_the_future_is_rejected() {
     assert_core_error_kind(
         block_on(
             fs.list_by_inode(&namespace_id, docs.inode_id)
-                .page(PageRequest {
-                    limit: page_limit(2),
-                    cursor: Some(loonfs_types::encode_cursor(&cursor).expect("encode cursor")),
-                }),
+                .page_limit(page_limit(2))
+                .cursor(Some(
+                    loonfs_types::encode_cursor(&cursor).expect("encode cursor"),
+                ))
+                .page(),
         ),
         ErrorCode::InvalidRequest,
     );
@@ -769,10 +752,8 @@ fn inode_children_of_the_root_list_by_the_root_inode() {
 
     let page = block_on(
         fs.list_by_inode(&namespace_id, root.inode_id)
-            .page(PageRequest {
-                limit: page_limit(10),
-                cursor: None,
-            }),
+            .page_limit(page_limit(10))
+            .page(),
     )
     .expect("list root children by inode");
     assert_eq!(display_names(&page.entries), vec!["a.txt", "b.txt"]);
@@ -801,10 +782,8 @@ fn inode_children_empty_resumed_page_reports_the_drifted_head() {
         .expect("stat listed directory");
     let first = block_on(
         fs.list_by_inode(&namespace_id, docs.inode_id)
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: None,
-            }),
+            .page_limit(page_limit(2))
+            .page(),
     )
     .expect("first page");
     let cursor = first.next_cursor.clone().expect("next cursor");
@@ -818,10 +797,9 @@ fn inode_children_empty_resumed_page_reports_the_drifted_head() {
 
     let resumed = block_on(
         fs.list_by_inode(&namespace_id, docs.inode_id)
-            .page(PageRequest {
-                limit: page_limit(2),
-                cursor: Some(cursor),
-            }),
+            .page_limit(page_limit(2))
+            .cursor(Some(cursor))
+            .page(),
     )
     .expect("empty resumed page");
     assert!(resumed.entries.is_empty());
@@ -877,10 +855,8 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
     };
     let first = fs
         .list_file_revisions(&namespace_id, "/doc.txt")
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        })
+        .page_limit(page_limit(2))
+        .page()
         .await
         .expect("first revision page");
     assert_eq!(revision_numbers(&first), [6, 5]);
@@ -890,10 +866,9 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
     let namespace = reader.namespace(&namespace_id);
     let second = namespace
         .list_file_revisions("/doc.txt")
-        .page(PageRequest {
-            limit: page_limit(2),
-            cursor: first.next_cursor.clone(),
-        })
+        .page_limit(page_limit(2))
+        .cursor(first.next_cursor.clone())
+        .page()
         .await
         .expect("second revision page");
     assert_eq!(

@@ -5,8 +5,8 @@ use crate::metrics::{
     CounterHandle, DefaultMetricsRecorder, GaugeHandle, HistogramHandle, MetricsRecorder,
 };
 use crate::{
-    CreateSnapshotOptions, InlineContentPolicy, ListOptions, LoonFs, Namespace, PageRequest,
-    ReadAt, ReadFileStreamOptions, StatOptions, Writable,
+    CreateSnapshotOptions, InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadAt,
+    ReadFileStreamOptions, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -201,11 +201,8 @@ async fn finish<T>(work: impl Future<Output = T>) -> T {
         .expect("operation completes")
 }
 
-fn page<C>(cursor: Option<C>) -> PageRequest<C> {
-    PageRequest {
-        limit: EffectiveLimit::new(NonZeroU32::MIN),
-        cursor,
-    }
+fn one_entry() -> EffectiveLimit {
+    EffectiveLimit::new(NonZeroU32::MIN)
 }
 
 /// Checks that a list in the writable runtime and a list in a read-only
@@ -301,13 +298,14 @@ async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot()
 async fn three_page_pagers_release_the_slot_between_pages() {
     let fixture = Fixture::new(KeyPredicate::any()).await;
     let view = fixture.one_read(fixture.namespace.read_view()).await;
-    for mut pager in [fixture.namespace.list("/"), view.list("/")] {
-        let mut cursor = None;
+    for pager in [fixture.namespace.list("/"), view.list("/")] {
+        let mut pager = pager.page_limit(one_entry());
         for index in 0..3 {
-            let response = fixture.one_read(pager.page(page(cursor))).await;
+            let response = fixture
+                .one_read(async { pager.next().await.expect("another page") })
+                .await;
             assert_eq!(response.entries.len(), 1);
-            cursor = response.next_cursor;
-            assert_eq!(cursor.is_none(), index == 2);
+            assert_eq!(response.next_cursor.is_none(), index == 2);
         }
     }
     fixture.runtime.shutdown().await.expect("shutdown");
@@ -419,7 +417,8 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
             fixture
                 .namespace
                 .list_with_options("/", &list)
-                .page(page(None)),
+                .page_limit(one_entry())
+                .page(),
         )
         .await;
     fixture
@@ -427,7 +426,8 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
             fixture
                 .namespace
                 .list_by_inode_with_options(root.inode_id, &list)
-                .page(page(None)),
+                .page_limit(one_entry())
+                .page(),
         )
         .await;
     let view = fixture
@@ -440,12 +440,17 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
     fixture.one_read(view.stat("/")).await;
     fixture.one_read(view.stat_by_inode(root.inode_id)).await;
     fixture
-        .one_read(view.list_with_options("/", &list).page(page(None)))
+        .one_read(
+            view.list_with_options("/", &list)
+                .page_limit(one_entry())
+                .page(),
+        )
         .await;
     fixture
         .one_read(
             view.list_by_inode_with_options(root.inode_id, &list)
-                .page(page(None)),
+                .page_limit(one_entry())
+                .page(),
         )
         .await;
     fixture.runtime.shutdown().await.expect("shutdown");

@@ -12,7 +12,7 @@ use loonfs::{
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PageRequest, PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
+    PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -94,7 +94,8 @@ impl NamespaceReads {
         Ok(self
             .namespace
             .list_changes_with_options(after_seq, &options)
-            .page(page_request(None, limit)?)
+            .page_limit(page_limit(limit)?)
+            .page()
             .await?)
     }
 
@@ -150,7 +151,8 @@ impl NamespaceReadView<'_> {
         let mut page = self
             .namespace
             .list_changes(after_seq)
-            .page(page_request(None, limit)?)
+            .page_limit(page_limit(limit)?)
+            .page()
             .await?;
         page.changes
             .retain(|change| change.committed_seq <= head_seq);
@@ -209,7 +211,9 @@ impl NamespaceReadView<'_> {
         let page = self
             .view
             .list_by_inode(inode_id)
-            .page(page_request(cursor, limit)?)
+            .page_limit(page_limit(limit)?)
+            .cursor(cursor)
+            .page()
             .await?;
         Ok(Page {
             items: page.entries,
@@ -280,37 +284,29 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
     }
 }
 
-/// Names one page of `limit` items at `cursor`, under the public pagination
-/// contract.
-pub(crate) fn page_request<C>(cursor: Option<C>, limit: usize) -> Result<PageRequest<C>> {
-    Ok(PageRequest {
-        limit: page_limit(limit).map_err(invalid_page_limit)?,
-        cursor,
-    })
+/// Validates an internal page size of `limit` items against the public
+/// pagination contract.
+pub(crate) fn page_limit(limit: usize) -> Result<EffectiveLimit> {
+    contract_page_limit(limit).map_err(|error| GrepError::InvalidQuery(error.to_string()))
 }
 
-/// Validates an internal page request against the public pagination contract.
-fn page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
+fn contract_page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
     let requested = u32::try_from(limit).unwrap_or(u32::MAX);
     PaginationPolicy::default().effective_limit(Some(requested))
 }
 
-fn invalid_page_limit(error: LimitError) -> GrepError {
-    GrepError::InvalidQuery(error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{effective_batch_size, page_limit};
+    use super::{contract_page_limit, effective_batch_size};
     use loonfs::MAX_CURRENT_FILES_PER_STAT;
     use loonfs_types::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
 
     #[test]
     fn page_limits_enforce_the_pagination_contract() {
-        assert_eq!(page_limit(0), Err(LimitError::Zero));
-        assert_eq!(page_limit(7).expect("valid limit").get(), 7);
+        assert_eq!(contract_page_limit(0), Err(LimitError::Zero));
+        assert_eq!(contract_page_limit(7).expect("valid limit").get(), 7);
         assert_eq!(
-            page_limit(usize::MAX),
+            contract_page_limit(usize::MAX),
             Err(LimitError::ExceedsMax {
                 requested: u32::MAX,
                 max_limit: DEFAULT_MAX_PAGE_LIMIT,

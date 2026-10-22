@@ -3,9 +3,8 @@
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, CreateSnapshotOptions, LoonFs, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_types::api::v0::FilesystemChange;
-use loonfs_types::PageRequest;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ChangeSeq, CommitId,
     ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,
@@ -293,7 +292,7 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     .expect("administrator again");
     let feed = namespace_reader
         .list_changes(ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("feed");
     let root_rows: Vec<_> = feed
@@ -512,7 +511,7 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     assert_eq!(
         namespace_reader
             .list_changes(ChangeSeq(0))
-            .page(first_page())
+            .page()
             .await
             .expect_err("live feed rejects the old administrator")
             .code(),
@@ -531,10 +530,10 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     );
     let changes = view
         .list_changes(ChangeSeq(0))
-        .page(PageRequest {
-            limit: loonfs_types::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
-            cursor: None,
-        })
+        .page_limit(loonfs_types::EffectiveLimit::new(
+            std::num::NonZeroU32::new(10).expect("limit"),
+        ))
+        .page()
         .await;
     let bytes = view.read_content(&content, 100).await;
     assert_matches!(
@@ -562,10 +561,10 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .expect("load historical view");
     let changes = view
         .list_changes(ChangeSeq(0))
-        .page(PageRequest {
-            limit: loonfs_types::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
-            cursor: None,
-        })
+        .page_limit(loonfs_types::EffectiveLimit::new(
+            std::num::NonZeroU32::new(10).expect("limit"),
+        ))
+        .page()
         .await
         .expect("current administrator can read historical changes");
     assert_eq!(changes.changes.len(), 1);

@@ -22,7 +22,6 @@ use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::clock::{bounded, ManualClock};
-use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
     NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
@@ -1825,7 +1824,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
 
     let changes = namespace
         .list_changes(ChangeSeq(0))
-        .page(first_page())
+        .page()
         .await
         .expect("read change feed");
     let feed_actors = changes

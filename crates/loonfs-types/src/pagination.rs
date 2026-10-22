@@ -42,15 +42,23 @@ type PageLoader<P, E> =
     Box<dyn FnMut(PageRequest<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
 
 /// Fetches pages and retains unused items between bounded collections.
+///
+/// The pager keeps the listing's position. It starts at the first page, or
+/// at the position set with [`Pager::cursor`], and passes each page's next
+/// cursor to the next request. Each request asks for [`Pager::page_limit`]
+/// items, or for fewer when [`Pager::max_items`] leaves fewer to load.
 #[must_use]
 pub struct Pager<P: PagedResponse, E> {
     load_page: PageLoader<P, E>,
     state: PagerState<P::Cursor>,
     pending: Option<P>,
+    page_limit: EffectiveLimit,
+    unloaded_items: usize,
 }
 
 impl<P: PagedResponse, E> Pager<P, E> {
-    /// Creates a pager over the pages `load_page` returns.
+    /// Creates a pager over the pages `load_page` returns, at the default
+    /// page size and with no total limit.
     ///
     /// A request without a cursor asks `load_page` for the first page.
     pub fn new<F, Fut>(mut load_page: F) -> Self
@@ -62,11 +70,37 @@ impl<P: PagedResponse, E> Pager<P, E> {
             load_page: Box::new(move |request| Box::pin(load_page(request))),
             state: PagerState::NotStarted,
             pending: None,
+            page_limit: EffectiveLimit(PaginationPolicy::default().default_limit()),
+            unloaded_items: usize::MAX,
         }
     }
 
-    /// Returns the next page at the default page size, or `None` after
-    /// exhaustion.
+    /// Starts the listing at `cursor`, a position that an earlier page
+    /// returned, or at the first page when it is `None`.
+    pub fn cursor(mut self, cursor: Option<P::Cursor>) -> Self {
+        self.state = match cursor {
+            Some(cursor) => PagerState::More(cursor),
+            None => PagerState::NotStarted,
+        };
+        self.pending = None;
+        self
+    }
+
+    /// Asks for at most `page_limit` items in each request.
+    pub fn page_limit(mut self, page_limit: EffectiveLimit) -> Self {
+        self.page_limit = page_limit;
+        self
+    }
+
+    /// Ends the listing once the pager has loaded `max_items` items, and
+    /// asks each request for no more items than are left.
+    pub fn max_items(mut self, max_items: usize) -> Self {
+        self.unloaded_items = max_items;
+        self
+    }
+
+    /// Returns the next page, or `None` after the listing's last page or once
+    /// the pager has loaded `max_items` items.
     pub async fn next(&mut self) -> Option<Result<P, E>> {
         if let Some(page) = self.pending.take() {
             return Some(Ok(page));
@@ -76,9 +110,16 @@ impl<P: PagedResponse, E> Pager<P, E> {
             PagerState::More(cursor) => Some(cursor.clone()),
             PagerState::Done => return None,
         };
-        let limit = EffectiveLimit(PaginationPolicy::default().default_limit());
-        let page = (self.load_page)(PageRequest { limit, cursor }).await;
+        // A total too large for `u32` leaves more items than any page holds.
+        let unloaded_items = u32::try_from(self.unloaded_items).unwrap_or(u32::MAX);
+        let limit = NonZeroU32::new(unloaded_items.min(self.page_limit.get()))?;
+        let page = (self.load_page)(PageRequest {
+            limit: EffectiveLimit(limit),
+            cursor,
+        })
+        .await;
         if let Ok(page) = &page {
+            self.unloaded_items = self.unloaded_items.saturating_sub(page.items().len());
             self.state = match page.next_cursor() {
                 Some(cursor) => PagerState::More(cursor),
                 None => PagerState::Done,
@@ -87,12 +128,17 @@ impl<P: PagedResponse, E> Pager<P, E> {
         Some(page)
     }
 
-    /// Returns the page `request` names: the page at its cursor, or the first
-    /// page when it has none, with at most `request.limit` items.
+    /// Returns the pager's next page: the page at its cursor, or the first
+    /// page when it has none.
     ///
-    /// The pager's own position does not move.
-    pub async fn page(&mut self, request: PageRequest<P::Cursor>) -> Result<P, E> {
-        (self.load_page)(request).await
+    /// # Panics
+    ///
+    /// Panics when the pager has no page left to load, because it returned
+    /// the listing's last page or loaded `max_items` items.
+    pub async fn page(mut self) -> Result<P, E> {
+        self.next()
+            .await
+            .expect("a pager asked for one page should have a page left to load")
     }
 
     /// Returns at most `max_items` items.
@@ -725,28 +771,69 @@ mod tests {
         std::pin::pin!(future).poll(&mut Context::from_waker(Waker::noop()))
     }
 
+    fn limit(value: u32) -> EffectiveLimit {
+        EffectiveLimit::new(NonZeroU32::new(value).expect("nonzero limit"))
+    }
+
+    /// Returns every page `pager` loads, in order.
+    fn pages(mut pager: Pager<NumberPage, Infallible>) -> Vec<Vec<u32>> {
+        let mut pages = Vec::new();
+        loop {
+            let Poll::Ready(next) = poll_once(pager.next()) else {
+                panic!("a loader that is always ready should never leave a page pending");
+            };
+            let Some(page) = next else {
+                return pages;
+            };
+            pages.push(page.expect("an infallible page").numbers);
+        }
+    }
+
     #[test]
-    fn page_returns_the_page_at_the_cursor_with_the_requested_limit() {
-        let mut pager = numbers(10, usize::MAX);
-        let request = PageRequest {
-            limit: EffectiveLimit::new(NonZeroU32::new(3).expect("nonzero limit")),
-            cursor: Some(4),
-        };
+    fn page_returns_the_page_at_the_cursor_with_the_page_limit() {
+        let pager = numbers(10, usize::MAX).cursor(Some(4)).page_limit(limit(3));
 
         assert_eq!(
-            poll_once(pager.page(request)),
+            poll_once(pager.page()),
             Poll::Ready(Ok(NumberPage {
                 numbers: vec![5, 6, 7],
                 next_cursor: Some(7),
             }))
         );
-        assert_eq!(
-            poll_once(pager.next()),
-            Poll::Ready(Some(Ok(NumberPage {
-                numbers: (0..10).collect(),
-                next_cursor: None,
-            })))
-        );
+    }
+
+    #[test]
+    fn a_page_limit_and_max_items_size_each_request_and_end_the_listing() {
+        // Each case is the listing's length, the most items the loader puts
+        // on one page, the page limit, the total limit, and the length of
+        // each page.
+        let cases = [
+            (20, usize::MAX, 10, 3, vec![3]),
+            (20, usize::MAX, 3, 7, vec![3, 3, 1]),
+            (5, usize::MAX, 2, usize::MAX, vec![2, 2, 1]),
+            (5, usize::MAX, 2, 2, vec![2]),
+            (5, usize::MAX, 3, 99, vec![3, 2]),
+            (20, 2, 3, 7, vec![2, 2, 2, 1]),
+            (20, usize::MAX, 3, 0, vec![]),
+        ];
+        for (count, max_page_items, page_limit, max_items, lengths) in cases {
+            let pages = pages(
+                numbers(count, max_page_items)
+                    .page_limit(limit(page_limit))
+                    .max_items(max_items),
+            );
+            let case = format!(
+                "{count} items, at most {max_page_items} a page, page limit {page_limit}, \
+                 total limit {max_items}"
+            );
+            assert_eq!(
+                pages.iter().map(Vec::len).collect::<Vec<_>>(),
+                lengths,
+                "{case}"
+            );
+            let total = u32::try_from(lengths.iter().sum::<usize>()).expect("a small total");
+            assert_eq!(pages.concat(), (0..total).collect::<Vec<_>>(), "{case}");
+        }
     }
 
     #[test]
