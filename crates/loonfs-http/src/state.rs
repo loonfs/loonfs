@@ -176,7 +176,20 @@ pub struct HeldNamespace {
     pub index_dirty: bool,
     pub collected_seq: Option<ChangeSeq>,
     pub collected_at_ms: u64,
-    pub metadata_retry_at_ms: u64,
+    pub metadata_retry: SweepRetry,
+    pub index_retry: SweepRetry,
+    pub gc_retry: SweepRetry,
+}
+
+/// When a host's maintenance sweep next makes one call on a held namespace,
+/// and how many times in a row that call has failed there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SweepRetry {
+    /// The earliest time the sweep's ticks make the call again, on the
+    /// table's monotonic timer.
+    pub retry_at_ms: u64,
+    /// The call's failures in a row, zero after an attempt that didn't fail.
+    pub attempts: u32,
 }
 
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
@@ -230,7 +243,9 @@ impl Namespaces {
                             index_dirty: false,
                             collected_seq: None,
                             collected_at_ms: now_ms,
-                            metadata_retry_at_ms: 0,
+                            metadata_retry: SweepRetry::default(),
+                            index_retry: SweepRetry::default(),
+                            gc_retry: SweepRetry::default(),
                         })),
                     );
                     return Ok(handle);

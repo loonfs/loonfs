@@ -54,36 +54,38 @@ impl Sweep {
                 return;
             }
             let metadata_caught_up = held.handle.metadata_caught_up();
+            let metadata_retry = held.metadata_retry;
             // The idle fold allows one metadata call before the retry time,
             // when no call has run since the tail reached the idle fold age.
-            let idle_fold_due = held
-                .handle
-                .idle_fold_due_at_ms()
-                .is_some_and(|fold_due_at_ms| {
-                    now_ms >= fold_due_at_ms
-                        && held
-                            .metadata_retry_at_ms
-                            .saturating_sub(inner.metadata_retry_interval_ms)
-                            < fold_due_at_ms
-                });
-            let due = if !metadata_caught_up
-                && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
-                && !self.backed_off(&namespace_id, SweepCall::Metadata)
-            {
+            // While the call keeps failing, its retry time also includes its
+            // backoff, which the idle fold doesn't cut short.
+            let idle_fold_due = metadata_retry.attempts == 0
+                && held
+                    .handle
+                    .idle_fold_due_at_ms()
+                    .is_some_and(|fold_due_at_ms| {
+                        now_ms >= fold_due_at_ms
+                            && metadata_retry
+                                .retry_at_ms
+                                .saturating_sub(inner.metadata_retry_interval_ms)
+                                < fold_due_at_ms
+                    });
+            let metadata_due =
+                !metadata_caught_up && (now_ms >= metadata_retry.retry_at_ms || idle_fold_due);
+            let due = if metadata_due {
                 Due::Metadata
             } else if inner.grep.is_some()
                 && (held.index_dirty || held.indexed_seq != seq)
-                && !self.backed_off(&namespace_id, SweepCall::GrepIndex)
+                && now_ms >= held.index_retry.retry_at_ms
             {
                 Due::Index
             } else if seq.is_some()
                 && seq != held.collected_seq
                 && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
-                && !self.backed_off(&namespace_id, SweepCall::Gc)
+                && now_ms >= held.gc_retry.retry_at_ms
             {
                 Due::Collection
-            } else if metadata_caught_up || self.backoff_at_cap(&namespace_id, SweepCall::Metadata)
-            {
+            } else if metadata_caught_up || self.backoff_at_cap(metadata_retry) {
                 Due::Close
             } else {
                 return;
@@ -92,8 +94,8 @@ impl Sweep {
         };
         match due {
             Due::Metadata => {
-                let caught_up = self.maintain_metadata(&namespace_id).await;
-                self.record_metadata(&entry, seq, caught_up);
+                self.maintain_metadata(&namespace_id, Some(&entry), seq)
+                    .await;
             }
             Due::Index => {
                 if let Some(grep) = &inner.grep {
@@ -101,11 +103,7 @@ impl Sweep {
                         .await;
                 }
             }
-            Due::Collection => {
-                if self.gc(&namespace_id).await {
-                    self.record_collection(&entry, seq);
-                }
-            }
+            Due::Collection => self.gc(&namespace_id, Some(&entry), seq).await,
             Due::Close => {
                 let close = AssertUnwindSafe(self.close_idle_session(&namespace_id, seq));
                 if let Err(payload) = close.catch_unwind().await {
@@ -134,21 +132,21 @@ impl Sweep {
                 inner.idle_session_close_after_ms,
                 |held| {
                     // A failing call keeps an idle session held, so ticks
-                    // retry it on its backoff, until its wait reaches the
+                    // retry it on its backoff, until its backoff reaches the
                     // cap. Then the session closes and the next full pass
                     // retries the call.
-                    (held.handle.metadata_caught_up()
-                        || self.backoff_at_cap(namespace_id, SweepCall::Metadata))
+                    let at_cap = |call: SweepCall| self.backoff_at_cap(call.retry(held));
+                    (held.handle.metadata_caught_up() || at_cap(SweepCall::Metadata))
                         && (inner.grep.is_none()
                             || (!held.index_dirty && held.indexed_seq == seq)
-                            || self.backoff_at_cap(namespace_id, SweepCall::GrepIndex))
+                            || at_cap(SweepCall::GrepIndex))
                         && (held.collected_seq == seq
                             || inner
                                 .namespaces
                                 .now_ms()
                                 .saturating_sub(held.collected_at_ms)
                                 < inner.collection_interval_ms
-                            || self.backoff_at_cap(namespace_id, SweepCall::Gc))
+                            || at_cap(SweepCall::Gc))
                 },
             )
             .await

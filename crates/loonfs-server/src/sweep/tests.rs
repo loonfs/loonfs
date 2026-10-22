@@ -1,13 +1,13 @@
 //! Daily listing, session ticks, and their store request costs.
 
-use super::{GarbageCollection, Sweep};
+use super::{GarbageCollection, Sweep, SweepCall};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
-use loonfs::{LoonFs, Maintenance, NamespaceId, SharedObjectStore, Writable};
+use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
-use loonfs_http::Namespaces;
+use loonfs_http::{Namespaces, SweepRetry};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::clock::ManualClock;
@@ -495,7 +495,6 @@ async fn a_sweep_survives_a_failing_namespace() {
         1
     );
 
-    server.clock.advance_ms(config.tick_interval_ms);
     server
         .sweep
         .run_pass(GarbageCollection::Skip)
@@ -504,7 +503,7 @@ async fn a_sweep_survives_a_failing_namespace() {
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "a pass after the backoff tries the failed namespace again"
+        "a namespace that no host holds keeps no retry state, so the next pass tries it again"
     );
 }
 
@@ -546,10 +545,18 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
     let store = Arc::new(PanicOnManifestRead {
         inner: LocalFsStore::new(directory.path()).expect("local store"),
         manifest_prefix: loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
-        armed: AtomicBool::new(true),
+        armed: AtomicBool::new(false),
     });
     let config = sweep_config(None);
     let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
+    let _held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&names[1])
+        .await
+        .expect("hold the namespace that panics");
+    store.armed.store(true, Ordering::SeqCst);
 
     server.pass_after(0).await;
     store.armed.store(false, Ordering::SeqCst);
@@ -561,55 +568,77 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         "the panic doesn't stop the visits to other namespaces"
     );
     assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 1);
-    assert_eq!(server.metadata_failures(), 1);
-    let backoff = super::lock(&server.sweep.inner.backoff)
-        .get(&(names[1].clone(), super::SweepCall::Metadata))
-        .copied()
-        .expect("the panic is backed off");
-    assert_eq!(backoff.code, loonfs::ErrorCode::ServerError);
-    assert_eq!(backoff.attempts, 1);
+    assert_eq!(server.visit_failures(SweepCall::Metadata), 1);
+    assert_eq!(
+        server.retry(&names[1], SweepCall::Metadata),
+        SweepRetry {
+            retry_at_ms: server.sweep.inner.namespaces.now_ms() + config.maintenance_interval_ms,
+            attempts: 1,
+        },
+        "the panic counts as a failure, and ticks wait for its retry time"
+    );
 
-    server.pass_after(config.tick_interval_ms).await;
+    server.pass_after(0).await;
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "a pass after the backoff tries the namespace again"
+        "the next pass tries the namespace again"
     );
 }
 
-/// A server over one seeded namespace whose store calls fail until cleared,
-/// with an idle WAL tail that a visit folds.
-async fn failing_namespace_server(
+/// A server over a store whose `failing` calls fail once armed, holding a
+/// session whose WAL tail has one commit. The returned handle keeps the
+/// session from closing while a test holds it.
+async fn held_failing_server(
     directory: &std::path::Path,
-) -> (Arc<FailStore<LocalFsStore>>, SweepServer, NamespaceId) {
-    let base: SharedObjectStore = local_store(directory);
-    let namespace_id = namespace_id("failing");
-    let (writer, now_ms) = seed_writer(&base).await;
-    seed_unfolded_tail(&writer, &namespace_id).await;
-    writer.shutdown().await.expect("stop the writer");
-    let failing_prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
-    let store = Arc::new(FailStore::matching(
+    config: &ServerConfig,
+    failing: OperationSelector,
+) -> (
+    Arc<FailStore<LocalFsStore>>,
+    SweepServer,
+    NamespaceId,
+    Namespace<Writable>,
+) {
+    let store = Arc::new(FailStore::new(
         LocalFsStore::new(directory).expect("local store"),
-        move |operation| operation.key().starts_with(&failing_prefix),
+        KeyPredicate::any(),
+        failing,
         InjectedError::PermissionDenied("expired credentials".to_owned()),
     ));
-    let server =
-        SweepServer::start(store.clone(), &sweep_config(None), now_ms + 20 * MINUTE_MS).await;
-    (store, server, namespace_id)
+    let server = SweepServer::start(store.clone(), config, 0).await;
+    let namespace_id = namespace_id("held-failing");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create the namespace");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("hold the session");
+    held.put_file("/tail.txt", b"unfolded", &test_actor())
+        .await
+        .expect("write the tail");
+    (store, server, namespace_id, held)
 }
 
 impl SweepServer {
-    fn metadata_failures(&self) -> u64 {
+    fn visit_failures(&self, call: SweepCall) -> u64 {
         self.counter(
             "loonfs.maintenance.sweep_visit_failures",
-            &[("call", "metadata")],
+            &[("call", call.as_str())],
         )
     }
 
-    fn backoff_attempts(&self, namespace_id: &NamespaceId) -> Option<u32> {
-        super::lock(&self.sweep.inner.backoff)
-            .get(&(namespace_id.clone(), super::SweepCall::Metadata))
-            .map(|backoff| backoff.attempts)
+    fn retry(&self, namespace_id: &NamespaceId, call: SweepCall) -> SweepRetry {
+        self.sweep
+            .inner
+            .namespaces
+            .visit_held(namespace_id, |held| call.retry(held))
+            .expect("a held session")
     }
 
     async fn pass_after(&self, elapsed_ms: u64) {
@@ -619,138 +648,112 @@ impl SweepServer {
             .await
             .expect("list namespaces");
     }
+
+    /// Checks that ticks make a held session's failing `call` again exactly
+    /// when each wait in `wait_seconds` ends, from the call's first failure.
+    async fn tick_through_retries(
+        &self,
+        namespace_id: &NamespaceId,
+        call: SweepCall,
+        wait_seconds: &[u64],
+    ) {
+        for (attempts, wait_s) in (1..).zip(wait_seconds) {
+            assert_eq!(self.retry(namespace_id, call).attempts, attempts);
+            let failures = self.visit_failures(call);
+            self.tick_after(wait_s * 1_000 - 1).await;
+            assert_eq!(
+                self.visit_failures(call),
+                failures,
+                "failure {attempts} waits {wait_s} s"
+            );
+            self.tick_after(1).await;
+            assert_eq!(
+                self.visit_failures(call),
+                failures + 1,
+                "failure {attempts} is retried after {wait_s} s"
+            );
+        }
+    }
 }
 
+/// Checks a failing metadata call's schedule with the default 5-second tick
+/// and 5-minute metadata interval: the later of that interval and a backoff
+/// that starts at one tick and doubles up to an hour.
 #[tokio::test]
-async fn a_failing_call_backs_off_and_is_retried_after_its_delay() {
+async fn a_failing_metadata_call_waits_the_later_of_its_interval_and_its_backoff() {
+    const WAIT_SECONDS: [u64; 12] = [
+        300, 300, 300, 300, 300, 300, 320, 640, 1_280, 2_560, 3_600, 3_600,
+    ];
     let directory = tempdir().expect("tempdir");
-    let (store, server, namespace_id) = failing_namespace_server(directory.path()).await;
-    let first_ms = sweep_config(None).tick_interval_ms;
+    let mut config = sweep_config(None);
+    assert_eq!(
+        (config.tick_interval_ms, config.maintenance_interval_ms),
+        (5_000, 5 * MINUTE_MS)
+    );
+    // Keeps collection from coming due while the clock runs for hours.
+    config.gc_interval_ms = 30 * DAY_MS;
+    let (store, server, namespace_id, held) =
+        held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
-
-    server.pass_after(0).await;
-    assert_eq!(server.metadata_failures(), 1);
-    assert_eq!(server.backoff_attempts(&namespace_id), Some(1));
-    server.pass_after(first_ms - 1).await;
-    assert_eq!(
-        server.metadata_failures(),
-        1,
-        "the call waits out its backoff"
-    );
-    server.pass_after(1).await;
-    assert_eq!(
-        server.metadata_failures(),
-        2,
-        "the call is retried after it"
-    );
-    assert_eq!(server.backoff_attempts(&namespace_id), Some(2));
-
-    server.pass_after(first_ms).await;
-    assert_eq!(
-        server.metadata_failures(),
-        2,
-        "a second failure doubles the wait"
-    );
-    server.pass_after(first_ms).await;
-    assert_eq!(server.metadata_failures(), 3);
+    server.tick_after(config.tick_interval_ms).await;
+    server
+        .tick_through_retries(&namespace_id, SweepCall::Metadata, &WAIT_SECONDS)
+        .await;
 
     store.clear();
-    server.pass_after(4 * first_ms).await;
+    server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
+    assert_eq!(
+        server.retry(&namespace_id, SweepCall::Metadata).attempts,
+        0,
+        "a success clears the backoff"
+    );
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
         "a permission failure is retried, not skipped for good"
     );
-}
-
-#[tokio::test]
-async fn a_success_clears_the_backoff() {
-    let directory = tempdir().expect("tempdir");
-    let (store, server, namespace_id) = failing_namespace_server(directory.path()).await;
-    let first_ms = sweep_config(None).tick_interval_ms;
-    let entries = || match server
-        .recorder
-        .snapshot()
-        .by_name("loonfs.maintenance.sweep_backoff_entries")
-        .next()
-        .map(|entry| entry.value.clone())
-    {
-        Some(MetricValue::Gauge(value)) => value,
-        other => panic!("expected the backoff gauge, found {other:?}"),
-    };
+    held.put_file("/again.txt", b"unfolded", &test_actor())
+        .await
+        .expect("write another tail");
     store.fail_all();
-    server.pass_after(0).await;
-    server.pass_after(first_ms).await;
-    assert_eq!(server.backoff_attempts(&namespace_id), Some(2));
-    assert_eq!(entries(), 1);
-
-    store.clear();
-    server.pass_after(2 * first_ms).await;
-    assert_eq!(server.backoff_attempts(&namespace_id), None);
-    assert_eq!(entries(), 0);
-
-    store.fail_all();
-    server.pass_after(0).await;
+    server.tick_after(config.tick_interval_ms).await;
     assert_eq!(
-        server.backoff_attempts(&namespace_id),
-        Some(1),
+        server.retry(&namespace_id, SweepCall::Metadata).attempts,
+        1,
         "a failure after a success starts a new backoff"
     );
 }
 
+/// Checks a failing collection's schedule with the default 5-second tick: a
+/// backoff that starts at one tick and doubles up to an hour.
 #[tokio::test]
-async fn the_backoff_map_evicts_the_earliest_retry_at_its_cap() {
+async fn a_failing_collection_backs_off_from_one_tick_to_an_hour() {
+    const WAIT_SECONDS: [u64; 12] = [5, 10, 20, 40, 80, 160, 320, 640, 1_280, 2_560, 3_600, 3_600];
     let directory = tempdir().expect("tempdir");
-    let server = SweepServer::start(local_store(directory.path()), &sweep_config(None), 0).await;
-    let fail = |name: &str| {
-        server.sweep.record_failure(
-            &namespace_id(name),
-            super::SweepCall::Metadata,
-            loonfs::ErrorCode::ServerError,
-            &"injected",
-        );
-    };
-    fail("earliest");
-    server.clock.advance_ms(1);
-    for index in 1..super::MAX_SWEEP_BACKOFF_ENTRIES {
-        fail(&format!("later-{index}"));
-    }
-    assert_eq!(server.backoff_attempts(&namespace_id("earliest")), Some(1));
-
-    fail("newest");
-    let entries = super::lock(&server.sweep.inner.backoff);
-    assert_eq!(entries.len(), super::MAX_SWEEP_BACKOFF_ENTRIES);
-    let key = |name: &str| (namespace_id(name), super::SweepCall::Metadata);
-    assert!(!entries.contains_key(&key("earliest")));
-    assert!(entries.contains_key(&key("newest")));
+    let mut config = sweep_config(None);
+    config.idle_fold_after_ms = 0;
+    let (store, server, namespace_id, held) =
+        held_failing_server(directory.path(), &config, OperationSelector::List).await;
+    server.tick_after(config.tick_interval_ms).await;
+    assert!(held.metadata_caught_up());
+    store.fail_all();
+    server.tick_after(config.gc_interval_ms).await;
+    assert_eq!(server.visit_failures(SweepCall::Gc), 1);
+    server
+        .tick_through_retries(&namespace_id, SweepCall::Gc, &WAIT_SECONDS)
+        .await;
+    assert_eq!(server.visit_failures(SweepCall::Metadata), 0);
 }
 
 #[tokio::test]
 async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the_cap() {
     let directory = tempdir().expect("tempdir");
-    let store = Arc::new(FailStore::matching(
-        LocalFsStore::new(directory.path()).expect("local store"),
-        |_| true,
-        InjectedError::PermissionDenied("expired credentials".to_owned()),
-    ));
     let mut config = sweep_config(None);
     // Keeps collection from coming due while the clock runs for hours.
     config.gc_interval_ms = 30 * DAY_MS;
-    let server = SweepServer::start(store.clone(), &config, 0).await;
-    let namespace_id = namespace_id("held-failing");
-    server
-        .runtime
-        .create_namespace(&namespace_id, &test_actor())
-        .await
-        .expect("create the namespace");
+    let (store, server, namespace_id, held) =
+        held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     let namespaces = &server.sweep.inner.namespaces;
-    let held = namespaces
-        .open(&namespace_id)
-        .await
-        .expect("hold the session");
-    held.put_file("/tail.txt", b"unfolded", &test_actor())
-        .await
-        .expect("write the tail");
     drop(held);
     store.fail_all();
 
@@ -759,19 +762,19 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         .tick_after(config.idle_session_close_after_ms + 1)
         .await;
     server.tick_after(config.tick_interval_ms).await;
-    assert_eq!(server.metadata_failures(), 2);
+    assert_eq!(server.visit_failures(SweepCall::Metadata), 2);
     assert_eq!(
         namespaces.held_ids(),
         std::slice::from_ref(&namespace_id),
         "a transient failure keeps the idle session held"
     );
 
-    let attempts = || server.backoff_attempts(&namespace_id).expect("backing off");
+    let attempts = || server.retry(&namespace_id, SweepCall::Metadata).attempts;
     while super::backoff_ms(config.tick_interval_ms, attempts()) < super::MAX_SWEEP_BACKOFF_MS {
-        let failures = server.metadata_failures();
+        let failures = server.visit_failures(SweepCall::Metadata);
         server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
         assert_eq!(
-            server.metadata_failures(),
+            server.visit_failures(SweepCall::Metadata),
             failures + 1,
             "ticks retry the call on its backoff"
         );
