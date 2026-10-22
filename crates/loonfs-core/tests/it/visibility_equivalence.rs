@@ -243,7 +243,7 @@ impl VisibilityHarness {
     async fn expire(&self, inode_id: InodeId, deletion_seq: ChangeSeq) {
         NamespaceCommitEngine::new(
             self.namespace_id().clone(),
-            Arc::new(tokio::sync::Semaphore::new(32)),
+            Arc::new(loonfs_core::test_support::content_writes()),
         )
         .publish_expiry(
             &*self.store,

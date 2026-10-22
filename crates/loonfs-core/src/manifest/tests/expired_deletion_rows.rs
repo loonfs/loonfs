@@ -86,7 +86,7 @@ async fn commit<S: ObjectStore + ?Sized>(
     };
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        Arc::new(tokio::sync::Semaphore::new(32)),
+        Arc::new(crate::test_support::content_writes()),
     )
     .publish_batch(
         store,

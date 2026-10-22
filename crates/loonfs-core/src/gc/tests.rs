@@ -1509,7 +1509,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     .expect("move the floor past the deletion");
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_expiry(
         &store,
