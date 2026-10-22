@@ -878,8 +878,10 @@ impl Maintenance {
     ///
     /// Advancing the floor abandons the replay history below it, and a later
     /// base compaction keeps, for each file, every revision above the floor
-    /// and the newest revision at or below it. Nothing schedules it, so an
-    /// unattended deployment keeps its whole history.
+    /// and the newest revision at or below it. The runtime doesn't schedule
+    /// an advance. The reference server makes one on each full maintenance
+    /// pass when its `retention_window_ms` is set, and without that setting,
+    /// an unattended deployment keeps its whole history.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.advance_retention_floor",

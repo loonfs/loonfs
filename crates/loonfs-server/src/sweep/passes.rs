@@ -1,6 +1,6 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, panic_message, GarbageCollection, RunningSweep, Sweep, SweepCall};
+use super::{lock, panic_message, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
 use std::panic::AssertUnwindSafe;
@@ -31,13 +31,23 @@ impl Sweep {
             .await;
     }
 
+    /// Runs the session's first due step, then the retention advance that a
+    /// full pass left to this visit, if it left one.
     async fn tick_session(&self, namespace_id: NamespaceId) {
-        let inner = &self.inner;
-        let Some(_visit) = self.claim(&namespace_id).await else {
+        let Some((visit, _permit)) = self.claim(&namespace_id, Overlap::Skip).await else {
             return;
         };
+        // Boxed for the same reason as the retention advance: the spawned
+        // sweep's `Send` check overflows on the unboxed due step inside this
+        // future.
+        self.run_due_step(&namespace_id).boxed().await;
+        self.finish_visit(visit).await;
+    }
+
+    async fn run_due_step(&self, namespace_id: &NamespaceId) {
+        let inner = &self.inner;
         let now_ms = inner.namespaces.now_ms();
-        let Some(entry) = inner.namespaces.entry(&namespace_id) else {
+        let Some(entry) = inner.namespaces.entry(namespace_id) else {
             return;
         };
         let (seq, due) = {
@@ -94,18 +104,18 @@ impl Sweep {
         };
         match due {
             Due::Metadata => {
-                self.maintain_metadata(&namespace_id, Some(&entry), seq)
+                self.maintain_metadata(namespace_id, Some(&entry), seq)
                     .await;
             }
             Due::Index => {
                 if let Some(grep) = &inner.grep {
-                    self.maintain_index(grep, &namespace_id, Some(&entry), seq)
+                    self.maintain_index(grep, namespace_id, Some(&entry), seq)
                         .await;
                 }
             }
-            Due::Collection => self.gc(&namespace_id, Some(&entry), seq).await,
+            Due::Collection => self.gc(namespace_id, Some(&entry), seq).await,
             Due::Close => {
-                let close = AssertUnwindSafe(self.close_idle_session(&namespace_id, seq));
+                let close = AssertUnwindSafe(self.close_idle_session(namespace_id, seq));
                 if let Err(payload) = close.catch_unwind().await {
                     inner.metrics.panics.increment(1);
                     tracing::error!(
@@ -135,7 +145,10 @@ impl Sweep {
                     // retry it on its backoff, until its backoff reaches the
                     // cap. Then the session closes and the next full pass
                     // retries the call.
-                    let at_cap = |call: SweepCall| self.backoff_at_cap(call.retry(held));
+                    let at_cap = |call: SweepCall| {
+                        call.retry(held)
+                            .is_some_and(|retry| self.backoff_at_cap(retry))
+                    };
                     (held.handle.metadata_caught_up() || at_cap(SweepCall::Metadata))
                         && (inner.grep.is_none()
                             || (!held.index_dirty && held.indexed_seq == seq)
@@ -162,6 +175,7 @@ impl Sweep {
             maintenance_interval_ms = inner.metadata_retry_interval_ms,
             gc_interval_ms = inner.collection_interval_ms,
             full_sweep_interval_ms = loonfs_types::saturating_duration_ms(inner.full_interval),
+            retention_window_ms = inner.retention_window_ms.map(std::num::NonZeroU64::get),
             max_concurrent_maintenance = inner.max_concurrent_visits,
             maintains_grep_index = inner.grep.is_some(),
             "maintenance sweep started"

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -264,6 +264,12 @@ pub struct ServerConfig {
     /// The first runs at start. Defaults to 86400000 (24 hours).
     #[serde(default = "default_full_sweep_interval_ms")]
     pub full_sweep_interval_ms: u64,
+    /// How long the server keeps a namespace's history before it advances
+    /// the namespace's retention floor past that history, in milliseconds.
+    /// With it set, each full pass advances every active namespace's floor
+    /// to the last commit at or before the current time minus this window.
+    /// Absent, the server advances no floor.
+    pub retention_window_ms: Option<NonZeroU64>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
     #[serde(default = "default_idle_session_close_after_ms")]
@@ -2181,6 +2187,44 @@ root = "/tmp/loonfs-server"
             ));
             let config = load_server_config(&path).expect("valid config");
             assert_eq!(config.idle_fold_after_ms, expected, "{setting:?}");
+        }
+    }
+
+    #[test]
+    fn a_retention_window_is_optional_and_must_be_positive() {
+        let config = |setting: &str| {
+            write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+{setting}
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+            ))
+        };
+        for (setting, expected) in [
+            ("", None),
+            (
+                "retention_window_ms = 2592000000",
+                std::num::NonZeroU64::new(2_592_000_000),
+            ),
+        ] {
+            let loaded = load_server_config(config(setting)).expect("valid config");
+            assert_eq!(loaded.retention_window_ms, expected, "{setting:?}");
+        }
+        match load_server_config(config("retention_window_ms = 0"))
+            .expect_err("a zero window must be rejected")
+        {
+            ServerConfigError::Decode(message) => assert!(
+                message.contains("retention_window_ms")
+                    && message.contains("expected a nonzero u64"),
+                "the decode error should identify `retention_window_ms` and say why: {message}"
+            ),
+            other => panic!("expected a decode error, got {other:?}"),
         }
     }
 

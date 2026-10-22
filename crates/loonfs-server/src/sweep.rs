@@ -6,8 +6,9 @@ use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
 };
 use loonfs::{
-    ChangeSeq, ErrorCode, GcOptions, Maintenance, MaintenanceCancellation,
-    MetadataMaintenanceOutcome, NamespaceId, SharedObjectStore,
+    AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, Maintenance,
+    MaintenanceCancellation, MetadataMaintenanceOutcome, NamespaceId, RetentionTarget,
+    SharedObjectStore,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -18,9 +19,10 @@ use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::EffectiveLimit;
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::future::Future;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -47,7 +49,7 @@ const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
 pub enum GarbageCollection {
     /// Collect each namespace's garbage and its grep garbage.
     Collect,
-    /// Maintain metadata and the grep index only.
+    /// Make the visit's other calls without collecting garbage.
     Skip,
 }
 
@@ -74,10 +76,24 @@ pub enum GarbageCollection {
 /// still inside its grace window. It makes every call on every namespace it
 /// lists without waiting for a held entry's retry times, and a namespace
 /// without a held entry keeps no retry state, because the next pass is its
-/// retry. The pass and the ticks share `max_concurrent_maintenance` visit
-/// slots and never visit the same namespace concurrently. Listing failures
-/// stop new visits; already started visits finish before returning.
-/// Hosts can call [`Self::run_pass`] and [`Self::tick`] directly.
+/// retry.
+///
+/// With `retention_window_ms` set, the pass also advances each active
+/// namespace's retention floor to the last commit at or before the current
+/// time minus the window. Ticks don't advance the floor on their own
+/// schedule, because an advance checks that the manifest's segments exist and
+/// publishes a manifest, and a window measured in days needs no finer
+/// schedule than the daily pass. A namespace whose floor already reached its
+/// cutoff publishes nothing. When the pass reaches a namespace that a tick is
+/// visiting, it leaves the advance to that visit, which makes it after its
+/// own step. The pass can't wait for a visit that may be running a long
+/// compaction, and skipping the day's advance would make the window a day
+/// longer for exactly the namespaces that are busiest.
+///
+/// The pass and the ticks share `max_concurrent_maintenance` visit slots and
+/// never visit the same namespace concurrently. Listing failures stop new
+/// visits; already started visits finish before returning. Hosts can call
+/// [`Self::run_pass`] and [`Self::tick`] directly.
 #[derive(Clone)]
 pub struct Sweep {
     inner: Arc<SweepInner>,
@@ -93,8 +109,11 @@ struct SweepInner {
     metadata_retry_interval_ms: u64,
     collection_interval_ms: u64,
     full_interval: Duration,
+    retention_window_ms: Option<NonZeroU64>,
     idle_session_close_after_ms: u64,
-    visiting: Mutex<HashSet<NamespaceId>>,
+    /// The namespaces being visited, each with whether a full pass found it
+    /// here and left its retention advance to the visit.
+    visiting: Mutex<HashMap<NamespaceId, bool>>,
     slots: Semaphore,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
@@ -158,33 +177,41 @@ enum SweepCall {
     /// Garbage collection, which runs the core collector and then the grep index's collector
     /// through [`loonfs_http::gc_namespace`].
     Gc,
+    /// The retention advance, which the full pass makes, or leaves to a
+    /// visit that has the namespace when the pass reaches it.
+    Retention,
 }
 
 impl SweepCall {
-    const ALL: [Self; 3] = [Self::Metadata, Self::GrepIndex, Self::Gc];
+    const ALL: [Self; 4] = [Self::Metadata, Self::GrepIndex, Self::Gc, Self::Retention];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Metadata => "metadata",
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
+            Self::Retention => "retention",
         }
     }
 
-    /// The call's retry state on a held entry.
-    fn retry(self, held: &HeldNamespace) -> SweepRetry {
+    /// The call's retry state on a held entry. The retention advance keeps
+    /// none, because ticks never retry it, so a failed advance waits for the
+    /// next full pass like a call on a namespace without a held entry.
+    fn retry(self, held: &HeldNamespace) -> Option<SweepRetry> {
         match self {
-            Self::Metadata => held.metadata_retry,
-            Self::GrepIndex => held.index_retry,
-            Self::Gc => held.gc_retry,
+            Self::Metadata => Some(held.metadata_retry),
+            Self::GrepIndex => Some(held.index_retry),
+            Self::Gc => Some(held.gc_retry),
+            Self::Retention => None,
         }
     }
 
-    fn retry_mut(self, held: &mut HeldNamespace) -> &mut SweepRetry {
+    fn retry_mut(self, held: &mut HeldNamespace) -> Option<&mut SweepRetry> {
         match self {
-            Self::Metadata => &mut held.metadata_retry,
-            Self::GrepIndex => &mut held.index_retry,
-            Self::Gc => &mut held.gc_retry,
+            Self::Metadata => Some(&mut held.metadata_retry),
+            Self::GrepIndex => Some(&mut held.index_retry),
+            Self::Gc => Some(&mut held.gc_retry),
+            Self::Retention => None,
         }
     }
 }
@@ -227,6 +254,7 @@ impl Sweep {
                 metadata_retry_interval_ms: config.maintenance_interval_ms,
                 collection_interval_ms: config.gc_interval_ms,
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
+                retention_window_ms: config.retention_window_ms,
                 idle_session_close_after_ms: config.idle_session_close_after_ms,
                 visiting: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance.get()),
@@ -252,7 +280,8 @@ impl Sweep {
 
     /// Visits every namespace the store lists once. With
     /// [`GarbageCollection::Collect`], each visit also collects the
-    /// namespace's garbage and its grep garbage.
+    /// namespace's garbage and its grep garbage. With a retention window,
+    /// each visit also advances the namespace's retention floor.
     ///
     /// Returns how many namespaces the pass listed, or the listing failure
     /// that ended it once the visits it had started returned. A failed call
@@ -341,7 +370,10 @@ impl Sweep {
 
     async fn visit(&self, namespace_id: NamespaceId, garbage: GarbageCollection) {
         let inner = &self.inner;
-        let Some(_visit) = self.claim(&namespace_id).await else {
+        let Some((visit, _permit)) = self
+            .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
+            .await
+        else {
             return;
         };
         let entry = inner.namespaces.entry(&namespace_id);
@@ -351,9 +383,16 @@ impl Sweep {
         if let Some(grep) = &inner.grep {
             self.maintain_index(grep, &namespace_id, entry, seq).await;
         }
+        // The advance reads only folded commits, so it runs after the
+        // metadata call, which can fold an idle tail.
+        if let Some(retention_window_ms) = inner.retention_window_ms {
+            self.advance_retention(&namespace_id, entry, retention_window_ms)
+                .await;
+        }
         if garbage == GarbageCollection::Collect {
             self.gc(&namespace_id, entry, seq).await;
         }
+        self.finish_visit(visit).await;
     }
 
     /// Makes one metadata call. Unfinished work, or a failure, leaves the
@@ -421,17 +460,31 @@ impl Sweep {
         }
     }
 
+    /// Claims the namespace for one visit and waits for a visit slot.
+    /// Returns `None` when another visit has the namespace, which `overlap`
+    /// may leave the retention advance to, or when the sweep stops first.
     async fn claim<'a>(
         &'a self,
         namespace_id: &NamespaceId,
+        overlap: Overlap,
     ) -> Option<(Visiting<'a>, SemaphorePermit<'a>)> {
         let inner = &self.inner;
-        if !lock(&inner.visiting).insert(namespace_id.clone()) {
-            return None;
+        match lock(&inner.visiting).entry(namespace_id.clone()) {
+            Entry::Occupied(mut visit) => {
+                if overlap == Overlap::LeaveRetentionAdvance && inner.retention_window_ms.is_some()
+                {
+                    visit.insert(true);
+                }
+                return None;
+            }
+            Entry::Vacant(free) => {
+                free.insert(false);
+            }
         }
         let visit = Visiting {
             inner,
             namespace_id: namespace_id.clone(),
+            released: false,
         };
         let permit = tokio::select! {
             biased;
@@ -439,6 +492,23 @@ impl Sweep {
             permit = inner.slots.acquire() => permit.ok()?,
         };
         Some((visit, permit))
+    }
+
+    /// Makes the retention advance that full passes left to this visit, then
+    /// releases the namespace. The check and the release share the visiting
+    /// lock with a pass's claim, so a pass either leaves its advance before
+    /// the release or claims the namespace itself after it.
+    async fn finish_visit(&self, mut visit: Visiting<'_>) {
+        // Each turn makes the advance that one pass left while this visit
+        // had the namespace, so the loop turns once for each full pass that
+        // overlaps the visit.
+        while visit.release_unless_retention_due() {
+            if let Some(retention_window_ms) = self.inner.retention_window_ms {
+                let entry = self.inner.namespaces.entry(&visit.namespace_id);
+                self.advance_retention(&visit.namespace_id, entry.as_deref(), retention_window_ms)
+                    .await;
+            }
+        }
     }
 
     /// Whether `retry` is a call that keeps failing on a held namespace and
@@ -483,6 +553,43 @@ impl Sweep {
             held.collected_seq = seq;
             held.collected_at_ms = inner.namespaces.now_ms();
         }
+    }
+
+    /// Advances the namespace's retention floor to the last commit at or
+    /// before the current time minus `retention_window_ms`, with the same
+    /// advance as the `retention` job. A deleted namespace returns
+    /// `namespace_deleted`, which isn't a failure. For when the deletions
+    /// below the new floor expire, see [Advancing the floor on a
+    /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
+    async fn advance_retention(
+        &self,
+        namespace_id: &NamespaceId,
+        entry: Option<&Mutex<HeldNamespace>>,
+        retention_window_ms: NonZeroU64,
+    ) {
+        let inner = &self.inner;
+        if inner.stop.is_cancelled() {
+            return;
+        }
+        let options = AdvanceRetentionFloorOptions {
+            target: RetentionTarget::Cutoff {
+                cutoff_at_ms: inner
+                    .maintenance
+                    .now_ms()
+                    .saturating_sub(retention_window_ms.get()),
+            },
+        };
+        // Boxed so the spawned sweep's `Send` check does not recurse through
+        // every engine future the advance awaits.
+        let result = contain(
+            inner
+                .maintenance
+                .advance_retention_floor_with_options(namespace_id, &options)
+                .boxed()
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        self.record_call(namespace_id, entry, SweepCall::Retention, result, 0);
     }
 
     /// Runs build steps while each one publishes, at most
@@ -531,7 +638,8 @@ impl Sweep {
             Ok(output) => (Some(output), None),
             Err(failure) => (None, Some(failure).filter(CallFailure::counts)),
         };
-        let retry = entry.map(|entry| self.schedule(entry, call, failure.is_some(), work_wait_ms));
+        let retry =
+            entry.and_then(|entry| self.schedule(entry, call, failure.is_some(), work_wait_ms));
         match (&failure, retry) {
             (Some(failure), retry) => self.record_failure(namespace_id, call, failure, retry),
             (None, Some(retry)) if output.is_some() && retry.failures_before > 0 => {
@@ -548,7 +656,8 @@ impl Sweep {
     }
 
     /// Sets when the sweep next makes `call` on a held namespace, the one
-    /// place that computes it.
+    /// place that computes it. Returns `None` for a call that keeps no retry
+    /// state.
     ///
     /// The call waits `work_wait_ms`, the wait its own work asks for. After
     /// a failure, it waits the later of that and its failure backoff
@@ -560,11 +669,11 @@ impl Sweep {
         call: SweepCall,
         failed: bool,
         work_wait_ms: u64,
-    ) -> Retry {
+    ) -> Option<Retry> {
         let now_ms = self.inner.namespaces.now_ms();
         let first_backoff_ms = self.first_backoff_ms();
         let mut held = lock(entry);
-        let state = call.retry_mut(&mut held);
+        let state = call.retry_mut(&mut held)?;
         let failures_before = state.attempts;
         let (attempts, wait_ms) = if failed {
             let attempts = failures_before.saturating_add(1);
@@ -577,11 +686,11 @@ impl Sweep {
             retry_at_ms: now_ms.saturating_add(wait_ms),
             attempts,
         };
-        Retry {
+        Some(Retry {
             failures_before,
             attempts,
             wait_ms,
-        }
+        })
     }
 
     /// Counts a failed call, and logs it with where the call stands on a
@@ -590,8 +699,9 @@ impl Sweep {
     /// On a held namespace, the first failure in a row logs at error level
     /// and later ones at warning level, and the doubling backoff limits how
     /// often they repeat. A namespace that no host holds keeps no retry
-    /// state, because the next full pass is its retry. Each full pass that
-    /// finds it failing logs one error line, so the namespace logs once per
+    /// state, and neither does the retention advance, because the next full
+    /// pass is their retry. Each full pass that finds one failing logs one
+    /// error line, so the namespace logs once per
     /// `full_sweep_interval_ms` (a day by default). The rule of logging a
     /// repeating failure once allows one line per interval, so a failure
     /// that's retried once a day can log on every retry. Every panic logs
@@ -660,14 +770,47 @@ impl Drop for IndexBuild<'_> {
     }
 }
 
+/// What a claim does when another visit has the namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overlap {
+    /// Skip the namespace.
+    Skip,
+    /// Skip the namespace, and with a retention window, leave the retention
+    /// advance to the visit that has it.
+    LeaveRetentionAdvance,
+}
+
+/// One visit's claim on a namespace. Dropping it releases the namespace, and
+/// [`Sweep::finish_visit`] releases it after the advances a pass left.
 struct Visiting<'sweep> {
     inner: &'sweep SweepInner,
     namespace_id: NamespaceId,
+    released: bool,
+}
+
+impl Visiting<'_> {
+    /// Releases the namespace, unless a full pass left its retention advance
+    /// to this visit. Then clears that mark, keeps the namespace, and returns
+    /// `true`.
+    fn release_unless_retention_due(&mut self) -> bool {
+        let mut visiting = lock(&self.inner.visiting);
+        let retention_due = visiting
+            .get_mut(&self.namespace_id)
+            .expect("a claimed namespace should stay in the visiting map until it's released");
+        if std::mem::take(retention_due) {
+            return true;
+        }
+        visiting.remove(&self.namespace_id);
+        self.released = true;
+        false
+    }
 }
 
 impl Drop for Visiting<'_> {
     fn drop(&mut self) {
-        lock(&self.inner.visiting).remove(&self.namespace_id);
+        if !self.released {
+            lock(&self.inner.visiting).remove(&self.namespace_id);
+        }
     }
 }
 
@@ -761,7 +904,7 @@ struct SweepMetrics {
     passes_ok: Arc<dyn CounterHandle>,
     passes_failed: Arc<dyn CounterHandle>,
     pass_seconds: Arc<dyn HistogramHandle>,
-    visit_failures: [Arc<dyn CounterHandle>; 3],
+    visit_failures: [Arc<dyn CounterHandle>; SweepCall::ALL.len()],
     panics: Arc<dyn CounterHandle>,
     namespaces: Arc<dyn GaugeHandle>,
 }
