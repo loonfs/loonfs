@@ -78,10 +78,10 @@ pub(super) struct StatInodeQuery {
         ),
         responses(
             (status = 200, description = "Path entry for the inode", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -155,11 +155,11 @@ pub(super) struct ListInodeChildrenQuery {
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a directory", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -271,11 +271,11 @@ pub(super) async fn list_file_revisions_by_inode(
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )

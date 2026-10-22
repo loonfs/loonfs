@@ -324,10 +324,10 @@ impl ReadTarget {
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -391,10 +391,10 @@ pub(super) async fn list_path_entries(
         ),
         responses(
             (status = 200, description = "Path entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid path, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 400, description = "Invalid path, include_attributes, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -448,10 +448,10 @@ pub(super) async fn get_path_entry(
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path, revision, snapshot ID, consistency, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
+            (status = 400, description = "Invalid path, revision, snapshot ID, consistency, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -511,7 +511,7 @@ pub(super) async fn get_file_content(
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest first. Advancing the retention floor doesn't remove entries. Each entry includes the inode ID and deletion sequence that an undelete needs, and the deleted name when the delete recorded one.",
+        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's writer expires it after the retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
@@ -738,11 +738,11 @@ pub(super) async fn create_commit(
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
-            (status = 400, description = "Invalid change cursor, limit, snapshot ID, consistency, non-snapshot checkpoint, or after_seq above the head that the request reads", body = ErrorResponse),
+            (status = 400, description = "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
-            (status = 409, description = "The cursor is older than the retained change history. Restart from a fresh listing or checkpoint.", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 409, description = "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )

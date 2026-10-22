@@ -955,8 +955,9 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             Some(&serde_json::json!(["strong", "eventual"]))
         );
         assert_eq!(
-            schema.get("default").and_then(Value::as_str),
-            Some("eventual")
+            schema.get("default"),
+            None,
+            "the default is the server's `consistency` setting, so the schema declares none"
         );
         let max_staleness = query_parameter(paths, path, "get", "max_staleness_ms");
         assert_eq!(max_staleness.get("required"), Some(&Value::Bool(false)));

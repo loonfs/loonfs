@@ -233,6 +233,10 @@ impl utoipa::PartialSchema for OpenApiPageLimit {
 impl utoipa::ToSchema for OpenApiPageLimit {}
 
 /// Schema-only override for the `consistency` query parameter.
+///
+/// The schema declares no default, because the default is the server's
+/// `consistency` setting, and a client generator that sends declared defaults
+/// would pair `consistency` with `snapshot_id`, which the server rejects.
 #[cfg(feature = "openapi")]
 pub(super) struct OpenApiConsistency;
 
@@ -242,7 +246,6 @@ impl utoipa::PartialSchema for OpenApiConsistency {
         utoipa::openapi::schema::Object::builder()
             .schema_type(utoipa::openapi::schema::Type::String)
             .enum_values(Some(["strong", "eventual"]))
-            .default(Some(serde_json::json!("eventual")))
             .into()
     }
 }
