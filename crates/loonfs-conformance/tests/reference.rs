@@ -72,6 +72,7 @@ async fn run_reference_corpus(shape: StoreShape, checksum_algorithm: ChecksumAlg
             "pagination" => run_pagination(&harness, case).await,
             "changes" => run_changes(&harness, case).await,
             "snapshots" => run_snapshots(&harness, case).await,
+            "unknown_event_kinds" => run_unknown_event_kinds(case).await,
             "end_to_end" => run_end_to_end(&harness, case).await,
             // Each SDK harness runs this case against its own proxy.
             "proxy" => {}
@@ -2546,6 +2547,94 @@ async fn run_changes(harness: &Harness, case: &Case) {
         change.events.as_slice(),
         [FilesystemChange::DirectoryCreated { .. }]
     );
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnknownEventKindsRequest {
+    namespace_id: String,
+    after_seq: u64,
+    unknown_kind: String,
+    page: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnknownEventKindsExpected {
+    committed_seqs: Vec<u64>,
+    next_after_seq: u64,
+    known_events: Vec<Vec<serde_json::Value>>,
+}
+
+async fn run_unknown_event_kinds(case: &Case) {
+    let (request, expected) =
+        parse_values::<UnknownEventKindsRequest, UnknownEventKindsExpected>(case);
+    // The reference server returns only the kinds that the API defines, so a stub serves the page.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind change feed stub");
+    let stub_url = format!(
+        "http://{}",
+        listener.local_addr().expect("change feed stub address")
+    );
+    let page = request.page.clone();
+    let router = axum::Router::new().route(
+        "/v0/namespaces/{namespace_id}/changes",
+        axum::routing::get(move || std::future::ready(axum::Json(page.clone()))),
+    );
+    let stub = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("the change feed stub should serve until it is aborted");
+    });
+    let feed = configured_client(&stub_url, None)
+        .list_changes(
+            &namespace_id(&request.namespace_id),
+            ChangeSeq(request.after_seq),
+        )
+        .page()
+        .await
+        .expect("list changes");
+    stub.abort();
+
+    let committed_seqs: Vec<u64> = feed
+        .changes
+        .iter()
+        .map(|change| change.committed_seq.0)
+        .collect();
+    assert_eq!(committed_seqs, expected.committed_seqs);
+    assert_eq!(
+        feed.next_after_seq,
+        Some(ChangeSeq(expected.next_after_seq))
+    );
+    // The client decodes an event whose kind it doesn't define as `FilesystemChange::Unknown`.
+    let known_events: Vec<Vec<serde_json::Value>> = feed
+        .changes
+        .iter()
+        .map(|change| {
+            change
+                .events
+                .iter()
+                .filter(|event| **event != FilesystemChange::Unknown)
+                .map(|event| serde_json::to_value(event).expect("encode known event"))
+                .collect()
+        })
+        .collect();
+    assert_eq!(known_events, expected.known_events);
+    let page_unknown_count = request.page["changes"]
+        .as_array()
+        .expect("page changes")
+        .iter()
+        .flat_map(|change| change["events"].as_array().expect("page events"))
+        .filter(|event| event["kind"] == request.unknown_kind.as_str())
+        .count();
+    let decoded_unknown_count = feed
+        .changes
+        .iter()
+        .flat_map(|change| &change.events)
+        .filter(|event| **event == FilesystemChange::Unknown)
+        .count();
+    assert_eq!(decoded_unknown_count, page_unknown_count);
 }
 
 #[derive(Debug, Deserialize)]

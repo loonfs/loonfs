@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ var expectedCases = []string{
 	"pagination",
 	"proxy",
 	"snapshots",
+	"unknown_event_kinds",
 	"upload_abort",
 	"upload_direct_put",
 	"upload_modes",
@@ -102,6 +104,8 @@ func TestSDKConformance(t *testing.T) {
 				runInodeMutations(t, h, testCase)
 			case "snapshots":
 				runSnapshots(t, h, testCase)
+			case "unknown_event_kinds":
+				runUnknownEventKinds(t, testCase)
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -3118,6 +3122,71 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	if len(change.Events) != 1 || change.Events[0] == nil || change.Events[0].DirectoryCreated == nil {
 		t.Errorf("change events = %#v, want one directory_created event", change.Events)
+	}
+}
+
+type unknownEventKindsRequest struct {
+	NamespaceID string          `json:"namespace_id"`
+	AfterSeq    int64           `json:"after_seq"`
+	UnknownKind string          `json:"unknown_kind"`
+	Page        json.RawMessage `json:"page"`
+}
+
+type unknownEventKindsExpected struct {
+	CommittedSeqs []int64 `json:"committed_seqs"`
+	NextAfterSeq  int64   `json:"next_after_seq"`
+	KnownEvents   [][]any `json:"known_events"`
+}
+
+func runUnknownEventKinds(t *testing.T, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[unknownEventKindsRequest, unknownEventKindsExpected](t, testCase)
+	stub := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Header().Set("Content-Type", "application/json")
+		_, _ = responseWriter.Write(request.Page)
+	}))
+	defer stub.Close()
+
+	feed, err := server.NewClient(option.WithBaseURL(stub.URL)).Changes.List(
+		context.Background(),
+		&loonfs.ListChangesRequest{
+			NamespaceID: request.NamespaceID,
+			AfterSeq:    loonfs.ChangeSeq(request.AfterSeq),
+		},
+	)
+	if err != nil {
+		t.Fatalf("list changes: %v", err)
+	}
+	if feed.NextAfterSeq == nil || int64(*feed.NextAfterSeq) != expected.NextAfterSeq {
+		t.Errorf("next_after_seq = %v, want %d", feed.NextAfterSeq, expected.NextAfterSeq)
+	}
+	if len(feed.Changes) != len(expected.CommittedSeqs) {
+		t.Fatalf("change count = %d, want %d", len(feed.Changes), len(expected.CommittedSeqs))
+	}
+	for index, change := range feed.Changes {
+		if int64(change.CommittedSeq) != expected.CommittedSeqs[index] {
+			t.Errorf("change %d committed_seq = %d, want %d", index, change.CommittedSeq, expected.CommittedSeqs[index])
+		}
+		// The SDK keeps an event whose kind it doesn't define, with only its kind and raw JSON
+		// set, so a caller skips it by kind.
+		known := []any{}
+		for _, event := range change.Events {
+			if event.Kind == request.UnknownKind {
+				continue
+			}
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatalf("encode change %d event: %v", index, err)
+			}
+			var decoded any
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatalf("decode change %d event: %v", index, err)
+			}
+			known = append(known, decoded)
+		}
+		if !reflect.DeepEqual(known, expected.KnownEvents[index]) {
+			t.Errorf("change %d known events = %v, want %v", index, known, expected.KnownEvents[index])
+		}
 	}
 }
 

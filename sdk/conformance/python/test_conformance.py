@@ -83,6 +83,7 @@ EXPECTED_CASES = [
     "pagination",
     "proxy",
     "snapshots",
+    "unknown_event_kinds",
     "upload_abort",
     "upload_direct_put",
     "upload_modes",
@@ -472,6 +473,21 @@ class ChangesRequest:
 class ChangesExpected:
     committed_seq: int
     change_count: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class UnknownEventKindsRequest:
+    namespace_id: str
+    after_seq: int
+    unknown_kind: str
+    page: JsonObject
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class UnknownEventKindsExpected:
+    committed_seqs: list[int]
+    next_after_seq: int
+    known_events: list[list[JsonObject]]
 
 
 @dataclass(frozen=True)
@@ -1966,6 +1982,23 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert change.events is not None
     assert len(change.events) == 1
     assert change.events[0].kind == "directory_created"
+
+
+def test_unknown_event_kinds(cases: dict[str, ConformanceCase]) -> None:
+    request, expected = _decode(
+        cases["unknown_event_kinds"], UnknownEventKindsRequest, UnknownEventKindsExpected
+    )
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=request.page))
+    with httpx.Client(transport=transport) as http:
+        client = LoonFS(base_url="http://api.test", token="unused", httpx_client=http)
+        feed = client.changes.list(request.namespace_id, after_seq=request.after_seq)
+
+    # The SDK leaves out an event whose kind it doesn't define.
+    assert [change.committed_seq for change in feed.changes] == expected.committed_seqs
+    assert feed.next_after_seq == expected.next_after_seq
+    assert [
+        [event.dict() for event in change.events] for change in feed.changes
+    ] == expected.known_events
 
 
 def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) -> None:

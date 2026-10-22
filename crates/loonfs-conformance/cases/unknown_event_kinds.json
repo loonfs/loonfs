@@ -1,0 +1,92 @@
+{
+  "name": "unknown_event_kinds",
+  "intent": "Checks that a client skips a change feed event whose kind it doesn't define and keeps the rest of the page. The harness serves `page` itself, because the reference server returns only the kinds that the API defines. `unknown_kind` stands for a kind that a newer server added.",
+  "request": {
+    "namespace_id": "conf-unknown-event-kinds",
+    "after_seq": 418,
+    "unknown_kind": "link_created",
+    "page": {
+      "namespace_id": "conf-unknown-event-kinds",
+      "after_seq": 418,
+      "head_seq": 421,
+      "next_after_seq": 420,
+      "changes": [
+        {
+          "namespace_id": "conf-unknown-event-kinds",
+          "commit_id": "conf-unknown-event-kinds-001",
+          "committed_seq": 419,
+          "committed_by": "conformance-unknown-event-kinds",
+          "committed_at_ms": 1752624000000,
+          "events": [
+            {
+              "kind": "directory_created",
+              "inode_id": "ino_42",
+              "parent_inode_id": "ino_1",
+              "display_name": "docs",
+              "binding_version": "bv-42"
+            },
+            {
+              "kind": "link_created",
+              "inode_id": "ino_43",
+              "parent_inode_id": "ino_42",
+              "display_name": "latest",
+              "binding_version": "bv-43",
+              "target_inode_id": "ino_44"
+            },
+            {
+              "kind": "moved",
+              "inode_id": "ino_44",
+              "source_parent_inode_id": "ino_1",
+              "source_display_name": "draft.txt",
+              "destination_parent_inode_id": "ino_42",
+              "destination_display_name": "report.txt",
+              "binding_version": "bv-44"
+            }
+          ]
+        },
+        {
+          "namespace_id": "conf-unknown-event-kinds",
+          "commit_id": "conf-unknown-event-kinds-002",
+          "committed_seq": 420,
+          "committed_by": "conformance-unknown-event-kinds",
+          "committed_at_ms": 1752624000001,
+          "events": [
+            {
+              "kind": "link_created",
+              "inode_id": "ino_45",
+              "parent_inode_id": "ino_42",
+              "display_name": "previous",
+              "binding_version": "bv-45",
+              "target_inode_id": "ino_42"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "expected": {
+    "committed_seqs": [419, 420],
+    "next_after_seq": 420,
+    "known_events": [
+      [
+        {
+          "kind": "directory_created",
+          "inode_id": "ino_42",
+          "parent_inode_id": "ino_1",
+          "display_name": "docs",
+          "binding_version": "bv-42"
+        },
+        {
+          "kind": "moved",
+          "inode_id": "ino_44",
+          "source_parent_inode_id": "ino_1",
+          "source_display_name": "draft.txt",
+          "destination_parent_inode_id": "ino_42",
+          "destination_display_name": "report.txt",
+          "binding_version": "bv-44"
+        }
+      ],
+      []
+    ]
+  }
+}
