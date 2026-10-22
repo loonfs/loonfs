@@ -104,7 +104,7 @@ One committed version of a file's contents. Each file revision is assigned a mon
 
 ### Tombstone
 
-A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. The namespace's writer can instead expire the deletion. An expired deletion can't be undeleted, and its tombstone keeps hiding the subtree. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. The namespace's writer can instead expire the deletion. An expired deletion can't be undeleted, its tombstone keeps hiding the subtree, and a base compaction then removes the subtree's rows. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
 
 ### Namespace tombstone
 
@@ -190,7 +190,7 @@ The process that merges a namespace's metadata runs into fewer runs, and drops r
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each file keeps at least its newest revision, and compaction can remove older rows (superseded bindings, old revisions, and commit receipts). A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). Once the floor reaches a deletion, the namespace's writer expires the deletion, and a base compaction then removes the rows that the expired deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 

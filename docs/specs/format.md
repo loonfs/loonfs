@@ -1282,7 +1282,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), keep every version above the floor and the newest version at or below it. Drop that floor version too if it's unbound. Remove every version of an edge whose parent an expired deletion hides. |
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set`, `revoke`, and `expire` event. |
-| `active_deletions` | Keep listed deletions until they're revoked or expired, and remove a cancelled `listed` and `removed` pair together. The floor doesn't expire a recoverable deletion. |
+| `active_deletions` | Keep listed deletions until they're revoked or expired, and remove a cancelled `listed` and `removed` pair together. A deletion at or below the floor keeps its `listed` row until the namespace's writer commits the deletion's `expire` event. |
 | `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
@@ -2131,13 +2131,13 @@ Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, an
 For example, this is the complete canonical preimage for one directory-creation request. The hashed bytes have no trailing newline:
 
 ```json
-{"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
+{"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
 ```
 
 Its fingerprint is:
 
 ```text
-v1:sha256:a64ec097a98f4c881c3770868ad31e77efd8ec9fedb6101672de2091311666ba
+v1:sha256:2d44c045a1d4eaaf3e808abbe1088b581fa51292cd410bc34dfd8e63f67140d3
 ```
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can leave out defaults that the canonical operation writes explicitly, so its raw request JSON isn't the fingerprint preimage.
