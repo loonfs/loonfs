@@ -207,9 +207,9 @@ fn a_removal_carries_the_undeletes_or_expirys_sequence_so_it_lands_in_that_commi
         assert_matches!(
             &delta_rows[0],
             MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-                action: ActiveDeletionRowAction::Removed { revocation_seq },
+                action: ActiveDeletionRowAction::Removed { removed_seq },
                 ..
-            }) if *revocation_seq == ChangeSeq(9),
+            }) if *removed_seq == ChangeSeq(9),
             "unexpected delta row: {:?}",
             delta_rows[0]
         );

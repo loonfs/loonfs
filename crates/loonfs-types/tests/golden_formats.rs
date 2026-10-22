@@ -1975,7 +1975,7 @@ fn sample_active_deletion_removed_row() -> MetadataRow {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Removed {
-            revocation_seq: ChangeSeq(9),
+            removed_seq: ChangeSeq(9),
         },
     })
 }

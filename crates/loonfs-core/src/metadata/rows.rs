@@ -99,7 +99,7 @@ pub(crate) fn active_deletion_from_tombstone(
                 root_inode_id: tombstone.root_inode_id,
                 deletion_seq: target.seq,
                 action: ActiveDeletionRowAction::Removed {
-                    revocation_seq: tombstone.committed_seq,
+                    removed_seq: tombstone.committed_seq,
                 },
             }
         }

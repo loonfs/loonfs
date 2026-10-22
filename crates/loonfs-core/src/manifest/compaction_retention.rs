@@ -522,7 +522,7 @@ mod tests {
             root_inode_id: InodeId(9),
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Removed {
-                revocation_seq: ChangeSeq(4),
+                removed_seq: ChangeSeq(4),
             },
         });
         let listed = MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {

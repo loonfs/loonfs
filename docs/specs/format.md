@@ -1849,7 +1849,7 @@ For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke or expire target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, a revoke action is `{"kind":"revoke","target":...}`, and an expire action is `{"kind":"expire","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `revocation_seq`, the sequence of the undelete or expiry that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the undelete or expiry that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
 
 Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
 

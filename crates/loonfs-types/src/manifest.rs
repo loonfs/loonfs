@@ -58,7 +58,7 @@ pub enum MetadataRowFamily {
     DirentryChildBinds,
     /// Stores file revisions newest-first within each inode.
     Revisions,
-    /// Stores set and revoke events used to determine active subtree tombstones.
+    /// Stores set, revoke, and expire events used to determine active subtree tombstones.
     Tombstones,
     /// Names the deletions that are recoverable right now, derived from the
     /// tombstone family and ordered by deletion time.
@@ -234,8 +234,8 @@ pub enum MetadataRow {
     /// Derived row used to list currently recoverable deletions.
     ///
     /// Materialization writes `listed` for each tombstone set and `removed` for
-    /// each revoke. This lets trash listing use an ordered range scan instead of
-    /// replaying all historical deletion events.
+    /// each revoke or expire. This lets trash listing use an ordered range scan
+    /// instead of replaying all historical deletion events.
     ActiveDeletion(ActiveDeletionRecord),
     /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt(CommitReceiptRecord),
@@ -578,11 +578,11 @@ pub enum ActiveDeletionRowAction {
         deleted_binding: DeletedBinding,
     },
     /// The deletion was cancelled by an undelete or an expiry at
-    /// `revocation_seq`.
+    /// `removed_seq`.
     Removed {
         /// Commit sequence of the undelete or expiry that cancelled the
         /// deletion.
-        revocation_seq: ChangeSeq,
+        removed_seq: ChangeSeq,
     },
 }
 
@@ -1950,7 +1950,7 @@ mod tests {
                     root_inode_id: InodeId(42),
                     deletion_seq: ChangeSeq(12),
                     action: super::ActiveDeletionRowAction::Removed {
-                        revocation_seq: ChangeSeq(15),
+                        removed_seq: ChangeSeq(15),
                     },
                 }),
             ),
