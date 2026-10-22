@@ -825,38 +825,15 @@ impl NamespaceCommitEngine {
     }
 
     /// The basis manifest that needs a successor check, either because its
-    /// last confirmation expired or because this attempt probed the tip.
-    fn unconfirmed_basis(&self, attempt: &Observation, tip_probed: bool) -> Option<ManifestNo> {
+    /// last confirmation expired or because the tip observation expired, so
+    /// that the check also confirms the tip.
+    fn unconfirmed_basis(&self, attempt: &Observation, tip_expired: bool) -> Option<ManifestNo> {
         let projection = self.publish_tail.as_ref()?;
-        let confirmed_recently = !tip_probed
+        let confirmed_recently = !tip_expired
             && self.basis_checked.as_ref().is_some_and(|checked| {
                 checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS
             });
         (!confirmed_recently).then(|| projection.basis().manifest_no())
-    }
-
-    /// Probes the next WAL number only while the position's last basis
-    /// confirmation is within the revalidation bound. An error reloads.
-    async fn next_wal_absent<S: ObjectStore + ?Sized>(
-        &self,
-        store: &S,
-        attempt: &Observation,
-    ) -> bool {
-        let Some(position) = self.publish_tail.as_ref() else {
-            return false;
-        };
-        if !self.basis_checked.as_ref().is_some_and(|checked| {
-            checked.age_at(attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
-        }) {
-            return false;
-        }
-        let Ok(next) = position.head.wal_no.successor() else {
-            return false;
-        };
-        matches!(
-            crate::wal::wal_object_exists(store, &self.namespace_id, next).await,
-            Ok(false)
-        )
     }
 
     /// Checks the position's WAL tail for the commit's receipt, without
@@ -1138,16 +1115,25 @@ impl NamespaceCommitEngine {
         let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
         });
-        if tip_expired && !self.next_wal_absent(store, &attempt).await {
+        // An answer can't confirm a basis whose last confirmation is at the
+        // revalidation bound, so the position is dropped without a probe.
+        if tip_expired
+            && !self.basis_checked.as_ref().is_some_and(|checked| {
+                checked.age_at(&attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
+            })
+        {
             self.invalidate_projection();
         }
         // A landed put confirms the tip, not the manifest the batch was planned
         // against: a fold or compaction (including our own) may have succeeded.
-        // Another writer must claim a successor manifest before writing WAL.
-        // The WAL probe also checks for an unobserved put by this session.
-        // Check the successor after that probe, and bound the answer by the
-        // previous basis confirmation so a collected successor cannot look
-        // absent. Either probe finding an object or failing reloads the view.
+        // Another writer must claim a successor manifest before it writes a WAL
+        // object, so the probe also confirms the tip. A WAL object that another
+        // writer creates after the probe is too young to be collected before
+        // the put, so the put collides with it. After this session's own put
+        // with an unknown outcome, the engine has already dropped the
+        // position. Bound the answer by the previous basis confirmation so a
+        // collected successor can't look absent. A probe that finds a manifest
+        // or fails reloads the view.
         if let Some(manifest_no) = self.unconfirmed_basis(&attempt, tip_expired) {
             let successor = crate::namespace::read_anchor::manifest_has_successor(
                 store,
