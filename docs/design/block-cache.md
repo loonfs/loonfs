@@ -91,11 +91,18 @@ Why does a memory hit refresh the block's place on disk? Without the refresh, th
 
 This section describes where LoonFS keeps the extra blocks that a read fetches ahead of what it needs.
 
-When a listing, or a lookup that can match more than one row, misses on a data block, LoonFS reads ahead. It fetches the block and the blocks after it, up to the end of the block's group of 32 in the segment's index, in ranged GETs of at most 4 MiB each. For example, a read that needs block 40 of a segment fetches blocks 40 through 63. The next page of a listing, or a lookup of a nearby key, can then use those blocks without another request. (A lookup of one name in a directory matches one row, and it doesn't read ahead.)
+When a listing or a lookup misses on a data block, LoonFS reads ahead. It fetches the block and the blocks after it, up to the end of the block's group of 32 in the segment's index, in ranged GETs of at most 4 MiB each. These blocks are the read's "read-ahead window". For example, a read that needs block 40 of a segment fetches a window of blocks 40 through 63. (Some lookups that match one row, such as a lookup of one name in a directory, don't read ahead.)
 
-A read's memo, which the read looks in before the block cache, is charged to the server's read working memory (`max_read_working_bytes`), and LoonFS drops the memo when the read ends. If a read kept its read-ahead blocks in its memo, the blocks would be dropped with the memo, and the next page of a listing, which is a separate read, would fetch the same bytes again. So LoonFS decodes every block of a read-ahead window and inserts each one into the block cache under its own key. With the SSD tier on, each of those inserts also writes the block's stored bytes to disk, as every insert does.
+What LoonFS does with the window's other blocks depends on the kind of read:
 
-Why insert blocks that no read has asked for? The window costs the same GETs whether LoonFS keeps its extra blocks or not, and the next page of a listing uses them. A block that no read uses leaves the cache like any other block that isn't read.
+- For a scan of a range of rows, such as a listing's scan of a directory's entries, LoonFS decodes every block of the window, records each one in the read's memo, and inserts each one into the block cache (into both tiers, when the SSD tier is on). The next page of the listing, which is a separate read, can then find those blocks in the block cache.
+- For a lookup, such as a lookup of a file's latest revision, LoonFS fetches the window in one ranged GET, so the window stops at 4 MiB. The read's memo records the window's other blocks as stored bytes, without decoding them. If the read uses one of those blocks and the block cache doesn't have it, LoonFS decodes the block from its stored bytes and inserts it into the block cache (into both tiers, when the SSD tier is on). A block that the read doesn't use isn't decoded.
+
+A read's memo, which the read looks in before the block cache, is charged to the server's read working memory (`max_read_working_bytes`), and the charge includes the stored bytes of a lookup's window. LoonFS drops the memo when the read ends. For example, a page of a listing looks up the latest revision of each file it lists, and those lookups share the page's memo. The next page is a separate read, so a lookup on that page that misses the block cache fetches its window again, even if the previous page fetched the same window. Because the SSD tier keeps blocks as stored bytes, a later change could let it keep a window's other blocks without decoding them, but LoonFS doesn't do this yet.
+
+Why does LoonFS insert a scan's whole window, including blocks that no read has asked for? The window costs the same GETs whether LoonFS keeps its extra blocks or not, and the next page of a listing can use them. A block that no read uses leaves the cache like any other block that isn't read.
+
+Why doesn't LoonFS decode a lookup's whole window when it fetches the window? A lookup reads the blocks of its key range one at a time, and its key range can end before the window does, so decoding the whole window would decode blocks that the lookup never reads. And if the block cache couldn't keep a decoded window's blocks until the lookup reached them, LoonFS would fetch and decode the rest of the window again at each later block, so the lookup would decode up to 32 times as many blocks as it reads. In a test where the block cache keeps four blocks, a lookup that reads 97 blocks would decode about 1,600 blocks that way, and it decodes 97 when the window is kept as stored bytes. In a listing of a million files, lookups that decoded each window when they fetched it spent an hour decoding.
 
 ## Budgets and counters
 
@@ -162,7 +169,7 @@ This section lists what the block cache and its SSD tier cost.
 | --- | --- |
 | Memory | The memory tier keeps decoded blocks, as the memory implementation does. The SSD tier's 64 MiB write queue and its index, at 168 bytes for each block on disk, are a term in `fixed` |
 | Disk | Up to the SSD tier's budget (less on a tier of blocks smaller than 4 KiB), and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
-| CPU | A disk hit is checked and decoded again. A read-ahead window decodes every block it fetches, including blocks that no read uses |
+| CPU | A disk hit is checked and decoded again. A scan decodes every block of a read-ahead window, including blocks that no read uses, and a lookup decodes only the blocks of its window that a read uses |
 | Requests | The first read of a block that the server didn't write costs a GET, with or without the tier. A disk hit costs no request |
 | Code | One interface with two implementations, and no cache under the block cache |
 
