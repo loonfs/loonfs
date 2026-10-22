@@ -26,6 +26,7 @@ use crate::storage::content_location::extent_object_key;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
+use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
@@ -38,7 +39,6 @@ use loonfs_types::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 #[derive(Clone, Copy)]
@@ -443,7 +443,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         content_ref: &ContentRef,
         start_offset: u64,
-        content_writes: &Semaphore,
+        content_writes: &PermitPool,
     ) -> Result<Vec<GrantedRange>> {
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
@@ -469,10 +469,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map_err(|error| CoreError::store(key, &error))?
                 .is_none()
             {
-                let _permit = content_writes
-                    .acquire()
-                    .await
-                    .expect("content write semaphore should remain open");
+                let _permit = content_writes.acquire().await;
                 store
                     .put_immutable_verified(key, bytes::Bytes::new())
                     .await
@@ -550,7 +547,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        content_writes: &Semaphore,
+        content_writes: &PermitPool,
     ) -> Result<DirectDownloadTarget> {
         let (entry, content_ref) = self
             .resolve_file_content(absolute_path, revision_no, access)
@@ -653,7 +650,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        content_writes: &Semaphore,
+        content_writes: &PermitPool,
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
             Some(revision_no) => {
@@ -1472,7 +1469,7 @@ mod tests {
                     operation,
                 ))],
                 &context,
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                std::sync::Arc::new(crate::test_support::content_writes()),
                 crate::test_support::std_timer(),
             )
             .await
@@ -1525,7 +1522,7 @@ mod tests {
                 },
             ))],
             &context(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await

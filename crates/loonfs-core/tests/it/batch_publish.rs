@@ -1856,7 +1856,7 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
         .expect("bootstrap");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     engine
         .publish_batch(
@@ -1925,7 +1925,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
         .expect("bootstrap");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     engine
         .publish_batch(

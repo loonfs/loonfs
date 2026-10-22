@@ -83,7 +83,7 @@ impl<'a> PublishPlanningSession<'a> {
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
-        content_writes: &tokio::sync::Semaphore,
+        content_writes: &crate::PermitPool,
         candidate: &CommitCandidate,
         semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
@@ -278,7 +278,7 @@ mod tests {
             let plan = session
                 .prepare_commit(
                     &store,
-                    &tokio::sync::Semaphore::new(32),
+                    &crate::test_support::content_writes(),
                     &CommitCandidate::new(request.clone()),
                     commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new())
                         .expect("fingerprint"),
@@ -319,7 +319,7 @@ mod tests {
                 staged.content_ref().clone(),
             )],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await
@@ -348,7 +348,7 @@ mod tests {
         session
             .prepare_commit(
                 &store,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
                 &CommitCandidate::new(first_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -376,7 +376,7 @@ mod tests {
         session
             .prepare_commit(
                 &store,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
                 &CommitCandidate::new(second_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -412,7 +412,7 @@ mod tests {
                 put_file_candidate("create-wide-b", "/wide/b.txt", staged.content_ref().clone()),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await;
@@ -452,7 +452,7 @@ mod tests {
                 candidate_that_allocates_then_fails("reject-second"),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await;
@@ -482,7 +482,7 @@ mod tests {
                 create_directory_candidate("accept-second", "/kept"),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await;
@@ -523,7 +523,7 @@ mod tests {
                 ),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await;
@@ -566,7 +566,7 @@ mod tests {
                 )),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await;

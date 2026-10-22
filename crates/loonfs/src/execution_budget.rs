@@ -1,13 +1,12 @@
 //! The work in flight that one or more runtimes share.
 
-use crate::metrics::{
-    AdmissionInstruments, ExecutionBudgetInstruments, MetricsRecorder, PermitPoolGauges,
-};
+use crate::metrics::{AdmissionInstruments, ExecutionBudgetInstruments, MetricsRecorder};
 use loonfs_core::cache::ReadWorkingMemory;
+pub(crate) use loonfs_core::BudgetPermit;
+use loonfs_core::PermitPool;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 #[cfg(test)]
 mod read_tests;
@@ -25,8 +24,9 @@ pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
 pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
 /// Default bytes retained across read, publication, and fold memos.
 pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
-/// Default content writes in flight across runtimes sharing a budget.
-pub const DEFAULT_MAX_CONTENT_WRITES: usize = 32;
+/// Default maximum content object writes that the runtimes sharing one
+/// budget run at once.
+pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: usize = 32;
 const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -61,7 +61,7 @@ struct ExecutionBudgetInner {
     folds: PermitPool,
     compactions: PermitPool,
     max_merge_input_bytes: NonZeroUsize,
-    content_writes: Arc<Semaphore>,
+    content_writes: Arc<PermitPool>,
 }
 
 impl fmt::Debug for ExecutionBudget {
@@ -101,7 +101,9 @@ impl ExecutionBudget {
                 )
                 .unwrap()
             },
-            max_content_writes: const { NonZeroUsize::new(DEFAULT_MAX_CONTENT_WRITES).unwrap() },
+            max_concurrent_content_writes: const {
+                NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
+            },
             metrics_recorder: None,
         }
     }
@@ -114,6 +116,7 @@ impl ExecutionBudget {
         let publications = self.inner.publications.counts();
         let folds = self.inner.folds.counts();
         let compactions = self.inner.compactions.counts();
+        let content_writes = self.inner.content_writes.counts();
         ExecutionBudgetStats {
             read_working_bytes: self.inner.read_working_memory.in_use(),
             admitted_requests: admitted.requests,
@@ -126,10 +129,12 @@ impl ExecutionBudget {
             folds_waiting: folds.waiting,
             compactions_running: compactions.running,
             compactions_waiting: compactions.waiting,
+            content_writes_running: content_writes.running,
+            content_writes_waiting: content_writes.waiting,
         }
     }
 
-    pub(crate) fn content_writes(&self) -> Arc<Semaphore> {
+    pub(crate) fn content_writes(&self) -> Arc<PermitPool> {
         Arc::clone(&self.inner.content_writes)
     }
 
@@ -201,7 +206,7 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
     max_merge_input_bytes: NonZeroUsize,
-    max_content_writes: NonZeroUsize,
+    max_concurrent_content_writes: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
@@ -282,10 +287,12 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Limits content writes during publication, folds, staging, and direct downloads.
-    /// Each write holds one permit until it finishes. Defaults to 32.
-    pub fn max_content_writes(mut self, limit: NonZeroUsize) -> Self {
-        self.max_content_writes = limit;
+    /// Sets the maximum number of content object writes run at once. Folds,
+    /// validation, and direct downloads take a permit for each content
+    /// object they write, and staging takes one for each upload, until the
+    /// write finishes. Defaults to [`DEFAULT_MAX_CONCURRENT_CONTENT_WRITES`].
+    pub fn max_concurrent_content_writes(mut self, limit: NonZeroUsize) -> Self {
+        self.max_concurrent_content_writes = limit;
         self
     }
 
@@ -307,6 +314,7 @@ impl ExecutionBudgetBuilder {
             publications,
             folds,
             compactions,
+            content_writes,
             read_working_memory,
         } = ExecutionBudgetInstruments::new(self.metrics_recorder.as_deref());
         ExecutionBudget {
@@ -326,8 +334,9 @@ impl ExecutionBudgetBuilder {
                 folds: PermitPool::new(self.max_concurrent_folds, folds),
                 compactions: PermitPool::new(self.max_concurrent_compactions, compactions),
                 max_merge_input_bytes: self.max_merge_input_bytes,
-                content_writes: Arc::new(Semaphore::new(
-                    self.max_content_writes.get().min(Semaphore::MAX_PERMITS),
+                content_writes: Arc::new(PermitPool::new(
+                    self.max_concurrent_content_writes,
+                    content_writes,
                 )),
             }),
         }
@@ -361,6 +370,10 @@ pub struct ExecutionBudgetStats {
     pub compactions_running: usize,
     /// Metadata merges waiting for a compaction permit.
     pub compactions_waiting: usize,
+    /// Content object writes holding a content write permit.
+    pub content_writes_running: usize,
+    /// Content object writes waiting for a content write permit.
+    pub content_writes_waiting: usize,
 }
 
 /// The publication requests admitted and not yet settled, and the limits on
@@ -416,103 +429,5 @@ impl AdmittedTotals {
         admitted.requests -= 1;
         admitted.bytes -= estimated_bytes;
         AdmissionChange::Admitted(*admitted)
-    }
-}
-
-/// The permits for one kind of work, and the count of the work that holds
-/// them or waits for them.
-struct PermitPool {
-    permits: Semaphore,
-    counts: Mutex<PoolCounts>,
-    gauges: PermitPoolGauges,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct PoolCounts {
-    running: usize,
-    waiting: usize,
-}
-
-impl PermitPool {
-    fn new(limit: NonZeroUsize, gauges: PermitPoolGauges) -> Self {
-        Self {
-            permits: Semaphore::new(limit.get().min(Semaphore::MAX_PERMITS)),
-            counts: Mutex::default(),
-            gauges,
-        }
-    }
-
-    async fn acquire(&self) -> BudgetPermit<'_> {
-        self.update(|counts| counts.waiting += 1);
-        let mut permit = BudgetPermit {
-            pool: self,
-            permit: None,
-        };
-        let acquired = self
-            .permits
-            .acquire()
-            .await
-            .expect("execution budget permits should remain open");
-        self.update(|counts| {
-            counts.waiting -= 1;
-            counts.running += 1;
-        });
-        permit.permit = Some(acquired);
-        permit
-    }
-
-    fn counts(&self) -> PoolCounts {
-        *self
-            .counts
-            .lock()
-            .expect("the pool counts lock should not be poisoned")
-    }
-
-    /// Changes the counts, then reports them after the lock is released,
-    /// because the gauges call the caller's recorder.
-    fn update(&self, change: impl FnOnce(&mut PoolCounts)) {
-        let counts = {
-            let mut counts = self
-                .counts
-                .lock()
-                .expect("the pool counts lock should not be poisoned");
-            change(&mut counts);
-            *counts
-        };
-        self.gauges.report(counts.running, counts.waiting);
-    }
-}
-
-/// A permit from an [`ExecutionBudget`], or a place in the queue for one.
-/// Dropping it returns the permit or gives up the place.
-pub(crate) struct BudgetPermit<'a> {
-    pool: &'a PermitPool,
-    permit: Option<SemaphorePermit<'a>>,
-}
-
-impl Drop for BudgetPermit<'_> {
-    fn drop(&mut self) {
-        let permit = self.permit.take();
-        let running = permit.is_some();
-        // A drop can run while a panic unwinds, and a second panic then
-        // aborts the process, so this recovers a poisoned lock instead of
-        // panicking. The critical section only updates two counts.
-        let counts = {
-            let mut counts = self
-                .pool
-                .counts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if running {
-                counts.running -= 1;
-            } else {
-                counts.waiting -= 1;
-            }
-            *counts
-        };
-        self.pool.gauges.report(counts.running, counts.waiting);
-        // The count falls before the permit returns, so the running count
-        // never passes the limit.
-        drop(permit);
     }
 }

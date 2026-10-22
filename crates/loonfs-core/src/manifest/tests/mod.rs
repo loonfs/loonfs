@@ -143,7 +143,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -169,7 +169,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
     let prepared = prepare_stored_content(&catalog, stored);
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_batch(
         store,

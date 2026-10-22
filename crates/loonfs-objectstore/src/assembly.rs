@@ -3,7 +3,7 @@
 use crate::object_store::Result;
 use crate::{
     AssemblySource, ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MAX_MULTIPART_PART_BYTES,
-    PROVIDER_MIN_MULTIPART_PART_BYTES,
+    PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
@@ -11,6 +11,17 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
 
 pub(crate) const READ_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
+
+// An assembly copies each source read of at most `READ_BYTES` into the part it
+// builds, so it keeps one part and one read in memory at once (see
+// `ConfiguredObjectStoreKind::max_assembly_buffer_bytes`). Below the multipart
+// threshold, the part is the whole result. Above it, a part that passes
+// through the process is one read or the provider's smallest part on S3, and
+// one `R2_PART_BYTES` part on R2. So a part is at most `READ_BYTES` on every
+// store but R2, and at most `R2_PART_BYTES` there.
+const _: () = assert!(PROVIDER_MULTIPART_THRESHOLD_BYTES <= READ_BYTES);
+const _: () = assert!(PROVIDER_MIN_MULTIPART_PART_BYTES <= READ_BYTES);
+const _: () = assert!(PROVIDER_MULTIPART_THRESHOLD_BYTES <= R2_PART_BYTES);
 
 pub(crate) fn source_range(source: &AssemblySource, size_bytes: u64) -> Result<ByteRange> {
     let range = source.range.clone().unwrap_or(ByteRange {

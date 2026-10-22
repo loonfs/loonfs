@@ -80,13 +80,14 @@ fixed = 128 MiB
       + max_connections x 472 KiB
       + (max_concurrent_uploads + max_concurrent_downloads) x 8 MiB
       + (max_concurrent_folds + max_concurrent_compactions) x 32 MiB
+      + max_concurrent_content_writes x 16 MiB (72 MiB on R2)
       + 32 MiB
       + local_cache.memory_bytes + 320 MiB, with a [local_cache] table
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
 ```
 
-`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the completed upload sessions that garbage collection keeps between passes, and the local cache. The local cache's term is its memory tier plus 64 MiB of write buffers and up to 256 MiB of inserts waiting for its disk tier.
+`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between passes, and the local cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The local cache's term is its memory tier plus 64 MiB of write buffers and up to 256 MiB of inserts waiting for its disk tier.
 
 The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
 
@@ -105,7 +106,7 @@ The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of manag
 
 You can still set each pool's setting to override its share. The sum check uses the final values, including one merge input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
 
-Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, and compaction counts, and it divides merge input by the final compaction count.
+Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, compaction, and content write counts, and it divides merge input by the final compaction count.
 
 Why is the headroom 200 MiB plus a quarter of the pools? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
 
@@ -390,6 +391,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and pin-fold memos | Shared |
 | Merge input | `max_merge_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments that one fold, compaction, or maintenance step keeps in memory while it writes them | Per operation |
+| Content writes | `max_concurrent_content_writes` | 32 writes | Content object writes running at once, for the content that folds, validation, and direct downloads write and for staged uploads. Each keeps at most 16 MiB in memory, or 72 MiB on R2 | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and snapshot and fork creation start | Concurrency |
 | Compactions | `max_concurrent_compactions` | 2 | Metadata compactions running at once, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
@@ -411,7 +413,7 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, a local cache, or overrides, the budgets that have a process-wide limit add up to 1,088 MiB:
+Without a memory limit, grep, a local cache, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -420,10 +422,11 @@ Without a memory limit, grep, a local cache, or overrides, the budgets that have
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
+| 32 content writes at 16 MiB | 512 MiB |
 | Read working memory | 256 MiB |
 | 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 1,088 MiB |
+| Total | 1,600 MiB |
 
 The total leaves out:
 
@@ -446,7 +449,7 @@ The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for it
 
 The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk tier, and up to 256 MiB of inserts waiting for the disk tier. There's no setting for the last two, and the sizing formula counts all three.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 701 MiB of managed memory, and the smallest limit that passes is 1,492 MiB. A local cache takes its `memory_bytes` plus 320 MiB from the same limit, so a 2 GiB limit fails the check when `memory_bytes` is more than 236 MiB. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 291 MiB of managed memory, and the smallest limit that passes is 2,004 MiB. A local cache takes its `memory_bytes` plus 320 MiB from the same limit, so with a local cache the smallest limit is 2,324 MiB plus `memory_bytes`. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,796 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 
@@ -455,6 +458,8 @@ If a request finds that its namespace's session has been fenced, the request fai
 When the server drops a fenced session, it logs a warning with `namespace_id`, and with `active_writer_id` when the error includes the winning writer. The host table reports the number of fenced sessions dropped so far as `Namespaces::fenced_sessions_dropped`. If one namespace keeps getting fenced, two writers are receiving its traffic, so route that namespace to one writer. After a restart, the first write to each namespace acquires a new writer epoch.
 
 `max_concurrent_folds` defaults to 2. If the `loonfs.execution_budget.folds_waiting` gauge stays above zero, WAL folds are waiting at the cap. Raise the cap only after you account for the extra object-store and CPU work. The `loonfs.execution_budget.compactions_waiting` gauge reports the same thing for `max_concurrent_compactions`.
+
+`max_concurrent_content_writes` defaults to 32. A fold writes up to 16 content objects at once, and each write takes a content write permit, as does each content object that validation or a direct download writes and each staged upload. So by default, two folds can use every permit. If the `loonfs.execution_budget.content_writes_waiting` gauge stays above zero, content writes are waiting at the cap, and the `loonfs.execution_budget.content_writes_running` gauge reports the writes that have a permit. Each permit adds 16 MiB to `fixed` (72 MiB on R2), so raising the cap leaves less managed memory. An embedded host sets this limit with `ExecutionBudgetBuilder::max_concurrent_content_writes`.
 
 `min_publish_interval_ms` sets the minimum time between publication starts in one namespace, and it defaults to 1000 ms. A cold namespace publishes immediately.
 

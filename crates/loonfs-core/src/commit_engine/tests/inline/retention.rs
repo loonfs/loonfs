@@ -101,7 +101,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await

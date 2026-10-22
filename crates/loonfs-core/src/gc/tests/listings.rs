@@ -50,7 +50,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         .collect();
     assert_eq!(heads, [metadata_manifest_object(&namespace_id, &successor)]);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
-    let content_writes = Arc::new(tokio::sync::Semaphore::new(32));
+    let content_writes = Arc::new(crate::test_support::content_writes());
     fork_namespace(
         &recorded,
         &namespace_id,

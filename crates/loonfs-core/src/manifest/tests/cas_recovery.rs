@@ -277,7 +277,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             ));
             let mut engine = crate::commit_engine::NamespaceCommitEngine::new(
                 namespace_id.clone(),
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                std::sync::Arc::new(crate::test_support::content_writes()),
             )
             .writer_session(session);
             engine

@@ -27,7 +27,7 @@ enum Rival {
 
 impl Rival {
     async fn publish(&self, store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let content_writes = tokio::sync::Semaphore::new(32);
+        let content_writes = crate::test_support::content_writes();
         match self {
             Self::CompactorClaim => {
                 claim_compactor(store, namespace_id, crate::test_support::std_timer())
@@ -110,7 +110,7 @@ impl Writer {
         Self {
             engine: NamespaceCommitEngine::new(
                 namespace_id.clone(),
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                std::sync::Arc::new(crate::test_support::content_writes()),
             ),
             directory,
             store,
@@ -187,7 +187,7 @@ impl Writer {
     /// process, its next put waits for the next rival, and so on. The request
     /// log is cleared after each rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> Result<FoldedWalTail> {
-        let content_writes = tokio::sync::Semaphore::new(32);
+        let content_writes = crate::test_support::content_writes();
         let input = self.engine.wal_fold_input().expect("tail");
         let basis = input.basis.manifest_no();
         let other = self.other_process();
@@ -305,7 +305,7 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 
 #[tokio::test]
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     for rival in [Rival::Merge, Rival::CompactorClaim, Rival::RetentionAdvance] {
         let mut writer = Writer::open().await;
         writer
@@ -619,7 +619,7 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
 /// session finds that it's fenced at its next commit.
 #[tokio::test]
 async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.wal_fold_input().expect("tail");
@@ -711,7 +711,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         Drops,
         Stays,
     }
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     for (epoch_after, wal_after, outcome, expected) in [
         (0, 0, Some(FoldWalOutcome::Published), Position::Moves),
         (1, 0, Some(FoldWalOutcome::Published), Position::Drops),
@@ -770,7 +770,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
 /// began, moves the position onto that process's manifest with no tail.
 #[tokio::test]
 async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.wal_fold_input().expect("tail");

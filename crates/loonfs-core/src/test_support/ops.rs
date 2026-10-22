@@ -61,7 +61,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
         namespace_id,
         vec![candidate],
         context,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await;
@@ -156,7 +156,7 @@ pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         vec![CommitCandidate::prepared(request, prepared)],
         context,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await;

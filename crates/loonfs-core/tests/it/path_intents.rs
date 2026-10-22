@@ -1826,7 +1826,7 @@ async fn assert_corpus_admission_and_lookup<'a>(
     .expect("bootstrap namespace");
     let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
     for (display_name, name_key) in corpus {

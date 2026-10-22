@@ -661,18 +661,37 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
 }
 
 #[tokio::test]
+async fn content_write_permits_default_to_32_and_count_what_holds_and_waits() {
+    let budget = ExecutionBudget::default();
+    let pool = budget.content_writes();
+    let held = futures::future::join_all(
+        (0..crate::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).map(|_| pool.acquire()),
+    )
+    .await;
+    let mut waiting = Box::pin(pool.acquire());
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+    assert_eq!(
+        budget.stats(),
+        ExecutionBudgetStats {
+            content_writes_running: 32,
+            content_writes_waiting: 1,
+            ..ExecutionBudgetStats::default()
+        }
+    );
+    drop(held);
+    drop(waiting.await);
+    assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+}
+
+#[tokio::test]
 async fn content_staging_holds_the_shared_write_permit_without_publication_admission() {
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use loonfs_test_support::stores::ConcurrencyWatchStore;
-    assert_eq!(
-        ExecutionBudget::default()
-            .content_writes()
-            .available_permits(),
-        32
-    );
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let budget = ExecutionBudget::builder()
-        .max_content_writes(NonZeroUsize::MIN)
+        .max_concurrent_content_writes(NonZeroUsize::MIN)
+        .metrics_recorder(recorder.clone())
         .build();
     let root = tempdir().expect("directory");
     let store = Arc::new(ConcurrencyWatchStore::new(
@@ -711,9 +730,33 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         () = store.inner().wait_until_blocked() => {}
         _ = &mut writes => panic!("staging finished before writing"),
     }
-    assert!(futures::poll!(&mut writes).is_pending());
-    assert_eq!(budget.content_writes().available_permits(), 0);
-    assert_eq!(budget.stats().admitted_requests, 0);
+    bounded(Duration::from_secs(10), async {
+        while budget.stats().content_writes_waiting == 0 {
+            assert!(futures::poll!(&mut writes).is_pending());
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second staging write waits for the permit");
+    let content_write_gauges = || {
+        [
+            "loonfs.execution_budget.content_writes_running",
+            "loonfs.execution_budget.content_writes_waiting",
+        ]
+        .map(|name| gauge(&recorder, name))
+    };
+    let stats = budget.stats();
+    assert_eq!(
+        stats,
+        ExecutionBudgetStats {
+            read_working_bytes: stats.read_working_bytes,
+            content_writes_running: 1,
+            content_writes_waiting: 1,
+            ..ExecutionBudgetStats::default()
+        },
+        "staging holds a content write permit and no publication admission"
+    );
+    assert_eq!(content_write_gauges(), [1, 1]);
     assert_eq!(store.puts().total, 1);
     store.inner().release();
     let (first, second) = writes.await;
@@ -721,6 +764,11 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
     second.expect("streamed staging");
     assert_eq!(store.puts().total, 2);
     assert_eq!(store.puts().peak_in_flight, 1);
-    assert_eq!(budget.content_writes().available_permits(), 1);
+    let stats = budget.stats();
+    assert_eq!(
+        (stats.content_writes_running, stats.content_writes_waiting),
+        (0, 0)
+    );
+    assert_eq!(content_write_gauges(), [0, 0]);
     runtime.shutdown().await.expect("shutdown");
 }

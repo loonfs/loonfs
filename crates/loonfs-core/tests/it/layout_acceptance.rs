@@ -41,7 +41,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
     let content_ref = prepared.content_ref().clone();
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .publish_batch(
         store,

@@ -89,7 +89,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for number in 0..9 {
         publish(&mut engine, &store, &format!("data-{number}"))
@@ -384,13 +384,13 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     let session = crate::commit_engine::SharedWriterSessionStatus::default();
     let mut first = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .writer_session(Arc::clone(&session));
     publish(&mut first, &store, "seed").await.expect("seed");
     let mut second = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .writer_session(session);
     store.reset();
@@ -445,7 +445,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .expect("create");
     let mut stale = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     publish(&mut stale, &store, "old")
         .await
@@ -475,7 +475,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     ));
     let mut active = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .writer_session(session);
     assert_eq!(
@@ -501,7 +501,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
@@ -585,7 +585,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for number in 1..20 {
         publish(&mut engine, &store, &format!("directory-{number}"))
@@ -638,7 +638,7 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
@@ -708,7 +708,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     publish(&mut engine, &store, "seed").await.expect("seed");
     engine.invalidate_projection();
@@ -856,7 +856,7 @@ async fn warm_context_behind(
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        Arc::new(tokio::sync::Semaphore::new(32)),
+        Arc::new(crate::test_support::content_writes()),
     );
     publish(&mut engine, store, "first").await.expect("first");
     let loaded = crate::namespace::read_anchor::load_read_anchor(
@@ -1058,7 +1058,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .expect("create");
     let mut writer_a = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer_a.clone());
     writer_a
@@ -1085,7 +1085,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             blocked.wait_until_blocked().await;
             let mut writer_b = NamespaceCommitEngine::new(
                 namespace_id.clone(),
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                std::sync::Arc::new(crate::test_support::content_writes()),
             )
             .monotonic_timer(timer_b.clone());
             writer_b
@@ -1118,7 +1118,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 None,
                 &Deadline::start(timer_b.clone()),
                 crate::manifest::MetadataRunPolicy::default(),
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
             )
             .await
             .expect("fold takeover and commit");

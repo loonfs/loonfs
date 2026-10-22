@@ -78,7 +78,7 @@ pub(crate) fn commit_fingerprint(
 )]
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
     session: &PublishPlanningSession<'_>,
@@ -188,7 +188,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 
 async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     view: &MetadataView<'_, '_, S>,
     before: &MetadataView<'_, '_, S>,
     pieces: &CommitPieces<'_>,
@@ -262,7 +262,7 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
     store: &S,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
@@ -679,7 +679,7 @@ mod tests {
             .collect();
         let validated = prepare_commit_against_publish_view(
             store,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             &CommitCandidate::prepared(request.clone(), content),
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             &session,
@@ -1011,7 +1011,7 @@ mod tests {
                 set_owner("/docs/a.txt", "ada"),
             ))],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await

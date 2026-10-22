@@ -11,7 +11,7 @@ use super::{
 };
 use crate::metrics::{LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_OK};
 use crate::GcResponse;
-use loonfs_core::CompactionUnitOutcome;
+use loonfs_core::{CompactionUnitOutcome, PermitPoolObserver};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -583,10 +583,11 @@ impl ObjectStoreOperationInstruments {
 pub(crate) struct ExecutionBudgetInstruments {
     pub(crate) read_working_memory: Option<Arc<dyn loonfs_core::cache::ReadWorkingMemoryObserver>>,
     pub(crate) admission: AdmissionInstruments,
-    pub(crate) reads: PermitPoolGauges,
-    pub(crate) publications: PermitPoolGauges,
-    pub(crate) folds: PermitPoolGauges,
-    pub(crate) compactions: PermitPoolGauges,
+    pub(crate) reads: Option<Arc<dyn PermitPoolObserver>>,
+    pub(crate) publications: Option<Arc<dyn PermitPoolObserver>>,
+    pub(crate) folds: Option<Arc<dyn PermitPoolObserver>>,
+    pub(crate) compactions: Option<Arc<dyn PermitPoolObserver>>,
+    pub(crate) content_writes: Option<Arc<dyn PermitPoolObserver>>,
 }
 
 impl ExecutionBudgetInstruments {
@@ -657,6 +658,17 @@ impl ExecutionBudgetInstruments {
                     "Metadata merges waiting for a compaction permit",
                 ),
             ),
+            content_writes: PermitPoolGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.content_writes_running",
+                    "Content object writes holding a content write permit",
+                ),
+                (
+                    "loonfs.execution_budget.content_writes_waiting",
+                    "Content object writes waiting for a content write permit",
+                ),
+            ),
         }
     }
 }
@@ -694,39 +706,31 @@ impl AdmissionInstruments {
 }
 
 /// The running and waiting gauges of one kind of budget permit.
-pub(crate) struct PermitPoolGauges {
-    installed: Option<InstalledPoolGauges>,
-}
-
-struct InstalledPoolGauges {
+struct PermitPoolGauges {
     running: Arc<dyn GaugeHandle>,
     waiting: Arc<dyn GaugeHandle>,
 }
 
 impl PermitPoolGauges {
+    /// Registers one pool's gauges now, or nothing without a recorder.
     fn register(
         recorder: Option<&dyn MetricsRecorder>,
         (running_name, running_description): (&'static str, &'static str),
         (waiting_name, waiting_description): (&'static str, &'static str),
-    ) -> Self {
-        Self {
-            installed: recorder.map(|recorder| InstalledPoolGauges {
+    ) -> Option<Arc<dyn PermitPoolObserver>> {
+        recorder.map(|recorder| {
+            Arc::new(Self {
                 running: recorder.register_gauge(running_name, running_description, &[]),
                 waiting: recorder.register_gauge(waiting_name, waiting_description, &[]),
-            }),
-        }
+            }) as Arc<dyn PermitPoolObserver>
+        })
     }
+}
 
-    pub(crate) fn report(&self, running: usize, waiting: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed
-            .running
-            .set(i64::try_from(running).unwrap_or(i64::MAX));
-        installed
-            .waiting
-            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
+impl PermitPoolObserver for PermitPoolGauges {
+    fn report(&self, running: usize, waiting: usize) {
+        self.running.set(i64::try_from(running).unwrap_or(i64::MAX));
+        self.waiting.set(i64::try_from(waiting).unwrap_or(i64::MAX));
     }
 }
 

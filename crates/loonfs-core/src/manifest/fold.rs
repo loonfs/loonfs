@@ -71,7 +71,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         None,
         &deadline,
         MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .map(|folded| folded.response)
@@ -99,7 +99,7 @@ fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) ->
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
 ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
     let tail = projection.tail_state.as_ref();
     let assembled = tail
@@ -185,7 +185,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     held: Option<WalFoldInput>,
     deadline: &Deadline,
     policy: MetadataRunPolicy,
-    content_writes: &tokio::sync::Semaphore,
+    content_writes: &crate::PermitPool,
 ) -> Result<FoldedWalTail> {
     let projection = match held {
         Some(held) => ManifestProjection {
@@ -259,7 +259,7 @@ struct FoldAttempts<'a, S: ObjectStore + ?Sized> {
     namespace_id: &'a NamespaceId,
     deadline: &'a Deadline,
     policy: MetadataRunPolicy,
-    content_writes: &'a tokio::sync::Semaphore,
+    content_writes: &'a crate::PermitPool,
     projection: ManifestProjection<'a, S>,
     /// The content objects written for the projection's tail, which a
     /// rebuild over a manifest at the same head uses again.

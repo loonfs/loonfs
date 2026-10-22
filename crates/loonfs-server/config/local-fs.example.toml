@@ -22,6 +22,12 @@ memory_limit_bytes = 4294967296
 # max_merge_input_bytes of decoded input. Defaults to 2.
 #max_concurrent_compactions = 2
 
+# Maximum content object writes this server runs at once, including the
+# content that folds write. Each keeps up to 16 MiB in memory (72 MiB on R2).
+# A sustained `loonfs.execution_budget.content_writes_waiting` gauge means the
+# cap is too low. Defaults to 32.
+#max_concurrent_content_writes = 32
+
 # Minimum interval between publication starts per namespace; cold namespaces
 # publish immediately. Defaults to 1000 ms.
 #min_publish_interval_ms = 1000

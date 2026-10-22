@@ -45,7 +45,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 Arc::new(StdMonotonicTimer::default()),
                 Default::default(),
                 None,
-                &tokio::sync::Semaphore::new(32),
+                &crate::test_support::content_writes(),
             )
             .await
             .expect("fork");
@@ -61,7 +61,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             Default::default(),
             &setup,
             crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
             crate::test_support::std_timer(),
         )
         .await
@@ -104,7 +104,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         Default::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await

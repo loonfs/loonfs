@@ -1214,7 +1214,7 @@ async fn planned_appends_match_the_model() {
     ];
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     for (index, operations) in requests.into_iter().enumerate() {
         let request = CommitIntent {
@@ -1331,7 +1331,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     for operation in operations {
         let request = CommitIntent {
@@ -1359,7 +1359,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             None,
             &deadline(),
             loonfs_core::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &loonfs_core::test_support::content_writes(),
         )
         .await
         .expect("fold");

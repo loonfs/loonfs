@@ -42,6 +42,17 @@ impl ConfiguredObjectStoreKind {
             Self::GcpGcs => "gcp_gcs",
         }
     }
+
+    /// Returns the most bytes that one assembly on this store keeps in
+    /// memory at once, which is the part it builds and the source read it
+    /// copies into that part.
+    pub const fn max_assembly_buffer_bytes(self) -> u64 {
+        let part_bytes = match self {
+            Self::CloudflareR2 => crate::assembly::R2_PART_BYTES,
+            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => crate::assembly::READ_BYTES,
+        };
+        part_bytes + crate::assembly::READ_BYTES
+    }
 }
 
 /// Validated provider client and the direct-transfer issuers it supports.

@@ -101,7 +101,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         Some(input),
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fold publish projection")

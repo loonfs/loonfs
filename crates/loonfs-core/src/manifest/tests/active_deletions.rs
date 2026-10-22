@@ -230,7 +230,7 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
 ) -> loonfs_types::Commit {
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_batch(
         store,
@@ -1015,7 +1015,7 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         let engine = NamespaceEngine::reader(
             &store,
             namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         );
 
         store.reset();
@@ -1083,7 +1083,7 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
     let engine = NamespaceEngine::reader(
         &store,
         namespace_id,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     let limit = EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero"));
 

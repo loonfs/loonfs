@@ -58,7 +58,7 @@ async fn assert_files_readable(
 
 #[tokio::test]
 async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = &engine.namespace_id.clone();
     let values = vec![
@@ -131,7 +131,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
 
 #[tokio::test]
 async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = &engine.namespace_id.clone();
     let values = vec![inline(namespace_id, Bytes::from_static(b"shared"))];

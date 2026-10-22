@@ -75,7 +75,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork target");
@@ -89,7 +89,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Default::default(),
         &setup,
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -240,7 +240,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         Default::default(),
         &context(clock.now_ms()),
         crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
         crate::test_support::std_timer(),
     )
     .await
@@ -362,7 +362,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fork");

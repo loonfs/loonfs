@@ -283,7 +283,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
 
     let mut engine_a = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     engine_a
         .publish_batch(
@@ -321,7 +321,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
     let writer_b = context("writer-b");
     let mut engine_b = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     engine_b
         .publish_batch(
@@ -353,7 +353,7 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
     let session = SharedWriterSessionStatus::default();
     let mut engine_a1 = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .writer_session(Arc::clone(&session));
     engine_a1
@@ -371,7 +371,7 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
     let writer_b = context("writer-b");
     let mut engine_b = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     engine_b
         .publish_batch(
@@ -414,7 +414,7 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
     drop(engine_a1);
     let mut engine_a2 = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .writer_session(session);
     let still_fenced = engine_a2
@@ -466,7 +466,7 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     for (name, advance_ms) in [
@@ -539,7 +539,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     publish_one(&mut engine, &store, &writer, "alpha").await;
@@ -553,7 +553,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         None,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fold");
@@ -611,7 +611,7 @@ async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloa
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone());
     publish_one(&mut engine, &store, &writer, "alpha").await;
@@ -693,7 +693,7 @@ async fn writer_after_one_publish(
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .monotonic_timer(timer.clone())
     .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
@@ -802,7 +802,7 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
         None,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("another process folds");
@@ -855,7 +855,7 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
         [Err(error)] if error.code() == ErrorCode::MaintenanceRequired
     );
     let deadline = Deadline::start(timer.clone());
-    let content_writes = tokio::sync::Semaphore::new(32);
+    let content_writes = crate::test_support::content_writes();
     let fold = |input| {
         fold_wal_tail(
             &store,
@@ -912,7 +912,7 @@ async fn writer_after_own_compaction(
             Some(input),
             &Deadline::start(timer.clone()),
             crate::manifest::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("own fold");
@@ -1068,7 +1068,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         None,
         &Deadline::start(timer.clone()),
         crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fold");
@@ -1130,7 +1130,7 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         None,
         &Deadline::start(timer.clone()),
         crate::manifest::MetadataRunPolicy::default(),
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
     )
     .await
     .expect("fold");
@@ -1308,7 +1308,7 @@ async fn the_manifest_head_is_sent_after_the_wal_probe_answers() {
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
         )
         .await
         .expect("another process folds");
@@ -1340,7 +1340,7 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
         .expect("bootstrap");
     let mut over_budget = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     over_budget
         .session_writer_epoch(&store, &writer)
@@ -1382,7 +1382,7 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
 
     let mut healthy = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     let retried = healthy
         .publish_batch(
@@ -1417,7 +1417,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         .expect("bootstrap");
     let mut seed = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     seed.publish_batch(
         &store,
@@ -1439,7 +1439,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         &writer,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32),
+        &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
     )
     .await
@@ -1450,7 +1450,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     // its validation walks need.
     let mut uncached = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     );
     store.reset();
     uncached
@@ -1488,7 +1488,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
     let mut cached = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .segment_cache(cache);
     store.reset();

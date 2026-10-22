@@ -183,7 +183,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
 
     let mut publisher = loonfs_core::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     store.reset();
     let responses = publisher
