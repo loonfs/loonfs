@@ -52,7 +52,7 @@ The host sets how much memory a server has, and memory is empty after a restart.
 The tiered implementation has two parts. The "memory tier" keeps decoded blocks under the memory budget, as the memory implementation does, and the "SSD tier" keeps blocks in a directory on the local SSD under a byte budget of its own. The two tiers form one cache with one admission rule: every block that's inserted goes into both tiers. To get a block, the tiered implementation:
 
 1. If the block is in memory, marks it as the most recently used block on disk and returns the block.
-2. If the block is on disk, reads it, checks its length and checksum against the caller's handle, decodes it, marks it as the most recently used block on disk, inserts the decoded block into memory, and returns the block.
+2. If the block is on disk, checks the length of the block's file against the stored length that the SSD tier recorded for the block, before it reads any of the file's bytes. Then it reads the block, checks its length and checksum against the caller's handle, decodes it, marks it as the most recently used block on disk, inserts the decoded block into memory, and returns the block.
 3. If the block is in neither tier, returns a miss.
 
 After a miss, a get or load reads the block from the store and inserts it. An insert puts the decoded block into memory and queues the stored bytes for the SSD tier's writer, which writes them to disk, so a read doesn't wait for a disk write. An insert of a block that the disk already keeps writes nothing, and it refreshes the block's place on disk. LoonFS inserts a block in three cases:
@@ -91,11 +91,18 @@ Why does a memory hit refresh the block's place on disk? Without the refresh, th
 
 This section describes where LoonFS keeps the extra blocks that a read fetches ahead of what it needs.
 
-When a listing, or a lookup that can match more than one row, misses on a data block, LoonFS reads ahead. It fetches the block and the blocks after it, up to the end of the block's group of 32 in the segment's index, in ranged GETs of at most 4 MiB each. For example, a read that needs block 40 of a segment fetches blocks 40 through 63. The next page of a listing, or a lookup of a nearby key, can then use those blocks without another request. (A lookup of one name in a directory matches one row, and it doesn't read ahead.)
+When a listing or a lookup misses on a data block, LoonFS reads ahead. It fetches the block and the blocks after it, up to the end of the block's group of 32 in the segment's index, in ranged GETs of at most 4 MiB each. These blocks are the read's "read-ahead window". For example, a read that needs block 40 of a segment fetches a window of blocks 40 through 63. (Some lookups that match one row, such as a lookup of one name in a directory, don't read ahead.)
 
-A read's memo, which the read looks in before the block cache, is charged to the server's read working memory (`max_read_working_bytes`), and LoonFS drops the memo when the read ends. If a read kept its read-ahead blocks in its memo, the blocks would be dropped with the memo, and the next page of a listing, which is a separate read, would fetch the same bytes again. So LoonFS decodes every block of a read-ahead window and inserts each one into the block cache under its own key. With the SSD tier on, each of those inserts also writes the block's stored bytes to disk, as every insert does.
+What LoonFS does with the window's other blocks depends on the kind of read:
 
-Why insert blocks that no read has asked for? The window costs the same GETs whether LoonFS keeps its extra blocks or not, and the next page of a listing uses them. A block that no read uses leaves the cache like any other block that isn't read.
+- For a scan of a range of rows, such as a listing's scan of a directory's entries, LoonFS decodes every block of the window, records each one in the read's memo, and inserts each one into the block cache (into both tiers, when the SSD tier is on). The next page of the listing, which is a separate read, can then find those blocks in the block cache.
+- For a lookup, such as a lookup of a file's latest revision, LoonFS fetches the window in one ranged GET, so the window stops at 4 MiB. The read's memo records the window's other blocks as stored bytes, without decoding them. If the read uses one of those blocks and the block cache doesn't have it, LoonFS decodes the block from its stored bytes and inserts it into the block cache (into both tiers, when the SSD tier is on). A block that the read doesn't use isn't decoded.
+
+A read's memo, which the read looks in before the block cache, is charged to the server's read working memory (`max_read_working_bytes`), and the charge includes the stored bytes of a lookup's window. LoonFS drops the memo when the read ends. For example, a page of a listing looks up the latest revision of each file it lists, and those lookups share the page's memo. The next page is a separate read, so a lookup on that page that misses the block cache fetches its window again, even if the previous page fetched the same window. Because the SSD tier keeps blocks as stored bytes, a later change could let it keep a window's other blocks without decoding them, but LoonFS doesn't do this yet.
+
+Why does LoonFS insert a scan's whole window, including blocks that no read has asked for? The window costs the same GETs whether LoonFS keeps its extra blocks or not, and the next page of a listing can use them. A block that no read uses leaves the cache like any other block that isn't read.
+
+Why doesn't LoonFS decode a lookup's whole window when it fetches the window? A lookup reads the blocks of its key range one at a time, and its key range can end before the window does, so decoding the whole window would decode blocks that the lookup never reads. And if the block cache couldn't keep a decoded window's blocks until the lookup reached them, LoonFS would fetch and decode the rest of the window again at each later block, so the lookup would decode up to 32 times as many blocks as it reads. In a test where the block cache keeps four blocks, a lookup that reads 97 blocks would decode about 1,600 blocks that way, and it decodes 97 when the window is kept as stored bytes. In a listing of a million files, lookups that decoded each window when they fetched it spent an hour decoding.
 
 ## Budgets and counters
 
@@ -106,7 +113,7 @@ LoonFS keeps each kind of cache entry under a budget of its own, so that one kin
 The SSD tier has two settings, in a `[metadata_cache.ssd]` table under the server's `[metadata_cache]` table ([`config.rs`](../../crates/loonfs-server/src/config.rs)). Both settings are required, and without the table, the server has no SSD tier.
 
 - `directory` is the directory on the local SSD that the SSD tier writes its blocks to. The server creates it if it's missing.
-- `max_segment_bytes` is the byte budget for blocks on disk, shared by every namespace that the server serves.
+- `max_segment_bytes` is the budget for blocks on disk, shared by every namespace that the server serves. The SSD tier charges each block its stored length, or 4 KiB for a smaller block, so the budget limits the number of blocks on disk as well as their bytes.
 
 Each read or write of a block on disk opens and closes the block's file, so the SSD tier keeps no files open between reads, and the server's sizing has no rule for open files.
 
@@ -116,11 +123,13 @@ The SSD tier also keeps its index and its write queue in memory. The index recor
 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B
 ```
 
-The formula assumes that a block on disk is 4 KiB, which was the mean size of a stored block in a compacted namespace of 20,000 files, so the term for a 10 GiB tier is about 484 MiB, and for a 100 GiB tier about 4.2 GiB.
+Because the SSD tier charges each block at least 4 KiB, it keeps at most one block for each 4 KiB of its budget, so the term is the most memory that the write queue and the index use. For a 10 GiB tier, the term is about 484 MiB, and for a 100 GiB tier, about 4.2 GiB. (For comparison, the mean stored block in a compacted namespace of 20,000 files was 4.1 KiB.)
 
 Why does the SSD tier have one budget for every namespace, and not one per namespace? Tenants' working sets differ by orders of magnitude, and they change over the day. For example, one tenant might read 2 GB of metadata all morning and nothing in the evening, while another reads 5 MB once an hour. A shared least-recently-used budget follows those working sets as they change, and a budget per namespace would need an operator to set and adjust a number for each tenant.
 
 Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Namespace heads, WAL tails, WAL objects, and content objects stay in memory under their own budgets.
+
+Why does the SSD tier charge each block at least 4 KiB? The index keeps an entry in memory for each block on disk, and its term in `fixed` covers one entry for each 4 KiB of the budget. If the SSD tier charged each block only its stored length, a tier of small blocks could keep many more entries than the term covers (a tier of 1 KiB blocks would keep more than three times as many), and the server could use more memory than its limit. The 4 KiB minimum costs disk instead, because a tier of blocks smaller than 4 KiB keeps fewer bytes on disk than its budget.
 
 Why does the SSD tier write blocks from a queue, and skip the write when the queue is full? Without the queue, a read that inserts a block would wait for a disk write before it returns. Without the cap, a disk that's slower than the reads would grow the queue past its term in `fixed`. A block that the SSD tier doesn't write stays in memory, and if memory evicts it, the next read of the block costs a GET, as it would on a server without the tier.
 
@@ -148,7 +157,7 @@ A client gets the same results with or without the tier, because the tier change
 
 The block cache's metrics keep one cache name, `segment`, in the grammar of the other cache metrics (`loonfs_<cache>_cache_*`), and they report each tier under a `tier` label with the value `memory` or `ssd`. The object cache's metrics use a `key_class` label in the same way (see [Probes and metrics](../../crates/loonfs-server/docs/self-hosting.md#probes-and-metrics)). For example, `loonfs_segment_cache_gets_total{tier="ssd",result="hit"}` records the gets that the SSD tier served from disk, and `loonfs_segment_cache_gets_total{tier="ssd",result="miss"}` records the gets that went to the store.
 
-The SSD tier records each block that it finds in its directory at startup as an insert, in `loonfs_segment_cache_inserts_total{tier="ssd"}`. The rejections family, `loonfs_segment_cache_rejections_total`, has the same `tier` label and records the blocks that a tier didn't keep. The SSD tier records a rejection when the write queue is full, when the write fails, when the tier is already closed, or when the block is larger than the whole budget, and in each case the block stays in memory. The SSD tier's gauge, `loonfs_segment_cache_retained_stored_bytes`, reports the bytes charged to the blocks on disk. Each block's charge is its stored length plus the index's own allocation for the block, and `metadata_cache.ssd.max_segment_bytes` limits that same charge. The SSD tier has a gauge of its own because the disk keeps stored bytes, and the memory gauge, `loonfs_segment_cache_retained_decoded_bytes`, reports decoded bytes.
+The SSD tier records each block that it finds in its directory at startup as an insert, in `loonfs_segment_cache_inserts_total{tier="ssd"}`. The rejections family, `loonfs_segment_cache_rejections_total`, has the same `tier` label and records the blocks that a tier didn't keep. The SSD tier records a rejection when the write queue is full, when the write fails, when the tier is already closed, or when the block is larger than the whole budget, and in each case the block stays in memory. The SSD tier's gauge, `loonfs_segment_cache_retained_stored_bytes`, reports the bytes charged to the blocks on disk. Each block's charge is the larger of its stored length and 4 KiB, plus the index's own allocation for the block, and `metadata_cache.ssd.max_segment_bytes` limits that same charge. So the gauge can report more bytes than the disk keeps, for example on a tier of blocks smaller than 4 KiB. The SSD tier has a gauge of its own because the disk keeps stored bytes, and the memory gauge, `loonfs_segment_cache_retained_decoded_bytes`, reports decoded bytes.
 
 The [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md#keeping-metadata-blocks-on-local-ssd) describes the two settings, and its [Set one number](../../crates/loonfs-server/docs/self-hosting.md#set-one-number) section states the term that the SSD tier adds to `fixed`.
 
@@ -159,8 +168,8 @@ This section lists what the block cache and its SSD tier cost.
 | | Cost |
 | --- | --- |
 | Memory | The memory tier keeps decoded blocks, as the memory implementation does. The SSD tier's 64 MiB write queue and its index, at 168 bytes for each block on disk, are a term in `fixed` |
-| Disk | The SSD tier's byte budget, and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
-| CPU | A disk hit is checked and decoded again. A read-ahead window decodes every block it fetches, including blocks that no read uses |
+| Disk | Up to the SSD tier's budget (less on a tier of blocks smaller than 4 KiB), and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
+| CPU | A disk hit is checked and decoded again. A scan decodes every block of a read-ahead window, including blocks that no read uses, and a lookup decodes only the blocks of its window that a read uses |
 | Requests | The first read of a block that the server didn't write costs a GET, with or without the tier. A disk hit costs no request |
 | Code | One interface with two implementations, and no cache under the block cache |
 
