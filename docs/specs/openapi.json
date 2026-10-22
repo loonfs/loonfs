@@ -3888,7 +3888,7 @@
           },
           "extensions": {
             "$ref": "#/components/schemas/ExtensionGcReports",
-            "description": "The reports from the extension collectors, each under its extension's name, left out when\nno extension collector ran.\n\nThe `gc` maintenance job runs each extension's collector after the core collector.\n`Maintenance::gc` in the embedded runtime runs only the core collector, so its result\nleaves this field out."
+            "description": "The reports from the extension collectors, each under its extension's name, left out when\nno extension collector ran.\n\nAfter the core collector, a `gc` run runs the collector of each extension whose state the\ndeployment maintains. For example, a deployment that advertises `maintenance.grep.index`\nreports the counts of the grep index's collector in `extensions.grep`."
           },
           "kind": {
             "enum": [
@@ -5689,7 +5689,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -5729,7 +5728,7 @@
                 }
               }
             },
-            "description": "Invalid change cursor, limit, snapshot ID, consistency, non-snapshot checkpoint, or after_seq above the head that the request reads"
+            "description": "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads"
           },
           "401": {
             "content": {
@@ -5749,7 +5748,7 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found"
+            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -5759,7 +5758,7 @@
                 }
               }
             },
-            "description": "The cursor is older than the retained change history. Restart from a fresh listing or checkpoint."
+            "description": "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head."
           },
           "410": {
             "content": {
@@ -5769,7 +5768,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5956,7 +5955,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -6001,7 +5999,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, consistency, non-snapshot checkpoint, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot ID, consistency, or revision_no combined with snapshot_id"
           },
           "401": {
             "content": {
@@ -6021,7 +6019,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found"
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6031,7 +6029,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "413": {
             "content": {
@@ -6103,7 +6101,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size"
+            "description": "Invalid path, revision, snapshot ID, revision_no combined with snapshot_id, or start_offset at or past the file's size"
           },
           "401": {
             "content": {
@@ -6123,7 +6121,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found"
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6133,7 +6131,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "413": {
             "content": {
@@ -6250,7 +6248,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -6290,7 +6287,7 @@
                 }
               }
             },
-            "description": "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency"
           },
           "401": {
             "content": {
@@ -6310,7 +6307,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found"
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6320,7 +6317,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6391,7 +6388,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -6431,7 +6427,7 @@
                 }
               }
             },
-            "description": "Invalid path, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid path, include_attributes, snapshot ID, or consistency"
           },
           "401": {
             "content": {
@@ -6451,7 +6447,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found"
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6461,7 +6457,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6599,7 +6595,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash": {
       "get": {
-        "description": "Returns the namespace's recoverable deletions, oldest first. Advancing the retention floor doesn't remove entries. Each entry includes the inode ID and deletion sequence that an undelete needs, and the deleted name when the delete recorded one.",
+        "description": "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's writer expires it after the retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
         "operationId": "list_trash",
         "parameters": [
           {
@@ -7059,7 +7055,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -7099,7 +7094,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, include_attributes, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, include_attributes, snapshot ID, or consistency"
           },
           "401": {
             "content": {
@@ -7119,7 +7114,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found"
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7129,7 +7124,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7229,7 +7224,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -7269,7 +7263,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, or consistency"
           },
           "401": {
             "content": {
@@ -7289,7 +7283,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found"
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -7309,7 +7303,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7372,7 +7366,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -7417,7 +7410,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, consistency, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, snapshot ID, or consistency"
           },
           "401": {
             "content": {
@@ -7437,7 +7430,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found"
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -7457,7 +7450,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "413": {
             "content": {
@@ -7540,7 +7533,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size"
+            "description": "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size"
           },
           "401": {
             "content": {
@@ -7560,7 +7553,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found"
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -7580,7 +7573,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot deleted or expired"
+            "description": "Namespace deleted"
           },
           "413": {
             "content": {
@@ -7787,7 +7780,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"

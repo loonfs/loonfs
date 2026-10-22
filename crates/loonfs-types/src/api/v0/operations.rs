@@ -1402,9 +1402,9 @@ pub struct GcResponse {
     /// The reports from the extension collectors, each under its extension's name, left out when
     /// no extension collector ran.
     ///
-    /// The `gc` maintenance job runs each extension's collector after the core collector.
-    /// `Maintenance::gc` in the embedded runtime runs only the core collector, so its result
-    /// leaves this field out.
+    /// After the core collector, a `gc` run runs the collector of each extension whose state the
+    /// deployment maintains. For example, a deployment that advertises `maintenance.grep.index`
+    /// reports the counts of the grep index's collector in `extensions.grep`.
     #[serde(default, skip_serializing_if = "ExtensionGcReports::is_empty")]
     pub extensions: ExtensionGcReports,
 }

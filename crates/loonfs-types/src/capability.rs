@@ -117,11 +117,6 @@ limit_keys! {
     /// request; smaller values answer `invalid_request`. Derived from the
     /// publication budgets, not tuned.
     LIMIT_GC_MIN_GRACE_WINDOW_MS = "maintenance.gc.min_grace_window_ms";
-    /// Advisory limit: matches per grep page when the request omits `limit`.
-    LIMIT_QUERY_GREP_DEFAULT = "query.grep.default_limit";
-    /// Advisory limit: the largest accepted grep page limit. Distinct from the
-    /// pagination keys — a grep item costs a verified file read, not a row.
-    LIMIT_QUERY_GREP_MAX = "query.grep.max_limit";
     /// Advisory limit: files a plan-less `allow_scan` grep will scan before
     /// refusing with `query_unindexable`.
     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES = "query.grep.scan_budget_files";

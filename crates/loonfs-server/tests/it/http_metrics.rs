@@ -93,7 +93,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         ) > 0.0
     );
     assert!(first.contains_key("loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"}"));
-    assert!(first.contains_key("loonfs_grep_block_cache_gets_total{result=\"hit\"}"));
+    assert!(first.contains_key("loonfs_grep_cache_gets_total{result=\"hit\"}"));
     assert!(first.contains_key("loonfs_wal_tail_cache_retained_decoded_bytes"));
     assert_eq!(
         series(&first, "loonfs_server_upload_permits_available"),

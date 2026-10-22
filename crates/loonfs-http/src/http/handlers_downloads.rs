@@ -44,10 +44,10 @@ use std::time::Duration;
         request_body = CreateDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadResponse),
-            (status = 400, description = "Invalid path, revision, snapshot ID, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 400, description = "Invalid path, revision, snapshot ID, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -115,11 +115,11 @@ pub(super) async fn create_download(
         request_body = CreateDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, snapshot ID, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

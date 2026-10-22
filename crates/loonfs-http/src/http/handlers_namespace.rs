@@ -21,15 +21,14 @@ use loonfs_types::ErrorResponse;
 use loonfs_types::{
     AccessRight, CapabilityDocument, Checkpoint, CreateNamespaceRequest, CreateSnapshotRequest,
     DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PaginationPolicy, PinId,
-    RunMaintenanceRequest, RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PinId, RunMaintenanceRequest,
+    RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
@@ -153,19 +152,10 @@ pub(super) async fn get_capabilities(
         state.options.serves_maintenance && state.grep.maintains(),
     );
     if state.grep.serves() {
-        let pagination = PaginationPolicy::default();
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
             .features
             .insert(FEATURE_QUERY_GREP.to_owned(), true);
-        capabilities.limits.insert(
-            LIMIT_QUERY_GREP_DEFAULT.to_owned(),
-            u64::from(pagination.default_limit().get()),
-        );
-        capabilities.limits.insert(
-            LIMIT_QUERY_GREP_MAX.to_owned(),
-            u64::from(pagination.max_limit().get()),
-        );
         capabilities.limits.insert(
             LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),
             loonfs_grep::MAX_GREP_SCAN_FILES as u64,

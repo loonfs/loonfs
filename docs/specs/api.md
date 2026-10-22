@@ -47,7 +47,7 @@ This section describes the capability document, which lists what a deployment su
 
 Every deployment describes itself with one capability document. A remote client fetches it from `GET /v0/capabilities` and caches it for the connection, and an embedded engine exposes the same document as a constant. As a result, the SDK checks capabilities the same way for both backends.
 
-The example below is the reference deployment's document. It lists the runtime's own `filesystem/v0` and `maintenance/v0` API groups, plus the `query/v0` API group, which the server adds by composing the grep extension. A host that composes no extension advertises neither that API group nor the two grep feature keys (`query.grep` for searching an index, and `maintenance.grep.index` for administering one). Either way, clients decide what to call based on the document.
+The example below is the reference deployment's document, with the server's default settings. It lists the runtime's own `filesystem/v0` and `maintenance/v0` API groups, plus the `query/v0` API group, which the server adds by composing the grep extension. A host that composes no extension advertises neither that API group nor the two grep feature keys (`query.grep` for searching an index, and `maintenance.grep.index` for administering one). Either way, clients decide what to call based on the document.
 
 ```json
 {
@@ -66,13 +66,17 @@ The example below is the reference deployment's document. It lists the runtime's
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
+    "commit.max_request_body_bytes": 2097152,
+    "download.service_proxied.max_concurrent_requests": 16,
+    "download.service_proxied.max_content_bytes": 268435456,
     "maintenance.gc.min_grace_window_ms": 2490000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
-    "query.grep.default_limit": 1000,
-    "query.grep.max_limit": 1000,
     "query.grep.scan_budget_files": 4096,
-    "query.grep.tail_budget_files": 512
+    "query.grep.tail_budget_files": 512,
+    "upload.complete.max_request_body_bytes": 8388608,
+    "upload.service_proxied.max_concurrent_requests": 8,
+    "upload.service_proxied.max_content_bytes": 268435456
   }
 }
 ```
@@ -112,8 +116,6 @@ Registered limit keys:
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the direct transfer capability lifetime, rather than tuned. |
-| `query.grep.default_limit` | The number of matches per grep page when the request omits `limit`. |
-| `query.grep.max_limit` | The largest grep page limit accepted. An invalid limit is rejected with `invalid_request`. These query keys identify the operation's contract, even though grep uses the same values as standard pagination. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
 | `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
 
@@ -2432,7 +2434,7 @@ The pattern uses the Rust `regex` crate's dialect (no backreferences or lookarou
 
 Every candidate is verified, so a stale index makes a query slower, but it doesn't change the results. Matches are ordered by `(inode_id, byte_offset)`, and one match is reported per line.
 
-Two budgets bound a page: the match limit, and a per-page budget of verified candidates. So a page can return fewer matches than its limit and still include a cursor. Each page is evaluated against the namespace head at page time, and it reports that head in `head_seq`. The cursor resumes strictly after the last candidate that the issuing page finished scanning, and it's bound to that request, so replaying it with different criteria is rejected as `invalid_request`.
+Two budgets bound a page: the match limit, and a per-page budget of verified candidates. The match limit is the request's `limit`, and it has the same default and maximum as every other paged request (`pagination.default_limit` and `pagination.max_limit`). Because of the candidate budget, a page can return fewer matches than its limit and still include a cursor. Each page is evaluated against the namespace head at page time, and it reports that head in `head_seq`. The cursor resumes strictly after the last candidate that the issuing page finished scanning, and it's bound to that request, so replaying it with different criteria is rejected as `invalid_request`.
 
 An active index stays enabled when its watermark is ahead of the head of the query's read view. The query takes a new read view once, and continues with the index it loaded.
 
