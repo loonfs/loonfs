@@ -55,6 +55,7 @@ from loonfs.server import (
     NotFoundError,
     PathEntry,
     PathEntry_File,
+    PathEntry_Unknown,
     UnauthorizedError,
     CompleteUploadBody_DirectMultipart,
     CompleteUploadBody_DirectPut,
@@ -84,6 +85,7 @@ EXPECTED_CASES = [
     "proxy",
     "snapshots",
     "unknown_event_kinds",
+    "unknown_inode_kinds",
     "upload_abort",
     "upload_direct_put",
     "upload_modes",
@@ -488,6 +490,22 @@ class UnknownEventKindsExpected:
     committed_seqs: list[int]
     next_after_seq: int
     known_events: list[list[JsonObject]]
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class UnknownInodeKindsRequest:
+    namespace_id: str
+    path: str
+    directory: str
+    unknown_kind: str
+    entry: JsonObject
+    listing: JsonObject
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class UnknownInodeKindsExpected:
+    entry: JsonObject
+    entries: list[JsonObject]
 
 
 @dataclass(frozen=True)
@@ -1999,6 +2017,40 @@ def test_unknown_event_kinds(cases: dict[str, ConformanceCase]) -> None:
     assert [
         [event.dict() for event in change.events] for change in feed.changes
     ] == expected.known_events
+
+
+def test_unknown_inode_kinds(cases: dict[str, ConformanceCase]) -> None:
+    request, expected = _decode(
+        cases["unknown_inode_kinds"], UnknownInodeKindsRequest, UnknownInodeKindsExpected
+    )
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path.endswith("/filesystem/entries"):
+            return httpx.Response(200, json=request.listing)
+        return httpx.Response(200, json=request.entry)
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as http:
+        client = LoonFS(base_url="http://api.test", token="unused", httpx_client=http)
+        entry = client.files.retrieve(request.namespace_id, path=request.path)
+        entries = client.files.list(request.namespace_id, path=request.directory).entries
+
+    # The SDK returns an entry whose kind it doesn't define as a `PathEntry_Unknown`, which
+    # declares the fields that every entry includes.
+    def unknown_fields(entry: PathEntry) -> JsonObject:
+        assert isinstance(entry, PathEntry_Unknown)
+        assert entry.inode_kind == request.unknown_kind
+        return {
+            field: value
+            for field, value in entry.dict().items()
+            if field in PathEntry_Unknown.model_fields and field != "inode_kind"
+        }
+
+    assert unknown_fields(entry) == expected.entry
+    assert [
+        unknown_fields(listed) if listed.inode_kind == request.unknown_kind else listed.dict()
+        for listed in entries
+    ] == expected.entries
 
 
 def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) -> None:

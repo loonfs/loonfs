@@ -49,6 +49,7 @@ var expectedCases = []string{
 	"proxy",
 	"snapshots",
 	"unknown_event_kinds",
+	"unknown_inode_kinds",
 	"upload_abort",
 	"upload_direct_put",
 	"upload_modes",
@@ -106,6 +107,8 @@ func TestSDKConformance(t *testing.T) {
 				runSnapshots(t, h, testCase)
 			case "unknown_event_kinds":
 				runUnknownEventKinds(t, testCase)
+			case "unknown_inode_kinds":
+				runUnknownInodeKinds(t, testCase)
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -3187,6 +3190,82 @@ func runUnknownEventKinds(t *testing.T, testCase conformanceCase) {
 		if !reflect.DeepEqual(known, expected.KnownEvents[index]) {
 			t.Errorf("change %d known events = %v, want %v", index, known, expected.KnownEvents[index])
 		}
+	}
+}
+
+type unknownInodeKindsRequest struct {
+	NamespaceID string          `json:"namespace_id"`
+	Path        string          `json:"path"`
+	Directory   string          `json:"directory"`
+	UnknownKind string          `json:"unknown_kind"`
+	Entry       json.RawMessage `json:"entry"`
+	Listing     json.RawMessage `json:"listing"`
+}
+
+type unknownInodeKindsExpected struct {
+	Entry   any   `json:"entry"`
+	Entries []any `json:"entries"`
+}
+
+func runUnknownInodeKinds(t *testing.T, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[unknownInodeKindsRequest, unknownInodeKindsExpected](t, testCase)
+	stub := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, httpRequest *http.Request) {
+		responseWriter.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(httpRequest.URL.Path, "/filesystem/entries") {
+			_, _ = responseWriter.Write(request.Listing)
+			return
+		}
+		_, _ = responseWriter.Write(request.Entry)
+	}))
+	defer stub.Close()
+	client := server.NewClient(option.WithBaseURL(stub.URL))
+
+	entry, err := client.Files.Retrieve(context.Background(), &loonfs.GetPathEntryRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        request.Path,
+	})
+	if err != nil {
+		t.Fatalf("stat the entry of an unknown kind: %v", err)
+	}
+	listing, err := client.Files.List(context.Background(), &loonfs.ListPathEntriesRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        request.Directory,
+	})
+	if err != nil {
+		t.Fatalf("list a directory with an entry of an unknown kind: %v", err)
+	}
+
+	// The SDK keeps an entry whose kind it doesn't define, with only its kind and raw JSON set,
+	// and GetUnknown decodes the fields that every entry includes.
+	entryFields := func(entry *loonfs.PathEntry) any {
+		var value any = entry
+		if entry.InodeKind == request.UnknownKind {
+			unknown, err := entry.GetUnknown()
+			if err != nil || unknown == nil {
+				t.Fatalf("read the fields of the %q entry: %v, %v", entry.InodeKind, unknown, err)
+			}
+			value = unknown
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("encode the %q entry: %v", entry.InodeKind, err)
+		}
+		var decoded any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("decode the %q entry: %v", entry.InodeKind, err)
+		}
+		return decoded
+	}
+	if fields := entryFields(entry); !reflect.DeepEqual(fields, expected.Entry) {
+		t.Errorf("stat entry = %v, want %v", fields, expected.Entry)
+	}
+	entries := []any{}
+	for _, listed := range listing.Results {
+		entries = append(entries, entryFields(listed))
+	}
+	if !reflect.DeepEqual(entries, expected.Entries) {
+		t.Errorf("listed entries = %v, want %v", entries, expected.Entries)
 	}
 }
 

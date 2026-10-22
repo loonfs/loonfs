@@ -34,8 +34,11 @@ explicitly if you may retry. Use
 to override the client default for a request.
 
 A commit's `events`, from a publishing helper or the change feed, leave out any
-event of a kind that this version of the SDK doesn't define, so a newer server
-can add event kinds without breaking older clients.
+event of a kind that this version of the SDK doesn't define. A stat or a
+directory listing keeps an entry of an inode kind that this version doesn't
+define, as a `PathEntry_Unknown` with the fields that every entry includes
+(such as `inode_id`, `path`, `display_name`, and `binding_version`). Both rules
+let a newer server add kinds without breaking older clients.
 
 Use `client.files.download_stream` in a `with` block for bounded download memory:
 

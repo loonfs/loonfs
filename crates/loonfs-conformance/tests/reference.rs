@@ -23,7 +23,7 @@ use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest,
     ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
-    ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, RevisionNo,
+    ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, PathEntryKind, RevisionNo,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
@@ -73,6 +73,7 @@ async fn run_reference_corpus(shape: StoreShape, checksum_algorithm: ChecksumAlg
             "changes" => run_changes(&harness, case).await,
             "snapshots" => run_snapshots(&harness, case).await,
             "unknown_event_kinds" => run_unknown_event_kinds(case).await,
+            "unknown_inode_kinds" => run_unknown_inode_kinds(case).await,
             "end_to_end" => run_end_to_end(&harness, case).await,
             // Each SDK harness runs this case against its own proxy.
             "proxy" => {}
@@ -2635,6 +2636,95 @@ async fn run_unknown_event_kinds(case: &Case) {
         .filter(|event| **event == FilesystemChange::Unknown)
         .count();
     assert_eq!(decoded_unknown_count, page_unknown_count);
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnknownInodeKindsRequest {
+    namespace_id: String,
+    path: String,
+    directory: String,
+    unknown_kind: String,
+    entry: serde_json::Value,
+    listing: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnknownInodeKindsExpected {
+    entry: serde_json::Value,
+    entries: Vec<serde_json::Value>,
+}
+
+async fn run_unknown_inode_kinds(case: &Case) {
+    let (request, expected) =
+        parse_values::<UnknownInodeKindsRequest, UnknownInodeKindsExpected>(case);
+    // The reference server returns only the kinds that the API defines, so a stub serves the
+    // entry and the listing.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind path entry stub");
+    let stub_url = format!(
+        "http://{}",
+        listener.local_addr().expect("path entry stub address")
+    );
+    let entry = request.entry.clone();
+    let listing = request.listing.clone();
+    let router = axum::Router::new()
+        .route(
+            "/v0/namespaces/{namespace_id}/filesystem/entry",
+            axum::routing::get(move || std::future::ready(axum::Json(entry.clone()))),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/filesystem/entries",
+            axum::routing::get(move || std::future::ready(axum::Json(listing.clone()))),
+        );
+    let stub = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("the path entry stub should serve until it is aborted");
+    });
+    let client = configured_client(&stub_url, None);
+    let stat = client
+        .stat(&namespace_path(&request.namespace_id, &request.path))
+        .await
+        .expect("stat the entry of an unknown kind");
+    let page = client
+        .list(&namespace_path(&request.namespace_id, &request.directory))
+        .page()
+        .await
+        .expect("list a directory with an entry of an unknown kind");
+    stub.abort();
+
+    // The client decodes an entry of a kind it doesn't define as `PathEntryKind::Unknown`, and
+    // keeps the fields that every entry includes.
+    let unknown_fields = |entry: &PathEntry| {
+        assert_eq!(entry.kind, PathEntryKind::Unknown);
+        let mut fields = serde_json::to_value(entry).expect("encode unknown entry");
+        fields
+            .as_object_mut()
+            .expect("an entry encodes as an object")
+            .remove("inode_kind");
+        fields
+    };
+    assert_eq!(unknown_fields(&stat), expected.entry);
+    let page_entries = request.listing["entries"]
+        .as_array()
+        .expect("listing entries");
+    assert_eq!(page.entries.len(), page_entries.len());
+    let entries: Vec<serde_json::Value> = page
+        .entries
+        .iter()
+        .zip(page_entries)
+        .map(|(entry, page_entry)| {
+            if page_entry["inode_kind"] == request.unknown_kind.as_str() {
+                unknown_fields(entry)
+            } else {
+                serde_json::to_value(entry).expect("encode known entry")
+            }
+        })
+        .collect();
+    assert_eq!(entries, expected.entries);
 }
 
 #[derive(Debug, Deserialize)]
