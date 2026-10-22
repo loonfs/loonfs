@@ -1181,6 +1181,130 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 }
 
 #[tokio::test]
+async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothing() {
+    use crate::{AdvanceRetentionFloorOptions, ChangeSeq, RetentionTarget};
+    use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let actor = loonfs_test_support::test_actor();
+    let namespace = namespace_id("idle");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("create the namespace");
+    for path in ["/a", "/b"] {
+        writer
+            .open_namespace(&namespace)
+            .expect("open the namespace")
+            .put_file(path, b"body", &actor)
+            .await
+            .expect("put a file");
+    }
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer"))
+        .fold_wal(&namespace)
+        .await
+        .expect("fold commits 1 and 2");
+    writer.shutdown().await.expect("shut down the writer");
+
+    // Each advance runs in a new runtime, so no cache has the segments that
+    // the fold wrote.
+    let maintenance = || async {
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
+            .build()
+            .await
+            .expect("maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
+    };
+    for (floor, advances) in [
+        (
+            ChangeSeq(1),
+            [
+                (RetentionTarget::Seq(ChangeSeq(0)), 4),
+                (RetentionTarget::Seq(ChangeSeq(1)), 4),
+                // The scan reads commit 2 from the commits segment, and
+                // commit 2 is later than the cutoff.
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
+            ],
+        ),
+        (
+            ChangeSeq(2),
+            [
+                (RetentionTarget::Head, 4),
+                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 4),
+                // No folded commit is above the head, so the scan reads no
+                // segment.
+                (
+                    RetentionTarget::Cutoff {
+                        cutoff_at_ms: u64::MAX,
+                    },
+                    4,
+                ),
+            ],
+        ),
+    ] {
+        maintenance()
+            .await
+            .advance_retention_floor_with_options(
+                &namespace,
+                &AdvanceRetentionFloorOptions {
+                    target: RetentionTarget::Seq(floor),
+                },
+            )
+            .await
+            .expect("advance the floor");
+        let manifest = metadata_manifest_object(
+            &namespace,
+            &current_manifest_payload(store.as_ref(), &namespace)
+                .await
+                .manifest_no,
+        );
+        for (target, requests) in advances {
+            let maintenance = maintenance().await;
+            store.reset();
+            let advanced = maintenance
+                .advance_retention_floor_with_options(
+                    &namespace,
+                    &AdvanceRetentionFloorOptions { target },
+                )
+                .await
+                .expect("an advance that moves nothing");
+            assert_eq!(advanced.retention_floor_seq, floor, "{target:?}");
+            let operations = store.take();
+            assert!(
+                operations.iter().all(|operation| matches!(
+                    operation,
+                    RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+                )),
+                "{target:?} sends only GET requests: {operations:?}"
+            );
+            let loads = operations
+                .iter()
+                .filter(|operation| {
+                    matches!(operation, RecordedOperation::Get { key, .. } if *key == manifest)
+                })
+                .count();
+            assert_eq!(
+                (loads, operations.len()),
+                (1, requests),
+                "{target:?} loads the current manifest once (the hint, the manifest, the \
+                 missing next manifest, and the hint again): {operations:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};

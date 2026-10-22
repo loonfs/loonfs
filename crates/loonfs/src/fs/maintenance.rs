@@ -900,7 +900,6 @@ impl Maintenance {
         options: &AdvanceRetentionFloorOptions,
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.load_live_anchor(namespace_id).await?;
         let result = self
             .engine(namespace_id)
             .advance_retention_floor(options.target)
