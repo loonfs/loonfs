@@ -2041,6 +2041,7 @@ dependencies = [
  "hyper-util",
  "loonfs",
  "loonfs-client",
+ "loonfs-core",
  "loonfs-grep",
  "loonfs-objectstore",
  "loonfs-test-support",

@@ -1,6 +1,7 @@
 //! HTTP router and handler contracts.
 
 mod attribution;
+mod expired_reads;
 mod handler_panics;
 mod hosted_content_ref_access;
 mod http_access;
@@ -3298,12 +3299,12 @@ mod direct_download {
     /// multipart one, which is exactly the provider shape this suite exists
     /// to cover: each test composes the bundle it means to serve.
     #[derive(Debug)]
-    struct LoopbackIssuer {
+    pub(super) struct LoopbackIssuer {
         object_base_url: String,
     }
 
     impl LoopbackIssuer {
-        fn at(object_base_url: impl Into<String>) -> Arc<Self> {
+        pub(super) fn at(object_base_url: impl Into<String>) -> Arc<Self> {
             Arc::new(Self {
                 object_base_url: object_base_url.into(),
             })

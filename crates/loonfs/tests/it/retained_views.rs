@@ -448,13 +448,15 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 .await
                 .expect("trash listing");
             assert!(trash.next_cursor.is_none());
-            assert_eq!(trash.entries.len(), 1, "{stage}: {namespace}");
-            assert_eq!(trash.entries[0].inode_id, deleted_inode);
-            assert_eq!(trash.entries[0].deletion_seq, deleted.committed_seq);
-            assert_eq!(
-                trash.entries[0].deleted_binding.display_name.as_str(),
-                "deleted.txt"
-            );
+            // The fork's listing starts above its fork point, so it leaves
+            // out the deletion that the fork inherited.
+            let listed = usize::from(namespace == &source);
+            assert_eq!(trash.entries.len(), listed, "{stage}: {namespace}");
+            if let Some(entry) = trash.entries.first() {
+                assert_eq!(entry.inode_id, deleted_inode);
+                assert_eq!(entry.deletion_seq, deleted.committed_seq);
+                assert_eq!(entry.deleted_binding.display_name.as_str(), "deleted.txt");
+            }
             assert_eq!(
                 namespace_reader
                     .stat("/docs/restored.txt")

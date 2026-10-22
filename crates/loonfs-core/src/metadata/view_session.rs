@@ -798,15 +798,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
-    /// One page of the namespace's recoverable deletions, oldest deletion
-    /// first. Uncached: one call serves one trash listing page request.
+    /// One page of the namespace's recoverable deletions after `after_seq`,
+    /// oldest deletion first. Uncached: one call serves one trash listing
+    /// page request.
     pub(crate) async fn active_deletions_page(
         &mut self,
+        after_seq: ChangeSeq,
         start_after: Option<(ChangeSeq, InodeId)>,
         limit: usize,
     ) -> Result<Vec<RecoverableDeletion>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
-        self.base.active_deletions_page(start_after, limit).await
+        self.base
+            .active_deletions_page(after_seq, start_after, limit)
+            .await
     }
 
     pub(crate) async fn hiding_subtree_tombstone(

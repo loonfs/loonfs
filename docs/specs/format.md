@@ -258,7 +258,7 @@ Every namespace has an "access mode", which is stored in its manifest and set wh
 
 A principal's effective rights on an inode are the union of its grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
 
-A deletion root has no current binding, so while its deletion is recoverable, its tombstone's saved parent is used for that step of the walk. The walk stops at the root of an expired deletion, so the inodes that an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited.
+A deletion root has no current binding, so while its deletion is recoverable, its tombstone's saved parent is used for that step of the walk. The walk stops at the root of an expired deletion, so the inodes that an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited. A read by inode ID of an inode that an expired deletion hides, or whose ancestry is disconnected, returns `inode_not_found` before LoonFS evaluates any grant, so no principal can read the inode, an administrator included (see [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads)). A snapshot from before the expiry still shows the inode, and in an ACL namespace, the [API specification][api-spec] allows only an administrator to read it through the snapshot.
 
 The `update_access` operation replaces an inode's access row, and it appears in the change feed as an `access_changed` event. The [API specification][api-spec] defines that operation, and how reads, commits, and upload sessions are authorized against access rows.
 
@@ -580,7 +580,22 @@ A reader resolves a path from root inode `1`. It maps each component to its name
 
 A directory listing resolves the visible child bindings, and it uses committed revision metadata for file sizes and content-reference summaries. It MUST NOT fetch and verify every file's content object just to list a directory.
 
-A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly.
+A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly, so it can read a file that has no current path, such as a file under a recoverable deletion.
+
+A read by inode ID MUST return `inode_not_found`, the error for an unknown inode, when the inode's ancestry refuses the read, whether it reads the inode's entry, its revisions, its attributes, or its content. To check the ancestry, the reader starts at the inode, follows the current bound bindings upward, and stops at the first tombstone that hides the inode or one of those ancestors (see [File and subtree deletion](#16-file-and-subtree-deletion)):
+
+- If that tombstone's latest event is `expire`, the read returns `inode_not_found`.
+- If its latest event is `set`, the read is allowed, and the subject's rights are evaluated through the deletion's saved parent, as for any recoverable deletion (see [Access rows](#18-access-rows)).
+- If the walk reaches the root inode without meeting a tombstone, the read is allowed.
+- If the walk reaches an inode with no bound binding before it meets a tombstone, the ancestry is disconnected, and the read returns `inode_not_found`.
+
+The reader applies this rule before it evaluates any access grant, so every principal gets the same result, and it applies the rule from the `expire` event on, even while the inode's rows are still stored.
+
+For example, suppose `/old/draft.txt` is deleted at sequence 30, `/old` is deleted at sequence 40, and the namespace's writer expires the deletion of `/old` at sequence 61. At sequence 50, a read by inode of the revisions of `/old/notes.txt` returns them, and from sequence 61 on, it returns `inode_not_found`. The revisions of `/old/draft.txt` stay readable by inode, because the first tombstone above that file is its own, and that deletion is still recoverable. If a base compaction of the bindings group then removes the bindings under `/old` while the revisions group still stores the revisions of `/old/notes.txt`, the walk from `/old/notes.txt` finds no binding and no tombstone, so the read still returns `inode_not_found`.
+
+Why does a disconnected ancestry refuse the read? Every live inode has bound bindings up to the root inode, and every deleted inode has them up to its deletion's root, which has a tombstone, so a walk that finds neither the root inode nor a tombstone has found an inode that belongs to nothing the namespace can show. Base compactions remove an expired subtree's rows a family group at a time, so the bindings that lead to the expired root can be gone while the revisions below it are still stored, and the walk can then no longer reach the `expire` event.
+
+Why does a read by inode refuse an expired subtree whose rows are still stored? An expired deletion can't be undeleted, so no request needs those rows anymore. Refusing every read from the `expire` event on means that removing the rows, in whatever order the family groups are compacted, can't change what a read returns or who can read it. For example, if a read by inode still evaluated the grants inside the subtree, removing a directory's access row before the revisions below it would remove that directory's boundary, and principals that the boundary excluded could then read those revisions.
 
 ### 4.5 Content verification
 

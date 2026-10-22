@@ -934,6 +934,12 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds a trash scan bound after every deletion at `deletion_seq` or
+    /// below, which sorts before every row of a later deletion.
+    pub fn active_deletion_key_after_seq(deletion_seq: ChangeSeq) -> String {
+        format!("{ACTIVE_DELETION_ROW_PREFIX}{:020}", deletion_seq.0 + 1)
+    }
+
     /// Builds a trash scan bound after one deletion position.
     pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
         after_row_key(&active_deletion_row_key(

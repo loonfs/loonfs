@@ -1,9 +1,9 @@
 //! Authorizes reads and commits against the subject's effective rights.
 
 use crate::error::{CoreError, Result};
-use crate::metadata::access::effective_rights;
+use crate::metadata::access::{effective_rights, is_administrator};
 use crate::metadata::MetadataViewSession;
-use crate::metadata::MetadataVisibilityReads;
+use crate::metadata::{ancestry_allows_read, MetadataVisibilityReads};
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
@@ -142,6 +142,16 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
     }
 
     /// Requires `rights` on `inode_id`, plus `history` for a snapshot read.
+    ///
+    /// In an ACL namespace, a snapshot read of an inode that an expired
+    /// deletion hides at the head, or whose ancestry is disconnected there,
+    /// also requires an administrator, so any other subject gets the
+    /// not-found error that a live read gives
+    /// ([API section 6.8](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authorization-in-acl-namespaces)).
+    /// Base compactions remove the head's rows under an expired subtree a
+    /// family group at a time, so a boundary row can be gone while a grant
+    /// above it is still stored, and judging a non-administrator's rights on
+    /// those rows could widen them. The walk is [`ancestry_allows_read`].
     pub(crate) async fn require(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -151,21 +161,20 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
     ) -> Result<()> {
         if let Some(head) = self.at_head {
             let rights = rights.union(AccessRights::from_iter([AccessRight::History]));
-            require(
-                &self.authorizer,
-                &mut head.metadata_view().session(),
-                inode_id,
-                rights,
-                absence,
-            )
-            .await
+            let mut head = head.metadata_view().session();
+            if self.refuses_at_head(&mut head, inode_id).await? {
+                return Err(absence.not_found(inode_id));
+            }
+            require(&self.authorizer, &mut head, inode_id, rights, absence).await
         } else {
             require(&self.authorizer, session, inode_id, rights, absence).await
         }
     }
 
     /// Whether the subject holds `read` on `inode_id` (always for an
-    /// unrestricted namespace).
+    /// unrestricted namespace). For a snapshot read, the subject also needs
+    /// administrator rights when the inode's ancestry at the head refuses the
+    /// read, as [`Self::require`] describes.
     pub(crate) async fn can_read(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -177,10 +186,30 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         let mut rights = AccessRights::from_iter([AccessRight::Read]);
         let effective = if let Some(head) = self.at_head {
             rights = rights.union(AccessRights::from_iter([AccessRight::History]));
-            effective_rights(&mut head.metadata_view().session(), principals, inode_id).await?
+            let mut head = head.metadata_view().session();
+            if self.refuses_at_head(&mut head, inode_id).await? {
+                return Ok(false);
+            }
+            effective_rights(&mut head, principals, inode_id).await?
         } else {
             effective_rights(session, principals, inode_id).await?
         };
         Ok(rights.is_subset_of(effective))
+    }
+
+    /// Whether a snapshot read of `inode_id` is refused at the head, as
+    /// [`Self::require`] describes: the namespace is an ACL namespace, the
+    /// subject isn't an administrator, and the inode's ancestry at the head
+    /// refuses the read.
+    async fn refuses_at_head(
+        &self,
+        head: &mut MetadataViewSession<'_, '_, S>,
+        inode_id: InodeId,
+    ) -> Result<bool> {
+        let Authorizer::Subject { principals } = &self.authorizer else {
+            return Ok(false);
+        };
+        Ok(!is_administrator(head, principals).await?
+            && !ancestry_allows_read(head, inode_id).await?)
     }
 }

@@ -27,6 +27,7 @@ mod content_request_accounting;
 mod derived_paths;
 mod direct_put;
 mod directory_page_reads;
+mod expired_deletions;
 mod handles;
 mod handoff;
 mod immutable_view_inputs;
