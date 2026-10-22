@@ -71,6 +71,7 @@ mod trace;
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST,
+    SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
@@ -217,10 +218,11 @@ pub use handle::{
     Writable,
 };
 pub use metadata_cache::{
-    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_CACHED_OBJECT_BYTES,
+    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
+    SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES, DEFAULT_MAX_CACHED_OBJECT_BYTES,
     DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES, DEFAULT_MAX_CONTENT_OBJECT_BYTES,
     DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_WAL_OBJECT_BYTES,
-    DEFAULT_MAX_WAL_TAIL_BYTES,
+    DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
 };
 pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,

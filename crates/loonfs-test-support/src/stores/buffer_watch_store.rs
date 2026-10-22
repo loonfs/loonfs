@@ -133,6 +133,10 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

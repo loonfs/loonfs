@@ -93,6 +93,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
         "loonfs_segment_cache_gets_total",
         "loonfs_segment_cache_inserts_total",
         "loonfs_segment_cache_evictions_total",
+        "loonfs_segment_cache_rejections_total",
         "loonfs_segment_cache_filter_skips_total",
         "loonfs_segment_cache_filter_false_positives_total",
         "loonfs_wal_tail_cache_gets_total",

@@ -164,6 +164,10 @@ pub(crate) fn cloudflare_r2_with_credentials(
 }
 
 fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+    let location = match &config.endpoint_url {
+        Some(endpoint) => format!("{endpoint} {}", config.bucket),
+        None => config.bucket.clone(),
+    };
     let endpoint_url = config
         .endpoint_url
         .as_deref()
@@ -235,6 +239,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
+            location,
         },
         config.kind,
         ChecksumAlgorithm::Crc64nvme,
@@ -1066,7 +1071,10 @@ mod tests {
             client.clone(),
             Arc::new(one_attempt),
             client,
-            crate::ProviderObjectStoreConfig { key_prefix: None },
+            crate::ProviderObjectStoreConfig {
+                key_prefix: None,
+                location: "bucket".to_owned(),
+            },
             kind,
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
             crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),

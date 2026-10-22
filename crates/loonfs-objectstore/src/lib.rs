@@ -46,7 +46,7 @@ pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
     ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode, Result,
-    SharedObjectStore,
+    SharedObjectStore, StoreIdentity,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{

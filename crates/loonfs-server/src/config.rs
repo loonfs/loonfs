@@ -3,7 +3,7 @@
 
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::MetricsRecorder;
-use loonfs::{ExecutionBudget, MetadataCache};
+use loonfs::{ExecutionBudget, MetadataCache, SsdSegmentBlocks};
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
 use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
@@ -443,6 +443,67 @@ pub struct MetadataCacheConfig {
     pub max_wal_tail_bytes: Option<usize>,
     pub max_wal_object_bytes: Option<usize>,
     pub max_content_object_bytes: Option<usize>,
+    /// The SSD tier of the metadata segment cache. The server has no SSD
+    /// tier when the table is absent.
+    pub ssd: Option<MetadataCacheSsdConfig>,
+}
+
+/// The server's `[metadata_cache.ssd]` table: where the SSD tier of the
+/// metadata segment cache keeps its blocks, and how many bytes of blocks it
+/// keeps. Both settings are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataCacheSsdConfig {
+    /// The directory on the server's local SSD that the tier writes its
+    /// blocks to. The server creates it if needed.
+    pub directory: String,
+    /// The most bytes of blocks that the tier keeps on disk, for every
+    /// namespace that the server serves.
+    pub max_segment_bytes: NonZeroUsize,
+}
+
+impl MetadataCacheSsdConfig {
+    /// Opens the SSD tier in the configured directory, which reads the
+    /// names of the files that the directory already has.
+    pub(crate) async fn open(&self) -> Result<SsdSegmentBlocks, ServerConfigError> {
+        SsdSegmentBlocks::open(&self.directory, self.max_segment_bytes)
+            .await
+            .map_err(|error| {
+                self.invalid_directory(format!(
+                    "the ssd tier can't open {:?}: {error}",
+                    self.directory
+                ))
+            })
+    }
+
+    /// Creates the directory if it's missing, and checks that the server can
+    /// write a file in it, by writing and removing a probe file. This is the
+    /// SSD tier's part of `--check-config`.
+    pub(crate) fn check_directory(&self) -> Result<(), ServerConfigError> {
+        let directory = Path::new(&self.directory);
+        fs::create_dir_all(directory).map_err(|error| {
+            self.invalid_directory(format!(
+                "the ssd tier can't create {:?}: {error}",
+                self.directory
+            ))
+        })?;
+        let probe = directory.join("check-config.probe");
+        fs::write(&probe, b"probe")
+            .and_then(|()| fs::remove_file(&probe))
+            .map_err(|error| {
+                self.invalid_directory(format!(
+                    "the ssd tier can't write a file in {:?}: {error}",
+                    self.directory
+                ))
+            })
+    }
+
+    fn invalid_directory(&self, reason: String) -> ServerConfigError {
+        ServerConfigError::Field(ConfigFieldError::Invalid {
+            field: "metadata_cache.ssd.directory",
+            reason,
+        })
+    }
 }
 
 /// The server's `[grep]` table.
@@ -641,6 +702,9 @@ impl ServerConfig {
             }));
         }
         validate_non_empty("content_token_secret", self.content_token_secret.expose())?;
+        if let Some(ssd) = &self.metadata_cache.ssd {
+            validate_non_empty("metadata_cache.ssd.directory", &ssd.directory)?;
+        }
         self.store.validate()?;
 
         let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
@@ -713,6 +777,13 @@ const MIB: usize = 1024 * 1024;
 /// plus a quarter of the pools, which covers each of those peaks.
 const ALLOCATOR_HEADROOM_FLOOR: usize = 200 * MIB;
 
+// The label of the SSD tier's term in `fixed` states these three values.
+const _: () = assert!(
+    loonfs::SSD_WRITE_QUEUE_BYTES == 64 * MIB
+        && loonfs::ASSUMED_STORED_BLOCK_BYTES == 4 * 1024
+        && loonfs::SSD_INDEX_ENTRY_BYTES == 168
+);
+
 #[derive(Debug)]
 pub(crate) struct MemoryTerm {
     name: &'static str,
@@ -743,7 +814,7 @@ impl MemoryTerm {
 #[derive(Debug)]
 pub(crate) struct MemorySizing {
     limit: Option<MemoryTerm>,
-    fixed: [(&'static str, u128); 6],
+    fixed: [(&'static str, u128); 7],
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
@@ -774,14 +845,20 @@ impl MemorySizing {
         ]
     }
 
-    pub(crate) fn metadata_cache(&self) -> MetadataCache {
-        MetadataCache::builder()
+    /// Builds the metadata cache with the sized limits, and with `ssd` as
+    /// the SSD tier of its segment blocks if the config has one.
+    pub(crate) fn metadata_cache(&self, ssd: Option<SsdSegmentBlocks>) -> MetadataCache {
+        let builder = MetadataCache::builder()
             .max_segment_bytes(self.segment.bytes)
             .max_head_bytes(self.head.bytes)
             .max_wal_tail_bytes(self.wal_tail.bytes)
             .max_wal_object_bytes(self.wal_object.bytes)
-            .max_content_object_bytes(self.content_object.bytes)
-            .build()
+            .max_content_object_bytes(self.content_object.bytes);
+        match ssd {
+            Some(ssd) => builder.ssd_segment_blocks(ssd),
+            None => builder,
+        }
+        .build()
     }
 
     pub(crate) fn log(&self) {
@@ -877,6 +954,12 @@ impl ServerConfig {
             (
                 "completed upload sessions",
                 loonfs::DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES as u128,
+            ),
+            (
+                "ssd tier (64 MiB write queue + `metadata_cache.ssd.max_segment_bytes` / 4 KiB x 168 B)",
+                self.metadata_cache.ssd.as_ref().map_or(0, |ssd| {
+                    SsdSegmentBlocks::memory_bytes(ssd.max_segment_bytes) as u128
+                }),
             ),
         ];
         let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
@@ -1098,7 +1181,8 @@ root = "unused"
                     201_326_592,
                     134_217_728,
                     536_870_912,
-                    33_554_432
+                    33_554_432,
+                    0
                 ]
             );
             assert_eq!(memory.headroom, 719_742_566);
@@ -1195,7 +1279,8 @@ max_cache_bytes = 0
                 67_108_864,
                 201_326_592,
                 134_217_728,
-                33_554_432
+                33_554_432,
+                0
             ]
         );
         assert_eq!(
@@ -1221,7 +1306,7 @@ max_cache_bytes = 0
     }
 
     /// The terms that the error for a failed memory check lists.
-    const EVERY_MEMORY_TERM: [&str; 22] = [
+    const EVERY_MEMORY_TERM: [&str; 23] = [
         "memory_limit_bytes",
         "process",
         "max_connections",
@@ -1231,6 +1316,7 @@ max_cache_bytes = 0
         "max_concurrent_compactions",
         "max_concurrent_content_writes",
         "completed upload sessions",
+        "metadata_cache.ssd.max_segment_bytes",
         "headroom",
         "managed",
         "268435456",
@@ -2493,6 +2579,7 @@ root = "/tmp/loonfs-server"
                 max_wal_tail_bytes: Some(4096),
                 max_wal_object_bytes: Some(2048),
                 max_content_object_bytes: Some(3072),
+                ssd: None,
             }
         );
     }
@@ -2527,8 +2614,93 @@ root = "/tmp/loonfs-server"
                 max_wal_tail_bytes: Some(0),
                 max_wal_object_bytes: Some(0),
                 max_content_object_bytes: Some(0),
+                ssd: None,
             }
         );
+    }
+
+    /// Checks that a config without `[metadata_cache.ssd]` has no SSD tier,
+    /// that the table needs both of its settings, and that the server
+    /// rejects a zero budget and an empty directory.
+    #[test]
+    fn the_ssd_table_is_optional_and_needs_both_settings() {
+        let config = |ssd: &str| {
+            write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+{ssd}
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+            ))
+        };
+        let absent = load_server_config(config("")).expect("no ssd table");
+        assert_eq!(absent.metadata_cache.ssd, None);
+
+        let present = load_server_config(config(
+            "[metadata_cache.ssd]\ndirectory = \"/var/lib/loonfs/ssd\"\nmax_segment_bytes = 1073741824",
+        ))
+        .expect("an ssd table with both settings");
+        assert_eq!(
+            present.metadata_cache.ssd,
+            Some(super::MetadataCacheSsdConfig {
+                directory: "/var/lib/loonfs/ssd".to_owned(),
+                max_segment_bytes: NonZeroUsize::new(1 << 30).expect("nonzero"),
+            })
+        );
+
+        for (ssd, field, reason) in [
+            (
+                "max_segment_bytes = 1073741824",
+                "directory",
+                "missing field",
+            ),
+            ("directory = \"/ssd\"", "max_segment_bytes", "missing field"),
+            (
+                "directory = \"/ssd\"\nmax_segment_bytes = 0",
+                "max_segment_bytes",
+                "expected a nonzero usize",
+            ),
+        ] {
+            match load_server_config(config(&format!("[metadata_cache.ssd]\n{ssd}"))) {
+                Err(ServerConfigError::Decode(message)) => assert!(
+                    message.contains(field) && message.contains(reason),
+                    "the decode error should identify `{field}` and say why: {message}"
+                ),
+                other => panic!("expected a decode error for `{field}`, got {other:?}"),
+            }
+        }
+        let empty = config("[metadata_cache.ssd]\ndirectory = \" \"\nmax_segment_bytes = 1");
+        assert_missing_field(
+            load_server_config(empty).expect_err("an empty directory"),
+            "metadata_cache.ssd.directory",
+        );
+    }
+
+    /// Checks that the SSD tier adds its write queue and the estimated
+    /// memory of its index to `fixed`, which the pools are sized after.
+    #[test]
+    fn the_ssd_tier_adds_its_write_queue_and_index_to_fixed() {
+        let without = memory_config("memory_limit_bytes = 8589934592");
+        let with = memory_config(
+            "memory_limit_bytes = 8589934592\n[metadata_cache.ssd]\ndirectory = \"/ssd\"\nmax_segment_bytes = 10737418240",
+        );
+        let without = without.memory_sizing(None).expect("sized without a tier");
+        let with = with.memory_sizing(None).expect("sized with a tier");
+        let (name, bytes) = with.fixed[6];
+        assert!(
+            name.contains("metadata_cache.ssd.max_segment_bytes"),
+            "{name}"
+        );
+        // 64 MiB of queue, and 10 GiB / 4 KiB = 2,621,440 entries of 168 B.
+        assert_eq!(bytes, 67_108_864 + 2_621_440 * 168);
+        assert_eq!(without.fixed[6].1, 0);
+        assert!(with.managed < without.managed);
     }
 
     #[test]

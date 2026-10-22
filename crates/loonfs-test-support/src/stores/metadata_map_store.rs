@@ -100,6 +100,10 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
             .unwrap_or_else(|| self.inner.checksum_algorithm())
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         Ok(self
             .inner

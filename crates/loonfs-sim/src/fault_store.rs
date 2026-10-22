@@ -221,6 +221,10 @@ where
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::Head, key);
         let result = self.inner.head(key).await;

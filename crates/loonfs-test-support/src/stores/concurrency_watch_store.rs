@@ -119,6 +119,10 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let _in_flight = self.enter(key, &self.reads).await;
         self.inner.head(key).await

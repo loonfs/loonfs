@@ -409,6 +409,10 @@ where
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<crate::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.head(key)).await;

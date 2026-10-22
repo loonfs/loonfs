@@ -140,6 +140,24 @@ memory_limit_bytes = 4294967296
 # local_fs store.
 # Clients gate on `filesystem.uploads.direct_put` in the capability document.
 
+# Optional SSD tier of the metadata segment cache. Omit the table and the
+# server keeps metadata blocks in memory alone, so a block that isn't in
+# memory costs a GET. With the table, the server also writes every block
+# that the cache inserts to `directory`, and a read that doesn't find a
+# block in memory, including the first read after a restart, reads the
+# block from disk.
+#
+# `max_segment_bytes` is the tier's budget for blocks on disk, for every
+# namespace the server serves. The tier charges each block at least 4 KiB,
+# so a tier of smaller blocks uses less disk. Both settings are required.
+# The directory contains nothing that the server depends on, so you can
+# empty it at any time. The tier adds its 64 MiB write queue and its index
+# to `fixed` in the sizing formula: 168 bytes for each 4 KiB of
+# `max_segment_bytes`, so about 484 MiB for the 10 GiB below.
+#[metadata_cache.ssd]
+#directory = "/var/lib/loonfs/ssd"
+#max_segment_bytes = 10737418240
+
 # Omit the `[grep]` table and this server composes no grep at all: uniform
 # `not_supported` responses, and no `query.grep` feature or limits advertised.
 # A `[grep]` table must set `mode`.

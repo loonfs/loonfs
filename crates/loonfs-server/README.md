@@ -71,13 +71,13 @@ To validate a config without starting the server, run:
 loonfs-server --config /etc/loonfs/server.toml --check-config
 ```
 
-The command prints one line and exits. It checks the config fields and the TLS certificate and key. The check doesn't bind the configured address or perform any object-store operation, but for a local filesystem store, it does create the store's root directory.
+The command prints one line and exits. It checks the config fields and the TLS certificate and key. With an SSD tier (the `[metadata_cache.ssd]` table), it also creates the tier's directory if it's missing, and checks that the server can write a file in it. The check doesn't bind the configured address or perform any object-store operation, but for a local filesystem store, it does create the store's root directory.
 
 If your container host can't mount a config file, you can pass the same TOML in `LOONFS_SERVER_CONFIG_TOML` and leave out `--config`. Keep credentials and the two server secrets in their own environment variables instead of putting them in the inline TOML.
 
 ## Deploying it
 
-Read [Self-hosting LoonFS](docs/self-hosting.md) for the topology, a minimal config, the probes, logging, upgrades, and what a one-writer deployment doesn't do.
+Read [Self-hosting LoonFS](docs/self-hosting.md) for the topology, a minimal config, the probes, logging, the SSD tier of the metadata cache, upgrades, and what a one-writer deployment doesn't do.
 
 If your application submits filesystem changes on behalf of its users, read [Actor attribution](docs/actor-attribution.md).
 

@@ -1,5 +1,8 @@
 //! The block cache that every read of a metadata segment's data, index, and
 //! filter blocks goes through, and its memory implementation.
+//!
+//! The `loonfs` crate has a second implementation, which also keeps blocks
+//! on local SSD, so the interface and the memory implementation are public.
 
 use super::cache::{
     DecodedMetadataSegmentBlock, MetadataSegmentCacheKey, ObjectStoreScope, SharedSegmentBlocks,
@@ -9,21 +12,18 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use loonfs_types::format::segment_blocks::BlockHandle;
+use std::future::Future;
 use std::sync::Arc;
 
 /// A block that a read loaded from the store, with its stored bytes (the
 /// bytes of the block's section, exactly as the segment stores them).
-pub(super) struct LoadedSegmentBlock {
-    pub(super) block: DecodedMetadataSegmentBlock,
-    #[allow(
-        dead_code,
-        reason = "the memory implementation keeps decoded blocks, so it drops the stored bytes"
-    )]
-    pub(super) stored: Bytes,
+pub struct LoadedSegmentBlock {
+    pub block: DecodedMetadataSegmentBlock,
+    pub stored: Bytes,
 }
 
 /// The load of one block from the store, which a block cache runs on a miss.
-pub(super) type SegmentBlockLoad<'a> = BoxFuture<'a, Result<LoadedSegmentBlock, ManifestLoadError>>;
+pub type SegmentBlockLoad<'a> = BoxFuture<'a, Result<LoadedSegmentBlock, ManifestLoadError>>;
 
 /// The cache of metadata segment blocks, which every read of a data, index,
 /// or filter block goes through.
@@ -36,10 +36,10 @@ pub(super) type SegmentBlockLoad<'a> = BoxFuture<'a, Result<LoadedSegmentBlock, 
 /// them against the handle when it reads them back. Manifests, which the
 /// shared segment blocks also keep, don't go through this cache.
 #[async_trait]
-pub(super) trait SegmentBlockCache: Send + Sync {
+pub trait SegmentBlockCache: Send + Sync {
     /// Returns the block under `key` and marks it recently used, or returns
     /// `None` if the cache doesn't keep it.
-    fn get_block(
+    async fn get_block(
         &self,
         key: &MetadataSegmentCacheKey,
         handle: &BlockHandle,
@@ -73,20 +73,46 @@ pub(super) trait SegmentBlockCache: Send + Sync {
 /// It keeps decoded blocks, which LoonFS checked against their handles when
 /// it loaded them, so it doesn't use the handle on a get or the stored bytes
 /// on an insert.
-pub(super) struct MemorySegmentBlocks {
+pub struct MemorySegmentBlocks {
     shared: Arc<SharedSegmentBlocks>,
     scope: ObjectStoreScope,
 }
 
 impl MemorySegmentBlocks {
-    pub(super) fn new(shared: Arc<SharedSegmentBlocks>, scope: ObjectStoreScope) -> Self {
+    /// Returns the memory implementation over `shared`, under `scope`.
+    pub fn new(shared: Arc<SharedSegmentBlocks>, scope: ObjectStoreScope) -> Self {
         Self { shared, scope }
+    }
+
+    /// Returns the block under `key`, or awaits `load` and inserts the block
+    /// that it returns, like [`SegmentBlockCache::get_or_load_block`], and
+    /// calls `hit` with the block when it's already in memory.
+    ///
+    /// Concurrent callers of one key share one run of `load`. An
+    /// implementation with a second tier under this one runs its own `load`
+    /// (from that tier, and then from the store) inside that single flight,
+    /// and uses `hit` to mark the block recently used in its tier too.
+    pub async fn get_or_load_with_hit<H, F, Fut>(
+        &self,
+        key: &MetadataSegmentCacheKey,
+        hit: H,
+        load: F,
+    ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError>
+    where
+        H: FnOnce(&DecodedMetadataSegmentBlock),
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<DecodedMetadataSegmentBlock, ManifestLoadError>>,
+    {
+        self.shared
+            .blocks
+            .get_or_load_with_hit(&(self.scope, key.clone()), hit, load)
+            .await
     }
 }
 
 #[async_trait]
 impl SegmentBlockCache for MemorySegmentBlocks {
-    fn get_block(
+    async fn get_block(
         &self,
         key: &MetadataSegmentCacheKey,
         _handle: &BlockHandle,
@@ -109,11 +135,7 @@ impl SegmentBlockCache for MemorySegmentBlocks {
         _handle: &BlockHandle,
         load: SegmentBlockLoad<'_>,
     ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
-        self.shared
-            .blocks
-            .get_or_load(&(self.scope, key.clone()), move || async move {
-                Ok(load.await?.block)
-            })
+        self.get_or_load_with_hit(key, |_| {}, move || async move { Ok(load.await?.block) })
             .await
     }
 }

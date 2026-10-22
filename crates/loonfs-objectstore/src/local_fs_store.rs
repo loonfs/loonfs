@@ -14,8 +14,8 @@ use crate::keyspace::{
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    AssemblySource, ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoreIdentity,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -41,6 +41,9 @@ const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
+    /// The provider, the absolute root, and the key prefix, which another
+    /// process that opens the same root and prefix finds the same.
+    identity: StoreIdentity,
     checksum_algorithm: ChecksumAlgorithm,
     /// Logical prefix every key is confined beneath, or `None` for the root.
     key_prefix: Option<String>,
@@ -83,10 +86,22 @@ impl LocalFsStore {
                 root.display()
             ))
         })?;
+        let absolute_root = std::fs::canonicalize(&root).map_err(|err| {
+            ObjectStoreError::Configuration(format!(
+                "failed to resolve store root `{}`: {err}",
+                root.display()
+            ))
+        })?;
+        let key_prefix = normalize_key_prefix(key_prefix)?;
         Ok(Self {
             root,
+            identity: StoreIdentity {
+                provider: ConfiguredObjectStoreKind::LocalFs.as_str(),
+                location: absolute_root.to_string_lossy().into_owned(),
+                key_prefix: key_prefix.clone(),
+            },
             checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            key_prefix: normalize_key_prefix(key_prefix)?,
+            key_prefix,
             write_lock: Mutex::new(()),
             #[cfg(test)]
             largest_staged_chunk: std::sync::atomic::AtomicU64::new(0),
@@ -536,6 +551,10 @@ impl LocalFsStore {
 impl ObjectStore for LocalFsStore {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
         self.checksum_algorithm
+    }
+
+    fn identity(&self) -> Option<StoreIdentity> {
+        Some(self.identity.clone())
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {

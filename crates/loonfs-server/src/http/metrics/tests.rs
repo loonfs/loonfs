@@ -174,7 +174,8 @@ fn a_scrape_reports_positive_process_resident_bytes() {
 }
 
 /// Checks that each field of the cache stats renders into its own series,
-/// under the exported name and labels that operators scrape.
+/// under the exported name and labels that operators scrape, and that each
+/// tier of the segment cache reports under its `tier` label.
 #[test]
 fn each_cache_stats_field_renders_into_its_own_series() {
     let mut rendered = String::new();
@@ -185,9 +186,18 @@ fn each_cache_stats_field_renders_into_its_own_series() {
             segment_misses: 2,
             segment_inserts: 3,
             segment_evictions: 4,
+            segment_rejections: 37,
             segment_filter_skips: 5,
             segment_filter_false_positives: 6,
             segment_bytes: 7,
+            segment_ssd: Some(SsdSegmentBlocksStats {
+                hits: 38,
+                misses: 39,
+                inserts: 40,
+                evictions: 41,
+                rejections: 42,
+                stored_bytes: 43,
+            }),
             head_hits: 8,
             head_misses: 9,
             wal_tail_hits: 10,
@@ -228,13 +238,20 @@ fn each_cache_stats_field_renders_into_its_own_series() {
     );
 
     let expected = [
-        "loonfs_segment_cache_gets_total{result=\"hit\"} 1",
-        "loonfs_segment_cache_gets_total{result=\"miss\"} 2",
-        "loonfs_segment_cache_inserts_total 3",
-        "loonfs_segment_cache_evictions_total 4",
+        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"} 1",
+        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"miss\"} 2",
+        "loonfs_segment_cache_inserts_total{tier=\"memory\"} 3",
+        "loonfs_segment_cache_evictions_total{tier=\"memory\"} 4",
+        "loonfs_segment_cache_rejections_total{tier=\"memory\"} 37",
         "loonfs_segment_cache_filter_skips_total 5",
         "loonfs_segment_cache_filter_false_positives_total 6",
         "loonfs_segment_cache_retained_decoded_bytes 7",
+        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"hit\"} 38",
+        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"miss\"} 39",
+        "loonfs_segment_cache_inserts_total{tier=\"ssd\"} 40",
+        "loonfs_segment_cache_evictions_total{tier=\"ssd\"} 41",
+        "loonfs_segment_cache_rejections_total{tier=\"ssd\"} 42",
+        "loonfs_segment_cache_retained_stored_bytes 43",
         "loonfs_head_cache_gets_total{result=\"hit\"} 8",
         "loonfs_head_cache_gets_total{result=\"miss\"} 9",
         "loonfs_wal_tail_cache_gets_total{result=\"hit\"} 10",
@@ -279,4 +296,15 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         expected.len(),
         "one series for each exported field"
     );
+}
+
+/// Checks that a cache without an SSD tier renders no `tier="ssd"` series
+/// and no stored-bytes gauge, so a dashboard doesn't read an idle tier.
+#[test]
+fn a_cache_without_an_ssd_tier_renders_only_the_memory_tier() {
+    let mut rendered = String::new();
+    render_metadata_cache(&mut rendered, &MetadataCacheStats::default());
+    assert!(rendered.contains("loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"} 0"));
+    assert!(!rendered.contains("tier=\"ssd\""), "{rendered}");
+    assert!(!rendered.contains("loonfs_segment_cache_retained_stored_bytes"));
 }
