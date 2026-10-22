@@ -16,6 +16,11 @@ use std::sync::Arc;
 
 /// When the worker runs the session's next expiry step, while the session
 /// has deletions to expire.
+///
+/// After a failed step the engine reports no expiry due until the session
+/// has published some commits of its own (see
+/// [`NamespaceCommitEngine::expiry_due`](loonfs_core::publish::NamespaceCommitEngine::expiry_due)),
+/// so the turn only orders steps against queued items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExpiryTurn {
     /// Before the next queued item.
@@ -23,19 +28,6 @@ pub(super) enum ExpiryTurn {
     /// After the next queued item, because the worker's last unit was a
     /// step. With nothing queued, the step runs at once.
     AfterItem,
-    /// Not again in this worker's run, because a step failed. The next
-    /// worker tries again.
-    Paused,
-}
-
-impl ExpiryTurn {
-    /// The turn after the worker publishes a queued item.
-    pub(super) fn after_item(self) -> Self {
-        match self {
-            Self::Paused => Self::Paused,
-            Self::BeforeItem | Self::AfterItem => Self::BeforeItem,
-        }
-    }
 }
 
 /// One unit of the worker's work.
@@ -71,7 +63,8 @@ impl NamespacePublisher {
     ///
     /// The step commits nothing that a caller waits for, so a panic needs no
     /// delivery. It drops the position, because the panic can follow the WAL
-    /// put, and the worker continues with its queue.
+    /// put, and it counts as a failed step, so the session tries again after
+    /// its next publications. The worker continues with its queue.
     pub(super) async fn publish_expiry_step(&self) -> ExpiryTurn {
         if let Ok(turn) = AssertUnwindSafe(self.publish_expiry_step_through_engine())
             .catch_unwind()
@@ -82,17 +75,23 @@ impl NamespacePublisher {
         self.record_panic();
         if let Some(engine) = self.lock_engine().await.engine.as_mut() {
             engine.invalidate_projection();
+            engine.record_failed_expiry_step();
         }
-        ExpiryTurn::Paused
+        ExpiryTurn::BeforeItem
     }
 
     async fn publish_expiry_step_through_engine(&self) -> ExpiryTurn {
+        let mut slot = self.lock_engine().await;
         let Some(writer) = self.writer.upgrade() else {
-            return ExpiryTurn::Paused;
+            // No step can publish once the writer is gone, and a failed step
+            // keeps the worker from trying again until a publication lands.
+            if let Some(engine) = slot.engine.as_mut() {
+                engine.record_failed_expiry_step();
+            }
+            return ExpiryTurn::BeforeItem;
         };
         let context = self.runtime_core.mutation_context(&writer.identity);
         let batch = Deadline::start(Arc::clone(&self.timer));
-        let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
         let store = self.runtime_core.store();
         // Boxed for the same type-recursion depth as the batch publish.
@@ -115,8 +114,8 @@ impl NamespacePublisher {
             self.namespace_id,
             tracing::Level::WARN,
             error = %crate::Error::Core(error).public_message(),
-            "deletion expiry step failed; the next worker or position move tries again"
+            "deletion expiry step failed; the session tries again after its next publications"
         );
-        ExpiryTurn::Paused
+        ExpiryTurn::BeforeItem
     }
 }
