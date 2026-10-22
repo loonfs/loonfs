@@ -67,25 +67,28 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         .await
         .expect("delete directory");
     writer.shutdown().await.expect("writer shutdown");
-    NamespaceCommitEngine::new(namespace_id, Arc::new(tokio::sync::Semaphore::new(32)))
-        .publish_expiry(
-            store,
-            CommitId::generate(),
-            vec![ExpiredDeletion {
-                inode_id: inodes[2],
-                deletion_seq: deletion.committed_seq,
-            }],
-            &MutationContext {
-                writer_id: writer_id("expiry-writer"),
-                now_ms: 1_000,
-            },
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("expire the deletion");
+    NamespaceCommitEngine::new(
+        namespace_id,
+        Arc::new(loonfs_core::test_support::content_writes()),
+    )
+    .publish_expiry(
+        store,
+        CommitId::generate(),
+        vec![ExpiredDeletion {
+            inode_id: inodes[2],
+            deletion_seq: deletion.committed_seq,
+        }],
+        &MutationContext {
+            writer_id: writer_id("expiry-writer"),
+            now_ms: 1_000,
+        },
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("expire the deletion");
     (
         public_inode_id::encode(inodes[0]),
         public_inode_id::encode(inodes[1]),

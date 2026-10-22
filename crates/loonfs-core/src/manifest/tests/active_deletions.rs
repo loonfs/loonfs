@@ -326,7 +326,7 @@ async fn expire<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::Commit, CoreError> {
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_expiry(
         store,
@@ -1292,7 +1292,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
 
         let undelete = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            std::sync::Arc::new(crate::test_support::content_writes()),
         )
         .publish_batch(
             &store,
@@ -1368,7 +1368,7 @@ async fn the_change_feed_reports_an_expiry_as_a_deletion_expired_event_by_loonfs
     // its receipt, though the deletion is no longer recoverable.
     let replayed = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        std::sync::Arc::new(crate::test_support::content_writes()),
     )
     .publish_expiry(
         &store,

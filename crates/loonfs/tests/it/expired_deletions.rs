@@ -3,15 +3,15 @@
 
 use loonfs::{
     AccessState, ChangeSeq, CommitId, CreateNamespaceOptions, CreateSnapshotOptions,
-    DeleteDirectoryBehavior, DeleteOptions, ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadOnly,
-    RevisionNo, SharedObjectStore, StatOptions, Writable,
+    DeleteDirectoryBehavior, DeleteOptions, ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt,
+    ReadOnly, RevisionNo, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::publish::NamespaceCommitEngine;
 use loonfs_core::time::Deadline;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_test_support::ids::{first_page, namespace_id, test_actor, writer_id};
+use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_types::{
     AccessGrants, AccessRight, AttributeInclusion, ExpiredDeletion, NamespaceAccess, NamespaceId,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -29,7 +29,7 @@ async fn expire(
 ) {
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        Arc::new(tokio::sync::Semaphore::new(32)),
+        Arc::new(loonfs_core::test_support::content_writes()),
     )
     .publish_expiry(
         store,
@@ -108,7 +108,7 @@ async fn reads_by_inode(
             code(
                 namespace
                     .list_file_revisions_by_inode(inode_id)
-                    .page(first_page())
+                    .page()
                     .await,
             ),
         ),
@@ -238,7 +238,7 @@ async fn history_reads(
     snapshot_id: &PinId,
 ) -> Vec<(String, [Result<(), ErrorCode>; 4])> {
     let at_snapshot = StatOptions {
-        snapshot_id: Some(snapshot_id.clone()),
+        at: ReadAt::Snapshot(snapshot_id.clone()),
         ..StatOptions::default()
     };
     let mut outcomes = Vec::new();
@@ -250,7 +250,7 @@ async fn history_reads(
                 code(
                     namespace
                         .list_file_revisions_by_inode(inode_id)
-                        .page(first_page())
+                        .page()
                         .await,
                 ),
                 code(
@@ -429,15 +429,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
         let reader = reader(&store).await.with_subject(admin.clone());
         let trash = |namespace_id: &NamespaceId| {
             let namespace = reader.namespace(namespace_id);
-            async move {
-                deletion_seqs(
-                    namespace
-                        .list_trash()
-                        .page(first_page())
-                        .await
-                        .expect("list trash"),
-                )
-            }
+            async move { deletion_seqs(namespace.list_trash().page().await.expect("list trash")) }
         };
         assert_eq!(
             trash(&fork_id).await,

@@ -323,7 +323,7 @@ async fn a_maximum_expiry_encodes_within_its_estimate() {
     let plan = session
         .prepare_commit(
             &store,
-            &tokio::sync::Semaphore::new(32),
+            &crate::test_support::content_writes(),
             &candidate,
             candidate
                 .semantic_identity(&namespace_id)
