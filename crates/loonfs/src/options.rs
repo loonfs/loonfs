@@ -14,9 +14,10 @@ use std::num::NonZeroU64;
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    ReadAt, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListFileRevisionsOptions, ListOptions,
+    ListTrashOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -106,8 +107,8 @@ pub struct CreateSnapshotOptions {
 
 /// Options for a direct download.
 ///
-/// The client's `DownloadOptions` also has `snapshot_id`, which this one does
-/// not need because a snapshot is read through its own read view.
+/// The client's `DownloadOptions` can also read a snapshot, which this one
+/// doesn't need because a snapshot is read through its own read view.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// The first byte the download reads, for a caller that already holds
@@ -116,6 +117,9 @@ pub struct DownloadOptions {
     /// the end answers `invalid_request`; a revision of zero bytes takes only
     /// 0.
     pub start_offset: u64,
+    /// How recently the read confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 /// Options for a streaming file read.

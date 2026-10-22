@@ -10,8 +10,8 @@ use super::handlers_uploads::{
 };
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, parse_boolean_query_param,
-    parse_include_attributes, parse_public_ordinal, parse_read_at, parse_revision_no,
-    required_query_param,
+    parse_consistency, parse_include_attributes, parse_public_ordinal, parse_read_at,
+    parse_revision_no, required_query_param,
 };
 #[cfg(feature = "openapi")]
 use super::query_params::{
@@ -24,8 +24,9 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    ChangeSeq, Consistency, DownloadOptions, ErrorCode, InodeId, ListChangesOptions, ListOptions,
-    Namespace, PinId, ReadAt, ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
+    ChangeSeq, Consistency, DownloadOptions, ErrorCode, InodeId, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, Namespace, PinId, ReadAt,
+    ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -54,6 +55,8 @@ pub(super) struct PathPageQuery {
     path: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<String>,
 }
 
 /// The directory-listing query. These fields are repeated because
@@ -77,6 +80,16 @@ pub(super) struct ListPathPageQuery {
 pub(super) struct PageQuery {
     pub(super) limit: Option<String>,
     pub(super) cursor: Option<String>,
+}
+
+/// The query of a listing of the live head that has no other parameters.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LivePageQuery {
+    pub(super) limit: Option<String>,
+    pub(super) cursor: Option<String>,
+    pub(super) consistency: Option<String>,
+    pub(super) max_staleness_ms: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -103,8 +116,7 @@ pub(super) struct ChangesQuery {
 /// namespace with the request's consistency.
 ///
 /// A handler builds a read's options without `at`, and the target sets `at`
-/// for a live read. A download has no consistency setting, so a download's
-/// live target has none.
+/// for a live read.
 pub(super) enum ReadTarget {
     Snapshot(Box<ReadView>),
     Live(Namespace<ReadOnly>, Option<Consistency>),
@@ -252,14 +264,20 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
             Self::Snapshot(view) => view.create_download_with_options(path, options).await,
-            Self::Live(namespace, _) => match revision_no {
-                Some(revision_no) => {
-                    namespace
-                        .create_revision_download_with_options(path, revision_no, options)
-                        .await
+            Self::Live(namespace, consistency) => {
+                let options = DownloadOptions {
+                    consistency: *consistency,
+                    ..*options
+                };
+                match revision_no {
+                    Some(revision_no) => {
+                        namespace
+                            .create_revision_download_with_options(path, revision_no, &options)
+                            .await
+                    }
+                    None => namespace.create_download_with_options(path, &options).await,
                 }
-                None => namespace.create_download_with_options(path, options).await,
-            },
+            }
         }
     }
 
@@ -273,9 +291,15 @@ impl ReadTarget {
                 view.create_download_by_inode_with_options(inode_id, options)
                     .await
             }
-            Self::Live(namespace, _) => {
+            Self::Live(namespace, consistency) => {
                 namespace
-                    .create_download_by_inode_with_options(inode_id, options)
+                    .create_download_by_inode_with_options(
+                        inode_id,
+                        &DownloadOptions {
+                            consistency: *consistency,
+                            ..*options
+                        },
+                    )
                     .await
             }
         }
@@ -515,7 +539,9 @@ pub(super) async fn get_file_content(
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
@@ -531,13 +557,19 @@ pub(super) async fn list_trash(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppQuery(query): AppQuery<PageQuery>,
+    AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
+    let options = ListTrashOptions {
+        consistency: parse_consistency(
+            query.consistency.as_deref(),
+            query.max_staleness_ms.as_deref(),
+        )?,
+    };
     let response = namespace
-        .list_trash()
+        .list_trash_with_options(&options)
         .page_limit(effective_page_limit(query.limit)?)
         .cursor(checked_cursor::<TrashPageCursor>(query.cursor)?)
         .page()
@@ -567,7 +599,9 @@ pub(super) async fn list_trash(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path of the file."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
+            ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -589,8 +623,14 @@ pub(super) async fn list_file_revisions(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
+    let options = ListFileRevisionsOptions {
+        consistency: parse_consistency(
+            query.consistency.as_deref(),
+            query.max_staleness_ms.as_deref(),
+        )?,
+    };
     let response = namespace
-        .list_file_revisions(&path)
+        .list_file_revisions_with_options(&path, &options)
         .page_limit(effective_page_limit(query.limit)?)
         .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
         .page()

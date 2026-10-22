@@ -818,6 +818,17 @@
         "additionalProperties": false,
         "description": "The options for downloading a file inode's current revision.",
         "properties": {
+          "consistency": {
+            "$ref": "#/components/schemas/ReadConsistency",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`."
+          },
+          "max_staleness_ms": {
+            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "format": "int64",
+            "maximum": 1155000,
+            "minimum": 0,
+            "type": "integer"
+          },
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
             "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured."
@@ -871,6 +882,17 @@
         "additionalProperties": false,
         "description": "A request to download a file by path, and optionally a revision.",
         "properties": {
+          "consistency": {
+            "$ref": "#/components/schemas/ReadConsistency",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`."
+          },
+          "max_staleness_ms": {
+            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "format": "int64",
+            "maximum": 1155000,
+            "minimum": 0,
+            "type": "integer"
+          },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "The absolute path of the file to read."
@@ -957,6 +979,17 @@
         "additionalProperties": false,
         "description": "The options for downloading one retained revision of an inode.",
         "properties": {
+          "consistency": {
+            "$ref": "#/components/schemas/ReadConsistency",
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness,\nand `strong` confirms the head before the read."
+          },
+          "max_staleness_ms": {
+            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "format": "int64",
+            "maximum": 1155000,
+            "minimum": 0,
+            "type": "integer"
+          },
           "start_offset": {
             "description": "The first byte that the grant reads. It defaults to 0 and must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
             "format": "int64",
@@ -3670,6 +3703,14 @@
         "description": "The ID of one run of the store contract probe.\n\nThe probe stores its temporary objects under a key prefix that includes this ID.",
         "example": "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b",
         "pattern": "^probe_[0-9a-f]{32}$",
+        "type": "string"
+      },
+      "ReadConsistency": {
+        "description": "How recently a live read confirms the namespace head, without a maximum\nstaleness.\n\nA runtime's default consistency and the `consistency` field of a download\nrequest take one of these values. `eventual` reads at the head that was\nconfirmed last while that confirmation is younger than the maximum\nstaleness, and `strong` confirms the head before the read.",
+        "enum": [
+          "eventual",
+          "strong"
+        ],
         "type": "string"
       },
       "RetainedCandidates": {
@@ -6519,6 +6560,32 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "eventual",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6627,6 +6694,32 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "eventual",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -7655,6 +7748,32 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "eventual",
+              "enum": [
+                "strong",
+                "eventual"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],

@@ -5,11 +5,11 @@ use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::query_params::parse_revision_no;
+use super::query_params::{live_consistency, parse_revision_no, read_at};
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{DownloadOptions, ReadAt};
+use loonfs::DownloadOptions;
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
@@ -68,16 +68,18 @@ pub(super) async fn create_download(
         request.revision_no,
         "/revision_no",
     )?;
-    let target = read_target(
-        runtime.namespace(&namespace_id),
-        ReadAt::from(request.snapshot_id),
-        "/snapshot_id",
+    let at = read_at(
+        request.snapshot_id,
+        request.consistency,
+        request.max_staleness_ms,
     )
-    .await?;
+    .map_err(with_consistency_field_params)?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "/snapshot_id").await?;
     let issuer = direct_get_issuer(&state)?;
 
     let options = DownloadOptions {
         start_offset: request.start_offset,
+        ..DownloadOptions::default()
     };
     let download = target
         .create_download(request.path.as_str(), request.revision_no, &options)
@@ -138,15 +140,17 @@ pub(super) async fn create_download_by_inode(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let target = read_target(
-        runtime.namespace(&namespace_id),
-        ReadAt::from(request.snapshot_id),
-        "/snapshot_id",
+    let at = read_at(
+        request.snapshot_id,
+        request.consistency,
+        request.max_staleness_ms,
     )
-    .await?;
+    .map_err(with_consistency_field_params)?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "/snapshot_id").await?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         start_offset: request.start_offset,
+        ..DownloadOptions::default()
     };
     let download = target
         .create_download_by_inode(inode_id, &options)
@@ -201,9 +205,12 @@ pub(super) async fn create_revision_download_by_inode(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
+    let consistency = live_consistency(request.consistency, request.max_staleness_ms)
+        .map_err(with_consistency_field_params)?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         start_offset: request.start_offset,
+        consistency,
     };
     let target = runtime
         .namespace(&namespace_id)
@@ -214,6 +221,14 @@ pub(super) async fn create_revision_download_by_inode(
                 .with_body_field_param("start_offset")
         })?;
     inode_download_response(issuer, namespace_id, target).await
+}
+
+/// Reports a rejected `consistency` or `max_staleness_ms` as the JSON
+/// Pointer of the body field.
+fn with_consistency_field_params(error: ApiResponseError) -> ApiResponseError {
+    error
+        .with_body_field_param("consistency")
+        .with_body_field_param("max_staleness_ms")
 }
 
 async fn inode_download_response(

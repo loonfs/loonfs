@@ -51,6 +51,39 @@ pub enum Consistency {
     },
 }
 
+/// How recently a live read confirms the namespace head, without a maximum
+/// staleness.
+///
+/// A runtime's default consistency and the `consistency` field of a download
+/// request take one of these values. `eventual` reads at the head that was
+/// confirmed last while that confirmation is younger than the maximum
+/// staleness, and `strong` confirms the head before the read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReadConsistency {
+    /// Read at the head that was confirmed last while that confirmation is
+    /// younger than the maximum staleness.
+    #[default]
+    Eventual,
+    /// Confirm the head before the read, for a reader that follows writes
+    /// made in other processes.
+    Strong,
+}
+
+impl From<ReadConsistency> for Consistency {
+    /// Returns the consistency of a read at `consistency`, with the
+    /// runtime's default maximum staleness.
+    fn from(consistency: ReadConsistency) -> Self {
+        match consistency {
+            ReadConsistency::Eventual => Self::Eventual {
+                max_staleness_ms: None,
+            },
+            ReadConsistency::Strong => Self::Strong,
+        }
+    }
+}
+
 /// The state that a read reads: the namespace's live head, or a snapshot.
 ///
 /// A snapshot selects the state that a read of it sees, so only a live read
@@ -121,6 +154,22 @@ pub struct ListOptions {
     /// The live head or the snapshot that each page reads, by default the
     /// live head at the runtime's default consistency.
     pub at: ReadAt,
+}
+
+/// Options for listing a file's revisions by path or by inode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListFileRevisionsOptions {
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
+}
+
+/// Options for listing the namespace's recoverable deletions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListTrashOptions {
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 /// The attribute writes and removals one update applies.
@@ -411,5 +460,7 @@ mod tests {
         assert_eq!(StatOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListOptions::default().at, ReadAt::Live(None));
         assert_eq!(ReadAt::from(None), ReadAt::Live(None));
+        assert_eq!(ListFileRevisionsOptions::default().consistency, None);
+        assert_eq!(ListTrashOptions::default().consistency, None);
     }
 }

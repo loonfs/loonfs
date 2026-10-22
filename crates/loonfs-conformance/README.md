@@ -19,6 +19,7 @@ The eighteen cases cover:
 - mutations by inode (`inode_mutations`)
 - reads, copies, restores, and updates by inode (`inode_addressing`)
 - snapshot creation, reads, extension, and deletion (`snapshots`)
+- a read consistency on the trash and revision listings and the download grants (`read_consistency`)
 - change feed identity fields
 - change feed events of a kind that the client doesn't define (`unknown_event_kinds`)
 - path entries of an inode kind that the client doesn't define (`unknown_inode_kinds`)
@@ -60,6 +61,6 @@ A loopback service handles direct uploads and downloads. Only the S3 shape has a
 
 `start_server` takes a `StoreShape`. The server binary reads `LOONFS_CONFORMANCE_SHAPE=s3|gcs`, and uses `s3` when the variable is unset. An invalid value makes startup fail. SDK suites use the default shape.
 
-The typed client can't create malformed JSON or invalid query values, so the error case sends those two requests with a raw HTTP client. All other requests use `loonfs-client`.
+The typed client can't create malformed JSON or invalid query values, so the error case sends those two requests with a raw HTTP client. It also can't set a consistency on a snapshot read, so the `read_consistency` case sends that grant request with the raw client too. All other requests use `loonfs-client`.
 
 Unit tests cover fixture loading, byte patterns, and pagination. The integration test needs local TCP listeners.

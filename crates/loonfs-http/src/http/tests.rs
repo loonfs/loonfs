@@ -3147,7 +3147,7 @@ mod direct_download {
             ..DownloadOptions::default()
         };
         let at_checkpoint = DownloadOptions {
-            snapshot_id: Some(checkpoint_id),
+            at: loonfs_client::ReadAt::Snapshot(checkpoint_id),
             ..DownloadOptions::default()
         };
 

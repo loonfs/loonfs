@@ -83,6 +83,7 @@ EXPECTED_CASES = [
     "inode_mutations",
     "pagination",
     "proxy",
+    "read_consistency",
     "snapshots",
     "unknown_event_kinds",
     "unknown_inode_kinds",
@@ -210,6 +211,32 @@ class DownloadExpected:
     size_bytes: int
     checksum_algorithm: str
     committed_seq: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ReadConsistencyCommitIds:
+    put: str
+    put_deleted: str
+    delete: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ReadConsistencyRequest:
+    namespace_id: str
+    path: str
+    deleted_path: str
+    actor_id: ActorId
+    content_utf8: str
+    commit_ids: ReadConsistencyCommitIds
+    max_staleness_ms: int
+    snapshot_name: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ReadConsistencyExpected:
+    revision_no: int
+    trash_entry_count: int
+    snapshot_with_consistency: ErrorStatusExpected
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -2328,6 +2355,70 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         downloaded.content,
     )
     assert downloaded.content == payload
+
+
+def test_read_consistency(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode(
+        cases["read_consistency"], ReadConsistencyRequest, ReadConsistencyExpected
+    )
+    client = harness.client
+    namespace_id = request.namespace_id
+    actor = {"additional_headers": {"Loonfs-Actor": request.actor_id}}
+    client.namespaces.create(namespace_id=namespace_id, request_options=actor)
+    for path, commit_id in [
+        (request.path, request.commit_ids.put),
+        (request.deleted_path, request.commit_ids.put_deleted),
+    ]:
+        client.files.upload(
+            namespace_id,
+            path=path,
+            content=request.content_utf8.encode(),
+            request_options=actor,
+            commit_id=commit_id,
+        )
+    _apply(
+        client,
+        namespace_id,
+        request.commit_ids.delete,
+        request.actor_id,
+        FilesystemOperation_DeletePath(path=request.deleted_path),
+    )
+    inode_id = client.files.retrieve(namespace_id, path=request.path).inode_id
+
+    for consistency, max_staleness_ms in [
+        ("strong", None),
+        ("eventual", request.max_staleness_ms),
+    ]:
+        settings: dict[str, Any] = {"consistency": consistency}
+        if max_staleness_ms is not None:
+            settings["max_staleness_ms"] = max_staleness_ms
+        trash = client.trash.list(namespace_id, **settings)
+        assert len(trash.entries) == expected.trash_entry_count, consistency
+        for revisions in [
+            client.files.list_revisions(namespace_id, path=request.path, **settings),
+            client.inodes.list_revisions(namespace_id, inode_id, **settings),
+        ]:
+            assert revisions.revisions[0].revision_no == expected.revision_no, consistency
+        grants = [
+            client.files.create_download(namespace_id, path=request.path, **settings),
+            client.inodes.create_download(namespace_id, inode_id, **settings),
+            client.inodes.create_revision_download(
+                namespace_id, inode_id, expected.revision_no, **settings
+            ),
+        ]
+        for grant in grants:
+            assert grant.revision_no == expected.revision_no, consistency
+
+    snapshot = client.snapshots.create(namespace_id, name=request.snapshot_name)
+    with pytest.raises(BadRequestError) as refused:
+        client.files.create_download(
+            namespace_id,
+            path=request.path,
+            snapshot_id=snapshot.snapshot_id,
+            consistency="strong",
+        )
+    assert refused.value.status_code == expected.snapshot_with_consistency.status
+    assert refused.value.body.code == expected.snapshot_with_consistency.code
 
 
 def _signed_range(access: Any) -> str | None:

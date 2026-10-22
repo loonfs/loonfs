@@ -7,9 +7,10 @@ use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, Consistency, Error, ListChangesOptions, ListOptions, LoonFs, MetadataCache,
-    Namespace, NamespaceId, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions,
-    ReadOnly, SharedObjectStore, StatOptions, Writable,
+    ChangeSeq, Consistency, DownloadOptions, Error, ListChangesOptions, ListFileRevisionsOptions,
+    ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace, NamespaceId, ReadAt,
+    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
+    StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -17,7 +18,7 @@ use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
+use loonfs_types::{ChecksumAlgorithm, RevisionNo, ROOT_INODE_ID};
 use std::assert_matches;
 use std::sync::Arc;
 
@@ -163,6 +164,11 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
         consistency,
         ..ReadFileStreamOptions::default()
     };
+    let revisions = ListFileRevisionsOptions { consistency };
+    let download = DownloadOptions {
+        consistency,
+        ..DownloadOptions::default()
+    };
     fixture.recording.reset();
     let errors = [
         reader.stat_with_options("/file.txt", &stat).await.err(),
@@ -201,6 +207,37 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
             .next()
             .await
             .and_then(Result::err),
+        reader
+            .list_trash_with_options(&ListTrashOptions { consistency })
+            .next()
+            .await
+            .and_then(Result::err),
+        reader
+            .list_file_revisions_with_options("/file.txt", &revisions)
+            .next()
+            .await
+            .and_then(Result::err),
+        reader
+            .list_file_revisions_by_inode_with_options(ROOT_INODE_ID, &revisions)
+            .next()
+            .await
+            .and_then(Result::err),
+        reader
+            .create_download_with_options("/file.txt", &download)
+            .await
+            .err(),
+        reader
+            .create_revision_download_with_options("/file.txt", RevisionNo(1), &download)
+            .await
+            .err(),
+        reader
+            .create_download_by_inode_with_options(ROOT_INODE_ID, &download)
+            .await
+            .err(),
+        reader
+            .create_revision_download_by_inode_with_options(ROOT_INODE_ID, RevisionNo(1), &download)
+            .await
+            .err(),
     ];
     for error in errors {
         assert_invalid_request(error, "max_staleness_ms");
@@ -230,6 +267,10 @@ async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
         consistency,
         ..ReadFileStreamOptions::default()
     };
+    let download = DownloadOptions {
+        consistency,
+        ..DownloadOptions::default()
+    };
     fixture.recording.reset();
     let errors = [
         view.stat_with_options("/file.txt", &stat).await.err(),
@@ -238,6 +279,12 @@ async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
             .await
             .and_then(Result::err),
         view.read_file_stream_with_options("/file.txt", &stream)
+            .await
+            .err(),
+        view.create_download_with_options("/file.txt", &download)
+            .await
+            .err(),
+        view.create_download_by_inode_with_options(ROOT_INODE_ID, &download)
             .await
             .err(),
     ];
@@ -345,7 +392,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
 }
 
 /// Checks that a runtime whose default consistency is `strong` confirms the
-/// head on a read that sets none, such as a revision listing, which takes no
+/// head on a read that sets none, such as a revision listing without
 /// options, and that a read that sets `eventual` there sends no request
 /// within its maximum staleness.
 #[tokio::test]

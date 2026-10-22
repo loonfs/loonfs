@@ -80,9 +80,10 @@ pub use transport_error::TransportError;
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    ReadAt, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListFileRevisionsOptions, ListOptions,
+    ListTrashOptions, MoveOptions, PutFileOptions, ReadAt, StatOptions, UndeleteDestination,
+    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

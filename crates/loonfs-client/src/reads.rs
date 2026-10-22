@@ -3,7 +3,7 @@
 use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
-use loonfs_types::options::{Consistency, ReadAt};
+use loonfs_types::options::{Consistency, ListFileRevisionsOptions, ListTrashOptions, ReadAt};
 use loonfs_types::PageRequest;
 
 /// Options for a read of a file's content by path or by inode.
@@ -460,12 +460,22 @@ impl Client {
 
     /// Lists a file's revisions by path.
     pub fn list_file_revisions(&self, spec: &NamespacePath) -> FileRevisionsPager {
+        self.list_file_revisions_with_options(spec, &ListFileRevisionsOptions::default())
+    }
+
+    /// Lists a file's revisions by path, as `options` asks.
+    pub fn list_file_revisions_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &ListFileRevisionsOptions,
+    ) -> FileRevisionsPager {
         let client = self.clone();
         let spec = spec.clone();
+        let options = *options;
         loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let spec = spec.clone();
-            async move { client.file_revisions_page(&spec, request).await }
+            async move { client.file_revisions_page(&spec, request, &options).await }
         })
     }
 
@@ -473,6 +483,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         request: PageRequest<String>,
+        options: &ListFileRevisionsOptions,
     ) -> Result<ListFileRevisionsResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/revisions",
@@ -481,6 +492,7 @@ impl Client {
         ));
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        push_read_at(&mut query, &ReadAt::Live(options.consistency));
         let url = query.build();
         self.request_json::<(), ListFileRevisionsResponse>(
             self.get(&url),
@@ -496,14 +508,29 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> FileRevisionsPager {
+        self.list_file_revisions_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            &ListFileRevisionsOptions::default(),
+        )
+    }
+
+    /// Lists the retained revisions of a file inode, as `options` asks.
+    pub fn list_file_revisions_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &ListFileRevisionsOptions,
+    ) -> FileRevisionsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
+        let options = *options;
         loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             async move {
                 client
-                    .file_revisions_by_inode_page(&namespace_id, inode_id, request)
+                    .file_revisions_by_inode_page(&namespace_id, inode_id, request, &options)
                     .await
             }
         })
@@ -514,6 +541,7 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<String>,
+        options: &ListFileRevisionsOptions,
     ) -> Result<ListFileRevisionsResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
@@ -521,6 +549,7 @@ impl Client {
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        push_read_at(&mut query, &ReadAt::Live(options.consistency));
         let url = query.build();
         self.request_json::<(), ListFileRevisionsResponse>(
             self.get(&url),
@@ -532,12 +561,22 @@ impl Client {
 
     /// Lists the namespace's recoverable deletions.
     pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
+        self.list_trash_with_options(namespace_id, &ListTrashOptions::default())
+    }
+
+    /// Lists the namespace's recoverable deletions, as `options` asks.
+    pub fn list_trash_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &ListTrashOptions,
+    ) -> TrashPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
+        let options = *options;
         loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
-            async move { client.trash_page(&namespace_id, request).await }
+            async move { client.trash_page(&namespace_id, request, &options).await }
         })
     }
 
@@ -545,6 +584,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<String>,
+        options: &ListTrashOptions,
     ) -> Result<ListTrashResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/trash",
@@ -552,6 +592,7 @@ impl Client {
             namespace_id.as_str()
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        push_read_at(&mut query, &ReadAt::Live(options.consistency));
         let url = query.build();
         self.request_json::<(), ListTrashResponse>(self.get(&url), None, operations::LIST_TRASH)
             .await
@@ -997,6 +1038,81 @@ mod tests {
                 format!("{content}&snapshot_id={snapshot_id}"),
             ]
         );
+    }
+
+    /// Checks that the trash and revision listings send the consistency
+    /// parameters only when they set a consistency, so a listing that sets
+    /// none reaches a server that doesn't accept them.
+    #[tokio::test]
+    async fn listings_send_the_consistency_parameters_only_when_they_set_them() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
+        let trash = serde_json::json!({"namespace_id": "demo", "head_seq": 1, "entries": []});
+        let revisions = serde_json::json!({
+            "namespace_id": "demo",
+            "inode_id": "ino_2",
+            "head_seq": 1,
+            "revisions": []
+        });
+        let consistencies = [
+            None,
+            Some(Consistency::Strong),
+            Some(Consistency::Eventual {
+                max_staleness_ms: Some(2_500),
+            }),
+        ];
+        let transport = scripted_transport::script(consistencies.iter().flat_map(|_| {
+            [
+                Outcome::Success(trash.to_string().into_bytes()),
+                Outcome::Success(revisions.to_string().into_bytes()),
+                Outcome::Success(revisions.to_string().into_bytes()),
+            ]
+        }));
+        let client = client_for(&transport);
+        for consistency in consistencies {
+            client
+                .list_trash_with_options(&namespace_id, &ListTrashOptions { consistency })
+                .next()
+                .await
+                .expect("a page")
+                .expect("trash");
+            let options = ListFileRevisionsOptions { consistency };
+            client
+                .list_file_revisions_with_options(&spec, &options)
+                .next()
+                .await
+                .expect("a page")
+                .expect("revisions");
+            client
+                .list_file_revisions_by_inode_with_options(&namespace_id, InodeId(2), &options)
+                .next()
+                .await
+                .expect("a page")
+                .expect("revisions by inode");
+        }
+        let queries: Vec<_> = transport
+            .sent()
+            .into_iter()
+            .map(|request| {
+                let (_, query) = request.url.split_once('?').expect("a query string");
+                query
+                    .split('&')
+                    .filter(|parameter| {
+                        !parameter.starts_with("path=") && !parameter.starts_with("limit=")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&")
+            })
+            .collect();
+        let expected = [
+            "",
+            "consistency=strong",
+            "consistency=eventual&max_staleness_ms=2500",
+        ]
+        .into_iter()
+        .flat_map(|query| [query; 3])
+        .collect::<Vec<_>>();
+        assert_eq!(queries, expected);
     }
 
     #[tokio::test]

@@ -10,10 +10,10 @@ use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, Consistency, ContentRef, CoreError,
     CurrentFileState, DownloadOptions, Error, FileBytes, FileContentStream, InodeId,
-    ListChangesOptions, ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, Namespace, NamespaceId,
-    PathEntry, PinId, ReadAt, ReadFileOptions, ReadFileStreamOptions, RevisionNo,
-    SharedObjectStore, StatOptions,
+    ListChangesOptions, ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsOptions,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
+    ListTrashOptions, Namespace, NamespaceId, PathEntry, PinId, ReadAt, ReadFileOptions,
+    ReadFileStreamOptions, RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::{
@@ -495,6 +495,7 @@ impl ReadView {
     ) -> Result<DirectDownloadTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
+            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
             Ok(self
                 .engine
                 .direct_download_target(absolute_path, None, options.start_offset, &self.context)
@@ -575,6 +576,7 @@ impl ReadView {
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
+            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
             Ok(self
                 .engine
                 .direct_download_target_by_inode(
@@ -1175,7 +1177,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                None,
+                options.consistency,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target(
@@ -1274,7 +1276,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core
             .read(
                 &self.namespace_id,
-                None,
+                options.consistency,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target_by_inode(
@@ -1443,10 +1445,21 @@ impl<M: crate::Mode> Namespace<M> {
     /// A deletion stays listed until it's undeleted, or until the retention
     /// floor reaches it and the writer expires it.
     pub fn list_trash(&self) -> TrashPager {
+        self.list_trash_with_options(&ListTrashOptions::default())
+    }
+
+    /// Lists the namespace's recoverable deletions, oldest deletion first,
+    /// as `options` asks.
+    pub fn list_trash_with_options(&self, options: &ListTrashOptions) -> TrashPager {
         let reader = self.read_only();
+        let consistency = options.consistency;
         loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
-            async move { reader.trash_page(decode_page_request(request)?).await }
+            async move {
+                reader
+                    .trash_page(decode_page_request(request)?, consistency)
+                    .await
+            }
         })
     }
 
@@ -1465,11 +1478,12 @@ impl<M: crate::Mode> Namespace<M> {
     async fn trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
+        consistency: Option<Consistency>,
     ) -> Result<loonfs_types::ListTrashResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, None, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |engine, read_context| {
                 let request = request.clone();
                 async move {
                     let page = engine.list_trash_page(request, &read_context).await?;
@@ -1487,14 +1501,25 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists a file path's revision history, newest first.
     pub fn list_file_revisions(&self, absolute_path: &str) -> FileRevisionsPager {
+        self.list_file_revisions_with_options(absolute_path, &ListFileRevisionsOptions::default())
+    }
+
+    /// Lists a file path's revision history, newest first, as `options`
+    /// asks.
+    pub fn list_file_revisions_with_options(
+        &self,
+        absolute_path: &str,
+        options: &ListFileRevisionsOptions,
+    ) -> FileRevisionsPager {
         let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
+        let consistency = options.consistency;
         loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             let absolute_path = absolute_path.clone();
             async move {
                 reader
-                    .file_revisions_page(&absolute_path, decode_page_request(request)?)
+                    .file_revisions_page(&absolute_path, decode_page_request(request)?, consistency)
                     .await
             }
         })
@@ -1516,12 +1541,13 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
+        consistency: Option<Consistency>,
     ) -> Result<ListFileRevisionsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
-            .read(&self.namespace_id, None, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |engine, read_context| {
                 let request = request.clone();
                 let absolute_path = absolute_path.clone();
                 async move {
@@ -1541,12 +1567,30 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists the retained revisions of a file inode, newest first.
     pub fn list_file_revisions_by_inode(&self, inode_id: InodeId) -> FileRevisionsPager {
+        self.list_file_revisions_by_inode_with_options(
+            inode_id,
+            &ListFileRevisionsOptions::default(),
+        )
+    }
+
+    /// Lists the retained revisions of a file inode, newest first, as
+    /// `options` asks.
+    pub fn list_file_revisions_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        options: &ListFileRevisionsOptions,
+    ) -> FileRevisionsPager {
         let reader = self.read_only();
+        let consistency = options.consistency;
         loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             async move {
                 reader
-                    .file_revisions_by_inode_page(inode_id, decode_page_request(request)?)
+                    .file_revisions_by_inode_page(
+                        inode_id,
+                        decode_page_request(request)?,
+                        consistency,
+                    )
                     .await
             }
         })
@@ -1568,11 +1612,12 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
+        consistency: Option<Consistency>,
     ) -> Result<ListFileRevisionsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, None, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |engine, read_context| {
                 let request = request.clone();
                 async move {
                     let page = engine

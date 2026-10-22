@@ -4,7 +4,7 @@ use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{
-    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, PageQuery,
+    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, LivePageQuery,
 };
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
@@ -15,7 +15,7 @@ use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceI
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{ListOptions, ReadFileStreamOptions, StatOptions};
+use loonfs::{ListFileRevisionsOptions, ListOptions, ReadFileStreamOptions, StatOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse};
@@ -218,7 +218,9 @@ pub(super) async fn list_inode_children(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
+            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -236,14 +238,20 @@ pub(super) async fn list_file_revisions_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
-    AppQuery(query): AppQuery<PageQuery>,
+    AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
+    let options = ListFileRevisionsOptions {
+        consistency: parse_consistency(
+            query.consistency.as_deref(),
+            query.max_staleness_ms.as_deref(),
+        )?,
+    };
     let response = namespace
-        .list_file_revisions_by_inode(inode_id)
+        .list_file_revisions_by_inode_with_options(inode_id, &options)
         .page_limit(effective_page_limit(query.limit)?)
         .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
         .page()

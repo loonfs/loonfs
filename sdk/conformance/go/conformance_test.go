@@ -47,6 +47,7 @@ var expectedCases = []string{
 	"inode_mutations",
 	"pagination",
 	"proxy",
+	"read_consistency",
 	"snapshots",
 	"unknown_event_kinds",
 	"unknown_inode_kinds",
@@ -129,6 +130,8 @@ func TestSDKConformance(t *testing.T) {
 				runAbort(t, h, testCase)
 			case "download":
 				runDownload(t, h, testCase)
+			case "read_consistency":
+				runReadConsistency(t, h, testCase)
 			case "end_to_end":
 				runEndToEnd(t, h, testCase)
 			default:
@@ -801,6 +804,163 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(readback, payload) {
 		t.Error("downloaded content did not match payload")
 	}
+}
+
+type readConsistencyRequest struct {
+	NamespaceID    string                   `json:"namespace_id"`
+	Path           string                   `json:"path"`
+	DeletedPath    string                   `json:"deleted_path"`
+	ActorID        loonfs.ActorID           `json:"actor_id"`
+	ContentUTF8    string                   `json:"content_utf8"`
+	CommitIDs      readConsistencyCommitIDs `json:"commit_ids"`
+	MaxStalenessMs int64                    `json:"max_staleness_ms"`
+	SnapshotName   string                   `json:"snapshot_name"`
+}
+
+type readConsistencyCommitIDs struct {
+	Put        string `json:"put"`
+	PutDeleted string `json:"put_deleted"`
+	Delete     string `json:"delete"`
+}
+
+type readConsistencyExpected struct {
+	RevisionNo              int64               `json:"revision_no"`
+	TrashEntryCount         int                 `json:"trash_entry_count"`
+	SnapshotWithConsistency errorStatusExpected `json:"snapshot_with_consistency"`
+}
+
+// readConsistencySetting is one consistency that the case reads with: the
+// value of `consistency`, and its maximum staleness, or nil for none.
+type readConsistencySetting struct {
+	consistency    string
+	maxStalenessMs *int64
+}
+
+func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[readConsistencyRequest, readConsistencyExpected](t, testCase)
+	ctx := context.Background()
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
+	actor := option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}})
+	for _, file := range []struct{ path, commitID string }{
+		{request.Path, request.CommitIDs.Put},
+		{request.DeletedPath, request.CommitIDs.PutDeleted},
+	} {
+		if _, err := h.client.Files.Upload(ctx, files.UploadInput{
+			NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+			Path:        loonfs.AbsolutePath(file.path),
+			Content:     []byte(request.ContentUTF8),
+			CommitID:    loonfs.CommitID(file.commitID),
+		}, actor); err != nil {
+			t.Fatalf("put %s: %v", file.path, err)
+		}
+	}
+	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID(request.CommitIDs.Delete),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeletePath: &loonfs.FilesystemOperationDeletePath{
+					Behavior: &nonRecursive,
+					Path:     loonfs.AbsolutePath(request.DeletedPath),
+				},
+			},
+		},
+	}, request.ActorID)
+	inodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Path)).inodeID
+	revisionNo := loonfs.RevisionNo(expected.RevisionNo)
+
+	for _, setting := range []readConsistencySetting{
+		{consistency: "strong"},
+		{consistency: "eventual", maxStalenessMs: &request.MaxStalenessMs},
+	} {
+		label := setting.consistency
+		trash, err := h.client.Trash.List(ctx, &loonfs.ListTrashRequest{
+			NamespaceID:    request.NamespaceID,
+			Consistency:    loonfs.ListTrashRequestConsistency(setting.consistency).Ptr(),
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s trash: %v", label, err)
+		}
+		if len(trash.Results) != expected.TrashEntryCount {
+			t.Errorf("%s trash entries = %d, want %d", label, len(trash.Results), expected.TrashEntryCount)
+		}
+		byPath, err := h.client.Files.ListRevisions(ctx, &loonfs.ListFileRevisionsRequest{
+			NamespaceID:    request.NamespaceID,
+			Path:           request.Path,
+			Consistency:    loonfs.ListRevisionsFilesRequestConsistency(setting.consistency).Ptr(),
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s revisions by path: %v", label, err)
+		}
+		byInode, err := h.client.Inodes.ListRevisions(ctx, &loonfs.ListFileRevisionsByInodeRequest{
+			NamespaceID:    request.NamespaceID,
+			InodeID:        inodeID,
+			Consistency:    loonfs.ListRevisionsInodesRequestConsistency(setting.consistency).Ptr(),
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s revisions by inode: %v", label, err)
+		}
+		for _, revisions := range [][]*loonfs.FileRevision{byPath.Results, byInode.Results} {
+			if len(revisions) == 0 || revisions[0].RevisionNo != revisionNo {
+				t.Errorf("%s revisions = %#v, want revision %d first", label, revisions, revisionNo)
+			}
+		}
+		consistency := loonfs.ReadConsistency(setting.consistency).Ptr()
+		pathGrant, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
+			NamespaceID:    request.NamespaceID,
+			Path:           loonfs.AbsolutePath(request.Path),
+			Consistency:    consistency,
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s grant by path: %v", label, err)
+		}
+		inodeGrant, err := h.client.Inodes.CreateDownload(ctx, &loonfs.CreateDownloadByInodeRequest{
+			NamespaceID:    request.NamespaceID,
+			InodeID:        inodeID,
+			Consistency:    consistency,
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s grant by inode: %v", label, err)
+		}
+		revisionGrant, err := h.client.Inodes.CreateRevisionDownload(ctx, &loonfs.CreateRevisionDownloadByInodeRequest{
+			NamespaceID:    request.NamespaceID,
+			InodeID:        inodeID,
+			RevisionNo:     revisionNo,
+			Consistency:    consistency,
+			MaxStalenessMs: setting.maxStalenessMs,
+		})
+		if err != nil {
+			t.Fatalf("%s grant of a revision by inode: %v", label, err)
+		}
+		for _, granted := range []loonfs.RevisionNo{pathGrant.RevisionNo, inodeGrant.RevisionNo, revisionGrant.RevisionNo} {
+			if granted != revisionNo {
+				t.Errorf("%s grant revision = %d, want %d", label, granted, revisionNo)
+			}
+		}
+	}
+
+	snapshot, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		Name:        request.SnapshotName,
+	})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	snapshotID := snapshot.SnapshotID
+	_, err = h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        loonfs.AbsolutePath(request.Path),
+		SnapshotID:  &snapshotID,
+		Consistency: loonfs.ReadConsistencyStrong.Ptr(),
+	})
+	assertBadRequestError(t, err, expected.SnapshotWithConsistency)
 }
 
 type appendRequest struct {

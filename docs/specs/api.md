@@ -1295,7 +1295,7 @@ A read passes `strong` when it has to see a commit that another runtime acknowle
 - A change feed poller that learned its `after_seq` from a fresher read, which retries the request as `strong` (see below).
 - A client that changes a permission through one server and reads through another, which passes `strong` on that read.
 
-`LoonFsBuilder::consistency` sets the runtime's default consistency (`ReadConsistency::Eventual` or `ReadConsistency::Strong`), which is `eventual` unless the host sets `strong`. In the Rust runtime, a read's options leave the consistency unset by default (`None`, or `ReadAt::Live(None)` in the options that can also read a snapshot), and a read that takes no options, such as a revision listing, always takes the runtime's default. The reference server has the same setting, `consistency`, which a request without the `consistency` parameter takes, and a deployment whose readers always follow writes made through other servers sets it to `strong`. `LoonFsBuilder::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness_ms }` in the Rust runtime, or with `max_staleness_ms` on the HTTP binding, which is accepted only together with `consistency=eventual`.
+`LoonFsBuilder::consistency` sets the runtime's default consistency (`ReadConsistency::Eventual` or `ReadConsistency::Strong`), which is `eventual` unless the host sets `strong`. In the Rust runtime, a read's options leave the consistency unset by default (`None`, or `ReadAt::Live(None)` in the options that can also read a snapshot), and a read that takes no options, such as `Namespace::read_file_revision`, always takes the runtime's default. The reference server has the same setting, `consistency`, which a request without the `consistency` parameter takes, and a deployment whose readers always follow writes made through other servers sets it to `strong`. `LoonFsBuilder::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness_ms }` in the Rust runtime, or with `max_staleness_ms` on the HTTP binding, which is accepted only together with `consistency=eventual`.
 
 Neither the maximum staleness nor the manifest check interval can exceed `READ_REVALIDATION_BOUND_MS` (1,155,000 milliseconds). A runtime build with a larger `max_staleness_ms` or `manifest_revalidation_interval_ms` fails with a config error, a server whose config sets one fails at startup, and a read that sets a larger maximum staleness returns `invalid_request` with `param` set to `max_staleness_ms`. A cached head whose last manifest check is older than the bound is confirmed before a read with either setting.
 
@@ -1478,6 +1478,8 @@ Why does a recursive listing return a directory that the subject can't read? A c
 
 Lists the namespace's recoverable deletions, oldest deletion first (in ascending `(deletion_seq, inode_id)` order). The listing is paged with the standard `limit` and `cursor` pattern, and its cursor is an ordering resume like every other cursor. In an ACL namespace, a page can return fewer entries than `limit` and still include `next_cursor`.
 
+The listing accepts `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). Each page applies them to the head that the page reads.
+
 The listing is a range scan over the derived active-deletions family (see [File and subtree deletion](format.md#16-file-and-subtree-deletion)), so the cost of a page depends on the page, not on the namespace's deletion history. Those rows represent current state, so a deletion at or below the retention floor stays listed until the namespace's writer expires the deletion (see [Retention runs](#retention-runs)).
 
 In a fork, the scan starts above the fork point, which is the sequence of the source state that the fork copied and the fork's initial retention floor (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). The family's keys begin with the deletion sequence, so the fork point is where the scan starts, not a filter on its results, and a deletion that the fork inherited from its source never appears in the fork's listing. For example, if a namespace's trash lists a deletion at sequence 80 and the namespace is forked at sequence 100, the fork's listing starts above sequence 100 and leaves the deletion out, and the source's listing still includes it.
@@ -1515,7 +1517,7 @@ The server streams and verifies content in bounded chunks. For a file larger tha
 
 If the response body ends successfully, length and checksum verification completed. The server omits `Content-Length`, so receiving the expected number of bytes can't signal success before verification. An I/O or verification failure after the headers are sent aborts the body instead of returning a JSON error. Consumers MUST require successful stream completion, and a file download should publish its temporary output only after the stream completes. Streaming to stdout can expose a partial or unverified prefix before a later error.
 
-Revision listings return the newest revisions first, and they use the standard `limit` and `cursor` pattern. The path route resolves the current inode first, and the inode route addresses the inode directly. Both routes return the same response, which doesn't include paths. `next_cursor` is included only when another page is available.
+Revision listings return the newest revisions first, and they use the standard `limit` and `cursor` pattern. The path route resolves the current inode first, and the inode route addresses the inode directly. Both routes return the same response, which doesn't include paths. `next_cursor` is included only when another page is available. Both routes accept `consistency` and `max_staleness_ms`, which work as they do on the entry route, and each page applies them to the head that the page reads.
 
 File history above the retention floor is complete. At or below the floor, each file keeps its newest revision, so paging to the end reaches revision 1 only while no base compaction has removed it. The cursor resumes after the last revision returned, so a compaction between pages neither repeats nor skips a retained revision.
 
@@ -2159,6 +2161,8 @@ A direct download grants one signed range for each immutable extent. If some of 
 
 Instead of `revision_no`, the body can include `snapshot_id` to read a snapshot, but it can't include both. `start_offset` defaults to 0.
 
+The body can also include `consistency` and `max_staleness_ms`, which take the same values as the query parameters of the read routes (see [Read consistency](#read-consistency)). LoonFS finds the revision at the live head, so these fields select how recently the server confirms that head. Neither field can be combined with `snapshot_id`, and an invalid value returns `invalid_request` with `param` set to the field's JSON Pointer, such as `/consistency`.
+
 The response contains a short-lived read capability, plus everything the reader needs to check the bytes it receives:
 
 ```json
@@ -2187,7 +2191,7 @@ The response contains a short-lived read capability, plus everything the reader 
 }
 ```
 
-The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It takes an optional JSON body whose only field is `start_offset`, and its response doesn't include a path:
+The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It takes an optional JSON body with `start_offset`, `consistency`, and `max_staleness_ms`, and its response doesn't include a path:
 
 ```json
 {
@@ -2215,7 +2219,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 }
 ```
 
-`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with two fields: `snapshot_id` grants the revision that the snapshot captured instead, and `start_offset` is the first byte to read.
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with four fields. `snapshot_id` grants the revision that the snapshot captured instead, `start_offset` is the first byte to read, and `consistency` and `max_staleness_ms` work as they do on the path route.
 
 The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename, and after a deletion while the deletion is recoverable and the revision is retained. Once the namespace's writer expires the deletion, the route returns `inode_not_found`, as it does for an unknown inode (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
 
