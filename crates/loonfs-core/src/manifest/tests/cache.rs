@@ -1200,6 +1200,38 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
     }
 }
 
+/// Checks that when the block cache keeps nothing (its budget is zero), a
+/// lookup's memo records the stored bytes of the read-ahead window's other
+/// blocks, so the reads of those blocks within the same read send no GET
+/// after the window's one.
+#[tokio::test]
+async fn a_read_ahead_window_stays_in_the_memo_when_the_block_cache_keeps_nothing() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
+    let cache = MetadataSegmentCache::unshared(0);
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+
+    for position in 0..index.len() {
+        let block = data_block_load::load_segment_data_block_with_readahead(
+            &store,
+            Some(&cache),
+            Some(&memo),
+            &descriptor,
+            &index[position..],
+        )
+        .await
+        .expect("a read of a block in the window");
+        assert_eq!(block, expected[position]);
+    }
+    assert_eq!(cache.stats().cached_decoded_bytes, 0);
+    assert_eq!(
+        store.count(OperationSelector::Read),
+        1,
+        "one ranged GET reads the window, and the memo has the rest of it"
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
     let temp_dir = tempdir().expect("tempdir");
