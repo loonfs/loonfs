@@ -63,6 +63,16 @@ pub const MAX_EXPIRED_DELETIONS_PER_COMMIT: usize = 1_000;
 
 const _: () = assert!(MAX_EXPIRED_DELETIONS_PER_COMMIT <= MAX_COMMIT_OPERATIONS);
 
+/// Most successful publications of its own that a writer session waits for
+/// before it tries an expiry step again after consecutive failed steps. The
+/// wait doubles from one publication with each failure.
+///
+/// A step that keeps failing, for example against a store that refuses the
+/// put, then costs at most one failed WAL put for every 64 of the session's
+/// publications, while a step that failed once is tried again after the
+/// session's next publication.
+pub const MAX_EXPIRY_RETRY_PUBLICATIONS: usize = 64;
+
 /// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
 pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 

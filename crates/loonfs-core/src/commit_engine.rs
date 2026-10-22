@@ -1252,6 +1252,9 @@ impl NamespaceCommitEngine {
         if update.landed && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
+        if update.landed {
+            self.deletion_expiry.record_publication();
+        }
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail: Some(WalTailReport {

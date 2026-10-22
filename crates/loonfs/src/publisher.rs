@@ -1322,7 +1322,7 @@ impl NamespacePublisher {
                     continue;
                 }
                 Some(WorkerUnit::Item(item)) => {
-                    expiry_turn = expiry_turn.after_item();
+                    expiry_turn = ExpiryTurn::BeforeItem;
                     item
                 }
             };
@@ -1392,9 +1392,8 @@ impl NamespacePublisher {
         // Like its compaction, a session that no longer admits work expires
         // nothing more, so a close or a shutdown doesn't wait for a large
         // trash.
-        let expiry_due = expiry_turn != ExpiryTurn::Paused
-            && state.expiry_due
-            && matches!(state.admission, PublisherAdmissionStatus::Open);
+        let expiry_due =
+            state.expiry_due && matches!(state.admission, PublisherAdmissionStatus::Open);
         let unit =
             if expiry_due && (expiry_turn == ExpiryTurn::BeforeItem || state.queue.is_empty()) {
                 WorkerUnit::Expiry

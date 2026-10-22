@@ -5,7 +5,7 @@ use loonfs_types::api::v0::FilesystemChange;
 use loonfs_types::DeleteDirectoryBehavior;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_worker_survives_a_panicked_expiry_step_and_a_later_worker_expires_the_deletion() {
+async fn a_busy_session_retries_a_panicked_expiry_step_after_its_next_publication() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
@@ -62,13 +62,26 @@ async fn a_worker_survives_a_panicked_expiry_step_and_a_later_worker_expires_the
         .await
         .expect("advance the floor");
     store.wait_until_blocked().await;
-    let queued = commit(create_directory_request("queued", "queued"));
-    wait_for_queued_candidates(&namespace.session().publisher, 1).await;
+    // Twelve writes queue behind the step, so the worker that survives the
+    // panic never runs out of work.
+    let writes: Vec<_> = (0..12)
+        .map(|index| {
+            commit(create_directory_request(
+                format!("write-{index}"),
+                format!("write-{index}"),
+            ))
+        })
+        .collect();
+    wait_for_queued_candidates(&namespace.session().publisher, writes.len()).await;
     store.release_into_panic();
-    queued
-        .await
-        .expect("queued task")
-        .expect("the worker publishes queued work after the panic");
+    let mut last_write_seq = ChangeSeq(0);
+    for write in writes {
+        last_write_seq = write
+            .await
+            .expect("write task")
+            .expect("the worker publishes queued work after the panic")
+            .committed_seq;
+    }
     let drain_error = writer
         .drain()
         .await
@@ -80,12 +93,28 @@ async fn a_worker_survives_a_panicked_expiry_step_and_a_later_worker_expires_the
         "{drain_error}"
     );
 
-    // The next worker finds the floor again and expires the deletion before
-    // it publishes the undelete.
-    commit(create_directory_request("after", "after"))
+    // The same worker retried the step after its first publication, without
+    // a new worker or a fold.
+    let changes = writer
+        .read_only()
+        .namespace(&namespace_id)
+        .list_changes(deleted.committed_seq)
+        .collect_up_to(64)
         .await
-        .expect("after task")
-        .expect("a commit after the panic");
+        .expect("list changes");
+    let expiry = changes
+        .iter()
+        .find(|commit| {
+            commit.events
+                == [FilesystemChange::DeletionExpired {
+                    inode_id,
+                    deletion_seq: deleted.committed_seq,
+                }]
+        })
+        .expect("the expiry commits before the fold");
+    assert_eq!(expiry.committed_by, ActorId::loonfs());
+    assert!(expiry.committed_seq > last_write_seq, "{changes:?}");
+    maintenance.fold_wal(&namespace_id).await.expect("fold");
     let error = namespace
         .undelete(inode_id, deleted.committed_seq, &actor)
         .await

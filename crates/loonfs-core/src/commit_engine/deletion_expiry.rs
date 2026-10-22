@@ -8,7 +8,7 @@ use super::{
 };
 use crate::context::MutationContext;
 use crate::error::Result;
-use crate::limits::MAX_EXPIRED_DELETIONS_PER_COMMIT;
+use crate::limits::{MAX_EXPIRED_DELETIONS_PER_COMMIT, MAX_EXPIRY_RETRY_PUBLICATIONS};
 use crate::metadata::ActiveDeletionRange;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Deadline;
@@ -29,6 +29,11 @@ pub(super) struct DeletionExpiryState {
     /// The fork point, when the session opened a fork. The session expires
     /// every deletion at or below it before its first request.
     fork_seq: Option<ChangeSeq>,
+    /// Steps that failed since the last one that didn't.
+    failed_steps: u32,
+    /// Successful publications of the session's own that the session waits
+    /// for before its next step.
+    publications_before_retry: usize,
 }
 
 impl DeletionExpiryState {
@@ -37,6 +42,8 @@ impl DeletionExpiryState {
             finished_floor_seq: ChangeSeq(0),
             last_expired: None,
             fork_seq: None,
+            failed_steps: 0,
+            publications_before_retry: 0,
         }
     }
 
@@ -71,6 +78,32 @@ impl DeletionExpiryState {
         self.finished_floor_seq = floor_seq;
         self.last_expired = None;
     }
+
+    /// Records a step that failed, so the session waits for 1, 2, 4, and so
+    /// on, up to [`MAX_EXPIRY_RETRY_PUBLICATIONS`], successful publications
+    /// of its own before it tries again.
+    ///
+    /// Counting the session's own publications, rather than time, means a
+    /// transient failure recovers at the next write, and a persistent one,
+    /// such as a store that refuses the put, doesn't retry on every commit.
+    fn record_failure(&mut self) {
+        self.failed_steps = self.failed_steps.saturating_add(1);
+        self.publications_before_retry = 1_usize
+            .checked_shl(self.failed_steps - 1)
+            .unwrap_or(usize::MAX)
+            .min(MAX_EXPIRY_RETRY_PUBLICATIONS);
+    }
+
+    /// Records a step that published its expiry or found nothing to expire.
+    fn record_success(&mut self) {
+        self.failed_steps = 0;
+        self.publications_before_retry = 0;
+    }
+
+    /// Records a publication of the session's own that landed.
+    pub(super) fn record_publication(&mut self) {
+        self.publications_before_retry = self.publications_before_retry.saturating_sub(1);
+    }
 }
 
 impl NamespaceCommitEngine {
@@ -83,9 +116,17 @@ impl NamespaceCommitEngine {
     /// true at the first position move after a retention advance.
     pub fn expiry_due(&self) -> bool {
         !matches!(*self.lock_session(), WriterSessionStatus::Fenced(_))
+            && self.deletion_expiry.publications_before_retry == 0
             && self.publish_tail.as_ref().is_some_and(|position| {
                 position.retention_floor_seq() > self.deletion_expiry.finished_floor_seq
             })
+    }
+
+    /// Records a step of the expiry that failed without returning a result,
+    /// such as one that panicked, so the session waits before it tries again
+    /// the way it does after a step that returned a failure.
+    pub fn record_failed_expiry_step(&mut self) {
+        self.deletion_expiry.record_failure();
     }
 
     /// Runs one step of the session's expiry under the retention floor: scans
@@ -98,8 +139,26 @@ impl NamespaceCommitEngine {
     /// commit between them, so every expire event passes validation. The
     /// next step starts after the last deletion that this step expired.
     /// Returns `None`, and records that the session finished expiring under
-    /// the floor, once the scan finds no deletion.
+    /// the floor, once the scan finds no deletion. After a step that fails,
+    /// [`Self::expiry_due`] stays false until the session has published some
+    /// commits of its own (see [`MAX_EXPIRY_RETRY_PUBLICATIONS`]).
     pub async fn publish_expiry_step<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        context: &MutationContext,
+        batch: &Deadline,
+    ) -> Option<NamespaceCommitEnginePublishResult> {
+        let published = self.publish_next_expiry(store, context, batch).await;
+        match &published {
+            Some(published) if published.results.iter().any(Result::is_err) => {
+                self.deletion_expiry.record_failure();
+            }
+            Some(_) | None => self.deletion_expiry.record_success(),
+        }
+        published
+    }
+
+    async fn publish_next_expiry<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         context: &MutationContext,
@@ -225,5 +284,27 @@ impl NamespaceCommitEngine {
             self.deletion_expiry.last_expired = last;
         }
         published
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_after_failed_expiry_steps_doubles_up_to_its_cap() {
+        let mut state = DeletionExpiryState::new();
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            state.record_failure();
+            waits.push(state.publications_before_retry);
+        }
+        assert_eq!(waits, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
+        state.record_success();
+        state.record_failure();
+        assert_eq!(
+            state.publications_before_retry, 1,
+            "a success resets the count"
+        );
     }
 }
