@@ -6,7 +6,7 @@ use crate::metrics::{
 };
 use crate::{
     CreateSnapshotOptions, InlineContentPolicy, ListOptions, LoonFs, Namespace, PageRequest,
-    ReadFileStreamOptions, StatOptions, Writable,
+    ReadAt, ReadFileStreamOptions, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -397,11 +397,11 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         .await
         .expect("snapshot");
     let stat = StatOptions {
-        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
         ..StatOptions::default()
     };
     let list = ListOptions {
-        snapshot_id: stat.snapshot_id.clone(),
+        at: stat.at.clone(),
         ..ListOptions::default()
     };
     let root = fixture

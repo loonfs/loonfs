@@ -8,7 +8,8 @@ use super::handlers_filesystem::{
 };
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
-    parse_boolean_query_param, parse_consistency, parse_include_attributes, parse_revision_no,
+    parse_boolean_query_param, parse_consistency, parse_include_attributes, parse_read_at,
+    parse_revision_no,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
@@ -101,13 +102,12 @@ pub(super) async fn get_inode(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let entry = target
         .stat_by_inode_with_options(inode_id, &options)
         .await
@@ -183,13 +183,12 @@ pub(super) async fn list_inode_children(
     if let Some(value) = query.recursive.as_deref() {
         options.recursive = parse_boolean_query_param(value, "recursive")?;
     }
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    options.consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let listing = target
         .list_by_inode_with_options(inode_id, &options)
         .page(PageRequest {
@@ -296,16 +295,15 @@ pub(super) async fn get_file_content_by_inode(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let consistency = parse_consistency(
+    let at = parse_read_at(
+        parse_optional_snapshot_id(query.snapshot_id)?,
         query.consistency.as_deref(),
         query.max_staleness_ms.as_deref(),
-        snapshot_id.is_some(),
     )?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
+    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream_by_inode(inode_id, consistency)
+        .read_file_stream_by_inode(inode_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(
@@ -363,7 +361,6 @@ pub(super) async fn get_file_revision_content_by_inode(
         consistency: parse_consistency(
             query.consistency.as_deref(),
             query.max_staleness_ms.as_deref(),
-            false,
         )?,
         ..ReadFileStreamOptions::default()
     };

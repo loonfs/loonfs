@@ -3,19 +3,16 @@
 use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
-use loonfs_types::options::Consistency;
+use loonfs_types::options::{Consistency, ReadAt};
 use loonfs_types::PageRequest;
 
 /// Options for a read of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
-    /// Read the file revision captured by this snapshot instead of the
-    /// current one.
-    pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before the read, or
-    /// `None` to send no consistency parameter, so the server's default
-    /// applies. A snapshot read takes only `None`.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that the read reads, by default the
+    /// live head at the server's default consistency. A snapshot read
+    /// returns the file revision that the snapshot captured.
+    pub at: ReadAt,
 }
 
 /// Options for creating a namespace.
@@ -42,24 +39,25 @@ impl Default for CreateNamespaceOptions {
 /// Optional selectors for the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
-    /// End the feed at this snapshot's captured sequence.
-    pub snapshot_id: Option<PinId>,
-    /// How recently the server confirms the live head before each page, or
-    /// `None` to send no consistency parameter, so the server's default
-    /// applies. A snapshot's feed takes only `None`.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that each page reads, by default the
+    /// live head at the server's default consistency. A snapshot's feed ends
+    /// at the sequence that the snapshot captured.
+    pub at: ReadAt,
 }
 
-/// Adds the consistency query parameters of a live read. A read that sets no
-/// consistency sends neither, so the server's default applies.
-fn push_consistency(query: &mut QueryBuilder, consistency: Option<Consistency>) {
-    match consistency {
-        None => {}
-        Some(Consistency::Strong) => query.push("consistency", "strong"),
-        Some(Consistency::Eventual { max_staleness }) => {
+/// Adds the query parameters that say what a read reads at: `snapshot_id`
+/// for a snapshot, and the consistency parameters of a live read that sets
+/// a consistency. A live read that sets none sends neither, so the server's
+/// default applies.
+fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
+    match at {
+        ReadAt::Snapshot(snapshot_id) => query.push("snapshot_id", snapshot_id.as_str()),
+        ReadAt::Live(None) => {}
+        ReadAt::Live(Some(Consistency::Strong)) => query.push("consistency", "strong"),
+        ReadAt::Live(Some(Consistency::Eventual { max_staleness_ms })) => {
             query.push("consistency", "eventual");
-            if let Some(max_staleness) = max_staleness {
-                query.push("max_staleness_ms", max_staleness.as_millis());
+            if let Some(max_staleness_ms) = max_staleness_ms {
+                query.push("max_staleness_ms", max_staleness_ms);
             }
         }
     }
@@ -348,10 +346,7 @@ impl Client {
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
         push_recursive(&mut query, options.recursive);
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, operations::LIST_PATH_ENTRIES)
             .await
@@ -375,10 +370,7 @@ impl Client {
         ));
         query.push("path", spec.absolute_path().as_str());
         query.push("include_attributes", options.include_attributes);
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, operations::GET_PATH_ENTRY)
             .await
@@ -408,10 +400,7 @@ impl Client {
             self.base_url
         ));
         query.push("include_attributes", options.include_attributes);
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, operations::GET_INODE)
             .await
@@ -463,10 +452,7 @@ impl Client {
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
         push_recursive(&mut query, options.recursive);
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, operations::LIST_INODE_CHILDREN)
             .await
@@ -617,10 +603,7 @@ impl Client {
         ));
         query.push("after_seq", after_seq.0);
         query.push("limit", limit.get());
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         let url = query.build();
         self.request_json::<(), ListChangesResponse>(self.get(&url), None, operations::LIST_CHANGES)
             .await
@@ -713,10 +696,7 @@ impl Client {
         if let Some(revision_no) = revision_no {
             query.push("revision_no", revision_no.0);
         }
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         query.build()
     }
 
@@ -827,10 +807,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
             self.base_url
         ));
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        push_consistency(&mut query, options.consistency);
+        push_read_at(&mut query, &options.at);
         query.build()
     }
 
@@ -969,36 +946,37 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that a read that sets no consistency sends neither consistency
-    /// parameter, so the server's default applies, and that a read that sets
-    /// one sends `consistency`, plus `max_staleness_ms` when it sets a maximum
-    /// staleness.
+    /// Checks that a live read that sets no consistency sends neither
+    /// consistency parameter, so the server's default applies, that a live
+    /// read that sets one sends `consistency`, plus `max_staleness_ms` when it
+    /// sets a maximum staleness, and that a snapshot read sends only
+    /// `snapshot_id`.
     #[tokio::test]
-    async fn reads_send_the_consistency_parameters_only_when_they_set_them() {
+    async fn reads_send_only_the_parameters_of_what_they_read_at() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-        let read = |consistency| ReadFileOptions {
-            consistency,
-            ..ReadFileOptions::default()
-        };
+        let snapshot_id =
+            PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
         let transport = scripted_transport::script([
+            Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
         ]);
         let client = client_for(&transport);
-        for consistency in [
-            None,
-            Some(Consistency::Strong),
-            Some(Consistency::Eventual {
-                max_staleness: None,
-            }),
-            Some(Consistency::Eventual {
-                max_staleness: Some(std::time::Duration::from_millis(2_500)),
-            }),
+        for at in [
+            ReadAt::Live(None),
+            ReadAt::Live(Some(Consistency::Strong)),
+            ReadAt::Live(Some(Consistency::Eventual {
+                max_staleness_ms: None,
+            })),
+            ReadAt::Live(Some(Consistency::Eventual {
+                max_staleness_ms: Some(2_500),
+            })),
+            ReadAt::Snapshot(snapshot_id.clone()),
         ] {
             client
-                .read_file_with_options(&spec, &read(consistency))
+                .read_file_with_options(&spec, &ReadFileOptions { at })
                 .await
                 .expect("read file");
         }
@@ -1016,6 +994,7 @@ mod tests {
                 format!("{content}&consistency=strong"),
                 format!("{content}&consistency=eventual"),
                 format!("{content}&consistency=eventual&max_staleness_ms=2500"),
+                format!("{content}&snapshot_id={snapshot_id}"),
             ]
         );
     }

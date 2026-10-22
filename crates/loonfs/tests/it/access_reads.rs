@@ -276,7 +276,7 @@ async fn check_eventual_read_access(content_size: usize) {
     let namespace = reader.namespace(&namespace_id);
     let eventual = ReadFileOptions {
         consistency: Some(Consistency::Eventual {
-            max_staleness: None,
+            max_staleness_ms: None,
         }),
     };
     let read = namespace
@@ -330,7 +330,7 @@ async fn a_former_writer_sees_revocation_on_its_first_strong_read() {
 async fn a_former_writer_sees_revocation_past_the_maximum_staleness() {
     for warm_before_handoff in [false, true] {
         let eventual = Consistency::Eventual {
-            max_staleness: None,
+            max_staleness_ms: None,
         };
         check_former_writer_read(warm_before_handoff, eventual).await;
     }

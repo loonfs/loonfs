@@ -6,15 +6,14 @@ use super::core::{
 };
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::execution_budget::BudgetPermit;
-use crate::options::{check_consistency, check_pinned_consistency, check_snapshot_consistency};
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, Consistency, ContentRef, CoreError,
     CurrentFileState, DownloadOptions, Error, FileBytes, FileContentStream, InodeId,
     ListChangesOptions, ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
     ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, Namespace, NamespaceId,
-    PathEntry, PinId, ReadFileOptions, ReadFileStreamOptions, RevisionNo, SharedObjectStore,
-    StatOptions,
+    PathEntry, PinId, ReadAt, ReadFileOptions, ReadFileStreamOptions, RevisionNo,
+    SharedObjectStore, StatOptions,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::{
@@ -142,28 +141,27 @@ impl ReadView {
         self.context.head.seq
     }
 
-    /// Shared read options may name the snapshot this view reads; naming any
-    /// other snapshot would silently read the wrong one. A view is pinned, so
-    /// the options can't ask for an eventual read either.
-    fn ensure_pinned_options(
-        &self,
-        requested: Option<&PinId>,
-        consistency: Option<Consistency>,
-    ) -> Result<()> {
-        check_pinned_consistency(consistency)?;
-        let Some(requested) = requested else {
-            return Ok(());
-        };
-        if Some(requested) != self.snapshot_id() {
-            return Err(Error::InvalidRequest {
+    /// Rejects read options that ask for a state other than the one this
+    /// view captured. A view is pinned, so a read through it has no
+    /// consistency setting, and the options can refer to the snapshot this
+    /// view reads but to no other, because a read of another snapshot through
+    /// this view would silently return the wrong state.
+    fn ensure_read_at(&self, at: &ReadAt) -> Result<()> {
+        match at {
+            ReadAt::Live(None) => Ok(()),
+            ReadAt::Live(Some(_)) => Err(Error::InvalidRequest {
+                message: "a read through a read view has no consistency setting".to_owned(),
+                param: "consistency",
+            }),
+            ReadAt::Snapshot(requested) if Some(requested) == self.snapshot_id() => Ok(()),
+            ReadAt::Snapshot(requested) => Err(Error::InvalidRequest {
                 message: format!(
                     "`snapshot_id` {:?} refers to a different snapshot than this read view",
                     requested.as_str()
                 ),
                 param: "snapshot_id",
-            });
+            }),
         }
-        Ok(())
     }
 
     /// Lists the change feed after `after_seq` through this view's captured
@@ -209,7 +207,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .resolve_path(absolute_path, options.clone(), &self.context)
@@ -254,7 +252,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
+            self.ensure_read_at(&options.at)?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -304,7 +302,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .stat_inode(inode_id, options.clone(), &self.context)
@@ -347,7 +345,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
-            self.ensure_pinned_options(options.snapshot_id.as_ref(), options.consistency)?;
+            self.ensure_read_at(&options.at)?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -467,7 +465,7 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
-            check_pinned_consistency(options.consistency)?;
+            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
             Ok(self
                 .engine
                 .read_file_stream(
@@ -543,7 +541,7 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
-            check_pinned_consistency(options.consistency)?;
+            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
             Ok(self
                 .engine
                 .read_file_stream_by_inode(
@@ -731,31 +729,29 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
-        if let Some(snapshot_id) = &options.snapshot_id {
-            return self
-                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
-                .await?
-                .stat_with_permit(absolute_path, options, &permit)
-                .await;
-        }
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .stat_with_permit(absolute_path, options, &permit)
+                    .await;
+            }
+        };
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |engine, read_context| {
-                    let options = options.clone();
-                    async move {
-                        let entry = engine
-                            .resolve_path(absolute_path, options, &read_context)
-                            .await?;
-                        Ok(entry)
-                    }
-                },
-            )
+            .read(&self.namespace_id, consistency, |engine, read_context| {
+                let options = options.clone();
+                async move {
+                    let entry = engine
+                        .resolve_path(absolute_path, options, &read_context)
+                        .await?;
+                    Ok(entry)
+                }
+            })
             .await
     }
 
@@ -784,29 +780,27 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
-        if let Some(snapshot_id) = &options.snapshot_id {
-            return self
-                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
-                .await?
-                .stat_by_inode_with_permit(inode_id, options, &permit)
-                .await;
-        }
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .stat_by_inode_with_permit(inode_id, options, &permit)
+                    .await;
+            }
+        };
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |engine, read_context| {
-                    let options = options.clone();
-                    async move {
-                        let entry = engine.stat_inode(inode_id, options, &read_context).await?;
-                        Ok(entry)
-                    }
-                },
-            )
+            .read(&self.namespace_id, consistency, |engine, read_context| {
+                let options = options.clone();
+                async move {
+                    let entry = engine.stat_inode(inode_id, options, &read_context).await?;
+                    Ok(entry)
+                }
+            })
             .await
     }
 
@@ -860,43 +854,41 @@ impl<M: crate::Mode> Namespace<M> {
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
-        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
-        if let Some(snapshot_id) = &options.snapshot_id {
-            return self
-                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
-                .await?
-                .path_entries_page(absolute_path, request, options, &permit)
-                .await;
-        }
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .path_entries_page(absolute_path, request, options, &permit)
+                    .await;
+            }
+        };
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |engine, read_context| {
-                    let request = request.clone();
-                    let options = options.clone();
-                    let listed_path = listed_path.clone();
-                    async move {
-                        // Give awakened validation waiters a turn before synchronous page work.
-                        // The head is already captured and the validation guard has been released.
-                        tokio::task::yield_now().await;
-                        let page = engine
-                            .list_path_page(listed_path.as_str(), request, options, &read_context)
-                            .await?;
-                        Ok(ListPathEntriesResponse {
-                            namespace_id: self.namespace_id.clone(),
-                            path: listed_path,
-                            head_seq: read_context.head.seq,
-                            entries: page.items,
-                            next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
-                        })
-                    }
-                },
-            )
+            .read(&self.namespace_id, consistency, |engine, read_context| {
+                let request = request.clone();
+                let options = options.clone();
+                let listed_path = listed_path.clone();
+                async move {
+                    // Give awakened validation waiters a turn before synchronous page work.
+                    // The head is already captured and the validation guard has been released.
+                    tokio::task::yield_now().await;
+                    let page = engine
+                        .list_path_page(listed_path.as_str(), request, options, &read_context)
+                        .await?;
+                    Ok(ListPathEntriesResponse {
+                        namespace_id: self.namespace_id.clone(),
+                        path: listed_path,
+                        head_seq: read_context.head.seq,
+                        entries: page.items,
+                        next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
+                    })
+                }
+            })
             .await
     }
 
@@ -947,43 +939,41 @@ impl<M: crate::Mode> Namespace<M> {
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        check_snapshot_consistency(options.snapshot_id.as_ref(), options.consistency)?;
         let permit = self.core.inner.config.execution_budget.read_permit().await;
-        if let Some(snapshot_id) = &options.snapshot_id {
-            return self
-                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
-                .await?
-                .inode_children_page(inode_id, request, options, &permit)
-                .await;
-        }
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .inode_children_page(inode_id, request, options, &permit)
+                    .await;
+            }
+        };
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |engine, read_context| {
-                    let request = request.clone();
-                    let options = options.clone();
-                    async move {
-                        // Give awakened validation waiters a turn before synchronous page work.
-                        // The head is already captured and the validation guard has been released.
-                        tokio::task::yield_now().await;
-                        let page = engine
-                            .list_inode_children_page(inode_id, request, options, &read_context)
-                            .await?;
-                        let head_seq = read_context.head.seq;
-                        let next_cursor = encode_next_list_cursor(page.next_cursor.as_ref())?;
-                        Ok(ListInodeChildrenResponse {
-                            namespace_id: self.namespace_id.clone(),
-                            parent_inode_id: inode_id,
-                            head_seq,
-                            entries: page.items,
-                            next_cursor,
-                        })
-                    }
-                },
-            )
+            .read(&self.namespace_id, consistency, |engine, read_context| {
+                let request = request.clone();
+                let options = options.clone();
+                async move {
+                    // Give awakened validation waiters a turn before synchronous page work.
+                    // The head is already captured and the validation guard has been released.
+                    tokio::task::yield_now().await;
+                    let page = engine
+                        .list_inode_children_page(inode_id, request, options, &read_context)
+                        .await?;
+                    let head_seq = read_context.head.seq;
+                    let next_cursor = encode_next_list_cursor(page.next_cursor.as_ref())?;
+                    Ok(ListInodeChildrenResponse {
+                        namespace_id: self.namespace_id.clone(),
+                        parent_inode_id: inode_id,
+                        head_seq,
+                        entries: page.items,
+                        next_cursor,
+                    })
+                }
+            })
             .await
     }
 
@@ -1012,7 +1002,6 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
@@ -1080,7 +1069,6 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
@@ -1709,7 +1697,6 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
@@ -1809,7 +1796,6 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        check_consistency(options.consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
@@ -1923,7 +1909,6 @@ impl<M: crate::Mode> Namespace<M> {
         limit: EffectiveLimit,
         consistency: Option<Consistency>,
     ) -> Result<ListChangesResponse> {
-        check_consistency(consistency)?;
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core

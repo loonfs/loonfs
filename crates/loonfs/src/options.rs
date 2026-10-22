@@ -6,19 +6,16 @@
 //! Results are the `loonfs-types` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{Error, MetadataCompactionPolicy, PinId, Result, RetentionTarget};
-use loonfs_core::limits::{
-    FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS, READ_REVALIDATION_BOUND_MS,
-};
+use crate::{Error, MetadataCompactionPolicy, Result, RetentionTarget};
+use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
 use std::num::NonZeroU64;
-use std::time::Duration;
 
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
     DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    ReadAt, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
@@ -153,52 +150,6 @@ impl Default for ReadFileStreamOptions {
             start_offset: 0,
             consistency: None,
         }
-    }
-}
-
-/// Rejects a live read's consistency before the read sends a request, when
-/// its maximum staleness is longer than the revalidation bound.
-pub(crate) fn check_consistency(consistency: Option<Consistency>) -> Result<()> {
-    if let Some(Consistency::Eventual {
-        max_staleness: Some(max_staleness),
-    }) = consistency
-    {
-        if max_staleness > Duration::from_millis(READ_REVALIDATION_BOUND_MS) {
-            return Err(Error::InvalidRequest {
-                message: format!(
-                    "an eventual read's maximum staleness may not exceed the revalidation bound \
-                     ({READ_REVALIDATION_BOUND_MS} ms)"
-                ),
-                param: "max_staleness_ms",
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Rejects a read of a pinned view (a snapshot or a
-/// [`ReadView`](crate::ReadView)) that sets a consistency. The pin selects
-/// the state such a read sees, so the read has no consistency setting.
-pub(crate) fn check_pinned_consistency(consistency: Option<Consistency>) -> Result<()> {
-    if consistency.is_some() {
-        return Err(Error::InvalidRequest {
-            message: "a read of a snapshot or a read view has no consistency setting".to_owned(),
-            param: "consistency",
-        });
-    }
-    Ok(())
-}
-
-/// Checks the consistency of a read that reads a snapshot when it has a
-/// `snapshot_id`, and the live head otherwise, before the read sends a
-/// request.
-pub(crate) fn check_snapshot_consistency(
-    snapshot_id: Option<&PinId>,
-    consistency: Option<Consistency>,
-) -> Result<()> {
-    match snapshot_id {
-        Some(_) => check_pinned_consistency(consistency),
-        None => check_consistency(consistency),
     }
 }
 

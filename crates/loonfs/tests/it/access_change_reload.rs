@@ -5,8 +5,8 @@ use crate::common::wait_for_operation;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, CreateSnapshotOptions,
-    LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadOnly,
-    SharedObjectStore, StatOptions, Writable,
+    LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt,
+    ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::keys::{
@@ -305,7 +305,7 @@ const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "reg
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Some(Consistency::Strong),
+        at: ReadAt::Live(Some(Consistency::Strong)),
         ..StatOptions::default()
     }
 }

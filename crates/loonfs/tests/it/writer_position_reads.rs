@@ -5,8 +5,8 @@ use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadFileOptions, ReadOnly,
-    SharedObjectStore, StatOptions, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadAt, ReadFileOptions,
+    ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
@@ -41,7 +41,7 @@ fn is_manifest_get(
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        consistency: Some(Consistency::Strong),
+        at: ReadAt::Live(Some(Consistency::Strong)),
         ..StatOptions::default()
     }
 }

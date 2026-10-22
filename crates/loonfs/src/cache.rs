@@ -223,7 +223,8 @@ impl RuntimeCore {
     ) -> Result<RuntimeReadContext> {
         let (consistency, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
-                let consistency = consistency.unwrap_or(self.inner.config.consistency);
+                let consistency =
+                    consistency.unwrap_or(self.inner.config.consistency.consistency());
                 (consistency, self.max_staleness_ms(consistency))
             }
             HeadConfirmation::View => (Consistency::Strong, Some(READ_REVALIDATION_BOUND_MS)),
@@ -288,14 +289,10 @@ impl RuntimeCore {
     /// Returns the maximum staleness of a read with `consistency`, or `None`
     /// for a `strong` read.
     fn max_staleness_ms(&self, consistency: Consistency) -> Option<u64> {
-        let Consistency::Eventual { max_staleness } = consistency else {
+        let Consistency::Eventual { max_staleness_ms } = consistency else {
             return None;
         };
-        Some(
-            max_staleness.map_or(self.inner.config.max_staleness_ms, |max_staleness| {
-                u64::try_from(max_staleness.as_millis()).unwrap_or(u64::MAX)
-            }),
-        )
+        Some(max_staleness_ms.unwrap_or(self.inner.config.max_staleness_ms))
     }
 
     /// Returns the read context of `head` and `basis`.

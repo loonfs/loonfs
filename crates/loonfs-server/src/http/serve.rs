@@ -342,7 +342,7 @@ pub(super) async fn build_handles(
     if let Some(interval_ms) = config.max_staleness_ms {
         builder = builder.max_staleness_ms(interval_ms);
     }
-    builder = builder.consistency(config.consistency.consistency());
+    builder = builder.consistency(config.consistency);
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }

@@ -2,13 +2,12 @@
 
 use super::error::ApiResponseError;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, ErrorCode, ListOptions};
+use loonfs::{Consistency, ErrorCode, ListOptions, PinId, ReadAt};
 use loonfs_types::{
     decode_cursor, GeneratedIdValidationError, LimitError, ListPageCursor, OpaqueTokenError,
     PaginationPolicy, PublicOrdinalRangeError, RevisionNo,
 };
 use std::str::FromStr;
-use std::time::Duration;
 
 pub(super) fn required_query_param(
     value: Option<String>,
@@ -44,16 +43,16 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
     }
 }
 
-/// Parses the `consistency` and `max_staleness_ms` parameters of a live
-/// read, or returns `None`, the runtime's default, when the request sets
-/// neither. A read with a `snapshot_id` has no consistency setting, so
-/// `has_snapshot` rejects `consistency` on one.
-pub(super) fn parse_consistency(
+/// Returns what a read reads at, from its parsed `snapshot_id` and its
+/// `consistency` and `max_staleness_ms` parameters. A read with a
+/// `snapshot_id` has no consistency setting, so a request can't set
+/// `consistency` with one.
+pub(super) fn parse_read_at(
+    snapshot_id: Option<PinId>,
     consistency: Option<&str>,
     max_staleness_ms: Option<&str>,
-    has_snapshot: bool,
-) -> Result<Option<Consistency>, ApiResponseError> {
-    if has_snapshot && consistency.is_some() {
+) -> Result<ReadAt, ApiResponseError> {
+    if snapshot_id.is_some() && consistency.is_some() {
         return Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "consistency cannot be combined with snapshot_id, because a snapshot read has no \
@@ -61,10 +60,24 @@ pub(super) fn parse_consistency(
         )
         .with_param("consistency"));
     }
-    let max_staleness = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
+    let consistency = parse_consistency(consistency, max_staleness_ms)?;
+    Ok(match snapshot_id {
+        Some(snapshot_id) => ReadAt::Snapshot(snapshot_id),
+        None => ReadAt::Live(consistency),
+    })
+}
+
+/// Parses the `consistency` and `max_staleness_ms` parameters of a live
+/// read, or returns `None`, the runtime's default, when the request sets
+/// neither.
+pub(super) fn parse_consistency(
+    consistency: Option<&str>,
+    max_staleness_ms: Option<&str>,
+) -> Result<Option<Consistency>, ApiResponseError> {
+    let max_staleness_ms = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
     match consistency {
-        Some("eventual") => Ok(Some(Consistency::Eventual { max_staleness })),
-        None | Some("strong") if max_staleness.is_some() => Err(ApiResponseError::new(
+        Some("eventual") => Ok(Some(Consistency::Eventual { max_staleness_ms })),
+        None | Some("strong") if max_staleness_ms.is_some() => Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "max_staleness_ms requires consistency=eventual",
         )
@@ -79,7 +92,7 @@ pub(super) fn parse_consistency(
     }
 }
 
-fn parse_max_staleness_ms(value: &str) -> Result<Duration, ApiResponseError> {
+fn parse_max_staleness_ms(value: &str) -> Result<u64, ApiResponseError> {
     let invalid = |reason: &str| {
         ApiResponseError::new(
             ErrorCode::InvalidRequest,
@@ -95,7 +108,7 @@ fn parse_max_staleness_ms(value: &str) -> Result<Duration, ApiResponseError> {
             "must not exceed {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
         )));
     }
-    Ok(Duration::from_millis(max_staleness_ms))
+    Ok(max_staleness_ms)
 }
 
 pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {

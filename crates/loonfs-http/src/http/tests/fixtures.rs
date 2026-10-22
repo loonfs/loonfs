@@ -33,7 +33,7 @@ pub(super) struct TestAppOptions {
     /// `None`.
     pub(super) max_staleness_ms: Option<u64>,
     /// The runtime's default consistency, or the default when `None`.
-    pub(super) consistency: Option<loonfs::Consistency>,
+    pub(super) consistency: Option<loonfs::ReadConsistency>,
     /// The runtime's monotonic timer, or the system timer when `None`.
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
     /// The runtime's execution budget, or the default when `None`.

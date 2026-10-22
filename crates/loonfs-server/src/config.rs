@@ -21,6 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub use loonfs::ReadConsistency;
 pub use loonfs_http::JobMode;
 pub use loonfs_objectstore::StoreConfig;
 
@@ -321,31 +322,6 @@ pub struct TlsServerConfig {
     pub cert_path: String,
     /// PEM private key: PKCS#8, PKCS#1 (RSA), or SEC1.
     pub key_path: String,
-}
-
-/// The consistency of the server's live reads that don't set their own.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadConsistency {
-    /// Read at the head that the server confirmed last while that
-    /// confirmation is younger than `max_staleness_ms`.
-    #[default]
-    Eventual,
-    /// Confirm the head before every read, for a deployment whose readers
-    /// follow writes made through other servers.
-    Strong,
-}
-
-impl ReadConsistency {
-    /// Returns the runtime's default consistency.
-    pub fn consistency(self) -> loonfs::Consistency {
-        match self {
-            Self::Eventual => loonfs::Consistency::Eventual {
-                max_staleness: None,
-            },
-            Self::Strong => loonfs::Consistency::Strong,
-        }
-    }
 }
 
 fn default_maintenance() -> JobMode {

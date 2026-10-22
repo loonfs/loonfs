@@ -28,6 +28,32 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// maintenance folds a tail that is below the fold thresholds (15 minutes).
 pub const DEFAULT_IDLE_FOLD_AFTER_MS: u64 = 15 * 60 * 1_000;
 
+/// The consistency of a runtime's live reads that don't set their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadConsistency {
+    /// Read at the head that the runtime confirmed last while that
+    /// confirmation is younger than the runtime's maximum staleness.
+    #[default]
+    Eventual,
+    /// Confirm the head before every read, for a host whose readers follow
+    /// writes made in other processes.
+    Strong,
+}
+
+impl ReadConsistency {
+    /// Returns the consistency of a read that takes this default, with the
+    /// runtime's maximum staleness.
+    pub(crate) fn consistency(self) -> crate::Consistency {
+        match self {
+            Self::Eventual => crate::Consistency::Eventual {
+                max_staleness_ms: None,
+            },
+            Self::Strong => crate::Consistency::Strong,
+        }
+    }
+}
+
 /// The admission limits one writable runtime applies to each namespace's
 /// publication requests, and how long a commit waits at the write stop.
 ///
@@ -150,7 +176,7 @@ pub(crate) struct ReadConfig {
     /// again. Zero confirms on every read.
     pub max_staleness_ms: u64,
     /// The consistency of a read that doesn't set its own.
-    pub consistency: crate::Consistency,
+    pub consistency: ReadConsistency,
     /// Layout and input limits for metadata compactions.
     pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.
