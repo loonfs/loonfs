@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Removes the streaming and deprecated options from the generated Python SDK, applies the LoonFS retry and error rules, skips change events of kinds that the SDK doesn't define, and moves its entry point to `loonfs.server`."""
+"""Removes the streaming and deprecated options from the generated Python SDK, applies the LoonFS retry and error rules, skips change events of kinds that the SDK doesn't define, keeps path entries of inode kinds that the SDK doesn't define, and moves its entry point to `loonfs.server`."""
 
 import json
 import pathlib
@@ -159,6 +159,104 @@ source = replace_once(
     "    if IS_PYDANTIC_V2:\n",
 )
 commit_path.write_text(source)
+
+# A client must keep a path entry whose inode kind it doesn't know, and read the fields
+# that every entry includes. The generated union rejects an unknown kind, which fails the
+# whole stat or listing, so the patch wraps that union in one with a fallback member for
+# the other kinds. A directory entry has exactly the fields that every entry includes, so
+# the fallback member copies the directory member's fields.
+schemas = openapi["components"]["schemas"]
+entry_fields = {
+    kind: set(schemas[reference.rsplit("/", 1)[1]]["properties"])
+    for kind, reference in schemas["PathEntry"]["discriminator"]["mapping"].items()
+}
+assert entry_fields["dir"] == set.intersection(*entry_fields.values()), (
+    "a directory entry no longer has exactly the fields that every entry includes"
+)
+inode_kinds = "".join(f'    "{kind}",\n' for kind in sorted(entry_fields))
+path_entry_path = pathlib.Path("generated/python/types/path_entry.py")
+source = path_entry_path.read_text()
+source = replace_once(
+    source,
+    "from ..core.pydantic_utilities import IS_PYDANTIC_V2, UniversalBaseModel\n",
+    "from ..core.pydantic_utilities import IS_PYDANTIC_V2, UniversalBaseModel, universal_field_validator\n",
+)
+source = replace_once(
+    source,
+    "from .revision_no import RevisionNo\n",
+    "from .revision_no import RevisionNo\n"
+    "\n"
+    f"_INODE_KINDS = frozenset({{\n{inode_kinds}}})\n",
+)
+directory_member = source[
+    source.index("class PathEntry_Dir(UniversalBaseModel):\n") : source.index("class PathEntry_File(UniversalBaseModel):\n")
+]
+unknown_member, count = re.subn(
+    r'    """\n.*?    """\n',
+    '    """\n'
+    "    An entry of an inode kind that this version of the SDK doesn't define, such as a kind that a\n"
+    "    newer server added. It has the fields that every entry includes.\n"
+    '    """\n',
+    directory_member,
+    count=1,
+    flags=re.DOTALL,
+)
+assert count == 1, "expected a docstring on the directory member"
+unknown_member = replace_once(unknown_member, "class PathEntry_Dir(", "class PathEntry_Unknown(")
+unknown_member = replace_once(unknown_member, '    inode_kind: typing.Literal["dir"] = "dir"\n', "    inode_kind: str\n")
+unknown_member = replace_once(
+    unknown_member,
+    "    if IS_PYDANTIC_V2:\n",
+    "    @universal_field_validator(\"inode_kind\")\n"
+    "    def _reject_defined_inode_kinds(cls, inode_kind: str) -> str:\n"
+    "        # A directory or file entry decodes only as its own member, so an entry of a defined\n"
+    "        # kind that's missing a field fails validation instead of decoding as this member.\n"
+    "        if inode_kind in _INODE_KINDS:\n"
+    "            raise ValueError(f\"an entry of kind {inode_kind!r} doesn't match that kind's fields\")\n"
+    "        return inode_kind\n"
+    "\n"
+    "    if IS_PYDANTIC_V2:\n",
+)
+source = replace_once(
+    source,
+    "PathEntry = typing_extensions.Annotated[\n"
+    '    typing.Union[PathEntry_Dir, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
+    "]\n",
+    unknown_member + "PathEntry = typing.Union[\n"
+    "    typing_extensions.Annotated[\n"
+    '        typing.Union[PathEntry_Dir, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
+    "    ],\n"
+    "    PathEntry_Unknown,\n"
+    "]\n",
+)
+path_entry_path.write_text(source)
+# The package root becomes `loonfs.server` below, so both modules export the fallback member
+# beside the other members.
+for exports_path, replacements in (
+    (
+        pathlib.Path("generated/python/types/__init__.py"),
+        (
+            (
+                "    from .path_entry import PathEntry, PathEntry_Dir, PathEntry_File\n",
+                "    from .path_entry import PathEntry, PathEntry_Dir, PathEntry_File, PathEntry_Unknown\n",
+            ),
+            ('    "PathEntry_File": ".path_entry",\n', '    "PathEntry_File": ".path_entry",\n    "PathEntry_Unknown": ".path_entry",\n'),
+            ('    "PathEntry_File",\n', '    "PathEntry_File",\n    "PathEntry_Unknown",\n'),
+        ),
+    ),
+    (
+        pathlib.Path("generated/python/__init__.py"),
+        (
+            ("        PathEntry_File,\n", "        PathEntry_File,\n        PathEntry_Unknown,\n"),
+            ('    "PathEntry_File": ".types",\n', '    "PathEntry_File": ".types",\n    "PathEntry_Unknown": ".types",\n'),
+            ('    "PathEntry_File",\n', '    "PathEntry_File",\n    "PathEntry_Unknown",\n'),
+        ),
+    ),
+):
+    source = exports_path.read_text()
+    for old, new in replacements:
+        source = replace_once(source, old, new)
+    exports_path.write_text(source)
 
 client_path = pathlib.Path("generated/python/client.py")
 source = client_path.read_text()

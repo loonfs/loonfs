@@ -35,6 +35,7 @@ const EXPECTED_CASES = [
     "proxy",
     "snapshots",
     "unknown_event_kinds",
+    "unknown_inode_kinds",
     "upload_abort",
     "upload_direct_put",
     "upload_modes",
@@ -213,6 +214,20 @@ interface UnknownEventKindsExpected {
     committed_seqs: number[];
     next_after_seq: number;
     known_events: JsonObject[][];
+}
+
+interface UnknownInodeKindsRequest {
+    namespace_id: string;
+    path: string;
+    directory: string;
+    unknown_kind: string;
+    entry: JsonObject;
+    listing: JsonObject;
+}
+
+interface UnknownInodeKindsExpected {
+    entry: JsonObject;
+    entries: JsonObject[];
 }
 
 interface DirectPutRequest {
@@ -568,6 +583,15 @@ const UNKNOWN_EVENT_KINDS_EXPECTED_FIELDS = [
     "next_after_seq",
     "known_events",
 ] as const;
+const UNKNOWN_INODE_KINDS_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "directory",
+    "unknown_kind",
+    "entry",
+    "listing",
+] as const;
+const UNKNOWN_INODE_KINDS_EXPECTED_FIELDS = ["entry", "entries"] as const;
 const DIRECT_PUT_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -766,6 +790,17 @@ function decodeUnknownEventKinds(
     return [
         testCase.request as unknown as UnknownEventKindsRequest,
         testCase.expected as unknown as UnknownEventKindsExpected,
+    ];
+}
+
+function decodeUnknownInodeKinds(
+    testCase: ConformanceCase,
+): [UnknownInodeKindsRequest, UnknownInodeKindsExpected] {
+    strictObject(testCase.request, UNKNOWN_INODE_KINDS_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, UNKNOWN_INODE_KINDS_EXPECTED_FIELDS, `${testCase.name} expected`);
+    return [
+        testCase.request as unknown as UnknownInodeKindsRequest,
+        testCase.expected as unknown as UnknownInodeKindsExpected,
     ];
 }
 
@@ -2880,6 +2915,45 @@ conformanceTest("unknown_event_kinds", async (_activeHarness, testCase) => {
             change.events.filter((event) => (event.kind as string) !== request.unknown_kind),
         ),
         expected.known_events,
+    );
+});
+
+conformanceTest("unknown_inode_kinds", async (_activeHarness, testCase) => {
+    const [request, expected] = decodeUnknownInodeKinds(testCase);
+    const client = new LoonFSClient({
+        baseUrl: "http://api.test",
+        token: "unused",
+        fetch: async (input) => {
+            const url = new URL(input instanceof Request ? input.url : input);
+            return Response.json(
+                url.pathname.endsWith("/filesystem/entries") ? request.listing : request.entry,
+            );
+        },
+    });
+    const entry = await client.files.retrieve({
+        namespace_id: request.namespace_id,
+        path: request.path,
+    });
+    const listing = await client.files.list({
+        namespace_id: request.namespace_id,
+        path: request.directory,
+    });
+
+    // The SDK returns an entry whose kind it doesn't define unchanged, so a caller reads the
+    // fields that every entry includes and ignores the rest.
+    const unknownFields = (value: LoonFS.PathEntry, fields: JsonObject): JsonObject => {
+        assert.equal(value.inode_kind as string, request.unknown_kind);
+        const entryFields = value as unknown as JsonObject;
+        return Object.fromEntries(Object.keys(fields).map((field) => [field, entryFields[field]]));
+    };
+    assert.deepEqual(unknownFields(entry, expected.entry), expected.entry);
+    assert.deepEqual(
+        listing.data.map((listed, index) =>
+            (listed.inode_kind as string) === request.unknown_kind
+                ? unknownFields(listed, expected.entries[index] ?? {})
+                : listed,
+        ),
+        expected.entries,
     );
 });
 

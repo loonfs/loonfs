@@ -1,0 +1,147 @@
+{
+  "name": "unknown_inode_kinds",
+  "intent": "Checks that a client keeps a path entry whose inode kind it doesn't define, with the fields that every entry includes, and returns the other entries unchanged. The harness serves `entry` and `listing` itself, because the reference server returns only the kinds that the API defines. `unknown_kind` stands for a kind that a newer server added. The expected unknown entries list the fields that every entry includes, and leave out `inode_kind` and the fields that belong to the unknown kind.",
+  "request": {
+    "namespace_id": "conf-unknown-inode-kinds",
+    "path": "/docs/latest",
+    "directory": "/docs",
+    "unknown_kind": "link",
+    "entry": {
+      "namespace_id": "conf-unknown-inode-kinds",
+      "path": "/docs/latest",
+      "inode_id": "ino_43",
+      "created_by": "conformance-unknown-inode-kinds",
+      "created_at_ms": 1752623000000,
+      "inode_kind": "link",
+      "target_inode_id": "ino_44",
+      "head_seq": 421,
+      "parent_inode_id": "ino_42",
+      "display_name": "latest",
+      "binding_version": "bv-43",
+      "attributes_revision_no": 2,
+      "attributes_updated_by": "conformance-unknown-inode-kinds",
+      "attributes_updated_at_ms": 1752623500000,
+      "attributes": { "owner": "platform" }
+    },
+    "listing": {
+      "namespace_id": "conf-unknown-inode-kinds",
+      "path": "/docs",
+      "head_seq": 421,
+      "entries": [
+        {
+          "namespace_id": "conf-unknown-inode-kinds",
+          "path": "/docs/archive",
+          "inode_id": "ino_45",
+          "created_by": "conformance-unknown-inode-kinds",
+          "created_at_ms": 1752623000000,
+          "inode_kind": "dir",
+          "head_seq": 421,
+          "parent_inode_id": "ino_42",
+          "display_name": "archive",
+          "binding_version": "bv-45"
+        },
+        {
+          "namespace_id": "conf-unknown-inode-kinds",
+          "path": "/docs/latest",
+          "inode_id": "ino_43",
+          "created_by": "conformance-unknown-inode-kinds",
+          "created_at_ms": 1752623000000,
+          "inode_kind": "link",
+          "target_inode_id": "ino_44",
+          "head_seq": 421,
+          "parent_inode_id": "ino_42",
+          "display_name": "latest",
+          "binding_version": "bv-43"
+        },
+        {
+          "namespace_id": "conf-unknown-inode-kinds",
+          "path": "/docs/report.txt",
+          "inode_id": "ino_44",
+          "created_by": "conformance-unknown-inode-kinds",
+          "created_at_ms": 1752623000000,
+          "inode_kind": "file",
+          "head_seq": 421,
+          "parent_inode_id": "ino_42",
+          "display_name": "report.txt",
+          "binding_version": "bv-44",
+          "revision_no": 7,
+          "size_bytes": 5,
+          "content_ref": {
+            "kind": "blob_v1",
+            "owner_namespace_id": "conf-unknown-inode-kinds",
+            "content_id": "con_0123456789abcdef0123456789abcdef",
+            "size_bytes": 5,
+            "checksum": { "algorithm": "crc64nvme", "value": "3377857006524257" }
+          },
+          "revision_committed_by": "conformance-unknown-inode-kinds",
+          "revision_committed_at_ms": 1752624000000
+        }
+      ]
+    }
+  },
+  "expected": {
+    "entry": {
+      "namespace_id": "conf-unknown-inode-kinds",
+      "path": "/docs/latest",
+      "inode_id": "ino_43",
+      "created_by": "conformance-unknown-inode-kinds",
+      "created_at_ms": 1752623000000,
+      "head_seq": 421,
+      "parent_inode_id": "ino_42",
+      "display_name": "latest",
+      "binding_version": "bv-43",
+      "attributes_revision_no": 2,
+      "attributes_updated_by": "conformance-unknown-inode-kinds",
+      "attributes_updated_at_ms": 1752623500000,
+      "attributes": { "owner": "platform" }
+    },
+    "entries": [
+      {
+        "namespace_id": "conf-unknown-inode-kinds",
+        "path": "/docs/archive",
+        "inode_id": "ino_45",
+        "created_by": "conformance-unknown-inode-kinds",
+        "created_at_ms": 1752623000000,
+        "inode_kind": "dir",
+        "head_seq": 421,
+        "parent_inode_id": "ino_42",
+        "display_name": "archive",
+        "binding_version": "bv-45"
+      },
+      {
+        "namespace_id": "conf-unknown-inode-kinds",
+        "path": "/docs/latest",
+        "inode_id": "ino_43",
+        "created_by": "conformance-unknown-inode-kinds",
+        "created_at_ms": 1752623000000,
+        "head_seq": 421,
+        "parent_inode_id": "ino_42",
+        "display_name": "latest",
+        "binding_version": "bv-43"
+      },
+      {
+        "namespace_id": "conf-unknown-inode-kinds",
+        "path": "/docs/report.txt",
+        "inode_id": "ino_44",
+        "created_by": "conformance-unknown-inode-kinds",
+        "created_at_ms": 1752623000000,
+        "inode_kind": "file",
+        "head_seq": 421,
+        "parent_inode_id": "ino_42",
+        "display_name": "report.txt",
+        "binding_version": "bv-44",
+        "revision_no": 7,
+        "size_bytes": 5,
+        "content_ref": {
+          "kind": "blob_v1",
+          "owner_namespace_id": "conf-unknown-inode-kinds",
+          "content_id": "con_0123456789abcdef0123456789abcdef",
+          "size_bytes": 5,
+          "checksum": { "algorithm": "crc64nvme", "value": "3377857006524257" }
+        },
+        "revision_committed_by": "conformance-unknown-inode-kinds",
+        "revision_committed_at_ms": 1752624000000
+      }
+    ]
+  }
+}

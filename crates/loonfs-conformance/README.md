@@ -4,7 +4,7 @@
 
 ## Cases
 
-The seventeen cases cover:
+The eighteen cases cover:
 
 - standard API errors
 - repeated commit requests
@@ -21,6 +21,7 @@ The seventeen cases cover:
 - snapshot creation, reads, extension, and deletion (`snapshots`)
 - change feed identity fields
 - change feed events of a kind that the client doesn't define (`unknown_event_kinds`)
+- path entries of an inode kind that the client doesn't define (`unknown_inode_kinds`)
 - an end-to-end filesystem workflow
 - requests through a proxy, the routes it forwards, and its authorization hook
 
@@ -30,6 +31,8 @@ Two cases don't run in every harness:
 - `upload_modes`: this case runs in the Rust reference harness. SDK harnesses check that it's listed in the case inventory, and the Go harness logs that it skips the case.
 
 The `unknown_event_kinds` case runs in every harness, but not against the conformance server, because the server returns only the event kinds that the API defines. Each harness serves the case's `page` from a local stub instead, and checks that its client decodes the page and returns the other events unchanged. The Python SDK leaves out the events of `unknown_kind`. The other clients return those events as values of a kind they don't define, so their harnesses skip them.
+
+The `unknown_inode_kinds` case also runs in every harness against a local stub, because the server returns only the inode kinds that the API defines. Each harness serves the case's `entry` and `listing`, and checks that its client keeps the entry of `unknown_kind` with the fields that every entry includes, and returns the other entries unchanged. The Python SDK returns that entry as a `PathEntry_Unknown`, the Go SDK decodes its fields with `PathEntry.GetUnknown`, the TypeScript SDK returns it unchanged, and the Rust client decodes it as `PathEntryKind::Unknown`.
 
 ## JSON format
 

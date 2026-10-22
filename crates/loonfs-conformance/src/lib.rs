@@ -42,6 +42,7 @@ const EXPECTED_CASES: &[&str] = &[
     "proxy",
     "snapshots",
     "unknown_event_kinds",
+    "unknown_inode_kinds",
     "upload_abort",
     "upload_direct_put",
     "upload_modes",
