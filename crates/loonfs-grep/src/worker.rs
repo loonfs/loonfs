@@ -287,8 +287,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             return Ok(GrepDisableOutcome::NotEnabled);
         }
-        let checkpoint_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
+        let pin_id = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
         let next = GrepManifestState::new(
@@ -304,9 +304,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
-                if let Some(checkpoint_id) = checkpoint_id {
-                    self.delete_pin_if_present(namespace_id, &checkpoint_id)
-                        .await;
+                if let Some(pin_id) = pin_id {
+                    self.delete_pin_if_present(namespace_id, &pin_id).await;
                 }
                 Ok(GrepDisableOutcome::Disabled)
             }
@@ -345,15 +344,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
-                checkpoint_id,
-            } => match plan_backfill_unit(
-                &reads,
-                checkpoint_id,
-                *captured_seq,
-                *cursor_inode_id,
-                policy,
-            )
-            .await
+                pin_id,
+            } => match plan_backfill_unit(&reads, pin_id, *captured_seq, *cursor_inode_id, policy)
+                .await
             {
                 Ok(planned) => planned,
                 Err(error) if rebootstrap_required(&error) => {
@@ -472,8 +465,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: &LoadedGrepManifest,
         deadline: &Deadline,
     ) -> Result<GrepBuildOutcome> {
-        let previous_checkpoint_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
+        let previous_pin_id = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
         let manifest_no = next_manifest_no(Some(current))?;
@@ -487,8 +480,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         );
         match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
             Ok(_) => {
-                if let Some(previous_checkpoint_id) = previous_checkpoint_id {
-                    self.delete_pin_if_present(namespace_id, &previous_checkpoint_id)
+                if let Some(previous_pin_id) = previous_pin_id {
+                    self.delete_pin_if_present(namespace_id, &previous_pin_id)
                         .await;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
@@ -542,9 +535,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         segments.extend(new_segments);
         // A completed backfill is current through the sequence captured by
         // its checkpoint. The change feed resumes after that sequence.
-        let (status, completed_checkpoint_id, built_through_seq) = match progress {
+        let (status, completed_pin_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
-                checkpoint_id,
+                pin_id,
                 captured_seq,
                 next_cursor,
             } => match next_cursor {
@@ -552,7 +545,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     GrepIndexStatus::Backfilling {
                         captured_seq,
                         cursor_inode_id: Some(after_inode_id),
-                        checkpoint_id,
+                        pin_id,
                     },
                     None,
                     captured_seq,
@@ -562,7 +555,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         built_through_seq: captured_seq,
                         next_event_index: 0,
                     },
-                    Some(checkpoint_id),
+                    Some(pin_id),
                     captured_seq,
                 ),
             },
@@ -591,9 +584,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
             Ok(_) => {
-                if let Some(checkpoint_id) = completed_checkpoint_id {
-                    self.delete_pin_if_present(namespace_id, &checkpoint_id)
-                        .await;
+                if let Some(pin_id) = completed_pin_id {
+                    self.delete_pin_if_present(namespace_id, &pin_id).await;
                 }
                 Ok(GrepBuildOutcome::Published {
                     built_through_seq,
@@ -612,7 +604,7 @@ fn backfilling_manifest(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
     captured_seq: ChangeSeq,
-    checkpoint_id: PinId,
+    pin_id: PinId,
     next_run_no: RunNo,
 ) -> GrepManifestState {
     GrepManifestState::new(
@@ -621,7 +613,7 @@ fn backfilling_manifest(
         GrepIndexStatus::Backfilling {
             captured_seq,
             cursor_inode_id: None,
-            checkpoint_id,
+            pin_id,
         },
         GrepIndexState {
             reorganize: None,
@@ -717,7 +709,7 @@ struct IndexingStats {
 /// prevents a backfill cursor from being paired with change-feed progress.
 enum CollectedProgress {
     Backfill {
-        checkpoint_id: PinId,
+        pin_id: PinId,
         captured_seq: ChangeSeq,
         next_cursor: Option<InodeId>,
     },
@@ -739,7 +731,7 @@ enum CollectedProgress {
 /// still included, exactly as the row walk did).
 async fn plan_backfill_unit(
     reads: &NamespaceReads,
-    checkpoint_id: &PinId,
+    pin_id: &PinId,
     captured_seq: ChangeSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
@@ -752,7 +744,7 @@ async fn plan_backfill_unit(
     let mut cursor = cursor.map(|after_inode_id| CheckpointFilesPageCursor { after_inode_id });
     loop {
         let page = reads
-            .list_checkpoint_files(checkpoint_id)
+            .list_checkpoint_files(pin_id)
             .page_limit(page_limit(files_remaining)?)
             .cursor(cursor)
             .page()
@@ -760,7 +752,7 @@ async fn plan_backfill_unit(
         if page.captured_seq != captured_seq {
             return Err(GrepError::IndexCorrupt {
                 message: format!(
-                    "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
+                    "checkpoint `{pin_id}` pins sequence `{}` but the grep manifest is \
                  backfilling sequence `{captured_seq}`",
                     page.captured_seq
                 ),
@@ -804,7 +796,7 @@ async fn plan_backfill_unit(
         pending,
         stats,
         progress: CollectedProgress::Backfill {
-            checkpoint_id: checkpoint_id.clone(),
+            pin_id: pin_id.clone(),
             captured_seq,
             next_cursor,
         },
@@ -1045,38 +1037,38 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     current.manifest_state().segments(),
                     INDEX_GRAMS_MID_LEVEL,
                 );
-                let (snapshot_segment_ids, output_level) =
-                    if delta_runs >= policy.max_delta_runs.get() {
-                        (
-                            current
-                                .manifest_state()
-                                .segments()
-                                .iter()
-                                .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
-                                .map(|segment| segment.segment_id.clone())
-                                .collect(),
-                            INDEX_GRAMS_MID_LEVEL,
-                        )
-                    } else if mid_runs >= policy.max_mid_runs.get() {
-                        (
-                            current
-                                .manifest_state()
-                                .segments()
-                                .iter()
-                                .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
-                                .map(|segment| segment.segment_id.clone())
-                                .collect(),
-                            INDEX_GRAMS_BASE_LEVEL,
-                        )
-                    } else {
-                        return Ok(GrepReorganizeOutcome::NotNeeded {
-                            delta_runs,
-                            mid_runs,
-                        });
-                    };
+                let (input_segment_ids, output_level) = if delta_runs >= policy.max_delta_runs.get()
+                {
+                    (
+                        current
+                            .manifest_state()
+                            .segments()
+                            .iter()
+                            .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
+                            .map(|segment| segment.segment_id.clone())
+                            .collect(),
+                        INDEX_GRAMS_MID_LEVEL,
+                    )
+                } else if mid_runs >= policy.max_mid_runs.get() {
+                    (
+                        current
+                            .manifest_state()
+                            .segments()
+                            .iter()
+                            .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
+                            .map(|segment| segment.segment_id.clone())
+                            .collect(),
+                        INDEX_GRAMS_BASE_LEVEL,
+                    )
+                } else {
+                    return Ok(GrepReorganizeOutcome::NotNeeded {
+                        delta_runs,
+                        mid_runs,
+                    });
+                };
                 (
                     GrepReorganizeState {
-                        snapshot_segment_ids,
+                        input_segment_ids,
                         output_segment_ids: Vec::new(),
                         row_key_cursor: String::new(),
                         output_level,
@@ -1086,8 +1078,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 )
             }
         };
-        let snapshot = reorganize
-            .snapshot_segment_ids
+        let inputs = reorganize
+            .input_segment_ids
             .iter()
             .map(|segment_id| {
                 current
@@ -1097,7 +1089,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .find(|segment| &segment.segment_id == segment_id)
                     .ok_or_else(|| GrepError::IndexCorrupt {
                         message: format!(
-                            "grep reorganization snapshot segment `{segment_id}` is missing from the manifest"
+                            "grep reorganization input segment `{segment_id}` is missing from the manifest"
                         ),
                     })
             })
@@ -1106,7 +1098,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let merged = merge_snapshot_range(
             &self.store,
             namespace_id,
-            &snapshot,
+            &inputs,
             &reorganize.row_key_cursor,
             policy.max_decoded_input_rows_per_step.get(),
         )
@@ -1133,9 +1125,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         segments.extend(new_segments);
         let completed = merged.exhausted;
         let reorganize = if completed {
-            let snapshot_ids: BTreeSet<&IndexSegmentId> =
-                next_reorganize.snapshot_segment_ids.iter().collect();
-            segments.retain(|segment| !snapshot_ids.contains(&segment.segment_id));
+            let input_ids: BTreeSet<&IndexSegmentId> =
+                next_reorganize.input_segment_ids.iter().collect();
+            segments.retain(|segment| !input_ids.contains(&segment.segment_id));
             None
         } else {
             next_reorganize.row_key_cursor = merged.next_cursor;

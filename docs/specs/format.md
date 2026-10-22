@@ -2296,13 +2296,13 @@ The manifest's `status` contains the position fields for its lifecycle state:
 
 | Kind | Status fields |
 | --- | --- |
-| `backfilling` | `captured_seq`, `checkpoint_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
+| `backfilling` | `captured_seq`, `pin_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
 | `active` | `built_through_seq`, `next_event_index` |
 | `disabled` | No other status fields |
 
 Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
-The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
+The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
 
 Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
 
