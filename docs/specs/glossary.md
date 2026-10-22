@@ -58,7 +58,7 @@ A stored row that maps a commit ID to the sequence it committed at. LoonFS uses 
 
 ### Semantic fingerprint
 
-A digest of a commit's logical request: the actor, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`).
+A digest of a commit's logical request: the namespace, the actor, the subject, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`).
 
 ### Change feed
 
