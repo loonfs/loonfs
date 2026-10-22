@@ -668,7 +668,6 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
             .max_segment_bytes(0)
             .max_head_bytes(max_head_bytes)
             .max_wal_tail_bytes(0)
-            .max_wal_object_bytes(0)
             .max_content_object_bytes(0)
             .build()
     };
@@ -753,7 +752,6 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
                 .max_segment_bytes(SEGMENT_BUDGET_BYTES)
                 .max_head_bytes(0)
                 .max_wal_tail_bytes(0)
-                .max_wal_object_bytes(0)
                 .max_content_object_bytes(0)
                 .build(),
             |reader| list_every_directory(shape, reader),
@@ -772,7 +770,6 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
                 .max_segment_bytes(0)
                 .max_head_bytes(max_head_bytes)
                 .max_wal_tail_bytes(max_wal_tail_bytes)
-                .max_wal_object_bytes(0)
                 .max_content_object_bytes(0)
                 .build()
         };

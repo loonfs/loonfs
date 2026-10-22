@@ -12,7 +12,6 @@ use loonfs_test_support::stores::{
     KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::ChecksumAlgorithm;
-use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -487,12 +486,11 @@ async fn read_policy_stays_with_each_binding() {
     );
 }
 
-const CACHE_METRICS: [&str; 6] = [
+const CACHE_METRICS: [&str; 5] = [
     "loonfs.segment_cache.retained_decoded_bytes",
     "loonfs.head_cache.gets",
     "loonfs.wal_tail_cache.retained_decoded_bytes",
     "loonfs.wal_tail_cache.gets",
-    "loonfs.wal_object_cache.gets",
     "loonfs.content_object_cache.retained_decoded_bytes",
 ];
 
@@ -682,88 +680,6 @@ fn object_gets(operations: &[RecordedOperation], family: DurableObjectFamily) ->
         .count()
 }
 
-/// Checks that the first read after a compaction, in a runtime without the
-/// namespace's writer session, reloads the namespace's head without
-/// reading the unfolded WAL objects from the store again.
-///
-/// The reads run on a read-only runtime that shares the writer's cache,
-/// because reads in the writer's runtime start from the writer's position.
-#[tokio::test]
-async fn an_anchor_reload_reads_unfolded_wal_objects_from_the_object_cache() {
-    for max_wal_object_bytes in [crate::DEFAULT_MAX_WAL_OBJECT_BYTES, 0] {
-        let cache = MetadataCache::builder()
-            .max_wal_object_bytes(max_wal_object_bytes)
-            .build();
-        let (writer, store, _root) = recorded_writer(cache.clone()).await;
-        let reader = LoonFs::builder_with_store(store.clone())
-            .read_only()
-            .metadata_cache(cache.clone())
-            .manifest_revalidation_interval_ms(0)
-            .max_staleness_ms(0)
-            .build()
-            .await
-            .expect("build reader");
-        let reader_namespace = reader.namespace(&demo());
-        let namespace = writer.open_namespace(&demo()).expect("open namespace");
-        let maintenance = writer.maintenance(writer_id("object-cache-maintenance"));
-        for index in 0..3 {
-            namespace
-                .put_file(&format!("/folded-{index}"), b"folded", &test_actor())
-                .await
-                .expect("put a folded file");
-            maintenance.fold_wal(&demo()).await.expect("fold");
-        }
-        for index in 0..3 {
-            namespace
-                .put_file(&format!("/tail-{index}"), b"tail", &test_actor())
-                .await
-                .expect("put a file whose bytes stay in the WAL");
-        }
-        // The reader's first read loads the unfolded WAL objects from the
-        // store.
-        assert_eq!(
-            reader_namespace
-                .read_file("/tail-0")
-                .await
-                .expect("read")
-                .bytes,
-            b"tail"
-        );
-        let compaction = maintenance
-            .compact_metadata(&demo(), &crate::MaintenanceCancellation::new())
-            .await
-            .expect("compact");
-        assert_matches!(
-            compaction.compaction,
-            crate::MetadataCompactionOutcome::Published { .. }
-        );
-
-        store.reset();
-        assert_eq!(
-            reader_namespace
-                .read_file("/tail-2")
-                .await
-                .expect("read")
-                .bytes,
-            b"tail"
-        );
-        let operations = store.snapshot();
-        assert!(
-            operations
-                .iter()
-                .any(|operation| operation.key().contains("/manifests/")),
-            "the read reloads the anchor: {operations:?}"
-        );
-        let wal_gets = object_gets(&operations, DurableObjectFamily::WalObject);
-        if max_wal_object_bytes == 0 {
-            assert_eq!(wal_gets, 3, "without the cache, the reload reads the tail");
-        } else {
-            assert_eq!(wal_gets, 0, "{:?}", cache.stats());
-            assert_eq!(cache.stats().wal_object_hits, 3);
-        }
-    }
-}
-
 /// Checks that a second read of a small content object finds its bytes in
 /// the object cache, and that every read of an object over the size cap goes
 /// to the store.
@@ -808,11 +724,10 @@ async fn small_content_objects_are_read_from_the_store_once() {
     }
 }
 
-/// Checks that a second runtime over the same object store reads the WAL
-/// objects and the content object that the first runtime read, without a
-/// GET of its own.
+/// Checks that a second runtime over the same object store reads the content
+/// object that the first runtime read, without a GET of its own.
 #[tokio::test]
-async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
+async fn runtimes_over_one_store_share_content_objects() {
     let recording = Arc::new(RecordingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
         KeyPredicate::any(),
@@ -823,25 +738,23 @@ async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
     same_shape_store(&store, &MetadataCache::default(), b"file").await;
     let cache = MetadataCache::default();
     let (first, second) = (reader(&store, &cache).await, reader(&store, &cache).await);
-    let mut object_gets_by_runtime = Vec::new();
+    let mut content_gets_by_runtime = Vec::new();
     for runtime in [&first, &second] {
         recording.reset();
         assert_reads(runtime, b"file").await;
-        let operations = recording.take();
-        object_gets_by_runtime.push((
-            object_gets(&operations, DurableObjectFamily::WalObject),
-            object_gets(&operations, DurableObjectFamily::ContentBlob),
+        content_gets_by_runtime.push(object_gets(
+            &recording.take(),
+            DurableObjectFamily::ContentBlob,
         ));
     }
-    let (wal_gets, content_gets) = object_gets_by_runtime[0];
     assert!(
-        wal_gets > 0 && content_gets > 0,
+        content_gets_by_runtime[0] > 0,
         "the first runtime reads cold"
     );
     assert_eq!(
-        object_gets_by_runtime[1],
-        (0, 0),
-        "the second runtime reads the objects the first runtime read: {:?}",
+        content_gets_by_runtime[1],
+        0,
+        "the second runtime reads the object the first runtime read: {:?}",
         cache.stats()
     );
 }
@@ -852,7 +765,6 @@ async fn runtimes_over_one_store_share_decoded_wal_and_content_objects() {
 async fn reads_of_empty_files_keep_no_content_objects() {
     for max_content_object_bytes in [1, crate::DEFAULT_MAX_CONTENT_OBJECT_BYTES] {
         let cache = MetadataCache::builder()
-            .max_wal_object_bytes(0)
             .max_content_object_bytes(max_content_object_bytes)
             .build();
         let (writer, _store, _root) = recorded_writer(cache.clone()).await;

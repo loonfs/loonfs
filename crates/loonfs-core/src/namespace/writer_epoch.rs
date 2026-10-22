@@ -70,15 +70,9 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     )
     .await?;
     let mut tip = deadline.observe();
-    let mut anchor = load_read_anchor_from_manifest(
-        store,
-        None,
-        namespace_id,
-        manifest,
-        hint,
-        deadline.origin(),
-    )
-    .await?;
+    let mut anchor =
+        load_read_anchor_from_manifest(store, namespace_id, manifest, hint, deadline.origin())
+            .await?;
     // Only the deadline bounds this loop, because a lost fence race means the
     // old writer wrote a WAL object, and stopping after a count would make the
     // caller publish another epoch.

@@ -108,7 +108,7 @@ Why doesn't LoonFS decode a lookup's whole window when it fetches the window? A 
 
 This section describes the budget of each tier, the memory that the SSD tier adds to the server's sizing, and the counters that each tier reports.
 
-LoonFS keeps each kind of cache entry under a budget of its own, so that one kind can't evict another, and every cache reports the same family of counters (hits, misses, inserts, evictions, and rejections), as [Cache ownership](cache-ownership.md) describes. The memory tier is the segment block cache, with its budget (`metadata_cache.max_segment_bytes`) and its counters. That budget is separate from the budgets for namespace [heads](../specs/glossary.md#head), [WAL tails](../specs/glossary.md#wal-tail), WAL objects, and content objects, so a burst of block reads doesn't evict a reader's WAL tail.
+LoonFS keeps each kind of cache entry under a budget of its own, so that one kind can't evict another, and every cache reports the same family of counters (hits, misses, inserts, evictions, and rejections), as [Cache ownership](cache-ownership.md) describes. The memory tier is the segment block cache, with its budget (`metadata_cache.max_segment_bytes`) and its counters. That budget is separate from the budgets for namespace [heads](../specs/glossary.md#head), [WAL tails](../specs/glossary.md#wal-tail), and content objects, so a burst of block reads doesn't evict a reader's WAL tail.
 
 The SSD tier has two settings, in a `[metadata_cache.ssd]` table under the server's `[metadata_cache]` table ([`config.rs`](../../crates/loonfs-server/src/config.rs)). Both settings are required, and without the table, the server has no SSD tier.
 
@@ -127,7 +127,7 @@ Because the SSD tier charges each block at least 4 KiB, it keeps at most one blo
 
 Why does the SSD tier have one budget for every namespace, and not one per namespace? Tenants' working sets differ by orders of magnitude, and they change over the day. For example, one tenant might read 2 GB of metadata all morning and nothing in the evening, while another reads 5 MB once an hour. A shared least-recently-used budget follows those working sets as they change, and a budget per namespace would need an operator to set and adjust a number for each tenant.
 
-Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Namespace heads, WAL tails, WAL objects, and content objects stay in memory under their own budgets.
+Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Namespace heads, WAL tails, and content objects stay in memory under their own budgets.
 
 Why does the SSD tier charge each block at least 4 KiB? The index keeps an entry in memory for each block on disk, and its term in `fixed` covers one entry for each 4 KiB of the budget. If the SSD tier charged each block only its stored length, a tier of small blocks could keep many more entries than the term covers (a tier of 1 KiB blocks would keep more than three times as many), and the server could use more memory than its limit. The 4 KiB minimum costs disk instead, because a tier of blocks smaller than 4 KiB keeps fewer bytes on disk than its budget.
 

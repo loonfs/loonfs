@@ -51,7 +51,7 @@ impl DecodedBlockKey for CacheScope {
 }
 
 /// The scope under which a shared cache keeps the segment blocks, manifests,
-/// WAL objects, and content objects read from one object store.
+/// and content objects read from one object store.
 ///
 /// The cache mints one scope per object store, and every runtime over that
 /// object store reads under that scope. Runtimes over one object store can

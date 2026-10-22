@@ -221,8 +221,8 @@ pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
     SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES, DEFAULT_MAX_CACHED_OBJECT_BYTES,
     DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES, DEFAULT_MAX_CONTENT_OBJECT_BYTES,
-    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_WAL_OBJECT_BYTES,
-    DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
+    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
+    SSD_INDEX_ENTRY_BYTES,
 };
 pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,

@@ -15,7 +15,7 @@ use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    load_read_anchor_cached, load_snapshot_read_basis, manifest_has_successor, project_anchor_tail,
+    load_read_anchor, load_snapshot_read_basis, manifest_has_successor, project_anchor_tail,
     MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
     VerifiedNamespaceCatalogEntry,
 };
@@ -179,12 +179,7 @@ impl RuntimeCore {
             }
         }
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let loaded = load_read_anchor_cached(
-            self.store(),
-            &self.inner.object_cache,
-            namespace_id,
-            observed.clone(),
-        )
+        let loaded = load_read_anchor(self.store(), namespace_id, observed.clone())
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;

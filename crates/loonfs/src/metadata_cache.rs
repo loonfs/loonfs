@@ -31,8 +31,6 @@ pub const DEFAULT_MAX_WAL_TAIL_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit for completed upload sessions, 32 MiB (enough for about
 /// 125,000 sessions).
 pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
-/// Default limit for decoded WAL objects: 32 MiB.
-pub const DEFAULT_MAX_WAL_OBJECT_BYTES: usize = 32 * 1024 * 1024;
 /// Default limit for small content objects: 96 MiB.
 pub const DEFAULT_MAX_CONTENT_OBJECT_BYTES: usize = 96 * 1024 * 1024;
 /// Default size of the largest content object the cache keeps: 1 MiB.
@@ -50,17 +48,17 @@ pub(crate) enum CacheLookup {
 /// Decoded metadata that one or more runtimes read through.
 ///
 /// The cache keeps segment blocks, manifests, namespace heads, WAL-tail
-/// projections, WAL objects, small content objects, and the
-/// completed upload sessions that garbage collection reuses between passes.
+/// projections, small content objects, and the completed upload sessions
+/// that garbage collection reuses between passes.
 /// A cache built with an SSD tier (see
 /// [`MetadataCacheBuilder::ssd_segment_blocks`]) also keeps every segment
 /// block that it inserts on local disk.
 ///
 /// Runtimes built with the cache over clones of one [`SharedObjectStore`]
-/// share the decoded segment blocks, manifests, WAL objects, and content
-/// objects in the cache. Runtimes over different object stores never read
-/// each other's entries, even when two object stores contain objects under
-/// the same keys. Two runtimes built from the same
+/// share the decoded segment blocks, manifests, and content objects in the
+/// cache. Runtimes over different object stores never read each other's
+/// entries, even when two object stores contain objects under the same
+/// keys. Two runtimes built from the same
 /// [`StoreConfig`](crate::StoreConfig) each create their own object-store
 /// client, so they don't share entries. Each
 /// [`LoonFs`](crate::LoonFs) keeps its own namespace heads, WAL-tail
@@ -109,7 +107,6 @@ impl MetadataCache {
             max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
             max_wal_tail_bytes: DEFAULT_MAX_WAL_TAIL_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
-            max_wal_object_bytes: DEFAULT_MAX_WAL_OBJECT_BYTES,
             max_content_object_bytes: DEFAULT_MAX_CONTENT_OBJECT_BYTES,
             max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
             ssd_segment_blocks: None,
@@ -122,7 +119,6 @@ impl MetadataCache {
         let segments = self.inner.segment_blocks.stats();
         let heads = self.inner.heads_and_wal_tails.head_stats();
         let tails = self.inner.heads_and_wal_tails.tail_stats();
-        let wal_objects = self.inner.objects.wal_object_stats();
         let content_objects = self.inner.objects.content_object_stats();
         let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
@@ -154,11 +150,6 @@ impl MetadataCache {
             wal_tail_rejections: tails.rejections,
             wal_tail_rejected_bytes: tails.rejected_decoded_bytes,
             wal_tail_bytes: tails.cached_decoded_bytes,
-            wal_object_hits: wal_objects.hits,
-            wal_object_misses: wal_objects.misses,
-            wal_object_inserts: wal_objects.inserts,
-            wal_object_evictions: wal_objects.evictions,
-            wal_object_bytes: wal_objects.cached_decoded_bytes,
             content_object_hits: content_objects.hits,
             content_object_misses: content_objects.misses,
             content_object_inserts: content_objects.inserts,
@@ -171,10 +162,10 @@ impl MetadataCache {
         }
     }
 
-    /// Returns one runtime's views of the cache, with segment blocks, WAL
-    /// objects, and content objects under the scope of `store`, and namespace
-    /// heads, WAL-tail projections, and completed upload sessions under a new
-    /// scope for the runtime.
+    /// Returns one runtime's views of the cache, with segment blocks and
+    /// content objects under the scope of `store`, and namespace heads,
+    /// WAL-tail projections, and completed upload sessions under a new scope
+    /// for the runtime.
     pub(crate) fn bind(
         &self,
         store: &SharedObjectStore,
@@ -259,8 +250,7 @@ pub(crate) struct MetadataCacheBinding {
 }
 
 /// The object stores of the runtimes that read through the cache, each with
-/// the scope of its segment blocks, manifests, WAL objects, and content
-/// objects.
+/// the scope of its segment blocks, manifests, and content objects.
 ///
 /// An object store is identified by the address of its allocation. Each
 /// entry keeps a weak reference to the object store, so the allocation can't
@@ -300,7 +290,6 @@ pub struct MetadataCacheBuilder {
     max_head_bytes: usize,
     max_wal_tail_bytes: usize,
     max_completed_upload_session_bytes: usize,
-    max_wal_object_bytes: usize,
     max_content_object_bytes: usize,
     max_cached_object_bytes: u64,
     ssd_segment_blocks: Option<SsdSegmentBlocks>,
@@ -354,33 +343,11 @@ impl MetadataCacheBuilder {
         self
     }
 
-    /// Sets the decoded bytes of WAL objects that the cache keeps for reads.
-    /// Reads look for a WAL object here before the store, and a read that
-    /// loads a WAL object from the store adds it. Defaults to
-    /// [`DEFAULT_MAX_WAL_OBJECT_BYTES`]. Zero keeps none. A WAL object
-    /// heavier than the whole limit isn't kept.
-    ///
-    /// WAL objects have a limit of their own, so a burst of reads of content
-    /// objects can't evict the WAL objects that reads probe for and replay.
-    /// The default is the smaller of the two object limits, because a read
-    /// replays only the WAL objects that no fold has moved into segments
-    /// yet, and a writer session folds its tail at 32 WAL objects, or at
-    /// 2 MiB of inline bytes by default.
-    pub fn max_wal_object_bytes(mut self, max_wal_object_bytes: usize) -> Self {
-        self.max_wal_object_bytes = max_wal_object_bytes;
-        self
-    }
-
     /// Sets the bytes of small content objects that the cache keeps for
     /// reads. Reads look for a content object here before the store, and a
     /// read that verifies a content object of up to
     /// [`Self::max_cached_object_bytes`] from the store adds it. Defaults to
     /// [`DEFAULT_MAX_CONTENT_OBJECT_BYTES`]. Zero keeps none.
-    ///
-    /// Content objects have a limit of their own, so replays of WAL objects
-    /// can't evict the content objects that reads keep. The default is the larger of
-    /// the two object limits, because each entry can be up to 1 MiB, and the
-    /// bytes that reads keep grow with the number of small files they read.
     pub fn max_content_object_bytes(mut self, max_content_object_bytes: usize) -> Self {
         self.max_content_object_bytes = max_content_object_bytes;
         self
@@ -420,7 +387,6 @@ impl MetadataCacheBuilder {
                     self.max_completed_upload_session_bytes,
                 )),
                 objects: Arc::new(SharedObjects::new(
-                    self.max_wal_object_bytes,
                     self.max_content_object_bytes,
                     self.max_cached_object_bytes,
                 )),
@@ -498,17 +464,6 @@ pub struct MetadataCacheStats {
     /// Bytes charged to WAL-tail projections now, including their keys and
     /// the cache's own allocation for each entry.
     pub wal_tail_bytes: usize,
-    /// WAL object lookups that found the object in the cache.
-    pub wal_object_hits: usize,
-    /// WAL object lookups that went to the store.
-    pub wal_object_misses: usize,
-    /// WAL objects inserted.
-    pub wal_object_inserts: usize,
-    /// WAL objects evicted to stay within the WAL object limit.
-    pub wal_object_evictions: usize,
-    /// Bytes charged to WAL objects now, including their keys and the
-    /// cache's own allocation for each entry.
-    pub wal_object_bytes: usize,
     /// Content object lookups that found the requested bytes in the cache.
     pub content_object_hits: usize,
     /// Content object lookups that went to the store.

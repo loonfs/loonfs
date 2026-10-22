@@ -528,50 +528,6 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
     assert_eq!(anchor.tail.objects().len(), 6);
 }
 
-/// Checks that the object cache keeps a WAL object that decodes, and that a
-/// corrupt object or an absent number is read from the store again.
-#[tokio::test]
-async fn the_object_cache_keeps_only_wal_objects_that_decode() {
-    use super::reader::load_wal_object;
-
-    let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("cached-wal").expect("namespace");
-    create(&store, &namespace_id, &context(1_000))
-        .await
-        .expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
-        .await
-        .expect("fence");
-    replace_object(
-        &store,
-        &wal_object(&namespace_id, &WalNo(2)),
-        bytes::Bytes::from_static(b"corrupt"),
-    )
-    .await
-    .expect("corrupt WAL object");
-    let cache = crate::cache::ObjectCache::unshared(usize::MAX, 0);
-    for (wal_no, outcome, store_gets) in [(1, "decoded", 1), (2, "corrupt", 2), (3, "absent", 2)] {
-        store.reset();
-        for _ in 0..2 {
-            let loaded = load_wal_object(&store, Some(&cache), &namespace_id, WalNo(wal_no)).await;
-            match outcome {
-                "decoded" => assert_matches!(loaded.envelope, Ok(Some(_))),
-                "corrupt" => {
-                    assert_matches!(loaded.envelope, Err(super::WalTailLoadError::Replay { .. }))
-                }
-                _ => assert_matches!(loaded.envelope, Ok(None)),
-            }
-        }
-        assert_eq!(store.count(OperationSelector::Get), store_gets, "{outcome}");
-    }
-    let stats = cache.wal_object_stats();
-    assert_eq!((stats.inserts, stats.hits), (1, 1));
-}
-
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     use super::reader::{load_wal_object, load_wal_tail, WalWalk};
@@ -595,7 +551,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
     let mut sequential = Vec::new();
     for number in 1..=20 {
-        let loaded = load_wal_object(&store, None, &namespace_id, WalNo(number)).await;
+        let loaded = load_wal_object(&store, &namespace_id, WalNo(number)).await;
         let envelope = loaded
             .envelope
             .expect("sequential load")
@@ -609,7 +565,6 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         ConcurrencyWatchStore::new(store, KeyPredicate::prefix(wal_prefix(&namespace_id)));
     let tail = load_wal_tail(
         &watched,
-        None,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
             base_seq: ChangeSeq(0),
@@ -655,7 +610,6 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         .expect("remove an earlier WAL object");
     let error = super::reader::load_wal_tail(
         &store,
-        None,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
             base_seq: ChangeSeq(0),
