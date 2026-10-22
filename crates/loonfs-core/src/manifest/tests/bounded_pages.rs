@@ -2,8 +2,12 @@
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::super::build::write_manifest_segment;
+use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
+use super::super::segment_block_cache::{MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad};
 use super::*;
 use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
 
@@ -363,6 +367,154 @@ async fn bounded_pages_preserve_readahead_without_reading_the_entire_range() {
         store.count(OperationSelector::Read),
         0,
         "next page uses read-ahead"
+    );
+}
+
+/// A memory block cache that records each data block that a read asks it
+/// for, and counts each data block that LoonFS decodes into it: the block
+/// that a miss loads, and each block inserted without a read asking for it.
+struct DecodeCountingBlocks {
+    memory: MemorySegmentBlocks,
+    reads: Mutex<BTreeSet<u64>>,
+    decodes: AtomicUsize,
+}
+
+#[async_trait]
+impl SegmentBlockCache for DecodeCountingBlocks {
+    async fn get_block(
+        &self,
+        key: &MetadataSegmentCacheKey,
+        handle: &BlockHandle,
+    ) -> Option<DecodedMetadataSegmentBlock> {
+        self.memory.get_block(key, handle).await
+    }
+
+    fn insert_block(
+        &self,
+        key: MetadataSegmentCacheKey,
+        block: DecodedMetadataSegmentBlock,
+        stored: &[u8],
+    ) {
+        if key.block_kind == SegmentBlockKind::Data {
+            self.decodes.fetch_add(1, Ordering::SeqCst);
+        }
+        self.memory.insert_block(key, block, stored);
+    }
+
+    async fn get_or_load_block(
+        &self,
+        key: &MetadataSegmentCacheKey,
+        _handle: &BlockHandle,
+        load: SegmentBlockLoad<'_>,
+    ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
+        let data = key.block_kind == SegmentBlockKind::Data;
+        if data {
+            self.reads
+                .lock()
+                .expect("reads lock")
+                .insert(key.block_offset);
+        }
+        self.memory
+            .get_or_load_with_hit(
+                key,
+                |_| {},
+                move || async move {
+                    let loaded = load.await?;
+                    if data {
+                        self.decodes.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(loaded.block)
+                },
+            )
+            .await
+    }
+}
+
+/// Checks that a lookup's scan over several read-ahead windows of data
+/// blocks decodes each block it reads once, with one ranged GET per window,
+/// when the block cache keeps fewer blocks than one window. The scan reads
+/// one block per refill, so a window that the scan decoded whole and the
+/// cache then evicted would be fetched and decoded again from each later
+/// block of the window.
+#[tokio::test]
+async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_cache() {
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let expected: Vec<_> = (1..=96).flat_map(|sequence| rows(1, 1, sequence)).collect();
+    let mut segment_rows = rows(0, 1, 1);
+    segment_rows.extend(expected.clone());
+    segment_rows.extend(rows(2, 1024, 1));
+    let descriptor = segment(&store, &segment_rows).await;
+    let index = index_block_load::load_segment_index(
+        &store,
+        None,
+        &load::SessionBlockMemo::default(),
+        &descriptor,
+    )
+    .await
+    .expect("index");
+    // A budget of four blocks, so the cache keeps fewer blocks than a window.
+    let probe = MetadataSegmentCache::unshared(usize::MAX);
+    data_block_load::load_segment_data_block_with_readahead(
+        &store,
+        Some(&probe),
+        None,
+        &descriptor,
+        std::slice::from_ref(&index[1]),
+    )
+    .await
+    .expect("one block");
+    let shared = Arc::new(SharedSegmentBlocks::new(
+        4 * probe.stats().cached_decoded_bytes,
+    ));
+    let blocks = Arc::new(DecodeCountingBlocks {
+        memory: MemorySegmentBlocks::new(Arc::clone(&shared), ObjectStoreScope::new(0)),
+        reads: Mutex::default(),
+        decodes: AtomicUsize::new(0),
+    });
+    let cache = MetadataSegmentCache::with_blocks(
+        blocks.clone(),
+        shared,
+        ObjectStoreScope::new(0),
+        Arc::default(),
+    );
+    let runs = vec![MetadataRunManifest {
+        run_no: RunNo(1),
+        run_seq: ChangeSeq(96),
+        tier: RunTier::Delta,
+        segments: vec![MetadataFamilySegments {
+            family: FAMILY,
+            segments: vec![descriptor],
+        }],
+    }];
+    let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs);
+    let filter_probe = expected[0].filter_key_for_family(FAMILY);
+    store.reset();
+
+    let actual = view
+        .scan_prefix_for_lookup(
+            FAMILY,
+            &format!("{filter_probe}-"),
+            &filter_probe,
+            scan::Readahead::Stored,
+        )
+        .await
+        .expect("prefix scan");
+    assert_eq!(actual, expected);
+    let reads = blocks.reads.lock().expect("reads lock").len();
+    let gets = store.count(OperationSelector::Read);
+    assert!(
+        reads > 64,
+        "the scan reads three windows of blocks, not {reads}"
+    );
+    assert_eq!(
+        blocks.decodes.load(Ordering::SeqCst),
+        reads,
+        "decodes of the {reads} blocks that the scan read, with {gets} GETs"
+    );
+    assert!(
+        gets <= 6,
+        "one GET for each window and the index, not {gets}"
     );
 }
 

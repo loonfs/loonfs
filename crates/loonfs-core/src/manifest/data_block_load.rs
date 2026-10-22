@@ -31,6 +31,18 @@ pub(super) const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 // The SSD tier's write queue fits the blocks of at least one bulk GET.
 const _: () = assert!(MAX_BULK_LOAD_BYTES <= crate::limits::SSD_WRITE_QUEUE_BYTES as u64);
 
+/// Loads the data block of `entries[0]`, and reads ahead over the blocks of
+/// `entries` after it, up to `MAX_BULK_LOAD_BYTES` past the first block's
+/// offset, in the same ranged GET.
+///
+/// The memo records the stored bytes of the window's other blocks, and a
+/// later load by the same read decodes a block from them when the read
+/// reaches it, which inserts the block into the block cache. A scan reads one
+/// block at a time through this function, so decoding the whole window here
+/// would decode blocks that the scan never reads. And when the block cache
+/// keeps fewer blocks than the scan has in flight, the cache could evict the
+/// window's decoded blocks before the scan reaches them, and each later block
+/// of the window would then fetch and decode the rest of the window again.
 pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
