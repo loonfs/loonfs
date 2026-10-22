@@ -80,6 +80,7 @@ pub(crate) fn gcp_gcs_with_issuers(
 ) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
     let request_signer = Arc::new(GcsV4Presigner::new(&config)?);
     let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
+    let bucket = config.bucket.clone();
     let GcpGcsCredentials::ServiceAccountFile {
         path: service_account_key_path,
     } = &config.credentials;
@@ -117,7 +118,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         http,
         io_runtime: io_runtime.handle(),
         credentials,
-        bucket: config.bucket,
+        bucket: bucket.clone(),
         key_prefix,
         retry_warnings: Arc::clone(&retry_warnings),
     });
@@ -127,6 +128,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
+            location: bucket,
         },
         ConfiguredObjectStoreKind::GcpGcs,
         ChecksumAlgorithm::Crc32c,

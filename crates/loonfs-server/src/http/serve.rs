@@ -274,7 +274,8 @@ pub async fn app(
 /// metrics recorder.
 ///
 /// The runtime reads through one metadata cache built from the
-/// `[metadata_cache]` table, and runs its publications, folds, and merges
+/// `[metadata_cache]` table, with an SSD tier if the table has an `ssd`
+/// table, and runs its publications, folds, and merges
 /// under one execution budget built from the fold, compaction, and merge
 /// input limits and the `[publication]` totals. The execution budget reports
 /// to the recorder, and a scrape of `/metrics` reads the cache's counters
@@ -289,6 +290,10 @@ pub(super) async fn build_handles(
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
+    let ssd = match &config.metadata_cache.ssd {
+        Some(ssd) => Some(ssd.open().await?),
+        None => None,
+    };
     let invalid_runtime = |error: loonfs::Error| {
         ServerConfigError::Field(ConfigFieldError::Invalid {
             field: "runtime",
@@ -306,7 +311,7 @@ pub(super) async fn build_handles(
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
-        .metadata_cache(memory.metadata_cache())
+        .metadata_cache(memory.metadata_cache(ssd))
         .trace_mode(TraceMode::Remote)
         .store_kind(store_kind)
         .metrics_recorder(metrics.recorder());
@@ -387,14 +392,18 @@ fn tls_server_config(
 
 /// Validates configuration and startup resources without starting the server.
 ///
-/// This checks the config fields and the TLS identity. It does not bind the
-/// configured address or contact the object store. Use
-/// `loonfs-server --probe-store` or `loonfs maintenance store probe` to test
-/// storage access. Constructing a local store still creates its root
-/// directory.
+/// This checks the config fields and the TLS identity, and creates the SSD
+/// tier's directory if it's missing and checks that the server can write a
+/// file in it. It does not bind the configured address or contact the
+/// object store. Use `loonfs-server --probe-store` or
+/// `loonfs maintenance store probe` to test storage access. Constructing a
+/// local store still creates its root directory.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;
+    if let Some(ssd) = &config.metadata_cache.ssd {
+        ssd.check_directory()?;
+    }
     // Building the identity is the whole check; nothing here serves with it.
     let _identity = tls_server_config(config).map_err(ServeError::Tls)?;
     Ok(())
@@ -544,6 +553,9 @@ where
     };
     served.map_err(ServeError::Serve)?;
     let runtime_settled = runtime.shutdown().await;
+    // Nothing reads through the cache any more, so the SSD tier can write
+    // the blocks it queued and stop.
+    runtime.metadata_cache().close().await;
     runtime_settled.and(swept).map_err(ServeError::Shutdown)
 }
 

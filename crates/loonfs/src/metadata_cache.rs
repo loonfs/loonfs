@@ -2,16 +2,24 @@
 
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
-    CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache,
-    ObjectCache, ObjectStoreScope, ReadWorkingMemory, SharedCompletedUploadSessions,
-    SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
+    CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MemorySegmentBlocks,
+    MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
+    SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use tiered_segment_blocks::TieredSegmentBlocks;
 
+mod ssd_segment_blocks;
 #[cfg(test)]
 mod tests;
+mod tiered_segment_blocks;
+
+pub use ssd_segment_blocks::{
+    SsdBlockWriter, SsdSegmentBlocks, SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES,
+    SSD_INDEX_ENTRY_BYTES,
+};
 
 /// Default limit for decoded segment blocks and manifests: 256 MiB.
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
@@ -44,6 +52,9 @@ pub(crate) enum CacheLookup {
 /// The cache keeps segment blocks, manifests, namespace heads, WAL-tail
 /// projections, WAL objects, small content objects, and the
 /// completed upload sessions that garbage collection reuses between passes.
+/// A cache built with an SSD tier (see
+/// [`MetadataCacheBuilder::ssd_segment_blocks`]) also keeps every segment
+/// block that it inserts on local disk.
 ///
 /// Runtimes built with the cache over clones of one [`SharedObjectStore`]
 /// share the decoded segment blocks, manifests, WAL objects, and content
@@ -64,6 +75,8 @@ pub struct MetadataCache {
 
 struct MetadataCacheInner {
     segment_blocks: Arc<SharedSegmentBlocks>,
+    /// The SSD tier of the segment blocks, if the cache has one.
+    ssd_segment_blocks: Option<Arc<SsdSegmentBlocks>>,
     heads_and_wal_tails: Arc<SharedHeadsAndWalTails>,
     completed_upload_sessions: Arc<SharedCompletedUploadSessions>,
     objects: Arc<SharedObjects>,
@@ -99,6 +112,7 @@ impl MetadataCache {
             max_wal_object_bytes: DEFAULT_MAX_WAL_OBJECT_BYTES,
             max_content_object_bytes: DEFAULT_MAX_CONTENT_OBJECT_BYTES,
             max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
+            ssd_segment_blocks: None,
         }
     }
 
@@ -118,7 +132,13 @@ impl MetadataCache {
             segment_evictions: segments.evictions,
             segment_filter_skips: segments.filter_skips,
             segment_filter_false_positives: segments.filter_false_positives,
+            segment_rejections: segments.rejections,
             segment_bytes: segments.cached_decoded_bytes,
+            segment_ssd: self
+                .inner
+                .ssd_segment_blocks
+                .as_ref()
+                .map(|ssd| ssd.stats()),
             head_hits: self.inner.head_hits.load(Ordering::Relaxed),
             head_misses: self.inner.head_misses.load(Ordering::Relaxed),
             head_evictions: heads.evictions,
@@ -168,13 +188,31 @@ impl MetadataCache {
             .scope_of(store);
         let runtime_scope =
             CacheScope::new(self.inner.next_runtime_scope.fetch_add(1, Ordering::SeqCst));
-        MetadataCacheBinding {
-            cache: self.clone(),
-            segment_blocks: MetadataSegmentCache::new(
-                Arc::clone(&self.inner.segment_blocks),
+        // A store without an identity, such as a store in memory, has no
+        // objects outside this process, so its blocks stay in memory.
+        let shared_segment_blocks = Arc::clone(&self.inner.segment_blocks);
+        let segment_blocks = match (&self.inner.ssd_segment_blocks, store.identity()) {
+            (Some(ssd), Some(identity)) => {
+                let memory = MemorySegmentBlocks::new(
+                    Arc::clone(&shared_segment_blocks),
+                    object_store_scope,
+                );
+                MetadataSegmentCache::with_blocks(
+                    Arc::new(TieredSegmentBlocks::new(memory, Arc::clone(ssd), identity)),
+                    shared_segment_blocks,
+                    object_store_scope,
+                    read_working_memory,
+                )
+            }
+            _ => MetadataSegmentCache::new(
+                shared_segment_blocks,
                 object_store_scope,
                 read_working_memory,
             ),
+        };
+        MetadataCacheBinding {
+            cache: self.clone(),
+            segment_blocks,
             heads_and_wal_tails: HeadAndWalTailCache::new(
                 Arc::clone(&self.inner.heads_and_wal_tails),
                 runtime_scope,
@@ -184,6 +222,19 @@ impl MetadataCache {
                 runtime_scope,
             ),
             objects: ObjectCache::new(Arc::clone(&self.inner.objects), object_store_scope),
+        }
+    }
+
+    /// Stops the SSD tier from taking writes, and waits for it to write the
+    /// blocks that it queued. A cache without an SSD tier has nothing to
+    /// wait for.
+    ///
+    /// A host calls this when it shuts down, once no runtime reads through
+    /// the cache, so the blocks that reads loaded last are on disk for the
+    /// next start (see [`SsdSegmentBlocks::close`]).
+    pub async fn close(&self) {
+        if let Some(ssd) = &self.inner.ssd_segment_blocks {
+            ssd.close().await;
         }
     }
 
@@ -252,6 +303,7 @@ pub struct MetadataCacheBuilder {
     max_wal_object_bytes: usize,
     max_content_object_bytes: usize,
     max_cached_object_bytes: u64,
+    ssd_segment_blocks: Option<SsdSegmentBlocks>,
 }
 
 impl MetadataCacheBuilder {
@@ -342,11 +394,24 @@ impl MetadataCacheBuilder {
         self
     }
 
+    /// Sets the SSD tier of the segment blocks, which keeps every block that
+    /// the cache inserts on local disk as well as in memory. Defaults to
+    /// none, so blocks stay in memory alone.
+    ///
+    /// The tier keeps the blocks of every runtime whose object store has an
+    /// identity (see [`ObjectStore::identity`]), under the tier's own byte
+    /// budget. Manifests and the cache's other entries stay in memory.
+    pub fn ssd_segment_blocks(mut self, ssd_segment_blocks: SsdSegmentBlocks) -> Self {
+        self.ssd_segment_blocks = Some(ssd_segment_blocks);
+        self
+    }
+
     /// Builds the cache.
     pub fn build(self) -> MetadataCache {
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
                 segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
+                ssd_segment_blocks: self.ssd_segment_blocks.map(Arc::new),
                 heads_and_wal_tails: Arc::new(SharedHeadsAndWalTails::new(
                     self.max_head_bytes,
                     self.max_wal_tail_bytes,
@@ -372,22 +437,30 @@ impl MetadataCacheBuilder {
 /// that reads through it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataCacheStats {
-    /// Segment block and manifest lookups the cache answered.
+    /// Segment block and manifest lookups that found their entry in memory.
     pub segment_hits: usize,
-    /// Segment block and manifest lookups the cache could not answer.
+    /// Segment block and manifest lookups that didn't find their entry in
+    /// memory.
     pub segment_misses: usize,
-    /// Segment blocks and manifests inserted.
+    /// Segment blocks and manifests inserted into memory.
     pub segment_inserts: usize,
-    /// Segment blocks and manifests evicted to stay within the segment limit.
+    /// Segment blocks and manifests evicted from memory to stay within the
+    /// segment limit.
     pub segment_evictions: usize,
+    /// Segment blocks and manifests heavier than the whole segment limit,
+    /// which are never kept in memory.
+    pub segment_rejections: usize,
     /// Segments skipped because their bloom filter ruled out a lookup before
     /// any index or data read.
     pub segment_filter_skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.
     pub segment_filter_false_positives: usize,
-    /// Bytes charged to segment blocks and manifests now, including their
-    /// keys and the cache's own allocation for each entry.
+    /// Bytes charged to segment blocks and manifests in memory now,
+    /// including their keys and the cache's own allocation for each entry.
     pub segment_bytes: usize,
+    /// The counters and occupancy of the SSD tier of the segment blocks, or
+    /// `None` if the cache has no SSD tier.
+    pub segment_ssd: Option<SsdSegmentBlocksStats>,
     /// Namespace head lookups a read could start from.
     pub head_hits: usize,
     /// Namespace head lookups that sent a read to the store.

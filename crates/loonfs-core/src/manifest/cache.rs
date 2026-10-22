@@ -99,8 +99,11 @@ pub struct MetadataSegmentCacheStats {
     pub filter_false_positives: usize,
 }
 
-pub(super) type MetadataSegmentCacheKey = SegmentCacheKey;
-pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
+/// The key of a metadata segment block in the segment block cache.
+pub type MetadataSegmentCacheKey = SegmentCacheKey;
+/// A decoded metadata segment block or manifest, as the shared segment
+/// blocks keep it.
+pub type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     MetadataRow,
     (
         Arc<NamespaceManifestEnvelope>,
@@ -205,6 +208,24 @@ impl MetadataSegmentCache {
         }
     }
 
+    /// Returns a view whose data, index, and filter blocks go through
+    /// `blocks`, and whose manifests are kept in `shared` under `scope`.
+    ///
+    /// The `loonfs` crate passes its implementation with an SSD tier here.
+    pub fn with_blocks(
+        blocks: Arc<dyn SegmentBlockCache>,
+        shared: Arc<SharedSegmentBlocks>,
+        scope: ObjectStoreScope,
+        read_working_memory: Arc<ReadWorkingMemory>,
+    ) -> Self {
+        Self {
+            blocks,
+            shared,
+            scope,
+            read_working_memory,
+        }
+    }
+
     /// A view over blocks no other view reads, with the default block memo
     /// budget.
     #[cfg(any(test, feature = "test-support"))]
@@ -214,18 +235,6 @@ impl MetadataSegmentCache {
             ObjectStoreScope::new(0),
             Arc::default(),
         )
-    }
-
-    /// Returns a view whose data, index, and filter blocks go through
-    /// `blocks`, and whose manifests no other view reads.
-    #[cfg(test)]
-    pub(super) fn with_blocks(blocks: Arc<dyn SegmentBlockCache>) -> Self {
-        Self {
-            blocks,
-            shared: Arc::new(SharedSegmentBlocks::new(usize::MAX)),
-            scope: ObjectStoreScope::new(0),
-            read_working_memory: Arc::default(),
-        }
     }
 
     /// Returns the block cache that every read of a data, index, or filter

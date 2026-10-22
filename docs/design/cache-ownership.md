@@ -50,10 +50,11 @@ LoonFS builds every cache from `DecodedBlockCache`:
 | WAL objects | 32 MiB | Runtimes over one object store | Decoded WAL objects |
 | Content objects | 96 MiB | Runtimes over one object store | Content objects of up to 1 MiB |
 | Completed upload sessions | 32 MiB | One runtime | The content ID and completion time of each completed upload session |
+| Segment blocks on local SSD | None, because a server has no SSD tier unless its config sets one | Runtimes whose object stores have an identity | The disk key and stored length of each segment block on local SSD, charged at the block's stored length or 4 KiB, whichever is larger, so the budget bounds both the bytes on disk and the number of entries |
 
 Each budget applies across every runtime that shares the metadata cache, and every cache evicts the least recently used entry first. The completed-session budget is 32 MiB, which keeps about 110,000 sessions. (The engine charges each session its recency position and table slot as well as its record, so 16 MiB would keep about half as many.) Segment block loads and tail replays go through `get_or_load`, so concurrent callers of one key load it once, and every load or refresh of a cached head goes through the head's in-flight entry. Every cache keeps the same family of counters (hits, misses, evictions, and rejections), and the engine applies the zero-budget rule (a cache with a zero budget keeps nothing), so no caller checks for a zero budget itself. The block memo and the read working memory pool don't use the engine, because they're reservations against a pool, not caches.
 
-Why one cache type? All six caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
+Why one cache type? All seven caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
 
 Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay. In the same way, a burst of reads of content objects of up to 1 MiB could evict the WAL objects that the replay reads.
 

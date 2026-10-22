@@ -44,6 +44,19 @@ pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 /// seven small segments at once.
 pub const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Most stored bytes of metadata segment blocks that the SSD tier of the
+/// block cache (in the `loonfs` crate) keeps in memory while they wait for
+/// its writer.
+///
+/// An insert copies a block's stored bytes into the queue and returns, so a
+/// read doesn't wait for a disk write, and an insert that finds the queue
+/// full writes nothing to disk and records a rejection. One ranged GET of a
+/// metadata read fetches at most 4 MiB of blocks, so 64 MiB keeps the blocks
+/// of 16 such GETs while the writer catches up, and a local SSD writes
+/// 64 MiB in well under a second. The server's sizing formula includes this
+/// memory in `fixed`.
+pub const SSD_WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
 /// materialization.

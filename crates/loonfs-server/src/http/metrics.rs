@@ -3,7 +3,7 @@
 use super::AppState;
 use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS};
-use loonfs::MetadataCacheStats;
+use loonfs::{MetadataCacheStats, SsdSegmentBlocksStats};
 use loonfs_grep::GrepStepBudgetStats;
 use loonfs_http::RequestLimit;
 use std::fmt::Write as _;
@@ -207,6 +207,103 @@ fn lookups(hits: usize, misses: usize) -> [(SeriesLabels<'static>, usize); 2] {
     ]
 }
 
+/// The counters of one tier of the segment cache.
+struct SegmentTierCounts {
+    hits: usize,
+    misses: usize,
+    inserts: usize,
+    evictions: usize,
+    rejections: usize,
+}
+
+/// The label sets of one tier's series: the tier alone, and the tier with
+/// each lookup result.
+type TierLabels = [SeriesLabels<'static>; 3];
+
+const MEMORY_TIER: TierLabels = [
+    &[("tier", "memory")],
+    &[("tier", "memory"), ("result", RESULT_HIT)],
+    &[("tier", "memory"), ("result", RESULT_MISS)],
+];
+
+const SSD_TIER: TierLabels = [
+    &[("tier", "ssd")],
+    &[("tier", "ssd"), ("result", RESULT_HIT)],
+    &[("tier", "ssd"), ("result", RESULT_MISS)],
+];
+
+/// Writes the segment cache's counters, with one series for each tier
+/// under a `tier` label, and the segment cache's gauges.
+///
+/// The SSD tier's series appear only on a server with an SSD tier, because
+/// zeros would suggest that the server has an idle SSD tier.
+fn render_segment_cache(
+    rendered: &mut String,
+    memory: SegmentTierCounts,
+    ssd: Option<SsdSegmentBlocksStats>,
+    retained_decoded_bytes: usize,
+) {
+    let mut tiers = vec![(MEMORY_TIER, memory)];
+    if let Some(ssd) = ssd {
+        let counts = SegmentTierCounts {
+            hits: ssd.hits,
+            misses: ssd.misses,
+            inserts: ssd.inserts,
+            evictions: ssd.evictions,
+            rejections: ssd.rejections,
+        };
+        tiers.push((SSD_TIER, counts));
+    }
+    let gets: Vec<_> = tiers
+        .iter()
+        .flat_map(|([_, hit, miss], counts)| [(*hit, counts.hits), (*miss, counts.misses)])
+        .collect();
+    write_counter(
+        rendered,
+        "loonfs_segment_cache_gets",
+        "Metadata segment cache lookups, by tier and outcome",
+        &gets,
+    );
+    let per_tier = |count: fn(&SegmentTierCounts) -> usize| -> Vec<_> {
+        tiers
+            .iter()
+            .map(|([tier, ..], counts)| (*tier, count(counts)))
+            .collect()
+    };
+    write_counter(
+        rendered,
+        "loonfs_segment_cache_inserts",
+        "Blocks inserted into a tier of the metadata segment cache",
+        &per_tier(|counts| counts.inserts),
+    );
+    write_counter(
+        rendered,
+        "loonfs_segment_cache_evictions",
+        "Blocks evicted from a tier of the metadata segment cache",
+        &per_tier(|counts| counts.evictions),
+    );
+    write_counter(
+        rendered,
+        "loonfs_segment_cache_rejections",
+        "Blocks that a tier of the metadata segment cache didn't keep",
+        &per_tier(|counts| counts.rejections),
+    );
+    write_gauge(
+        rendered,
+        "loonfs_segment_cache_retained_decoded_bytes",
+        "Bytes currently charged to metadata-segment cache entries in memory, including keys and per-entry bookkeeping",
+        retained_decoded_bytes,
+    );
+    if let Some(ssd) = ssd {
+        write_gauge(
+            rendered,
+            "loonfs_segment_cache_retained_stored_bytes",
+            "Bytes currently charged to metadata segment blocks on the SSD tier, at least 4 KiB for each block, including per-entry bookkeeping",
+            ssd.stored_bytes,
+        );
+    }
+}
+
 /// Writes the metadata cache's stats as counters and gauges, in one family
 /// for each cache.
 ///
@@ -221,9 +318,11 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         segment_misses,
         segment_inserts,
         segment_evictions,
+        segment_rejections,
         segment_filter_skips,
         segment_filter_false_positives,
         segment_bytes,
+        segment_ssd,
         head_hits,
         head_misses,
         head_evictions,
@@ -254,13 +353,19 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         completed_upload_session_evictions: _,
         completed_upload_session_bytes: _,
     } = *stats;
+    render_segment_cache(
+        rendered,
+        SegmentTierCounts {
+            hits: segment_hits,
+            misses: segment_misses,
+            inserts: segment_inserts,
+            evictions: segment_evictions,
+            rejections: segment_rejections,
+        },
+        segment_ssd,
+        segment_bytes,
+    );
     for (name, description, hits, misses) in [
-        (
-            "loonfs_segment_cache_gets",
-            "Decoded metadata-segment cache lookups, by outcome",
-            segment_hits,
-            segment_misses,
-        ),
         (
             "loonfs_head_cache_gets",
             "Namespace head cache lookups, by outcome",
@@ -289,16 +394,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         write_counter(rendered, name, description, &lookups(hits, misses));
     }
     for (name, description, value) in [
-        (
-            "loonfs_segment_cache_inserts",
-            "Blocks inserted into the decoded metadata-segment cache",
-            segment_inserts,
-        ),
-        (
-            "loonfs_segment_cache_evictions",
-            "Blocks evicted from the decoded metadata-segment cache",
-            segment_evictions,
-        ),
         (
             "loonfs_segment_cache_filter_skips",
             "Segments skipped after their filter ruled out a lookup",
@@ -378,11 +473,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         write_counter(rendered, name, description, &[(NO_LABELS, value)]);
     }
     for (name, description, value) in [
-        (
-            "loonfs_segment_cache_retained_decoded_bytes",
-            "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
-            segment_bytes,
-        ),
         (
             "loonfs_head_cache_retained_decoded_bytes",
             "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",

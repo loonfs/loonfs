@@ -1115,7 +1115,7 @@ struct CountingBlockCache {
 
 #[async_trait]
 impl SegmentBlockCache for CountingBlockCache {
-    fn get_block(
+    async fn get_block(
         &self,
         key: &MetadataSegmentCacheKey,
         handle: &BlockHandle,
@@ -1142,7 +1142,7 @@ impl SegmentBlockCache for CountingBlockCache {
         handle: &BlockHandle,
         load: SegmentBlockLoad<'_>,
     ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
-        if let Some(block) = self.get_block(key, handle) {
+        if let Some(block) = self.get_block(key, handle).await {
             return Ok(block);
         }
         let loaded = load.await?;
@@ -1163,7 +1163,12 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         .map(|entry| (entry.block.offset, entry.block))
         .collect();
     let blocks = Arc::new(CountingBlockCache::default());
-    let cache = MetadataSegmentCache::with_blocks(blocks.clone());
+    let cache = MetadataSegmentCache::with_blocks(
+        blocks.clone(),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX)),
+        ObjectStoreScope::new(0),
+        Arc::default(),
+    );
 
     let (cold, cold_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
     assert_eq!(cold_reads, 1, "one ranged GET reads the whole span");

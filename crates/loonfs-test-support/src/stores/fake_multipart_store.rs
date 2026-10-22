@@ -149,6 +149,10 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let mut metadata = self.inner.head(key).await?;
         if let Some(metadata) = &mut metadata {

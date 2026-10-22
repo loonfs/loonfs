@@ -251,9 +251,10 @@ pub(crate) async fn start_tls_server_with_certificate(
 /// A plaintext server started and stopped through the deployed entry point.
 ///
 /// Unlike [`start_server`], which aborts its task, this shuts down the way a
-/// host does: the listener drains, the writer settles, and the local block
-/// cache is closed and released. That is what lets a test stop one server
-/// and start another on the same directories.
+/// host does: the listener drains, the writer settles, and the SSD tier of
+/// the metadata segment cache, if the server has one, writes the blocks it
+/// queued. That is what lets a test stop one server and start another on
+/// the same directories.
 pub(crate) struct GracefulTestServer {
     pub(crate) client: Client,
     pub(crate) server_url: String,

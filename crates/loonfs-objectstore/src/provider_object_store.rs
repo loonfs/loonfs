@@ -14,7 +14,7 @@ use crate::transfer_timeouts::is_transfer_timeout;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoreIdentity,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -35,11 +35,15 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Configures logical key scoping for a generic provider client.
+/// Configures logical key scoping for a generic provider client, and the
+/// location that the store's identity reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderObjectStoreConfig {
     /// Prefix prepended to every provider key, or `None` to expose the bucket root.
     pub key_prefix: Option<String>,
+    /// The bucket, with the endpoint when the configuration sets one, as
+    /// [`StoreIdentity::location`] describes.
+    pub location: String,
 }
 
 /// Bound for one control-plane HTTP attempt's request phase, and the
@@ -252,6 +256,7 @@ pub struct ProviderObjectStore {
     io_runtime: StoreIoRuntime,
     multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
+    location: String,
     retry_warnings: Arc<RetryWarnings>,
 }
 
@@ -297,6 +302,7 @@ impl ProviderObjectStore {
             io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
+            location: config.location,
             retry_warnings: Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default()))),
         })
     }
@@ -515,6 +521,14 @@ impl Drop for AbortUploadOnDrop {
 impl ObjectStore for ProviderObjectStore {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
         self.checksum_algorithm
+    }
+
+    fn identity(&self) -> Option<StoreIdentity> {
+        Some(StoreIdentity {
+            provider: self.kind.as_str(),
+            location: self.location.clone(),
+            key_prefix: self.key_prefix.clone(),
+        })
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
@@ -1184,6 +1198,7 @@ mod tests {
             Arc::new(MemoryPages(Arc::clone(&inner))),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
+                location: "bucket".to_owned(),
             },
             ConfiguredObjectStoreKind::LocalFs,
             ChecksumAlgorithm::Crc64nvme,
@@ -1915,6 +1930,7 @@ mod tests {
             flaky.clone(),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
+                location: "bucket".to_owned(),
             },
             ConfiguredObjectStoreKind::LocalFs,
             ChecksumAlgorithm::Crc64nvme,
@@ -2129,7 +2145,10 @@ mod tests {
             Arc::clone(&resending) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&one_attempt) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&resending) as Arc<dyn PaginatedListStore>,
-            ProviderObjectStoreConfig { key_prefix: None },
+            ProviderObjectStoreConfig {
+                key_prefix: None,
+                location: "bucket".to_owned(),
+            },
             ConfiguredObjectStoreKind::LocalFs,
             ChecksumAlgorithm::Crc64nvme,
             StoreIoRuntime::new().expect("store io runtime"),

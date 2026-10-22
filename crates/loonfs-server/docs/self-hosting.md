@@ -2,7 +2,7 @@
 
 This guide describes how to run `loonfs-server` on your own infrastructure, with Docker or Kubernetes, and how to size, monitor, upgrade, and maintain it.
 
-A LoonFS deployment is one server connected to an object store. All durable data is stored in the object store, and the server keeps only temporary state in memory.
+A LoonFS deployment is one server connected to an object store. All durable data is stored in the object store, and the server keeps only temporary state, in memory and in an optional cache on local disk.
 
 Run one active server per deployment, and don't run two active servers against the same LoonFS data. LoonFS doesn't support automatic failover or horizontal scaling. A restart or an upgrade makes the API unavailable until the server starts again.
 
@@ -82,11 +82,12 @@ fixed = 128 MiB
       + (max_concurrent_folds + max_concurrent_compactions) x 32 MiB
       + max_concurrent_content_writes x 16 MiB (72 MiB on R2)
       + 32 MiB
+      + 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B, with a [metadata_cache.ssd] table
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
 ```
 
-`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, and the completed upload sessions that garbage collection keeps between passes. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB.
+`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between passes, and the SSD tier of the metadata segment cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).)
 
 The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
 
@@ -137,7 +138,7 @@ docker run --rm \
 
 Replace `X.Y.Z` with the release version you're deploying. If you use cloud storage, remove the local store volume, and pass any provider credentials that your config requires.
 
-This command validates the config and the TLS files, but it doesn't contact the object store. Check object-store access after the server starts (see [4. Verify the deployment](#4-verify-the-deployment)).
+This command validates the config and the TLS files, but it doesn't contact the object store. With an SSD tier, it also creates the tier's directory if it's missing, and checks that the server can write a file in it. Check object-store access after the server starts (see [4. Verify the deployment](#4-verify-the-deployment)).
 
 ## 3. Deploy
 
@@ -315,7 +316,12 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs_head_cache_retained_decoded_bytes` | Gauge | Bytes charged to the namespace heads in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_wal_tail_cache_evictions_total` | Counter | A WAL-tail projection is evicted at the `metadata_cache.max_wal_tail_bytes` limit. A WAL-tail projection never evicts a namespace head, because heads have a limit of their own. |
 | `loonfs_wal_tail_cache_retained_decoded_bytes` | Gauge | Bytes charged to the WAL-tail projections in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
-| `loonfs_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the entries in the metadata segment cache, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
+| `loonfs_segment_cache_gets_total` | Counter, `tier` and `result` labels | A read looks up a metadata block (or, in memory, a manifest) in a tier of the segment cache. `tier` is `memory`, or `ssd` for the [SSD tier](#keeping-metadata-blocks-on-local-ssd), and `result` is `hit` or `miss`. A read that misses memory reads the block from disk, and a read that misses the SSD tier goes to the store, so `{tier="ssd",result="hit"}` records the GETs that the SSD tier saved. A damaged file that the server deletes is recorded as a miss. A server without the SSD tier reports no `ssd` series. |
+| `loonfs_segment_cache_inserts_total` | Counter, `tier` label | A tier keeps a new block. The SSD tier also records each block that it finds in its directory when the server starts. |
+| `loonfs_segment_cache_evictions_total` | Counter, `tier` label | A tier deletes its least recently used block at its budget, `metadata_cache.max_segment_bytes` in memory or `metadata_cache.ssd.max_segment_bytes` on disk. |
+| `loonfs_segment_cache_rejections_total` | Counter, `tier` label | A tier doesn't keep a block. In memory, the block is larger than the whole budget. On disk, the block is larger than the whole budget, the write queue is full, or the write failed, and the block stays in memory. |
+| `loonfs_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the entries in the metadata segment cache in memory, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
+| `loonfs_segment_cache_retained_stored_bytes` | Gauge | Bytes charged to the blocks on the SSD tier, up to `metadata_cache.ssd.max_segment_bytes`. Each block's charge is its stored length (4 KiB for a smaller block) and its index entry's allocation in memory, so the gauge is larger than the bytes on disk when blocks are small. |
 | `loonfs_wal_object_cache_evictions_total` | Counter | A decoded WAL object is evicted at the `metadata_cache.max_wal_object_bytes` limit. |
 | `loonfs_content_object_cache_evictions_total` | Counter | A content object is evicted at the `metadata_cache.max_content_object_bytes` limit. |
 | `loonfs.publisher.tail_replays` | Counter | A publish reads the WAL tail from the store, because the session has no position to start from. This happens on a session's first publish, after a failed publish, when a successor manifest or WAL object that another process wrote is found, after a fork of the namespace's head, and after about 19 minutes without confirming the basis. After a shorter quiet period, the session confirms the tip with two HEAD requests, and it doesn't read the tail again. A manifest that this runtime publishes itself doesn't cause a replay, because after a fold, a compaction, a snapshot, or a retention advance in the same runtime, the session moves to the new manifest and keeps the tail above it. Garbage collection publishes no manifest, so it doesn't cause a replay either. |
@@ -375,6 +381,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
 | Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 30%, or 40% without grep. 256 MiB without a memory limit | Decoded metadata blocks and manifests | Steady |
+| SSD tier of the segment cache | `metadata_cache.ssd.max_segment_bytes` | None, because the tier is off without `[metadata_cache.ssd]` | The tier's 64 MiB write queue, and an index of 168 bytes for each block on disk | Steady |
 | Grep cache | `grep.max_cache_bytes` | Derived: 10%. 256 MiB without a memory limit | Decoded grep blocks and manifests when serving queries | Steady |
 | Head cache | `metadata_cache.max_head_bytes` | 16 MiB, with or without a memory limit | Cached namespace heads for reads, about 18,000 namespaces at 0.9 KB each | Steady |
 | WAL tail cache | `metadata_cache.max_wal_tail_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
@@ -411,7 +418,7 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
+Without a memory limit, grep, an SSD tier, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -500,6 +507,29 @@ The tail limit uses the tail size from the session's position. A session has no 
 Explicit metadata maintenance and the maintenance sweep fold at the same `inline_content_fold_at_bytes` as the writer session, when the server's session for the namespace knows the tail's inline bytes. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
+
+## Keeping metadata blocks on local SSD
+
+This section describes the SSD tier of the metadata segment cache, which keeps metadata blocks on the server's local disk as well as in memory.
+
+The server keeps the metadata blocks that reads load in memory, up to `metadata_cache.max_segment_bytes`. A block that isn't in memory costs a GET, and memory is empty after a restart. With the SSD tier, the server also writes every block that the cache inserts to a directory on local disk, and a read that doesn't find a block in memory reads the block from disk instead of the store. The server reads the directory when it starts, so the blocks on disk stay readable after a restart.
+
+To turn the tier on, add the `[metadata_cache.ssd]` table with both of its settings:
+
+```toml
+[metadata_cache.ssd]
+directory = "/var/lib/loonfs/ssd"
+max_segment_bytes = 10737418240
+```
+
+- `directory` is the directory on the server's local SSD that the tier writes its blocks to. The server creates it if it's missing, and the server doesn't start if it can't create or read the directory.
+- `max_segment_bytes` is the tier's budget for blocks on disk, for every namespace that the server serves. The tier charges each block its stored length, or 4 KiB for a smaller block, and when it's over the budget, it deletes its least recently used block. So a tier of blocks smaller than 4 KiB uses less disk than its budget, and the memory of its index stays within the term in `fixed`. The value must be greater than zero.
+
+The tier keeps each block in a file of its own, with the block's bytes exactly as the segment stores them. A read checks a block from disk against the length and checksum that the segment records, as it checks a block from the store. If a block fails the check, or its file can't be read, the server deletes the file and reads the block from the store again.
+
+The directory contains nothing that the server depends on, so you can empty it at any time, even while the server runs, and the reads that follow go to the store. Give each server a directory of its own. Each server keeps its own index of the directory, so two servers on one directory would delete blocks that the other server still lists, and the directory could grow past either budget.
+
+The tier writes blocks to disk from a queue of up to 64 MiB, so a read doesn't wait for a disk write. If the queue is full when the cache inserts a block, the server doesn't write that block to disk, and the block stays in memory. The tier's queue and its index of the blocks on disk are a term in `fixed`, as [Set one number](#set-one-number) describes.
 
 ## Shutdown and upgrades
 

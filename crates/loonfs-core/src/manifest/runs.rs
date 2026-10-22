@@ -36,8 +36,12 @@ pub(super) struct MetadataFamilySegments {
     pub(super) segments: Vec<MetadataSegmentRef>,
 }
 
+/// One run of a cached manifest, in the order that reads scan the runs.
+///
+/// The segment block cache keeps these with each decoded manifest, so the
+/// type is public, but its fields aren't.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MetadataRunManifest {
+pub struct MetadataRunManifest {
     pub(super) run_no: RunNo,
     pub(super) run_seq: ChangeSeq,
     pub(super) tier: RunTier,

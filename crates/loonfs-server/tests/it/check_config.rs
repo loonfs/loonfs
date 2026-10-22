@@ -210,6 +210,55 @@ root = "{}"
     assert!(!stderr.contains("inline-content-secret"), "{stderr}");
 }
 
+/// Checks that `--check-config` creates a missing SSD tier directory and
+/// leaves no probe file in it, and that it fails with the field's name when
+/// it can't create the directory.
+#[test]
+fn check_config_creates_the_ssd_directory_or_reports_why_it_cannot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_root = dir.path().join("store");
+    let ssd_table = |directory: &Path| {
+        format!(
+            "\n[metadata_cache.ssd]\ndirectory = \"{}\"\nmax_segment_bytes = 1073741824\n",
+            directory.display()
+        )
+    };
+
+    let missing = dir.path().join("ssd");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &store_root,
+        &ssd_table(&missing),
+    );
+    let output = run_server(&config_path, &["--check-config"]);
+    assert!(
+        output.status.success(),
+        "expected success: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries: Vec<_> = std::fs::read_dir(&missing)
+        .expect("the check creates the directory")
+        .collect();
+    assert!(entries.is_empty(), "the probe file is gone: {entries:?}");
+
+    let occupied = dir.path().join("occupied");
+    std::fs::write(&occupied, b"a file, not a directory").expect("occupy the path");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &store_root,
+        &ssd_table(&occupied),
+    );
+    let output = run_server(&config_path, &["--check-config"]);
+    assert!(!output.status.success(), "expected a non-zero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("metadata_cache.ssd.directory") && stderr.contains("can't create"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn check_config_reports_an_invalid_config_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -120,6 +120,10 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         self.inner.checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
+        self.inner.identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::Head);
         let intercept = match self.interceptor.before(&context).await {

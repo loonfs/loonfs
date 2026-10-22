@@ -7,7 +7,9 @@
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
-use super::index_block_load::{load_section_bytes, segment_block_cache_key, segment_codec_error};
+use super::index_block_load::{
+    decode_stored_block, load_section_bytes, segment_block_cache_key, segment_codec_error,
+};
 use super::segment_block_cache::LoadedSegmentBlock;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
@@ -25,6 +27,9 @@ use std::sync::Arc;
 /// Longest single ranged GET issued while bulk-reading a block span; longer
 /// spans split into consecutive requests.
 pub(super) const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
+
+// The SSD tier's write queue fits the blocks of at least one bulk GET.
+const _: () = assert!(MAX_BULK_LOAD_BYTES <= crate::limits::SSD_WRITE_QUEUE_BYTES as u64);
 
 pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Sized>(
     store: &S,
@@ -110,10 +115,12 @@ fn decode_stored_data(
     handle: &BlockHandle,
     bytes: &[u8],
 ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
-    Ok(decoded_data_cache_block(
-        decode_data_block(bytes, handle)
-            .map_err(|err| segment_codec_error(&metadata_segment_object_key(descriptor), err))?,
-    ))
+    decode_stored_block(
+        &metadata_segment_object_key(descriptor),
+        SegmentBlockKind::Data,
+        handle,
+        bytes,
+    )
 }
 
 pub(super) fn decoded_data_cache_block(block: DecodedDataBlock) -> DecodedMetadataSegmentBlock {
@@ -152,7 +159,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             if let Some(DecodedMetadataSegmentBlock::Data {
                 block,
                 decoded_bytes,
-            }) = cache.blocks().get_block(&probe_key, &handle)
+            }) = cache.blocks().get_block(&probe_key, &handle).await
             {
                 if let Some(memo) = memo {
                     // Keep shared hits just like point loads, so this view's

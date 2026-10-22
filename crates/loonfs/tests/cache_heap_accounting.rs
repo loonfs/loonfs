@@ -1,5 +1,7 @@
 //! Checks that the metadata segment cache, the head cache, and the WAL-tail
-//! cache charge their budgets with the heap their contents hold.
+//! cache charge their budgets with the heap that their contents use, and that
+//! the index of the segment cache's SSD tier allocates no more for each
+//! block than the server's sizing formula estimates.
 //!
 //! This binary counts every allocation, so it keeps a process of its own.
 //! Heap here means the bytes the program asks the allocator for; allocator
@@ -9,7 +11,9 @@
 #![allow(clippy::print_stdout)]
 
 use bytes::Bytes;
-use loonfs::engine::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig};
+use loonfs::engine::{
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, SegmentBlockKind, SegmentCacheKey,
+};
 use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation, InlineContent,
 };
@@ -19,6 +23,7 @@ use loonfs::{
     DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::StoreIdentity;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, namespace_id, page_limit, test_actor,
 };
@@ -29,6 +34,7 @@ use loonfs_types::{
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -536,6 +542,108 @@ fn invalidating_and_inserting_one_long_key_stays_within_the_small_entry_bound() 
     );
 }
 
+/// Checks that the SSD tier's index allocates at most
+/// `SSD_INDEX_ENTRY_BYTES` for each block on disk, the cost that the
+/// server's sizing formula multiplies by its estimate of the blocks.
+///
+/// The test marks each block recently used once, as a hit in memory does,
+/// so the recency queue keeps a ghost position for each entry, and 16,385
+/// entries leave 32,770 positions, just past the 32,768 that the queue fits
+/// before it doubles. Of the sizes the test was run at, this one allocates
+/// the most for each entry.
+fn ssd_index_entries_stay_within_the_sizing_estimate() {
+    const BLOCKS: usize = 16_385;
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = StoreIdentity {
+        provider: "local_fs",
+        location: "/heap".to_owned(),
+        key_prefix: None,
+    };
+    let keys: Vec<SegmentCacheKey> = (0..BLOCKS)
+        .map(|index| SegmentCacheKey {
+            identity: format!("namespaces/demo/segments/{index:032}"),
+            block_kind: SegmentBlockKind::Data,
+            block_offset: 0,
+        })
+        .collect();
+    let budget = NonZeroUsize::new(1 << 30).expect("nonzero");
+    let (ssd, writer) = loonfs::SsdSegmentBlocks::open_paused(directory.path(), budget, 1 << 30)
+        .expect("open the ssd tier");
+    let baseline = LIVE.load(Ordering::Relaxed);
+    for key in &keys {
+        ssd.insert_stored(&store, key, b"x");
+    }
+    assert_eq!(writer.write_queued(), BLOCKS);
+    for key in &keys {
+        ssd.touch_stored(&store, key);
+    }
+    let heap = LIVE.load(Ordering::Relaxed).saturating_sub(baseline);
+    let per_block = heap / BLOCKS;
+    println!(
+        "ssd index | {BLOCKS} blocks | {heap} heap | {per_block} per block | {} estimated",
+        loonfs::SSD_INDEX_ENTRY_BYTES
+    );
+    assert_eq!(ssd.stats().inserts, BLOCKS);
+    assert!(
+        per_block <= loonfs::SSD_INDEX_ENTRY_BYTES,
+        "the ssd index allocates {per_block} bytes for each block, more than the estimate"
+    );
+}
+
+/// Checks that the index of an SSD tier whose budget is full of blocks of
+/// one byte stays within the sizing formula's term for the index, which
+/// assumes one entry for each 4 KiB of the budget.
+///
+/// The tier charges a block smaller than 4 KiB as 4 KiB, so a budget of
+/// 4,096 slots keeps about 3,966 blocks of one byte (each entry is also
+/// charged its own allocation) and evicts the rest of the 10,000 blocks that
+/// the test inserts. The test then marks every block recently used once, as
+/// hits in memory do, so the recency queue keeps a ghost position for each
+/// entry.
+fn an_ssd_budget_full_of_tiny_blocks_stays_within_the_sizing_term() {
+    const SLOTS: usize = 4_096;
+    const BLOCKS: usize = 10_000;
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = StoreIdentity {
+        provider: "local_fs",
+        location: "/heap".to_owned(),
+        key_prefix: None,
+    };
+    let keys: Vec<SegmentCacheKey> = (0..BLOCKS)
+        .map(|index| SegmentCacheKey {
+            identity: format!("namespaces/demo/segments/{index:032}"),
+            block_kind: SegmentBlockKind::Data,
+            block_offset: 0,
+        })
+        .collect();
+    let budget =
+        NonZeroUsize::new(SLOTS * loonfs::ASSUMED_STORED_BLOCK_BYTES).expect("nonzero budget");
+    let estimate = loonfs::SsdSegmentBlocks::memory_bytes(budget) - loonfs::SSD_WRITE_QUEUE_BYTES;
+    let (ssd, writer) = loonfs::SsdSegmentBlocks::open_paused(directory.path(), budget, 1 << 30)
+        .expect("open the ssd tier");
+    let baseline = LIVE.load(Ordering::Relaxed);
+    for key in &keys {
+        ssd.insert_stored(&store, key, b"x");
+    }
+    assert_eq!(writer.write_queued(), BLOCKS);
+    for key in &keys {
+        ssd.touch_stored(&store, key);
+    }
+    let heap = LIVE.load(Ordering::Relaxed).saturating_sub(baseline);
+    let stats = ssd.stats();
+    let kept = stats.inserts - stats.evictions;
+    println!("ssd index of tiny blocks | {kept} blocks | {heap} heap | {estimate} estimated");
+    assert!(
+        kept <= SLOTS,
+        "a budget of {SLOTS} slots keeps {kept} blocks"
+    );
+    assert!(
+        heap <= estimate,
+        "the ssd index of a budget full of tiny blocks allocates {heap} bytes, more than the \
+         {estimate} that the sizing term estimates"
+    );
+}
+
 /// Checks that a namespace head heavier than the whole head budget isn't
 /// kept by the cache once the read that loaded it is done, and that
 /// the next read of the namespace loads it again. The head of a namespace
@@ -599,6 +707,8 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
     small_entries_charge_cache_bookkeeping();
     hits_on_one_long_key_stay_within_the_small_entry_bound();
     invalidating_and_inserting_one_long_key_stays_within_the_small_entry_bound();
+    ssd_index_entries_stay_within_the_sizing_estimate();
+    an_ssd_budget_full_of_tiny_blocks_stays_within_the_sizing_term();
     let shapes = [
         Shape {
             label: "directories",

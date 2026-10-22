@@ -20,6 +20,25 @@ pub type SharedObjectStore = Arc<dyn ObjectStore>;
 /// implementation cleans up whatever it had started.
 pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 
+/// The objects that a store reads and writes, identified by the store's
+/// provider, its bucket or endpoint, and its key prefix.
+///
+/// Two stores with the same identity read the same objects, in this process
+/// and in any other, so a cache that outlives the process can key its
+/// entries by the identity. For example, an AWS S3 store of the bucket
+/// `tenants` under the prefix `prod` has the provider `aws_s3`, the location
+/// `tenants`, and the key prefix `prod`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoreIdentity {
+    /// The provider's config kind, such as `aws_s3` or `local_fs`.
+    pub provider: &'static str,
+    /// The bucket, with the endpoint when the provider has one, or the
+    /// absolute root directory of a local store.
+    pub location: String,
+    /// The prefix that the store adds to every key, if any.
+    pub key_prefix: Option<String>,
+}
+
 /// One object a listing reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedObject {
@@ -411,6 +430,16 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Providers may store a checksum they compute or one combined from verified requests.
     fn checksum_algorithm(&self) -> ChecksumAlgorithm;
 
+    /// Returns the identity of the objects that this store reads and writes,
+    /// or `None` for a store whose objects exist only in this process, such
+    /// as a store in memory.
+    ///
+    /// A store that wraps another store reads the same objects, so it
+    /// returns the identity of the store it wraps.
+    fn identity(&self) -> Option<StoreIdentity> {
+        None
+    }
+
     /// Reads metadata for one key, returning `None` when the object is absent.
     ///
     /// The returned compare token belongs to this exact observation. Invalid
@@ -641,6 +670,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().checksum_algorithm()
     }
 
+    fn identity(&self) -> Option<StoreIdentity> {
+        self.as_ref().identity()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.as_ref().head(key).await
     }
@@ -748,6 +781,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
 impl<T: ObjectStore + ?Sized> ObjectStore for &T {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
         (*self).checksum_algorithm()
+    }
+
+    fn identity(&self) -> Option<StoreIdentity> {
+        (*self).identity()
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {

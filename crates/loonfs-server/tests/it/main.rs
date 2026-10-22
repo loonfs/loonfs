@@ -25,3 +25,4 @@ mod http_snapshot_reads;
 mod http_snapshots;
 mod http_tls;
 mod http_uploads;
+mod ssd_tier;

@@ -12,6 +12,7 @@ macro_rules! delegate_object_store {
         $crate::delegate_object_store!($receiver => $inner;
             head,
             checksum_algorithm,
+            identity,
             create_multipart_upload,
             complete_multipart_upload,
             abort_multipart_upload,
@@ -33,6 +34,7 @@ macro_rules! delegate_object_store {
         $crate::delegate_object_store!($receiver => $inner;
             head,
             checksum_algorithm,
+            identity,
             create_multipart_upload,
             complete_multipart_upload,
             abort_multipart_upload,
@@ -84,6 +86,11 @@ macro_rules! __delegate_object_store_method {
     (checksum_algorithm, $receiver:ident, $inner:expr) => {
         fn checksum_algorithm(&$receiver) -> ::loonfs_types::ChecksumAlgorithm {
             $inner.checksum_algorithm()
+        }
+    };
+    (identity, $receiver:ident, $inner:expr) => {
+        fn identity(&$receiver) -> Option<::loonfs_objectstore::StoreIdentity> {
+            $inner.identity()
         }
     };
     (create_multipart_upload, $receiver:ident, $inner:expr) => {

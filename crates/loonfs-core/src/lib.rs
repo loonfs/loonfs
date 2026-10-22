@@ -124,7 +124,7 @@ pub mod time;
 pub mod cache {
     pub use crate::block_cache::{
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
-        DecodedBlockKey, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+        DecodedBlockKey, DecodedSegmentBlock, Insertion, SegmentBlockKind, SegmentCacheKey,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
     pub use crate::object_cache::{ObjectCache, SharedObjects};
@@ -135,8 +135,10 @@ pub mod cache {
 
     pub use crate::manifest::metadata_compaction_due;
     pub use crate::manifest::{
-        CacheScope, CachedHead, HeadAndWalTailCache, MetadataSegmentCache,
-        MetadataSegmentCacheStats, ObjectStoreScope, SharedHeadsAndWalTails, SharedSegmentBlocks,
+        decode_stored_block, CacheScope, CachedHead, DecodedMetadataSegmentBlock,
+        HeadAndWalTailCache, LoadedSegmentBlock, MemorySegmentBlocks, MetadataRunManifest,
+        MetadataSegmentCache, MetadataSegmentCacheKey, MetadataSegmentCacheStats, ObjectStoreScope,
+        SegmentBlockCache, SegmentBlockLoad, SharedHeadsAndWalTails, SharedSegmentBlocks,
         WalTailCacheKey,
     };
     pub use crate::namespace::status::{

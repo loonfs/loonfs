@@ -92,6 +92,14 @@ pub struct DecodedBlockCache<K, V> {
     stats: StatsInner,
 }
 
+/// What one insert did: whether the cache kept the entry, and the entries
+/// that the insert evicted to stay within the budget.
+#[derive(Debug)]
+pub struct Insertion<K, V> {
+    pub kept: bool,
+    pub evicted: Vec<(K, V)>,
+}
+
 /// The loads and checks of one key in flight.
 #[derive(Debug)]
 struct InFlight<V> {
@@ -225,16 +233,39 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<V, E>>,
     {
+        self.get_or_load_with_hit(cache_key, |_| {}, load).await
+    }
+
+    /// Returns the value under `cache_key` like [`Self::get_or_load`], and
+    /// calls `hit` with the value when the caller finds it in the cache.
+    ///
+    /// A cache with a second tier uses `hit` to mark the value recently used
+    /// in that tier too. `hit` runs after the cache's lock is released.
+    pub(crate) async fn get_or_load_with_hit<E, H, F, Fut>(
+        &self,
+        cache_key: &K,
+        hit: H,
+        load: F,
+    ) -> Result<V, E>
+    where
+        H: FnOnce(&V),
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
         let guard = self.join(cache_key);
         guard
             .join()
             .load(
-                || self.get(cache_key),
+                || {
+                    let value = self.get(cache_key)?;
+                    hit(&value);
+                    Some(value)
+                },
                 || {
                     let start = self.start(cache_key);
                     async move {
                         let block = load().await?;
-                        self.insert_entry(cache_key.clone(), block.clone(), Some(start));
+                        self.insert_entry(cache_key.clone(), block.clone(), Some(start), None);
                         Ok(block)
                     }
                 },
@@ -352,12 +383,37 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.lock().entries.get(key).map(|slot| slot.block.clone())
     }
 
+    /// Marks the value under `key` recently used without recording a hit or
+    /// a miss, and returns whether the cache keeps the key.
+    pub fn touch(&self, key: &K) -> bool {
+        let mut inner = self.lock();
+        let Some(key) = inner
+            .entries
+            .get_key_value(key)
+            .map(|(key, _)| Arc::clone(key))
+        else {
+            return false;
+        };
+        inner.touch(&key);
+        true
+    }
+
+    /// Records a hit for a lookup whose caller found an entry with
+    /// [`Self::peek`] and could use it.
+    ///
+    /// A disabled cache records nothing.
+    pub fn record_hit(&self) {
+        if !self.disabled() {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Records a miss for a lookup whose caller found an entry with
     /// [`Self::peek`] but can't use it, such as a prefix of an object that's
     /// shorter than a read needs.
     ///
     /// A disabled cache records nothing.
-    pub(crate) fn record_miss(&self) {
+    pub fn record_miss(&self) {
         if !self.disabled() {
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
         }
@@ -372,12 +428,28 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// entry first and then the entry itself. When the cache doesn't keep
     /// the entry, the entry that the key already had stays.
     pub fn insert(&self, key: K, block: V) -> bool {
-        self.insert_entry(key, block, None)
+        self.insert_entry(key, block, None, None)
+    }
+
+    /// Inserts like [`Self::insert`], and returns the entries that the
+    /// insert evicted, so the caller can release what each one refers to
+    /// (such as a file) after the cache's lock is released.
+    pub fn insert_evicting(&self, key: K, block: V) -> Insertion<K, V> {
+        let mut evicted = Vec::new();
+        let kept = self.insert_entry(key, block, None, Some(&mut evicted));
+        Insertion { kept, evicted }
     }
 
     /// Inserts like [`Self::insert`], unless `start` is the start of a load
-    /// that an invalidation or an eviction of `key` has passed.
-    fn insert_entry(&self, key: K, block: V, start: Option<CheckStart>) -> bool {
+    /// that an invalidation or an eviction of `key` has passed, and adds the
+    /// entries that the insert evicted to `evicted`, if it's given.
+    fn insert_entry(
+        &self,
+        key: K,
+        block: V,
+        start: Option<CheckStart>,
+        evicted: Option<&mut Vec<(K, V)>>,
+    ) -> bool {
         if self.disabled() {
             return false;
         }
@@ -392,7 +464,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         if start.is_some_and(|start| inner.dropped_since(&key, start)) {
             return false;
         }
-        self.put(&mut inner, key, block, entry_charge)
+        self.put(&mut inner, key, block, entry_charge, evicted)
     }
 
     /// Inserts `value` under `key` if the key has no entry or `newer`
@@ -437,7 +509,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         }
         match entry_charge {
             Ok(entry_charge) => {
-                self.put(&mut inner, key, value, entry_charge);
+                self.put(&mut inner, key, value, entry_charge, None);
             }
             Err(charged_bytes) => {
                 inner.drop_key(&key);
@@ -461,7 +533,17 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// Puts `block` under `key` in place of the key's entry, evicts the
     /// least recently used entries until the cache is within its budget
     /// again, and returns whether the cache kept the new entry.
-    fn put(&self, inner: &mut Inner<K, V>, key: K, block: V, entry_charge: usize) -> bool {
+    ///
+    /// The evicted entries go into `evicted` if it's given, and are dropped
+    /// otherwise.
+    fn put(
+        &self,
+        inner: &mut Inner<K, V>,
+        key: K,
+        block: V,
+        entry_charge: usize,
+        evicted: Option<&mut Vec<(K, V)>>,
+    ) -> bool {
         // A replaced entry's ghost positions point to its key, so the new
         // entry keeps that key instead of allocating another.
         let key = match inner.entries.remove_entry(&key) {
@@ -482,7 +564,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
-        self.evict_over_budget(inner);
+        self.evict_over_budget(inner, evicted);
         inner.entries.contains_key(&key)
     }
 
@@ -499,7 +581,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.config.max_decoded_bytes == 0
     }
 
-    fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
+    fn evict_over_budget(&self, inner: &mut Inner<K, V>, mut evicted: Option<&mut Vec<(K, V)>>) {
         while inner.charged_bytes > self.config.max_decoded_bytes {
             let Inner { entries, order, .. } = &mut *inner;
             let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
@@ -511,10 +593,15 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 .expect("the table keeps the key of a live position");
             let slot = inner.drop_key(&candidate).expect("live entry");
             self.record_eviction(slot.charged_bytes);
+            if let Some(evicted) = evicted.as_deref_mut() {
+                evicted.push((K::clone(&candidate), slot.block));
+            }
         }
     }
 
-    fn record_rejection(&self, charged_bytes: usize) {
+    /// Records an entry that the cache didn't keep, charged
+    /// `charged_bytes`.
+    pub fn record_rejection(&self, charged_bytes: usize) {
         self.stats.rejections.fetch_add(1, Ordering::Relaxed);
         self.stats
             .rejected_decoded_bytes

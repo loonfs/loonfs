@@ -52,7 +52,7 @@ For example, a directory lookup might overlap the descriptor ranges of several d
 
 ## Caching and combined reads
 
-LoonFS caches decoded index, filter, and data blocks, up to a byte budget. The cache affects how much a read costs, but not the metadata it returns.
+LoonFS caches decoded index, filter, and data blocks in memory, up to a byte budget. A server can also keep every block that the cache inserts on its local SSD, as a second tier of the same cache with a byte budget of its own. The SSD tier keeps each block in its stored form, which is the block's section exactly as the segment stores it. So LoonFS checks a block that it reads back from disk against the block's stored length and CRC32C, and decodes it, with the same code as a block read from the store. The cache affects how much a read costs, but not the metadata it returns.
 
 The implementation also combines reads when transferring some extra bytes is cheaper than another object-store round trip:
 

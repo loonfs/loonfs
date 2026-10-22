@@ -20,6 +20,12 @@
 //!   data blocks of a segment of 256 KiB or less. The first read after a
 //!   fold or a compaction then finds those blocks in the cache instead of
 //!   reading them from object storage.
+//!
+//! A runtime can read blocks through the `loonfs` crate's implementation of
+//! [`SegmentBlockCache`] instead, which also writes every block that it
+//! inserts to local disk. A block that memory has evicted is then read back
+//! from disk, checked against its handle, and decoded by
+//! [`decode_stored_block`]. Manifests stay in memory.
 
 mod block_load;
 mod build;
@@ -49,8 +55,9 @@ pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{
-    CacheScope, CachedHead, HeadAndWalTailCache, MetadataSegmentCache, MetadataSegmentCacheStats,
-    ObjectStoreScope, SharedHeadsAndWalTails, SharedSegmentBlocks, WalTailCacheKey,
+    CacheScope, CachedHead, DecodedMetadataSegmentBlock, HeadAndWalTailCache, MetadataSegmentCache,
+    MetadataSegmentCacheKey, MetadataSegmentCacheStats, ObjectStoreScope, SharedHeadsAndWalTails,
+    SharedSegmentBlocks, WalTailCacheKey,
 };
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
@@ -62,10 +69,14 @@ pub use self::error::ManifestLoadError;
 pub use self::fold::{
     fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
 };
+pub use self::index_block_load::decode_stored_block;
 pub(crate) use self::published::same_head;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::RetentionTarget;
-pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};
+pub use self::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
+pub use self::segment_block_cache::{
+    LoadedSegmentBlock, MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
+};
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
 };

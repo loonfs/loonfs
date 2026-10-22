@@ -88,6 +88,35 @@ pub(super) fn segment_codec_error(
     }
 }
 
+/// Checks a block's stored bytes against its handle and decodes them into
+/// the block that the block cache keeps.
+///
+/// A block loaded from the store and a block read from local SSD are both
+/// decoded here, so a block from disk passes the same check.
+pub fn decode_stored_block(
+    object_key: &str,
+    kind: SegmentBlockKind,
+    handle: &BlockHandle,
+    stored: &[u8],
+) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
+    let codec_error = |error| segment_codec_error(object_key, error);
+    match kind {
+        SegmentBlockKind::Index => Ok(index_cache_block(
+            decode_index_block(stored, handle).map_err(codec_error)?,
+        )),
+        SegmentBlockKind::Filter => Ok(filter_cache_block(
+            decode_filter_block(stored, handle).map_err(codec_error)?,
+        )),
+        SegmentBlockKind::Data => Ok(decoded_data_cache_block(
+            decode_data_block(stored, handle).map_err(codec_error)?,
+        )),
+        SegmentBlockKind::Manifest => Err(segment_codec_error(
+            object_key,
+            "a manifest isn't a segment block",
+        )),
+    }
+}
+
 /// Largest segment object fetched whole on first touch, in stored bytes.
 /// Below this, splitting the index and data reads into separate ranged GETs
 /// costs more round-trips than the whole object costs bytes; one GET
@@ -184,10 +213,8 @@ fn publish_segment_sections(
 
     let index_entries = match section(&index_handle) {
         Some(stored) => {
-            let block = index_cache_block(
-                decode_index_block(&stored, &index_handle)
-                    .map_err(|err| segment_codec_error(&object_key, err))?,
-            );
+            let block =
+                decode_stored_block(&object_key, SegmentBlockKind::Index, &index_handle, &stored)?;
             publish_segment_block(
                 segment_cache,
                 memo,
@@ -201,9 +228,12 @@ fn publish_segment_sections(
     };
     let filter_block = match section(&filter_handle) {
         Some(stored) => {
-            let filter = decode_filter_block(&stored, &filter_handle)
-                .map_err(|err| segment_codec_error(&object_key, err))?;
-            let block = filter_cache_block(filter);
+            let block = decode_stored_block(
+                &object_key,
+                SegmentBlockKind::Filter,
+                &filter_handle,
+                &stored,
+            )?;
             publish_segment_block(
                 segment_cache,
                 memo,
@@ -239,9 +269,12 @@ fn publish_segment_sections(
                     );
                     continue;
                 }
-                let decoded = decode_data_block(&stored, &entry.block)
-                    .map_err(|err| segment_codec_error(&object_key, err))?;
-                let block = decoded_data_cache_block(decoded);
+                let block = decode_stored_block(
+                    &object_key,
+                    SegmentBlockKind::Data,
+                    &entry.block,
+                    &stored,
+                )?;
                 publish_segment_block(
                     segment_cache,
                     memo,
@@ -343,10 +376,8 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
                 )
                 .await?,
             );
-            let entries = decode_index_block(&stored, &handle)
-                .map_err(|err| segment_codec_error(&object_key, err))?;
             Ok(LoadedSegmentBlock {
-                block: index_cache_block(entries),
+                block: decode_stored_block(&object_key, SegmentBlockKind::Index, &handle, &stored)?,
                 stored,
             })
         }
@@ -389,10 +420,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
             .map_err(|err| segment_codec_error(&object_key, format!("inline filter: {err}")))?;
         // The handle names and verifies the durable filter block; decoding
         // the inline copy against it proves the two are byte-identical.
-        let block = filter_cache_block(
-            decode_filter_block(&bytes, &handle)
-                .map_err(|err| segment_codec_error(&object_key, err))?,
-        );
+        let block = decode_stored_block(&object_key, SegmentBlockKind::Filter, &handle, &bytes)?;
         publish_segment_block(segment_cache, Some(memo), cache_key, &block, &bytes);
         return block.into_filter(&object_key);
     }
