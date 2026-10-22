@@ -41,6 +41,7 @@ mod row;
 mod runs;
 mod scan;
 mod scan_load;
+mod segment_block_cache;
 mod statistics;
 mod streaming_compaction;
 #[cfg(test)]

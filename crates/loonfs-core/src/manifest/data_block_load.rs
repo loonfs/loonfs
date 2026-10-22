@@ -1,16 +1,18 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
 //!
-//! Point loads and scan loads consult the per-view memo and the decoded block
-//! cache first. A scan load fetches the blocks that neither one has with
-//! coalesced ranged GETs.
+//! Point loads and scan loads consult the per-view memo and the block cache
+//! first. A scan load fetches the blocks that neither one has with coalesced
+//! ranged GETs.
 
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::index_block_load::{load_section_bytes, segment_block_cache_key, segment_codec_error};
+use super::segment_block_cache::LoadedSegmentBlock;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -38,9 +40,13 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
     {
         return Ok(block);
     }
-    let fetch = || async {
+    let fetch = async {
         if let Some(bytes) = memo.and_then(|memo| memo.stored(&cache_key)) {
-            return decode_stored_data(descriptor, &handle, &bytes);
+            let stored = Bytes::from_owner(bytes);
+            return Ok(LoadedSegmentBlock {
+                block: decode_stored_data(descriptor, &handle, &stored)?,
+                stored,
+            });
         }
         let read_count = entries
             .iter()
@@ -53,13 +59,15 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
         let entries = &entries[..read_count];
         let last = entries[entries.len() - 1].block;
         let object_key = metadata_segment_object_key(descriptor);
-        let bytes = load_section_bytes(
-            store,
-            &object_key,
-            handle.offset,
-            last.offset + u64::from(last.stored_bytes) - handle.offset,
-        )
-        .await?;
+        let bytes = Bytes::from(
+            load_section_bytes(
+                store,
+                &object_key,
+                handle.offset,
+                last.offset + u64::from(last.stored_bytes) - handle.offset,
+            )
+            .await?,
+        );
         if let Some(memo) = memo {
             for entry in &entries[1..] {
                 let start = usize::try_from(entry.block.offset - handle.offset).expect(
@@ -76,12 +84,20 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
                 );
             }
         }
-        let bytes = &bytes[..handle.stored_bytes as usize];
-        decode_stored_data(descriptor, &handle, bytes)
+        let stored = bytes.slice(..handle.stored_bytes as usize);
+        Ok::<_, ManifestLoadError>(LoadedSegmentBlock {
+            block: decode_stored_data(descriptor, &handle, &stored)?,
+            stored,
+        })
     };
     let block = match segment_cache {
-        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
-        None => fetch().await?,
+        Some(cache) => {
+            cache
+                .blocks()
+                .get_or_load_block(&cache_key, &handle, Box::pin(fetch))
+                .await?
+        }
+        None => fetch.await?.block,
     };
     if let Some(memo) = memo {
         memo.record(&cache_key, &block);
@@ -136,7 +152,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             if let Some(DecodedMetadataSegmentBlock::Data {
                 block,
                 decoded_bytes,
-            }) = cache.get(&probe_key)
+            }) = cache.blocks().get_block(&probe_key, &handle)
             {
                 if let Some(memo) = memo {
                     // Keep shared hits just like point loads, so this view's
@@ -159,7 +175,9 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 memo.record(&probe_key, &decoded);
             }
             if let Some(cache) = segment_cache {
-                cache.insert(probe_key.clone(), decoded.clone());
+                cache
+                    .blocks()
+                    .insert_block(probe_key.clone(), decoded.clone(), &bytes);
             }
             blocks[position] = Some(decoded.into_data(&metadata_segment_object_key(descriptor))?);
         }
@@ -203,29 +221,33 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                     SegmentBlockKind::Data,
                     span[0].block.offset,
                 );
-                let fetch = || async move {
-                    load_and_publish_span(
-                        store,
-                        segment_cache,
-                        memo,
-                        descriptor,
-                        span,
-                        winner_decodes,
-                    )
-                    .await
-                };
+                let fetch = load_and_publish_span(
+                    store,
+                    segment_cache,
+                    memo,
+                    descriptor,
+                    span,
+                    winner_decodes,
+                );
                 match segment_cache {
                     Some(cache) => {
                         cache
-                            .get_or_load(&first_key, || async {
-                                Ok(fetch()
-                                    .await?
-                                    .expect("a cached span should return its first block"))
-                            })
+                            .blocks()
+                            .get_or_load_block(
+                                &first_key,
+                                &span[0].block,
+                                Box::pin(async {
+                                    Ok::<_, ManifestLoadError>(
+                                        fetch
+                                            .await?
+                                            .expect("a cached span should return its first block"),
+                                    )
+                                }),
+                            )
                             .await?;
                     }
                     None => {
-                        fetch().await?;
+                        fetch.await?;
                     }
                 }
                 Ok::<_, ManifestLoadError>(())
@@ -279,7 +301,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 /// Fetches one contiguous span with a single ranged GET, decodes every
 /// block, keeps the winner's decodes, and publishes them to the per-view memo
 /// and (when populating) the shared cache. Returns the first block's cache
-/// entry for the single-flight cell.
+/// entry, with its stored bytes, for the single-flight cell.
 async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -287,12 +309,12 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     descriptor: &MetadataSegmentRef,
     span: &[SegmentIndexEntry],
     winner_decodes: &mut Option<Vec<Arc<DecodedDataBlock>>>,
-) -> Result<Option<DecodedMetadataSegmentBlock>, ManifestLoadError> {
+) -> Result<Option<LoadedSegmentBlock>, ManifestLoadError> {
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
     let span_len = last.offset + u64::from(last.stored_bytes) - first.offset;
     let object_key = metadata_segment_object_key(descriptor);
-    let bytes = load_section_bytes(store, &object_key, first.offset, span_len).await?;
+    let bytes = Bytes::from(load_section_bytes(store, &object_key, first.offset, span_len).await?);
     let mut first_block = None;
     let mut retained = Vec::with_capacity(span.len());
     for entry in span {
@@ -301,9 +323,9 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
             "`load_section_bytes` holds the whole span in memory, so a block's offset in it \
              should fit usize",
         );
-        let stored = &bytes[begin..begin + handle.stored_bytes as usize];
+        let stored = bytes.slice(begin..begin + handle.stored_bytes as usize);
         let decoded = Arc::new(
-            decode_data_block(stored, &handle)
+            decode_data_block(&stored, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?,
         );
         if memo.is_some() || segment_cache.is_some() {
@@ -319,10 +341,15 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
             if let Some(cache) = segment_cache {
                 // The first block is what the single-flight cell publishes;
                 // inserting it here too keeps the whole span uniformly cached.
-                cache.insert(cache_key, cache_block.clone());
+                cache
+                    .blocks()
+                    .insert_block(cache_key, cache_block.clone(), &stored);
             }
             if first_block.is_none() {
-                first_block = Some(cache_block);
+                first_block = Some(LoadedSegmentBlock {
+                    block: cache_block,
+                    stored,
+                });
             }
         }
         retained.push(decoded);

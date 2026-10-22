@@ -1,8 +1,11 @@
 //! Checkpoint metadata cache, scan sharing, filters, and lookup behavior.
 
+use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
+use super::super::segment_block_cache::{SegmentBlockCache, SegmentBlockLoad};
 use super::*;
 use loonfs_test_support::stores::replace_object;
 use std::assert_matches;
+use std::sync::Mutex;
 
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
     store: &S,
@@ -1099,6 +1102,97 @@ async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
         gets, 2,
         "one ranged GET per run of consecutive blocks nothing answered"
     );
+}
+
+/// A block cache that keeps blocks in a map, and records the offset and the
+/// handle of every get and the offset and the stored bytes of every insert.
+#[derive(Default)]
+struct CountingBlockCache {
+    blocks: Mutex<HashMap<MetadataSegmentCacheKey, DecodedMetadataSegmentBlock>>,
+    gets: Mutex<Vec<(u64, BlockHandle)>>,
+    inserts: Mutex<Vec<(u64, Bytes)>>,
+}
+
+#[async_trait]
+impl SegmentBlockCache for CountingBlockCache {
+    fn get_block(
+        &self,
+        key: &MetadataSegmentCacheKey,
+        handle: &BlockHandle,
+    ) -> Option<DecodedMetadataSegmentBlock> {
+        let mut gets = self.gets.lock().expect("gets lock");
+        gets.push((key.block_offset, *handle));
+        self.blocks.lock().expect("blocks lock").get(key).cloned()
+    }
+
+    fn insert_block(
+        &self,
+        key: MetadataSegmentCacheKey,
+        block: DecodedMetadataSegmentBlock,
+        stored: &[u8],
+    ) {
+        let mut inserts = self.inserts.lock().expect("inserts lock");
+        inserts.push((key.block_offset, Bytes::copy_from_slice(stored)));
+        self.blocks.lock().expect("blocks lock").insert(key, block);
+    }
+
+    async fn get_or_load_block(
+        &self,
+        key: &MetadataSegmentCacheKey,
+        handle: &BlockHandle,
+        load: SegmentBlockLoad<'_>,
+    ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
+        if let Some(block) = self.get_block(key, handle) {
+            return Ok(block);
+        }
+        let loaded = load.await?;
+        self.insert_block(key.clone(), loaded.block.clone(), &loaded.stored);
+        Ok(loaded.block)
+    }
+}
+
+/// Checks that a wide read passes each block's handle with every get and
+/// each block's stored bytes with every insert, and that a second read gets
+/// each block once from the block cache and inserts nothing.
+#[tokio::test]
+async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let object = segment_object_bytes(&store, &descriptor).await;
+    let handles: HashMap<u64, BlockHandle> = index
+        .iter()
+        .map(|entry| (entry.block.offset, entry.block))
+        .collect();
+    let blocks = Arc::new(CountingBlockCache::default());
+    let cache = MetadataSegmentCache::with_blocks(blocks.clone());
+
+    let (cold, cold_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    assert_eq!(cold_reads, 1, "one ranged GET reads the whole span");
+    let cold_gets = blocks.gets.lock().expect("gets lock").len();
+    let inserts = blocks.inserts.lock().expect("inserts lock").clone();
+    let inserted: BTreeSet<u64> = inserts.iter().map(|(offset, _)| *offset).collect();
+    assert_eq!(inserted, handles.keys().copied().collect::<BTreeSet<_>>());
+    for (offset, stored) in &inserts {
+        assert_eq!(
+            stored,
+            &stored_block_bytes(&object, &handles[offset]),
+            "the insert of the block at {offset} passes its stored bytes"
+        );
+    }
+
+    let (warm, warm_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    assert_eq!((warm, warm_reads), (cold, 0));
+    assert_eq!(
+        blocks.inserts.lock().expect("inserts lock").len(),
+        inserts.len()
+    );
+    let gets = blocks.gets.lock().expect("gets lock");
+    assert_eq!(gets.len() - cold_gets, index.len());
+    for (offset, handle) in gets.iter() {
+        assert_eq!(
+            handle, &handles[offset],
+            "the get of the block at {offset} passes its handle"
+        );
+    }
 }
 
 #[tokio::test]
