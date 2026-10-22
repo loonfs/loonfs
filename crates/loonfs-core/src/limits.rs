@@ -23,6 +23,19 @@ pub(crate) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 /// Caps each Bloom filter used by compaction and content collection.
 pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 
+/// Most levels of the walk that builds a base compaction's kept inode filter.
+///
+/// The walk's stack holds at most this many directories, counting the one
+/// the walk starts at, and the walk follows at most this many ancestors up
+/// from a recoverable deletion. Each level of the stack keeps a directory's
+/// inode ID and the row key where the walk resumes that directory, which is
+/// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
+/// takes at most about 7 MiB. A move can nest a tree deeper than any request
+/// path, and a compaction that meets a deeper tree keeps every row it would
+/// have tested, as it does when the filter would be larger than
+/// `MAX_BLOOM_FILTER_BYTES`.
+pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
+
 /// Most encoded segment bytes that one fold or compaction keeps in memory
 /// while the segments' puts run.
 ///

@@ -4,8 +4,9 @@
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, one segment builder per family, and a bounded wave of encoded outputs.
 //! [`finalize_metadata_compaction`] publishes the merged run with epoch
-//! fencing. Only base merges may remove rows below the retention floor. Every
-//! merge drops superseded layout rows.
+//! fencing. Only base merges may remove rows below the retention floor, and
+//! only base merges remove the rows of inodes that an expired deletion hides.
+//! Every merge drops superseded layout rows.
 
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
 use super::cache::MetadataSegmentCache;
@@ -19,6 +20,7 @@ use super::compaction_step::{
     ReplacementOutput,
 };
 use super::index_block_load::segment_object_bytes;
+use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use super::publish::{update_manifest, ManifestChange};
 use super::published::PublishedManifest;
 use super::runs::{runs_newest_first, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
@@ -215,6 +217,19 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<MetadataMergeReport, CompactionUnitOutcome>> {
+    let input_runs = resolve_input_runs(segments, spec)?;
+    let kept_inodes = match load_kept_inode_filter(
+        segments,
+        namespace_id,
+        spec.group,
+        spec.placement,
+        cancellation,
+    )
+    .await?
+    {
+        Ok(kept_inodes) => kept_inodes,
+        Err(stopped) => return Ok(Err(stopped)),
+    };
     let merge = GroupMerge::new(
         segments,
         output_cache,
@@ -223,7 +238,8 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         spec.placement,
         spec.frozen_floor_seq,
         policy,
-        resolve_input_runs(segments, spec)?,
+        input_runs,
+        kept_inodes,
         ProgressReporter::new(spec.input_rows()),
     );
     merge.run(&MergeControl { cancellation }).await
@@ -477,6 +493,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
     chain_filter: ChainFilter,
+    kept_inodes: KeptInodeFilter,
     result: MetadataMergeReport,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
@@ -538,6 +555,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         frozen_floor_seq: ChangeSeq,
         policy: MetadataRunPolicy,
         input_runs: Vec<MetadataRunManifest>,
+        kept_inodes: KeptInodeFilter,
         progress: ProgressReporter,
     ) -> Self {
         let input_bytes = input_runs
@@ -553,6 +571,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .as_ref()
                 .map(|manifest| manifest.payload().next_run_no),
             chain_filter: ChainFilter::NotNeeded,
+            kept_inodes,
             output_cache,
             namespace_id,
             group,
@@ -781,6 +800,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 if !filter.may_contain(layout.content_id.as_str().as_bytes()) {
                     continue;
                 }
+            }
+            if !self.kept_inodes.keeps(&row) {
+                continue;
             }
             if let Some(kept) = operator.take_floor_value_before(&row, floor_seq)? {
                 self.write_row(kept, &mut writers, puts).await?;

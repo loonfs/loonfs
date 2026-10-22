@@ -317,7 +317,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
 }
 
 /// Commits the writer's expiry of one deletion.
-async fn expire<S: ObjectStore + ?Sized>(
+pub(super) async fn expire<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -365,7 +365,7 @@ async fn trash_page<S: ObjectStore + ?Sized>(
 }
 
 /// The inode a visible path resolves to, read before a delete hides it.
-async fn inode_id_of<S: ObjectStore + ?Sized>(
+pub(super) async fn inode_id_of<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
