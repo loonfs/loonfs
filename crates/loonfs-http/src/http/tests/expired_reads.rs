@@ -67,6 +67,17 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         .await
         .expect("delete directory");
     writer.shutdown().await.expect("writer shutdown");
+    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+        store.clone(),
+        namespace_id.clone(),
+        writer_id("expiry-writer"),
+        Arc::new(loonfs_core::test_support::content_writes()),
+    );
+    maintenance.fold_wal().await.expect("fold the deletion");
+    maintenance
+        .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion.committed_seq))
+        .await
+        .expect("advance the floor to the deletion");
     NamespaceCommitEngine::new(
         namespace_id,
         Arc::new(loonfs_core::test_support::content_writes()),

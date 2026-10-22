@@ -27,6 +27,17 @@ async fn expire(
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
 ) {
+    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+        store.clone(),
+        namespace_id.clone(),
+        writer_id("expiry-writer"),
+        Arc::new(loonfs_core::test_support::content_writes()),
+    );
+    maintenance.fold_wal().await.expect("fold the deletion");
+    maintenance
+        .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion_seq))
+        .await
+        .expect("advance the floor to the deletion");
     NamespaceCommitEngine::new(
         namespace_id.clone(),
         Arc::new(loonfs_core::test_support::content_writes()),
