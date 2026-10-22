@@ -1282,7 +1282,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), keep every version above the floor and the newest version at or below it. Drop that floor version too if it's unbound. Remove every version of an edge whose parent an expired deletion hides. |
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set`, `revoke`, and `expire` event. |
-| `active_deletions` | Keep listed deletions until they're revoked or expired, and remove a cancelled `listed` and `removed` pair together. A deletion at or below the floor keeps its `listed` row until the namespace's writer commits its `expire` event. |
+| `active_deletions` | Keep listed deletions until they're revoked or expired, and remove a cancelled `listed` and `removed` pair together. A deletion at or below the floor keeps its `listed` row until the namespace's writer commits the deletion's `expire` event. |
 | `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |

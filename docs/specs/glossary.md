@@ -190,7 +190,7 @@ The process that merges a namespace's metadata runs into fewer runs, and drops r
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove older rows (superseded bindings, old revisions, and commit receipts). Once the floor reaches a deletion, the namespace's writer expires the deletion, and a base compaction then removes the rows that the expired deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). Once the floor reaches a deletion, the namespace's writer expires the deletion, and a base compaction then removes the rows that the expired deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 
