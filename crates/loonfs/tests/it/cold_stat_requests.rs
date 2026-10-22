@@ -9,7 +9,7 @@
 //! lookups was the scale term, and dependent per-section GETs were the
 //! wave count.
 
-use loonfs::{LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, Writable};
+use loonfs::{LoonFs, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
@@ -129,15 +129,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         }
         publish_candidates(&namespace_writer, candidates).await;
         maintenance
-            .maintain_metadata_with_options(
-                &namespace_id,
-                &MaintainMetadataOptions {
-                    max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                    ..Default::default()
-                },
-            )
+            .fold_wal(&namespace_id)
             .await
-            .expect("step");
+            .expect("fold the batch into one delta run");
     }
 
     // Confirm the manifest really carries several straddling delta direntry

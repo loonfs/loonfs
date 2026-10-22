@@ -128,34 +128,6 @@ fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
     }
 }
 
-type FamilyRunShape = (ApiMetadataRowFamily, u64, usize);
-type ManifestRunShape = (ChangeSeq, RunTier, Vec<FamilyRunShape>);
-
-fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
-    runs_newest_first(manifest.payload())
-        .into_iter()
-        .map(|run| {
-            let segments = run
-                .segments
-                .into_iter()
-                .map(|family_segments| {
-                    let row_count = family_segments
-                        .segments
-                        .iter()
-                        .map(|descriptor| descriptor.row_count)
-                        .sum();
-                    (
-                        family_segments.family,
-                        row_count,
-                        family_segments.segments.len(),
-                    )
-                })
-                .collect();
-            (run.run_seq, run.tier, segments)
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1394,7 +1366,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
 }
 
 #[tokio::test]
-async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermediate_reads() {
+async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermediate_reads() {
     let bounded_dir = tempdir().expect("bounded tempdir");
     let unbounded_dir = tempdir().expect("unbounded tempdir");
     let bounded_store = LocalFsStore::new(bounded_dir.path()).expect("bounded store");
@@ -1496,18 +1468,21 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
         &bounded.metadata_state,
         &unbounded.metadata_state
     ));
-    // Independent family groups may finish in a different order when their
-    // sizes differ. Compare the resulting shapes without the publication order.
-    let mut bounded_shape = manifest_run_shape(&bounded.manifest);
-    let mut unbounded_shape = manifest_run_shape(&unbounded.manifest);
-    bounded_shape.sort();
-    unbounded_shape.sort();
-    assert_eq!(bounded_shape, unbounded_shape);
-    assert!(delta_runs(&bounded.manifest).is_empty());
+    // One unbounded unit merges each group's tier of six runs whole. Units of
+    // two runs merge the tier's oldest runs into the base until the runs left
+    // are fewer than a tier, and those wait for later folds.
+    assert!(delta_runs(&unbounded.manifest).is_empty());
+    assert_eq!(
+        delta_runs(&bounded.manifest)
+            .iter()
+            .map(|run| run.run_seq)
+            .collect::<Vec<_>>(),
+        [ChangeSeq(5), ChangeSeq(6)]
+    );
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
     write_file_bytes(
-        &bounded_store,
+        &unbounded_store,
         &namespace_id,
         "/docs/later.txt",
         b"later\n",
@@ -1516,15 +1491,15 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     )
     .await
     .expect("write later file");
-    create_checkpoint(&bounded_store, &namespace_id, &context)
+    create_checkpoint(&unbounded_store, &namespace_id, &context)
         .await
         .expect("checkpoint later file");
     let below_trigger = super::compact_unit(
-        &bounded_store,
+        &unbounded_store,
         None,
         &namespace_id,
         loonfs_types::CompactorEpoch(0),
-        bounded_policy,
+        unbounded_policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
@@ -2099,7 +2074,6 @@ fn group_segment_object_keys(
 fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataRunPolicy {
     let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
     MetadataRunPolicy {
-        small_run_bytes: NonZeroUsize::MIN,
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
             .expect("test row budget should be nonzero"),
@@ -2254,27 +2228,30 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await;
 
-    // One delta run cancels a binding the base holds, a second delta run
-    // lands above it, and the floor moves past the cancellation.
+    // One delta run cancels a binding the base holds, more delta runs land
+    // above it until they make a tier, and the floor moves past the
+    // cancellation.
     let deleted = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
         .await
         .expect("delete");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the delete");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/extra.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write extra");
-    create_checkpoint(&store, &namespace_id, &context)
+    for extra in 1..MetadataRunPolicy::default().min_compaction_runs.get() {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/extra-{extra}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
         .await
-        .expect("checkpoint the extra file");
+        .expect("write extra");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the extra file");
+    }
     advance_retention_floor(
         &store,
         None,
@@ -2296,13 +2273,9 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await
     .expect("load the manifest before the merge");
-    // No run counts as small, so the size ratio keeps the large base out of
-    // the window.
-    let policy = MetadataRunPolicy {
-        small_run_bytes: NonZeroUsize::MIN,
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
+    // The base is more than four times the size of the delta runs, so their
+    // tier merges without it.
+    let policy = MetadataRunPolicy::default();
     let (group, spec) = plan_window(
         &store,
         &namespace_id,

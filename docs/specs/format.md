@@ -1206,7 +1206,7 @@ Why check that the segments exist first? Advancing the floor ends the guarantee 
 
 Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
-A compaction merges a contiguous window of at most eight runs, starting from the oldest. It can skip the group's oldest run when the runs above it are much smaller, and merge the delta runs above it instead. It can't skip a delta run in the middle.
+A compaction merges a contiguous window of at most eight of a group's runs. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
 
 ```text
 oldest                                       newest
@@ -1224,7 +1224,25 @@ A group has at most one base run. Base runs are ordered before delta runs, whate
 
 A delta-only compaction MUST merge at least two runs. Once a group has only one delta run above a much larger base, a delta-only compaction can't reduce the run count any further, so the next compaction of the group includes the base.
 
+LoonFS chooses a group's window by size tier. A "size tier" is a contiguous set of a group's runs whose sizes are close to each other, measured as the stored bytes of the group's segments in each run. To choose a window, LoonFS:
+
+1. Lists the group's runs from newest to oldest, with the base last.
+2. Starts a tier at the newest run, and adds each next older run while that run is at most four times the size of the smallest run already in the tier.
+3. Merges the tier if it has at least four runs. A tier of more than eight runs merges its oldest eight, and the newer runs wait for a later compaction.
+4. Otherwise starts a new tier at the next older run, and repeats step 2, until no older run is left.
+5. If no tier has four runs, and the group has at least eight delta runs, merges the group's four newest runs, whatever their sizes.
+
+For example, suppose a group's runs, from oldest to newest, are a 300 MiB base and delta runs of 90, 100, 110, and 2 MiB. The tier that starts at the 2 MiB run stops before the 110 MiB run, because 110 is more than four times 2. The tier that starts at the 110 MiB run adds the 100 and 90 MiB runs, and then the base, because 300 is at most four times 90. That tier has four runs, so the compaction merges them into a new base, and the 2 MiB run waits until later runs of a similar size make a tier with it.
+
+An explicit compaction request merges a group's runs whatever their sizes. If the group has more than eight runs, the request merges its oldest eight, unless the oldest run is more than four times the size of the smallest of the next seven. In that case, it merges the eight runs above the oldest one first, so the oldest run is rewritten once, by the compaction that finishes the group.
+
+(The tier size of four runs, the size ratio of four, and the limit of eight delta runs are implementation defaults, not format requirements. A compaction can merge any window that follows the earlier rules in this section.)
+
 Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.
+
+Why merge by size tier? A merge rewrites every byte of its input, so merging a small new run into a large one rewrites the large run for little new data. A tier merges runs of similar size, so a byte is rewritten about once each time the size of the run that contains it grows four times, and each merge of at least four runs removes at least three runs from the group. A new run that doesn't fit a tier waits. For example, if a fold publishes while a compaction of the group runs, the compaction publishes its new base over the fold's manifest, and the group is left with that base and the fold's run. Two runs aren't a tier, so the fold's run waits for later folds instead of making the group rewrite its base again.
+
+Why is there a limit of eight delta runs? A read of a key checks every run of the key's group that might contain it. If a group's runs never make a tier of four (for example, if each run is more than four times the size of the next newer one), the limit keeps the number of runs a read checks bounded.
 
 ### 10.3 Row retention during a base compaction
 

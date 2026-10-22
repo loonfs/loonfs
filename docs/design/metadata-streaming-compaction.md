@@ -8,27 +8,27 @@ LoonFS stores metadata in immutable runs. WAL folds add delta runs, and compacti
 
 This section describes how the planner chooses which runs to merge.
 
-Compaction works on family groups, which [Metadata rows and row keys](../specs/format.md#a6-metadata-rows-and-row-keys) lists. The planner ranks the groups that have delta rows by their delta row count, and it picks the first group that has an eligible window. A group whose only run is a base isn't selected. It's rewritten the next time it receives a delta run.
+Compaction works on family groups, which [Metadata rows and row keys](../specs/format.md#a6-metadata-rows-and-row-keys) lists. The planner ranks the groups that have delta rows by their delta row count, and it picks the first group that has a window due. A group whose only run is a base isn't selected.
 
-Within a group, the planner considers the base first, and then the delta runs from oldest to newest. It selects a contiguous window of at most eight runs, and it never leaves out a run in the middle of that window.
-
-Under the automatic size-tiered policy, a window is eligible when its oldest run is at most 8 MiB, or when the newer runs in that window total at least a quarter of the oldest run's stored bytes. The rule applies to both bases and large deltas. Stored bytes and row counts come from the manifest's descriptors, so planning reads no segment.
+Within a group, the automatic size-tiered policy looks for a size tier, as [Compaction windows](../specs/format.md#102-compaction-windows) describes. A tier starts at a run and grows toward older runs while each older run is at most four times the size of the smallest run already in it. The newest tier of at least four runs (`MetadataRunPolicy::min_compaction_runs`) is due, and the unit merges the whole tier, up to eight runs. A tier reaches the base when the base is at most four times the tier's smallest run, so the base is rewritten after newer runs of at least a quarter of its size build up. A group with eight delta runs (`MetadataRunPolicy::max_delta_runs`) and no tier merges its four newest runs. Stored bytes and row counts come from the manifest's descriptors, so planning reads no segment.
 
 The unit merges the whole window it selects. A `metadata` maintenance pass doesn't run a long compaction, so it admits only a window whose runs have at most 131,072 rows, and it reports a larger window as `metadata_compaction_required`. `Maintenance::compact_metadata`, and `Maintenance::maintain_metadata_while_due` after that report, run a unit that admits a window of any size.
 
 | Policy or bound | Behavior |
 | --- | --- |
-| `SizeTiered` | Waits for enough newer data before it rewrites a large oldest run. |
-| `CompactImmediately` | Bypasses the size threshold for explicit compaction. |
+| `SizeTiered` | Merges a tier of at least four runs of similar size, or a group's four newest runs once it has eight delta runs. |
+| `CompactImmediately` | Merges a group's runs whatever their sizes, for explicit compaction. A group of more than eight runs merges the runs above a large base first. |
 | Eight-run limit | Applies to every unit, including explicit requests. |
 | Row budget of a `metadata` pass | At most 131,072 rows in the selected window. |
 | Merge input | At most 64 MiB of decoded data-block input in memory at once. |
 
 A large backlog can need several publications. Explicit compaction merges one window per call, so a caller repeats the call for as long as it publishes. Automatic size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
 
-A merge that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A merge that starts above the oldest run produces a delta run, and it keeps every row. A lone oldest delta can be promoted to become the group's base.
+A merge that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A merge that starts above the oldest run produces a delta run, and it keeps every row. Explicit compaction can promote a lone delta to become the group's base.
 
 Why can't a merge above the oldest run remove rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
+
+Why does a new run wait instead of merging into the base? When a fold publishes while a unit runs, the unit publishes its output over the fold's manifest (see [Publication and restart](#publication-and-restart)), and the unit's group is left with its new base and the fold's run. Merging those two would rewrite the whole base for one fold's rows, so the fold's run waits until later folds make a tier with it. The other groups merge the fold's run into their own tiers as usual.
 
 ## Reading and writing incrementally
 

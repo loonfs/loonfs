@@ -200,7 +200,7 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
         .open(&namespace_id)
         .await
         .expect("open");
-    for index in 0..3 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         held.put_file(&format!("/file-{index}"), b"data", &test_actor())
             .await
             .expect("publish");
