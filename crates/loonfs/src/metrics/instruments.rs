@@ -1160,6 +1160,7 @@ mod tests {
                     writer_epoch: loonfs_types::WriterEpoch(1),
                     status: loonfs_types::format::control::NamespaceStatus::Active {},
                     folded_wal_no: loonfs_types::WalNo(1),
+                    retention_floor_seq: loonfs_types::ChangeSeq(0),
                     started: None,
                 },
                 rows_read: 20,

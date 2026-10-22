@@ -16,7 +16,9 @@ pub(crate) use self::batch::{
 #[cfg(test)]
 pub(crate) use self::changes::events_from_wal_deltas;
 pub(crate) use self::changes::list_changes_after;
-pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailPosition};
+pub(crate) use self::publish_view::{
+    load_publish_metadata_view, PublishMetadataView, PublishTailPosition,
+};
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
     begin_service_proxied_upload, complete_upload, direct_multipart_part_targets,

@@ -3340,5 +3340,6 @@ mod fenced_session;
 mod head_positions;
 mod inline_writer;
 mod pin_folds;
+mod retention_expiry;
 mod session_compaction;
 mod write_stop_wait;

@@ -3,6 +3,7 @@
 
 mod content;
 mod deletion;
+mod expiry;
 mod inline;
 
 use super::*;

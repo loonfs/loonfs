@@ -8,8 +8,9 @@ use super::manifest_index;
 use super::view::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
-    AccessRevisionRecord, AttributesProjection, DirentryBindingRecord, InodeRecord, MetadataView,
-    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    AccessRevisionRecord, ActiveDeletionRange, AttributesProjection, DirentryBindingRecord,
+    InodeRecord, MetadataView, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
@@ -798,19 +799,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
-    /// One page of the namespace's recoverable deletions after `after_seq`,
-    /// oldest deletion first. Uncached: one call serves one trash listing
-    /// page request.
+    /// One page of the namespace's recoverable deletions in `range`, oldest
+    /// deletion first. Uncached: one call serves one trash listing page, or
+    /// one scan of a writer's expiry.
     pub(crate) async fn active_deletions_page(
         &mut self,
-        after_seq: ChangeSeq,
-        start_after: Option<(ChangeSeq, InodeId)>,
+        range: &ActiveDeletionRange,
         limit: usize,
     ) -> Result<Vec<RecoverableDeletion>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
-        self.base
-            .active_deletions_page(after_seq, start_after, limit)
-            .await
+        self.base.active_deletions_page(range, limit).await
     }
 
     pub(crate) async fn hiding_subtree_tombstone(

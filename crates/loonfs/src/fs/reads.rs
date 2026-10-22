@@ -1439,10 +1439,10 @@ impl<M: crate::Mode> Namespace<M> {
             .await
     }
 
-    /// Lists the namespace's recoverable deletions, ascending by deleted root
-    /// inode. Tombstone rows are immortal, so this answers however far the
-    /// replay floor has advanced; entries carry the deleted name when the
-    /// delete recorded one.
+    /// Lists the namespace's recoverable deletions, oldest deletion first.
+    /// A deletion stays listed until it's undeleted, or until the retention
+    /// floor reaches it and the writer expires it. Entries include the deleted
+    /// name when the delete recorded one.
     pub fn list_trash(&self) -> TrashPager {
         let reader = self.read_only();
         loonfs_types::Pager::new(move |request| {

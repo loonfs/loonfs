@@ -30,7 +30,8 @@ pub(crate) use self::durable_cache::DurableVisibilityCache;
 #[cfg(test)]
 pub(crate) use self::rows::hiding_tombstone_from_records;
 pub(crate) use self::rows::{
-    active_deletion_from_tombstone, recoverable_deletion_from_active_record, RecoverableDeletion,
+    active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
+    RecoverableDeletion,
 };
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;

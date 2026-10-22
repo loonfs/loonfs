@@ -49,6 +49,20 @@ pub const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 /// materialization.
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 
+/// Most deletions that one of the writer's expiry commits expires, and so
+/// the most `listed` rows that one scan of the writer's expiry returns.
+///
+/// The writer admits no other commit between such a scan and the commit that
+/// expires what it found, and validating each expire event reads its
+/// deletion's tombstone, so this bounds how long one step of the expiry
+/// delays the namespace's other writes. A thousand expire deltas are well
+/// under a megabyte of WAL record. A fork's first writer session expires
+/// every inherited deletion before it admits a request, so that request
+/// waits for one commit for each thousand inherited deletions.
+pub const MAX_EXPIRED_DELETIONS_PER_COMMIT: usize = 1_000;
+
+const _: () = assert!(MAX_EXPIRED_DELETIONS_PER_COMMIT <= MAX_COMMIT_OPERATIONS);
+
 /// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
 pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 

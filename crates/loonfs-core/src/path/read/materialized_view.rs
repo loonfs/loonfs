@@ -12,8 +12,8 @@ use crate::manifest::{
     VerifiedMetadataSegments, WalTailCacheKey,
 };
 use crate::metadata::{
-    ancestry_allows_read, DirentryBindingRecord, LeafRevisionPreload, MetadataView,
-    MetadataViewSession, ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
+    ancestry_allows_read, ActiveDeletionRange, DirentryBindingRecord, LeafRevisionPreload,
+    MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
@@ -710,6 +710,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// whole deletion history. In a fork, the scan starts above the fork
     /// point, so a deletion the fork inherited is never listed
     /// ([API section 6.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#66-get-filesystemtrash)).
+    /// A deletion after the fork point and at or below the retention floor
+    /// stays listed until the writer expires it.
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
@@ -736,7 +738,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         let (deletions, next_cursor) = if access.is_unrestricted() {
             let mut deletions = session
-                .active_deletions_page(fork_seq, start_after, request.limit.limit_plus_one())
+                .active_deletions_page(
+                    &ActiveDeletionRange::after(start_after).above_seq(fork_seq),
+                    request.limit.limit_plus_one(),
+                )
                 .await?;
             let next_cursor = request.limit.finish_page(&mut deletions, |last| {
                 cursor(last.deletion_seq, last.root_inode_id)
@@ -752,7 +757,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             while !exhausted && kept.len() < limit && scanned < MAX_TRASH_ROWS_SCANNED_PER_PAGE {
                 let wanted = (limit - kept.len()).min(MAX_TRASH_ROWS_SCANNED_PER_PAGE - scanned);
                 let batch = session
-                    .active_deletions_page(fork_seq, start_after, wanted)
+                    .active_deletions_page(
+                        &ActiveDeletionRange::after(start_after).above_seq(fork_seq),
+                        wanted,
+                    )
                     .await?;
                 exhausted = batch.len() < wanted;
                 for deletion in batch {

@@ -4,10 +4,11 @@
 use super::indexes::MetadataIndexes;
 use crate::heap_bytes::HeapBytes;
 use loonfs_types::format::manifest::{
-    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    lookup_keys, AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
+    AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
 use std::mem::size_of;
@@ -136,6 +137,57 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) deleted_by: ActorId,
     /// The binding the delete removed and an in-place undelete restores.
     pub(crate) deleted_binding: DeletedBinding,
+}
+
+/// The rows of the active-deletion family that one scan reads, as row-key
+/// bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveDeletionRange {
+    pub(super) lower_bound: String,
+    /// `None` scans to the end of the family.
+    pub(super) upper_bound: Option<String>,
+}
+
+impl ActiveDeletionRange {
+    /// The deletions after the one at `start_after`, or every deletion when
+    /// it's `None`, as a trash listing page reads them.
+    pub(crate) fn after(start_after: Option<(ChangeSeq, InodeId)>) -> Self {
+        Self {
+            lower_bound: match start_after {
+                Some((deletion_seq, root_inode_id)) => {
+                    lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id)
+                }
+                None => lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned(),
+            },
+            upper_bound: string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX),
+        }
+    }
+
+    /// Starts the range above `after_seq` without moving it backward.
+    pub(crate) fn above_seq(self, after_seq: ChangeSeq) -> Self {
+        Self {
+            lower_bound: self
+                .lower_bound
+                .max(lookup_keys::active_deletion_key_after_seq(after_seq)),
+            ..self
+        }
+    }
+
+    /// Ends the range at `through_seq`, leaving out every deletion above it.
+    pub(crate) fn through(self, through_seq: ChangeSeq) -> Self {
+        Self {
+            upper_bound: Some(lookup_keys::active_deletion_key_after_seq(through_seq)),
+            ..self
+        }
+    }
+
+    pub(super) fn contains(&self, row_key: &str) -> bool {
+        row_key >= self.lower_bound.as_str()
+            && self
+                .upper_bound
+                .as_deref()
+                .is_none_or(|upper_bound| row_key < upper_bound)
+    }
 }
 
 impl MetadataState {

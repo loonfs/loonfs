@@ -492,12 +492,26 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
 /// Validates an expiry the way [`validate_undelete`] validates an undelete:
 /// the deletion at `deletion_seq` has to be the root's latest tombstone event.
 /// The expire event restores no binding, so the subtree stays hidden.
+///
+/// The deletion also has to be at or below the retention floor of the view,
+/// because a base compaction removes the rows that an expired deletion hides
+/// on the strength of that rule.
 async fn validate_expire_deletion<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
 ) -> Result<Vec<WalDelta>> {
+    let retention_floor_seq = view.view().retention_floor_seq();
+    if deletion_seq > retention_floor_seq {
+        return Err(CommitValidationError::DeletionAboveRetentionFloor {
+            operand: CommitOperand::ExpireTarget,
+            inode_id,
+            deletion_seq,
+            retention_floor_seq,
+        }
+        .into());
+    }
     let deletion =
         validate_recoverable_deletion(view, inode_id, deletion_seq, CommitOperand::ExpireTarget)
             .await?;
