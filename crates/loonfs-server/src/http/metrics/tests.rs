@@ -233,6 +233,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
             misses: 27,
             inserts: 28,
             evictions: 29,
+            cached_decoded_bytes: 44,
             ..DecodedBlockCacheStats::default()
         },
     );
@@ -270,10 +271,11 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         "loonfs_content_object_cache_inserts_total 23",
         "loonfs_wal_object_cache_evictions_total 24",
         "loonfs_wal_object_cache_retained_decoded_bytes 25",
-        "loonfs_grep_block_cache_gets_total{result=\"hit\"} 26",
-        "loonfs_grep_block_cache_gets_total{result=\"miss\"} 27",
-        "loonfs_grep_block_cache_inserts_total 28",
-        "loonfs_grep_block_cache_evictions_total 29",
+        "loonfs_grep_cache_gets_total{result=\"hit\"} 26",
+        "loonfs_grep_cache_gets_total{result=\"miss\"} 27",
+        "loonfs_grep_cache_inserts_total 28",
+        "loonfs_grep_cache_evictions_total 29",
+        "loonfs_grep_cache_retained_decoded_bytes 44",
         "loonfs_head_cache_evictions_total 30",
         "loonfs_head_cache_evicted_decoded_bytes_total 31",
         "loonfs_head_cache_rejections_total 32",

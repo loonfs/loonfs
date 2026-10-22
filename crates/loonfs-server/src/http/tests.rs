@@ -67,7 +67,7 @@ async fn app_validates_directly_built_configs() {
 }
 
 /// Checks that a scrape renders every counter and gauge of the metadata
-/// cache and the grep block cache exactly once, so the recorder's snapshot
+/// cache and the grep cache exactly once, so the recorder's snapshot
 /// doesn't include a second copy of any of them.
 #[tokio::test]
 async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
@@ -108,9 +108,9 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
         "loonfs_content_object_cache_gets_total",
         "loonfs_content_object_cache_inserts_total",
         "loonfs_content_object_cache_evictions_total",
-        "loonfs_grep_block_cache_gets_total",
-        "loonfs_grep_block_cache_inserts_total",
-        "loonfs_grep_block_cache_evictions_total",
+        "loonfs_grep_cache_gets_total",
+        "loonfs_grep_cache_inserts_total",
+        "loonfs_grep_cache_evictions_total",
     ] {
         assert_eq!(
             rendered
@@ -126,6 +126,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
         "loonfs_wal_tail_cache_retained_decoded_bytes",
         "loonfs_wal_object_cache_retained_decoded_bytes",
         "loonfs_content_object_cache_retained_decoded_bytes",
+        "loonfs_grep_cache_retained_decoded_bytes",
     ] {
         assert_eq!(
             rendered.matches(&format!("# TYPE {name} gauge\n")).count(),

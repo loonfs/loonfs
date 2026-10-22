@@ -14,8 +14,8 @@ pub(super) fn render(state: &AppState) -> String {
     let binding = &state.binding;
     let mut rendered = render_snapshot(&binding.metrics.snapshot());
     render_metadata_cache(&mut rendered, &state.runtime.metadata_cache().stats());
-    // A server that doesn't serve grep has no grep block cache. Reporting
-    // zeros would incorrectly suggest that the cache is idle.
+    // A server that doesn't serve grep has no grep cache. Reporting zeros
+    // would incorrectly suggest that the cache is idle.
     if let Some(grep_block_cache) = &state.grep_block_cache {
         render_grep_block_cache(&mut rendered, &grep_block_cache.stats());
     }
@@ -498,7 +498,7 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     }
 }
 
-/// Writes the grep block cache's stats as counters.
+/// Writes the grep cache's stats as counters and a gauge.
 ///
 /// Listing every field makes this code fail to compile when
 /// `DecodedBlockCacheStats` gains a field, which ensures new statistics are
@@ -512,25 +512,31 @@ fn render_grep_block_cache(rendered: &mut String, stats: &DecodedBlockCacheStats
         evicted_decoded_bytes: _,
         rejections: _,
         rejected_decoded_bytes: _,
-        cached_decoded_bytes: _,
+        cached_decoded_bytes,
     } = *stats;
     write_counter(
         rendered,
-        "loonfs_grep_block_cache_gets",
-        "Decoded grep block cache lookups, by outcome",
+        "loonfs_grep_cache_gets",
+        "Grep cache lookups, by outcome",
         &lookups(hits, misses),
     );
     write_counter(
         rendered,
-        "loonfs_grep_block_cache_inserts",
-        "Blocks inserted into the decoded grep block cache",
+        "loonfs_grep_cache_inserts",
+        "Decoded grep manifests and blocks inserted into the grep cache",
         &[(NO_LABELS, inserts)],
     );
     write_counter(
         rendered,
-        "loonfs_grep_block_cache_evictions",
-        "Blocks evicted from the decoded grep block cache",
+        "loonfs_grep_cache_evictions",
+        "Decoded grep manifests and blocks evicted to stay within the grep cache budget",
         &[(NO_LABELS, evictions)],
+    );
+    write_gauge(
+        rendered,
+        "loonfs_grep_cache_retained_decoded_bytes",
+        "Bytes currently charged to decoded grep manifests and blocks, including keys and per-entry bookkeeping",
+        cached_decoded_bytes,
     );
 }
 
