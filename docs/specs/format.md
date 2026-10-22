@@ -813,7 +813,7 @@ Every put is planned against an observed state, and that observation has to be r
 
 The publication budget (`WAL_PUBLISH_BUDGET_MS`) runs from the tip observation used to plan a batch until the batch's numbered put starts. A publication is within its budget while the elapsed time is at most the budget, and a cached tip has the same time limit. A successful put confirms nothing about the manifest the batch was planned against, because a fold or compaction might have replaced it since.
 
-A writer that keeps publishing checks the next manifest number when its last basis confirmation is more than `WAL_PUBLISH_BUDGET_MS` old. It trusts a "not found" answer only if the answer arrives less than `READ_REVALIDATION_BOUND_MS` after that previous confirmation. Otherwise, or if a successor exists, it reloads.
+A writer that keeps publishing checks the next manifest number when its last basis confirmation is more than `WAL_PUBLISH_BUDGET_MS` old. It trusts a "not found" answer only if the answer arrives less than `READ_REVALIDATION_BOUND_MS` after that previous confirmation. Otherwise, or if a successor exists, it reloads. Twice `WAL_PUBLISH_BUDGET_MS` is at most `READ_REVALIDATION_BOUND_MS`, so a writer whose commits are less than a budget apart sends this check while its basis is at most two budgets old, and the check can confirm the basis instead of making the writer reload.
 
 A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the tip, or reloads, before it plans. A confirmation attempt sends one HEAD request, for the next manifest number. If the request finds nothing, and the answer arrives less than `READ_REVALIDATION_BOUND_MS` after the previous basis confirmation, the writer keeps its position and the position's tail. The attempt's start (before the HEAD request) becomes the new tip observation and basis confirmation, even if the batch ends up writing nothing, and the put's budget runs from that start. If the request finds a manifest or fails, or the answer arrives late, the writer runs discovery instead. A basis that's already at the revalidation bound when the attempt starts is dropped without a request. [Publication and collection timing](#c1-publication-and-collection-timing) records the bounds.
 
@@ -1389,7 +1389,7 @@ The tombstone keeps its runs, so an import from a deleted owner can still be aut
 
 A retention floor can move past a pinned manifest's head sequence, and that doesn't remove the pin's protection. Reads through the pin use the pinned file set directly.
 
-Why keep a superseded manifest for one grace? A reader or writer confirms its view with a successor check that finds the next manifest number missing, so that successor is created no earlier than the check. The view's manifest, and every segment in its runs, therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (see [Replaying the visible WAL](#42-replaying-the-visible-wal) and [Publication and group commit](#63-publication-and-group-commit)). Both bounds are below the grace, and the clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions) is the margin.
+Why keep a superseded manifest for one grace? A reader or writer confirms its view with a successor check that finds the next manifest number missing, so that successor is created no earlier than the check. The view's manifest, and every segment in its runs, therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (see [Replaying the visible WAL](#42-replaying-the-visible-wal) and [Publication and group commit](#63-publication-and-group-commit)). Both bounds are below the grace, and the clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions) is the margin. The writer can use its basis for up to twice `WAL_PUBLISH_BUDGET_MS` after confirming it, because a batch planned when the basis is a budget old can still start its put up to a budget later, and twice the budget plus the provider request bound and the clock allowance is also below the grace.
 
 ### 11.3 Candidate and age rules
 
@@ -2147,7 +2147,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 
 | Constant | Milliseconds | Meaning |
 | --- | ---: | --- |
-| `WAL_PUBLISH_BUDGET_MS` | 60,000 | From observing the planning tip to starting the next numbered put. |
+| `WAL_PUBLISH_BUDGET_MS` | 300,000 | From observing the planning tip to starting the next numbered put. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | From the start of a bounded manifest publication (including an epoch claim) to starting its put. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | The shared retry budget for a client operation. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |

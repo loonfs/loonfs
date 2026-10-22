@@ -178,7 +178,10 @@ const fn duration_ms(duration: std::time::Duration) -> u64 {
 }
 
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
-pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
+///
+/// A writer that commits again within this budget of its previous commit
+/// doesn't send a request to confirm its tip first.
+pub const WAL_PUBLISH_BUDGET_MS: u64 = 5 * 60 * 1000;
 
 /// Self-enforced budget for one metadata publication: a fold, a compaction
 /// step, a claim, a deletion, a fork installation, a retention advance, or a
@@ -232,6 +235,30 @@ pub const READ_REVALIDATION_BOUND_MS: u64 =
         + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
 
 const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
+
+/// A writer plans against its basis without checking it while the basis's
+/// last confirmation is at most one WAL publication budget old. A batch
+/// planned when the basis is a budget old can start its put up to a budget
+/// later, because the put's budget runs from the batch's tip observation,
+/// which the writer's previous commit refreshed. So the writer can read the
+/// basis's segments, or commit a reference to content that only the basis
+/// lists, until two budgets after the confirmation, and the provider applies
+/// that put within its request bound. The basis's successor is created after
+/// the confirmation, and garbage collection keeps the basis and its segments
+/// for one grace after that.
+const _: () = assert!(
+    2 * WAL_PUBLISH_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS
+        <= GC_MIN_GRACE_WINDOW_MS
+);
+
+/// A writer checks its basis once the last confirmation is more than a WAL
+/// publication budget old, and it trusts the answer only within the
+/// revalidation bound of that confirmation. A writer whose commits are less
+/// than a budget apart sends that check when the basis is up to two budgets
+/// old. If two budgets were longer than the bound, a writer whose commits
+/// are spaced between half the bound and the budget would find its basis past
+/// the bound at every other commit, and drop its position and replay its tail.
+const _: () = assert!(2 * WAL_PUBLISH_BUDGET_MS <= READ_REVALIDATION_BOUND_MS);
 
 const _: () = assert!(
     3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS,

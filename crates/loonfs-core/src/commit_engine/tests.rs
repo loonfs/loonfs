@@ -747,6 +747,69 @@ async fn a_quiet_writer_confirms_its_tip_with_one_head() {
     );
 }
 
+/// Checks that a writer that commits every few minutes for an hour, against
+/// a manifest that nothing replaces, sends one HEAD of the next manifest
+/// number on each commit whose basis was confirmed more than a budget
+/// earlier, and no other request before its put, so it never reads its WAL
+/// tail again.
+///
+/// Commits a whole budget apart check the basis when it's two budgets old,
+/// and the revalidation bound still trusts that check.
+#[tokio::test]
+async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_tail() {
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+    for spacing_ms in [4 * 60 * 1000, WAL_PUBLISH_BUDGET_MS] {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        let mut confirmed_at_ms = 0;
+        let mut checks = 0;
+        let mut tail_reads = 0;
+        for commit in 1..=HOUR_MS / spacing_ms {
+            timer.advance_ms(spacing_ms);
+            let now_ms = commit * spacing_ms;
+            let due = now_ms - confirmed_at_ms > WAL_PUBLISH_BUDGET_MS;
+            store.reset();
+            publish_one(&mut engine, &store, &writer, &format!("dir-{commit}")).await;
+            let operations = store.take();
+            tail_reads += operations
+                .iter()
+                .filter(|operation| {
+                    operation.key() == loonfs_objectstore::keys::hint(&namespace_id)
+                        || (operation.key().starts_with(&wal_prefix(&namespace_id))
+                            && !matches!(operation, RecordedOperation::Put { .. }))
+                })
+                .count();
+            let (put, probes) = operations.split_last().expect("the put");
+            assert!(
+                probes.len() == usize::from(due)
+                    && probes
+                        .iter()
+                        .all(|operation| is_head_under(operation, &manifests))
+                    && matches!(
+                        put,
+                        RecordedOperation::Put {
+                            key,
+                            mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+                            ..
+                        } if key.starts_with(&wal_prefix(&namespace_id))
+                    ),
+                "{spacing_ms} ms apart, commit {commit}: {operations:?}"
+            );
+            if due {
+                confirmed_at_ms = now_ms;
+                checks += 1;
+            }
+        }
+        assert_eq!(tail_reads, 0, "{spacing_ms} ms apart");
+        // Each check confirms the basis for the commit after it, so every
+        // other commit checks.
+        assert_eq!(checks, HOUR_MS / spacing_ms / 2, "{spacing_ms} ms apart");
+    }
+}
+
 #[tokio::test]
 async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
     let directory = tempdir().expect("tempdir");
