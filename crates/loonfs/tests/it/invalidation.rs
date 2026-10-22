@@ -241,7 +241,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
             MetadataCache::builder()
                 .max_segment_bytes(0)
                 .max_head_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .build(),
         )
     })
@@ -600,7 +600,7 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
 }
 
 /// Creates `other_id` from a writer of its own and gives it one 16 KiB
-/// inline file, so its head state outweighs a namespace of a few small files.
+/// inline file, so its WAL tail outweighs a namespace of a few small files.
 async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
     let setup = writer(store, "other-setup").await;
     setup
@@ -620,9 +620,9 @@ async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
     setup.drain().await.expect("finish hints");
 }
 
-/// What a cold read of the root of `other_id` caches as head state once
+/// What a cold read of the root of `other_id` caches as its WAL tail once
 /// [`fill_other`] has written it, measured on a store of its own.
-async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
+async fn other_wal_tail_bytes(other_id: &NamespaceId) -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
@@ -637,7 +637,7 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
         .stat("/")
         .await
         .expect("cold read");
-    reader.metadata_cache().stats().head_state_bytes
+    reader.metadata_cache().stats().wal_tail_bytes
 }
 
 /// Checks that a read after a write in the writer's runtime sends no
@@ -773,7 +773,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     );
 }
 
-/// Checks that reads that fill the shared head-state cache leave an idle
+/// Checks that reads that fill the shared WAL-tail cache leave an idle
 /// writer's tail alone, so the writer's next publish reads no tail from the
 /// store.
 #[tokio::test]
@@ -783,10 +783,10 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("idle-writer").expect("namespace");
     let other_id = NamespaceId::parse("other").expect("namespace");
-    // The budget fits exactly the other namespace's head state, so one read
+    // The budget fits exactly the other namespace's WAL tail, so one read
     // of it fills the cache.
     let cache = MetadataCache::builder()
-        .max_head_state_bytes(other_head_state_bytes(&other_id).await)
+        .max_wal_tail_bytes(other_wal_tail_bytes(&other_id).await)
         .build();
     fill_other(&store, &other_id).await;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -818,7 +818,7 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         .stat("/")
         .await
         .expect("read the other namespace");
-    assert!(cache.stats().head_state_bytes > 0);
+    assert!(cache.stats().wal_tail_bytes > 0);
 
     let landed = namespace
         .put_file(

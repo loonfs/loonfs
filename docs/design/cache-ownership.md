@@ -14,7 +14,7 @@ A cache with a structure of its own also needs its own eviction rule, its own co
 
 ## A budget for heads
 
-LoonFS keeps heads and tails in two instances of one cache type, the block cache engine (`DecodedBlockCache`), each with its own budget, so a tail can't evict a head. The head budget (`max_head_bytes`) is 16 MiB by default, which fits about 18,000 namespaces at 0.9 KB each, and the tail budget (`max_head_state_bytes`) is 64 MiB by default.
+LoonFS keeps heads and tails in two instances of one cache type, the block cache engine (`DecodedBlockCache`), each with its own budget, so a tail can't evict a head. The head budget (`max_head_bytes`) is 16 MiB by default, which fits about 18,000 namespaces at 0.9 KB each, and the tail budget (`max_wal_tail_bytes`) is 64 MiB by default.
 
 The engine keeps a map of the loads and checks in flight, with one entry per key while a caller loads or checks that key. The entry goes when its last caller leaves, so the map contains nothing for an idle namespace. Each entry is the key's join (a `SharedCheck`), and the entry covers the races above:
 
@@ -74,8 +74,8 @@ The format's requirements don't cover caches, because the caches belong to the r
 
 The API specification leaves caches to the implementation. The documentation that describes them says:
 
-- The Rust API's documentation of `max_head_bytes` and `max_head_state_bytes`, and the server's [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md), describe the head budget (16 MiB by default) and the tail budget (64 MiB by default in the Rust API) as two settings. The guide says that a session keeps its own tail in memory until a fold moves it into segments.
-- The server reports evictions of heads in `loonfs_head_cache_evictions_total` and evictions of tails in `loonfs_head_state_cache_evictions_total`, each in its cache's family of counters.
+- The Rust API's documentation of `max_head_bytes` and `max_wal_tail_bytes`, and the server's [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md), describe the head budget (16 MiB by default) and the tail budget (64 MiB by default in the Rust API) as two settings. The guide says that a session keeps its own tail in memory until a fold moves it into segments.
+- The server reports evictions of heads in `loonfs_head_cache_evictions_total` and evictions of tails in `loonfs_wal_tail_cache_evictions_total`, each in its cache's family of counters.
 - The `loonfs.publisher.tail_replays` counter records a publish that reads the WAL tail from the store, and an eviction isn't one of its causes.
 - The documentation of `max_completed_upload_session_bytes` describes LRU eviction, and the self-hosting guide's table of caches lists the completed-session budget as 32 MiB.
 

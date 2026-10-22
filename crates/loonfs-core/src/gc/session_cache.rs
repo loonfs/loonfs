@@ -74,7 +74,7 @@ impl SharedCompletedUploadSessions {
 /// namespace ID. An upload ID is 128 random bits, so it's unique across the
 /// namespaces of a store, and a pass looks up only the IDs that it just
 /// listed under one namespace's prefix. The scope keeps two runtimes that
-/// share a metadata cache apart, as it does for their head state.
+/// share a metadata cache apart, as it does for their heads and WAL tails.
 #[derive(Debug)]
 pub struct CompletedUploadSessionCache {
     shared: Arc<SharedCompletedUploadSessions>,

@@ -2121,7 +2121,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
             MetadataCache::builder()
                 .max_segment_bytes(0)
                 .max_head_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .build(),
         )
         .build()
@@ -3100,9 +3100,9 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     let stats = writer.metadata_cache().stats();
     assert_eq!(stats.wal_tail_misses, heads.wal_tail_misses, "{stats:?}");
     assert_eq!(stats.wal_tail_inserts, 0, "{stats:?}");
-    assert_eq!(stats.head_state_evictions, 0, "{stats:?}");
+    assert_eq!(stats.wal_tail_evictions, 0, "{stats:?}");
     assert_eq!(
-        stats.head_state_bytes, heads.head_state_bytes,
+        stats.wal_tail_bytes, heads.wal_tail_bytes,
         "the publishes and the fold add nothing to the read cache: {stats:?}"
     );
     writer.shutdown().await.expect("shutdown");
@@ -3197,11 +3197,11 @@ async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it()
         .expect("drain settles every publisher");
 }
 
-/// Checks that with zero head and head-state limits the read cache keeps
+/// Checks that with zero head and WAL-tail limits the read cache keeps
 /// nothing, and that each writer session keeps its own tail, so a session's
 /// second commit reads no tail from the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() {
+async fn zero_head_and_wal_tail_limits_cache_nothing_and_sessions_keep_their_tails() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -3210,7 +3210,7 @@ async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() 
         MetadataCache::builder()
             .max_segment_bytes(0)
             .max_head_bytes(0)
-            .max_head_state_bytes(0)
+            .max_wal_tail_bytes(0)
             .build(),
         recorder.clone(),
     )
@@ -3227,7 +3227,7 @@ async fn a_zero_head_state_limit_caches_nothing_and_sessions_keep_their_tails() 
         .expect("commit");
 
     let stats = writer.metadata_cache().stats();
-    assert_eq!((stats.head_bytes, stats.head_state_bytes), (0, 0));
+    assert_eq!((stats.head_bytes, stats.wal_tail_bytes), (0, 0));
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         u64::try_from(namespaces.len()).expect("small count"),

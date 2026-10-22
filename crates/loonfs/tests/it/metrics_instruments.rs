@@ -173,10 +173,10 @@ fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
         reader.metadata_cache().stats()
     });
 
-    assert_eq!((stats.head_anchor_misses, stats.head_anchor_hits), (2, 1));
+    assert_eq!((stats.head_misses, stats.head_hits), (2, 1));
     assert!(
-        stats.head_state_bytes > 0,
-        "the head loads cached both namespaces' head state"
+        stats.wal_tail_bytes > 0,
+        "the head loads cached both namespaces' WAL tails"
     );
     assert!(
         stats.segment_bytes > 0,

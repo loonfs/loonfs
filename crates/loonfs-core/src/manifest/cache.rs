@@ -1,13 +1,15 @@
 //! Caches for decoded manifest state: SST blocks keyed by owner and segment
-//! id, validated manifests, and the head state reads start from.
+//! id, validated manifests, and the namespace heads and WAL tails that reads
+//! start from.
 //!
 //! One or more runtimes may read through one cache, each through its own
 //! views. The segment view adds the [`ObjectStoreScope`] of the runtime's
 //! object store to every key, so runtimes over the same object store share
 //! decoded blocks and manifests, and runtimes over different object stores
-//! never read each other's blocks. The head-state view adds the runtime's
-//! [`CacheScope`] to every key, so no runtime reads the namespace heads or
-//! WAL-tail projections of another runtime. Eviction runs across every scope.
+//! never read each other's blocks. The head and WAL-tail view adds the
+//! runtime's [`CacheScope`] to every key, so no runtime reads the namespace
+//! heads or WAL-tail projections of another runtime. Eviction runs across
+//! every scope.
 //!
 //! The segment view also carries the handle to the optional node-local
 //! cache of the same blocks in their encoded form; see
@@ -32,9 +34,10 @@ use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The scope under which a shared cache keeps one runtime's head state.
+/// The scope under which a shared cache keeps one runtime's namespace heads,
+/// WAL-tail projections, and completed upload sessions.
 ///
-/// The cache mints one scope per runtime, so no runtime reads the head state
+/// The cache mints one scope per runtime, so no runtime reads those entries
 /// of another runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheScope(u64);
@@ -267,13 +270,13 @@ impl MetadataSegmentCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct WalTailProjectionCacheKey {
+pub struct WalTailCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
     pub head_seq: ChangeSeq,
 }
 
-impl DecodedBlockKey for WalTailProjectionCacheKey {
+impl DecodedBlockKey for WalTailCacheKey {
     fn heap_bytes(&self) -> usize {
         HeapBytes::heap_bytes(&self.namespace_id)
     }
@@ -306,8 +309,8 @@ pub struct CachedHead {
 }
 
 impl CachedHead {
-    /// The durable order that [`HeadStateCache::replace_head`] compares heads
-    /// in: head sequence, then manifest number.
+    /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
+    /// heads in: head sequence, then manifest number.
     fn order(&self) -> (ChangeSeq, ManifestNo) {
         (self.head.seq, self.basis.manifest_no())
     }
@@ -357,28 +360,28 @@ fn later(cached: &Observation, candidate: Observation) -> Option<Observation> {
 /// Namespace heads and WAL-tail projections for every scope, each kind
 /// under its own byte budget and recency order, so a tail can't evict a
 /// head.
-pub struct SharedHeadState {
+pub struct SharedHeadsAndWalTails {
     heads: DecodedBlockCache<(CacheScope, NamespaceId), Arc<CachedHead>>,
-    tails: DecodedBlockCache<(CacheScope, WalTailProjectionCacheKey), Arc<ProjectedWalTail>>,
+    tails: DecodedBlockCache<(CacheScope, WalTailCacheKey), Arc<ProjectedWalTail>>,
 }
 
-impl std::fmt::Debug for SharedHeadState {
+impl std::fmt::Debug for SharedHeadsAndWalTails {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("SharedHeadState")
+            .debug_struct("SharedHeadsAndWalTails")
             .field("head_stats", &self.head_stats())
             .field("tail_stats", &self.tail_stats())
             .finish_non_exhaustive()
     }
 }
 
-impl SharedHeadState {
-    /// Returns head state that keeps up to `max_head_bytes` of namespace
-    /// heads and up to `max_tail_bytes` of WAL-tail projections.
-    pub fn new(max_head_bytes: usize, max_tail_bytes: usize) -> Self {
+impl SharedHeadsAndWalTails {
+    /// Returns a cache that keeps up to `max_head_bytes` of namespace heads
+    /// and up to `max_wal_tail_bytes` of WAL-tail projections.
+    pub fn new(max_head_bytes: usize, max_wal_tail_bytes: usize) -> Self {
         Self {
             heads: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_head_bytes)),
-            tails: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_tail_bytes)),
+            tails: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_wal_tail_bytes)),
         }
     }
 
@@ -393,24 +396,27 @@ impl SharedHeadState {
     }
 }
 
-/// One runtime's view of shared head state.
+/// One runtime's view of the shared namespace heads and WAL-tail projections.
 #[derive(Debug)]
-pub struct HeadStateCache {
-    shared: Arc<SharedHeadState>,
+pub struct HeadAndWalTailCache {
+    shared: Arc<SharedHeadsAndWalTails>,
     scope: CacheScope,
 }
 
-impl HeadStateCache {
-    pub fn new(shared: Arc<SharedHeadState>, scope: CacheScope) -> Self {
+impl HeadAndWalTailCache {
+    pub fn new(shared: Arc<SharedHeadsAndWalTails>, scope: CacheScope) -> Self {
         Self { shared, scope }
     }
 
-    /// A view over head state no other view reads, with a budget of
-    /// `max_decoded_bytes` for heads and another for tails.
+    /// A view over heads and WAL tails that no other view reads, with a
+    /// budget of `max_decoded_bytes` for heads and another for tails.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedHeadState::new(max_decoded_bytes, max_decoded_bytes)),
+            Arc::new(SharedHeadsAndWalTails::new(
+                max_decoded_bytes,
+                max_decoded_bytes,
+            )),
             CacheScope::new(0),
         )
     }
@@ -431,7 +437,7 @@ impl HeadStateCache {
         (self.scope, namespace_id.clone())
     }
 
-    fn tail_key(&self, key: &WalTailProjectionCacheKey) -> (CacheScope, WalTailProjectionCacheKey) {
+    fn tail_key(&self, key: &WalTailCacheKey) -> (CacheScope, WalTailCacheKey) {
         (self.scope, key.clone())
     }
 
@@ -538,7 +544,7 @@ impl HeadStateCache {
         self.shared.heads.invalidate(&self.head_key(namespace_id));
     }
 
-    pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
+    pub fn get_tail(&self, key: &WalTailCacheKey) -> Option<Arc<ProjectedWalTail>> {
         self.shared.tails.get(&self.tail_key(key))
     }
 
@@ -549,7 +555,7 @@ impl HeadStateCache {
     /// that miss its tail replay the tail once.
     pub(crate) async fn get_or_load_tail<E, F, Fut>(
         &self,
-        key: &WalTailProjectionCacheKey,
+        key: &WalTailCacheKey,
         load: F,
     ) -> Result<Arc<ProjectedWalTail>, E>
     where
@@ -562,17 +568,13 @@ impl HeadStateCache {
             .await
     }
 
-    pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
+    pub fn insert_tail(&self, key: WalTailCacheKey, tail: Arc<ProjectedWalTail>) {
         self.shared.tails.insert((self.scope, key), tail);
     }
 
     /// Returns the budget needed to cache this WAL-tail projection on its own.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn tail_charged_bytes(
-        &self,
-        key: &WalTailProjectionCacheKey,
-        tail: &Arc<ProjectedWalTail>,
-    ) -> usize {
+    pub fn tail_charged_bytes(&self, key: &WalTailCacheKey, tail: &Arc<ProjectedWalTail>) -> usize {
         crate::block_cache::charged_bytes(&self.tail_key(key), tail)
     }
 }
@@ -580,9 +582,9 @@ impl HeadStateCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheScope, CachedHead, CoreError, DecodedMetadataSegmentBlock, HeadStateCache,
+        CacheScope, CachedHead, CoreError, DecodedMetadataSegmentBlock, HeadAndWalTailCache,
         MetadataBasis, MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState,
-        ObjectStoreScope, Observation, SharedSegmentBlocks, WalTailProjectionCacheKey,
+        ObjectStoreScope, Observation, SharedSegmentBlocks, WalTailCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
@@ -617,8 +619,8 @@ mod tests {
 
     #[test]
     fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
-        let cache = HeadStateCache::unshared(16 * 1024);
-        let key = WalTailProjectionCacheKey {
+        let cache = HeadAndWalTailCache::unshared(16 * 1024);
+        let key = WalTailCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
             head_seq: ChangeSeq(12),
@@ -857,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn a_lower_head_does_not_replace_the_cached_head() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(head_at(5, 2, &now));
         for lower in [head_at(4, 3, &now), head_at(5, 1, &now)] {
             let read = cache
@@ -876,7 +878,7 @@ mod tests {
     #[test]
     fn a_higher_head_or_a_later_manifest_replaces_the_cached_head() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
         for (seq, manifest_no) in [(5, 1), (5, 2), (6, 1)] {
             let installed = cache.replace_head(head_at(seq, manifest_no, &now));
             assert_eq!(order(&installed), (seq, manifest_no));
@@ -894,7 +896,7 @@ mod tests {
         let early = Observation::now(clock.clone());
         clock.advance_ms(10);
         let late = Observation::now(clock.clone());
-        let cache = HeadStateCache::unshared(1 << 20);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(CachedHead {
             head_confirmed: late.clone(),
             ..head_at(5, 1, &early)
@@ -928,16 +930,16 @@ mod tests {
             &(CacheScope::new(0), demo.clone()),
             &Arc::new(head_at(7, 1, &now)),
         );
-        let invalidate = |cache: &HeadStateCache| cache.invalidate_head(&demo);
-        let evict = |cache: &HeadStateCache| {
+        let invalidate = |cache: &HeadAndWalTailCache| cache.invalidate_head(&demo);
+        let evict = |cache: &HeadAndWalTailCache| {
             cache.replace_head(head_at(7, 1, &now));
             assert!(cache.get_head(&demo).is_some(), "the newer head fits");
             // A head of another namespace, charged the same, takes its place.
             cache.replace_head(head_of("omed", 7, 1, &now));
             assert!(cache.get_head(&demo).is_none(), "the newer head is evicted");
         };
-        for drop_head in [&invalidate as &dyn Fn(&HeadStateCache), &evict] {
-            let cache = HeadStateCache::unshared(budget);
+        for drop_head in [&invalidate as &dyn Fn(&HeadAndWalTailCache), &evict] {
+            let cache = HeadAndWalTailCache::unshared(budget);
             let (release, released) = watch::channel(false);
             let mut read = pin!(cache.check_or_join_head(
                 &demo,
@@ -975,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn a_wave_of_reads_of_one_head_shares_at_most_two_checks() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
         let checks = AtomicUsize::new(0);
         let (release, released) = watch::channel(false);
         let read = |name: &'static str, seq| {
@@ -1021,7 +1023,7 @@ mod tests {
     #[test]
     fn a_tail_of_any_size_evicts_no_head() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(4096);
+        let cache = HeadAndWalTailCache::unshared(4096);
         cache.replace_head(head_at(5, 1, &now));
         for (index, inodes) in [1, 4, 16, 64, 256].into_iter().cycle().take(20).enumerate() {
             let rows = (0..inodes)
@@ -1045,7 +1047,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             );
-            let key = WalTailProjectionCacheKey {
+            let key = WalTailCacheKey {
                 namespace_id: namespace("demo"),
                 manifest_no: ManifestNo(index as u64),
                 head_seq: ChangeSeq(5),
@@ -1064,7 +1066,7 @@ mod tests {
     #[test]
     fn a_head_larger_than_the_budget_is_not_cached() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(4096);
+        let cache = HeadAndWalTailCache::unshared(4096);
         let large = head_with_grants(5, 1_000, &now);
         assert!(large.heap_bytes() > 16 * 4096);
         let head = cache.replace_head(large);
@@ -1087,7 +1089,7 @@ mod tests {
     async fn a_newer_head_too_large_to_cache_drops_the_older_head() {
         let now = crate::test_support::observed_now();
         let demo = namespace("demo");
-        let cache = HeadStateCache::unshared(4096);
+        let cache = HeadAndWalTailCache::unshared(4096);
         cache.replace_head(head_at(0, 1, &now));
         assert!(cache.get_head(&demo).is_some());
         let rejections = cache.head_stats().rejections;
@@ -1117,7 +1119,7 @@ mod tests {
     #[test]
     fn a_larger_head_is_charged_its_weight() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(1 << 20);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
         let small = cache.replace_head(head_at(5, 1, &now));
         let before = cache.head_stats().cached_decoded_bytes;
         let large = cache.replace_head(head_with_grants(6, 100, &now));
@@ -1135,11 +1137,11 @@ mod tests {
     #[tokio::test]
     async fn a_zero_budget_keeps_and_counts_nothing() {
         let now = crate::test_support::observed_now();
-        let cache = HeadStateCache::unshared(0);
+        let cache = HeadAndWalTailCache::unshared(0);
         cache.replace_head(head_at(5, 1, &now));
         assert!(cache.get_head(&namespace("demo")).is_none());
 
-        let key = WalTailProjectionCacheKey {
+        let key = WalTailCacheKey {
             namespace_id: namespace("demo"),
             manifest_no: ManifestNo(1),
             head_seq: ChangeSeq(5),

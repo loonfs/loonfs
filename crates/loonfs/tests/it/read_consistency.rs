@@ -510,7 +510,7 @@ async fn keeps_the_head(
         .stat_with_options("/file.txt", &strong())
         .await
         .expect("strong read");
-    let misses = reader.metadata_cache().stats().head_anchor_misses;
+    let misses = reader.metadata_cache().stats().head_misses;
     namespace
         .stat_with_options(
             "/file.txt",
@@ -521,7 +521,7 @@ async fn keeps_the_head(
         )
         .await
         .expect("eventual read");
-    reader.metadata_cache().stats().head_anchor_misses == misses
+    reader.metadata_cache().stats().head_misses == misses
 }
 
 /// Checks that an eventual read after a strong read never reads an older
@@ -597,7 +597,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
 
-    let misses = reader.metadata_cache().stats().head_anchor_misses;
+    let misses = reader.metadata_cache().stats().head_misses;
     let after = namespace
         .stat_with_options(
             "/file.txt",
@@ -610,7 +610,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("eventual read");
     assert_eq!(after.head_seq, commit.committed_seq);
     assert_eq!(
-        reader.metadata_cache().stats().head_anchor_misses,
+        reader.metadata_cache().stats().head_misses,
         misses + 1,
         "the eventual read loads the namespace"
     );

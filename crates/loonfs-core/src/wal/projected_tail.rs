@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// first.
 ///
 /// Replay already downloaded the resident bytes, so reads need no content
-/// request for them. The head-state budget bounds the bytes of the tails
+/// request for them. The WAL-tail budget bounds the bytes of the tails
 /// that the read cache keeps. A writer session keeps its own tail, which the
 /// write stop and the inline tail limit bound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

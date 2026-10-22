@@ -87,7 +87,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .build(),
         )
         .build()
@@ -157,7 +157,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_head_bytes(0)
-                .max_head_state_bytes(0)
+                .max_wal_tail_bytes(0)
                 .build(),
         )
         .build()

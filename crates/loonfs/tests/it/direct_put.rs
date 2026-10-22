@@ -722,7 +722,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
                 MetadataCache::builder()
                     .max_segment_bytes(0)
                     .max_head_bytes(0)
-                    .max_head_state_bytes(0)
+                    .max_wal_tail_bytes(0)
                     .build(),
             )
         },

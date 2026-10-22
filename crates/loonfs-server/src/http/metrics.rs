@@ -3,9 +3,7 @@
 use super::AppState;
 use crate::local_cache::FoyerCacheStats;
 use loonfs::engine::DecodedBlockCacheStats;
-use loonfs::metrics::{
-    KeyClass, MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS,
-};
+use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS};
 use loonfs::MetadataCacheStats;
 use loonfs_grep::GrepStepBudgetStats;
 use loonfs_http::RequestLimit;
@@ -219,7 +217,8 @@ fn lookups(hits: usize, misses: usize) -> [(SeriesLabels<'static>, usize); 2] {
     ]
 }
 
-/// Writes the metadata cache's stats as counters and gauges.
+/// Writes the metadata cache's stats as counters and gauges, in one family
+/// for each cache.
 ///
 /// The stats are the one source of these values, and the runtime's recorder
 /// doesn't register them. Listing every field makes this code fail to
@@ -235,8 +234,8 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         segment_filter_skips,
         segment_filter_false_positives,
         segment_bytes,
-        head_anchor_hits,
-        head_anchor_misses,
+        head_hits,
+        head_misses,
         head_evictions,
         head_evicted_bytes,
         head_rejections,
@@ -245,31 +244,81 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         wal_tail_hits,
         wal_tail_misses,
         wal_tail_inserts,
-        head_state_evictions,
-        head_state_evicted_bytes,
-        head_state_rejections,
-        head_state_rejected_bytes,
-        head_state_bytes,
+        wal_tail_evictions,
+        wal_tail_evicted_bytes,
+        wal_tail_rejections,
+        wal_tail_rejected_bytes,
+        wal_tail_bytes,
         wal_object_hits,
         wal_object_misses,
         wal_object_inserts,
+        wal_object_evictions,
+        wal_object_bytes,
         content_object_hits,
         content_object_misses,
         content_object_inserts,
-        object_evictions,
-        object_bytes,
-        completed_session_hits: _,
-        completed_session_misses: _,
-        completed_session_evictions: _,
-        completed_session_bytes: _,
+        content_object_evictions,
+        content_object_bytes,
+        completed_upload_session_hits: _,
+        completed_upload_session_misses: _,
+        completed_upload_session_evictions: _,
+        completed_upload_session_bytes: _,
     } = *stats;
-    write_counter(
-        rendered,
-        "loonfs_namespace_head_cache_gets",
-        "Namespace head cache lookups, by outcome",
-        &lookups(head_anchor_hits, head_anchor_misses),
-    );
+    for (name, description, hits, misses) in [
+        (
+            "loonfs_segment_cache_gets",
+            "Decoded metadata-segment cache lookups, by outcome",
+            segment_hits,
+            segment_misses,
+        ),
+        (
+            "loonfs_head_cache_gets",
+            "Namespace head cache lookups, by outcome",
+            head_hits,
+            head_misses,
+        ),
+        (
+            "loonfs_wal_tail_cache_gets",
+            "WAL-tail cache lookups, by outcome",
+            wal_tail_hits,
+            wal_tail_misses,
+        ),
+        (
+            "loonfs_wal_object_cache_gets",
+            "WAL object cache lookups, by outcome",
+            wal_object_hits,
+            wal_object_misses,
+        ),
+        (
+            "loonfs_content_object_cache_gets",
+            "Content object cache lookups, by outcome",
+            content_object_hits,
+            content_object_misses,
+        ),
+    ] {
+        write_counter(rendered, name, description, &lookups(hits, misses));
+    }
     for (name, description, value) in [
+        (
+            "loonfs_segment_cache_inserts",
+            "Blocks inserted into the decoded metadata-segment cache",
+            segment_inserts,
+        ),
+        (
+            "loonfs_segment_cache_evictions",
+            "Blocks evicted from the decoded metadata-segment cache",
+            segment_evictions,
+        ),
+        (
+            "loonfs_segment_cache_filter_skips",
+            "Segments skipped after their filter ruled out a lookup",
+            segment_filter_skips,
+        ),
+        (
+            "loonfs_segment_cache_filter_false_positives",
+            "Filter admissions that matched no metadata rows",
+            segment_filter_false_positives,
+        ),
         (
             "loonfs_head_cache_evictions",
             "Namespace heads evicted to stay within the head budget",
@@ -290,144 +339,83 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             "Bytes charged to rejected namespace heads, including keys and per-entry bookkeeping",
             head_rejected_bytes,
         ),
-    ] {
-        write_counter(rendered, name, description, &[(NO_LABELS, value)]);
-    }
-    write_gauge(
-        rendered,
-        "loonfs_head_cache_retained_decoded_bytes",
-        "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",
-        head_bytes,
-    );
-
-    write_counter(
-        rendered,
-        "loonfs_metadata_segment_cache_gets",
-        "Decoded metadata-segment cache lookups, by outcome",
-        &lookups(segment_hits, segment_misses),
-    );
-    for (name, description, value) in [
         (
-            "loonfs_metadata_segment_cache_inserts",
-            "Blocks inserted into the decoded metadata-segment cache",
-            segment_inserts,
+            "loonfs_wal_tail_cache_inserts",
+            "WAL-tail projections inserted into the WAL-tail cache",
+            wal_tail_inserts,
         ),
         (
-            "loonfs_metadata_segment_cache_evictions",
-            "Blocks evicted from the decoded metadata-segment cache",
-            segment_evictions,
+            "loonfs_wal_tail_cache_evictions",
+            "WAL-tail projections evicted to stay within the WAL-tail budget",
+            wal_tail_evictions,
         ),
         (
-            "loonfs_metadata_segment_cache_filter_skips",
-            "Segments skipped after their filter ruled out a lookup",
-            segment_filter_skips,
-        ),
-        (
-            "loonfs_metadata_segment_cache_filter_false_positives",
-            "Filter admissions that matched no metadata rows",
-            segment_filter_false_positives,
-        ),
-    ] {
-        write_counter(rendered, name, description, &[(NO_LABELS, value)]);
-    }
-    write_gauge(
-        rendered,
-        "loonfs_metadata_segment_cache_retained_decoded_bytes",
-        "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
-        segment_bytes,
-    );
-
-    write_counter(
-        rendered,
-        "loonfs_wal_tail_projection_cache_gets",
-        "WAL-tail projection cache lookups, by outcome",
-        &lookups(wal_tail_hits, wal_tail_misses),
-    );
-    write_counter(
-        rendered,
-        "loonfs_wal_tail_projection_cache_inserts",
-        "WAL-tail projections inserted into the cache",
-        &[(NO_LABELS, wal_tail_inserts)],
-    );
-
-    for (name, description, value) in [
-        (
-            "loonfs_head_state_cache_evictions",
-            "WAL-tail projections evicted to stay within the head-state budget",
-            head_state_evictions,
-        ),
-        (
-            "loonfs_head_state_cache_evicted_decoded_bytes",
+            "loonfs_wal_tail_cache_evicted_decoded_bytes",
             "Bytes charged to evicted WAL-tail projections, including keys and per-entry bookkeeping",
-            head_state_evicted_bytes,
+            wal_tail_evicted_bytes,
         ),
         (
-            "loonfs_head_state_cache_rejections",
-            "WAL-tail projections heavier than the whole head-state budget",
-            head_state_rejections,
+            "loonfs_wal_tail_cache_rejections",
+            "WAL-tail projections heavier than the whole WAL-tail budget",
+            wal_tail_rejections,
         ),
         (
-            "loonfs_head_state_cache_rejected_decoded_bytes",
+            "loonfs_wal_tail_cache_rejected_decoded_bytes",
             "Bytes charged to rejected WAL-tail projections, including keys and per-entry bookkeeping",
-            head_state_rejected_bytes,
+            wal_tail_rejected_bytes,
+        ),
+        (
+            "loonfs_wal_object_cache_inserts",
+            "WAL objects inserted into the WAL object cache",
+            wal_object_inserts,
+        ),
+        (
+            "loonfs_wal_object_cache_evictions",
+            "WAL objects evicted to stay within the WAL object budget",
+            wal_object_evictions,
+        ),
+        (
+            "loonfs_content_object_cache_inserts",
+            "Content objects inserted into the content object cache",
+            content_object_inserts,
+        ),
+        (
+            "loonfs_content_object_cache_evictions",
+            "Content objects evicted to stay within the content object budget",
+            content_object_evictions,
         ),
     ] {
         write_counter(rendered, name, description, &[(NO_LABELS, value)]);
     }
-    write_gauge(
-        rendered,
-        "loonfs_head_state_cache_retained_decoded_bytes",
-        "Bytes currently charged to WAL-tail projections, including keys and per-entry bookkeeping",
-        head_state_bytes,
-    );
-
-    // The `key_class` labels match the ones that the object-store metrics
-    // use for the same objects.
-    let (wal_object, content) = (KeyClass::WalObject.as_str(), KeyClass::Content.as_str());
-    write_counter(
-        rendered,
-        "loonfs_object_cache_gets",
-        "Object cache lookups, by key class and outcome",
-        &[
-            (
-                &[("key_class", wal_object), ("result", RESULT_HIT)],
-                wal_object_hits,
-            ),
-            (
-                &[("key_class", wal_object), ("result", RESULT_MISS)],
-                wal_object_misses,
-            ),
-            (
-                &[("key_class", content), ("result", RESULT_HIT)],
-                content_object_hits,
-            ),
-            (
-                &[("key_class", content), ("result", RESULT_MISS)],
-                content_object_misses,
-            ),
-        ],
-    );
-    write_counter(
-        rendered,
-        "loonfs_object_cache_inserts",
-        "Objects inserted into the object cache, by key class",
-        &[
-            (&[("key_class", wal_object)], wal_object_inserts),
-            (&[("key_class", content)], content_object_inserts),
-        ],
-    );
-    write_counter(
-        rendered,
-        "loonfs_object_cache_evictions",
-        "WAL objects and content objects evicted to stay within their budgets",
-        &[(NO_LABELS, object_evictions)],
-    );
-    write_gauge(
-        rendered,
-        "loonfs_object_cache_retained_decoded_bytes",
-        "Bytes currently charged to WAL objects and content objects, including keys and per-entry bookkeeping",
-        object_bytes,
-    );
+    for (name, description, value) in [
+        (
+            "loonfs_segment_cache_retained_decoded_bytes",
+            "Bytes currently charged to metadata-segment cache entries, including keys and per-entry bookkeeping",
+            segment_bytes,
+        ),
+        (
+            "loonfs_head_cache_retained_decoded_bytes",
+            "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",
+            head_bytes,
+        ),
+        (
+            "loonfs_wal_tail_cache_retained_decoded_bytes",
+            "Bytes currently charged to WAL-tail projections, including keys and per-entry bookkeeping",
+            wal_tail_bytes,
+        ),
+        (
+            "loonfs_wal_object_cache_retained_decoded_bytes",
+            "Bytes currently charged to WAL objects, including keys and per-entry bookkeeping",
+            wal_object_bytes,
+        ),
+        (
+            "loonfs_content_object_cache_retained_decoded_bytes",
+            "Bytes currently charged to content objects, including keys and per-entry bookkeeping",
+            content_object_bytes,
+        ),
+    ] {
+        write_gauge(rendered, name, description, value);
+    }
 }
 
 /// Writes the grep block cache's stats as counters.

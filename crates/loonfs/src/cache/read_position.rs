@@ -4,7 +4,7 @@
 use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
-use loonfs_core::cache::{CachedHead, HeadStateCache, SharedCheck, WalTailProjectionCacheKey};
+use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
 use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
@@ -49,7 +49,7 @@ pub(crate) trait HeadPositions: Send + Sync {
 pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head, with the position's tail.
-    head_state: Arc<HeadStateCache>,
+    head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
     position: Mutex<Option<Arc<ReadPosition>>>,
     /// The session's checks of the position, which the reads that need a
     /// check share.
@@ -58,10 +58,10 @@ pub(crate) struct ReadPositionSlot {
 
 impl ReadPositionSlot {
     /// Returns an empty slot for a writer session in the runtime whose read
-    /// cache is `head_state`.
-    pub(crate) fn new(head_state: Arc<HeadStateCache>) -> Self {
+    /// cache is `head_and_wal_tail_cache`.
+    pub(crate) fn new(head_and_wal_tail_cache: Arc<HeadAndWalTailCache>) -> Self {
         Self {
-            head_state,
+            head_and_wal_tail_cache,
             position: Mutex::default(),
             check: SharedCheck::default(),
         }
@@ -108,7 +108,7 @@ impl ReadPositionSlot {
     /// slot had a position.
     ///
     /// The position becomes the namespace's cached head first, through
-    /// [`HeadStateCache::replace_head`](loonfs_core::cache::HeadStateCache::replace_head),
+    /// [`HeadAndWalTailCache::replace_head`](loonfs_core::cache::HeadAndWalTailCache::replace_head),
     /// with both checks at the position's last successor check, because
     /// that check confirmed a head that this runtime wrote itself. So the
     /// first read after the position starts from a head at least as new as
@@ -127,15 +127,15 @@ impl ReadPositionSlot {
         let Some(position) = self.current() else {
             return false;
         };
-        self.head_state.insert_tail(
-            WalTailProjectionCacheKey {
+        self.head_and_wal_tail_cache.insert_tail(
+            WalTailCacheKey {
                 namespace_id: position.head.namespace_id.clone(),
                 manifest_no: position.basis.manifest_no(),
                 head_seq: position.head.seq,
             },
             Arc::clone(&position.tail),
         );
-        self.head_state.replace_head(CachedHead {
+        self.head_and_wal_tail_cache.replace_head(CachedHead {
             head: position.head.clone(),
             basis: position.basis.clone(),
             basis_checked: position.basis_checked.clone(),

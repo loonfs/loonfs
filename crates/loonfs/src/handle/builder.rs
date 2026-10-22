@@ -131,7 +131,7 @@ impl<M> LoonFsBuilder<M> {
     /// Runtimes built over clones of one [`SharedObjectStore`] share the
     /// decoded segment blocks and manifests in the cache, and runtimes over
     /// different object stores never read each other's blocks. This runtime
-    /// keeps its own head anchors and WAL-tail projections in the cache, and
+    /// keeps its own namespace heads and WAL-tail projections in the cache, and
     /// its clones, its read-only view, and its maintenance share them.
     /// Without this setting, the runtime creates a private cache with the
     /// default limits. Either cache keeps its counters in

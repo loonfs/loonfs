@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cache::{
-    DecodedBlockCacheStats, HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheKey,
+    DecodedBlockCacheStats, HeadAndWalTailCache, MetadataSegmentCache, WalTailCacheKey,
 };
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
@@ -19,7 +19,7 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
         head,
         basis,
         segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-        head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
+        head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
         object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
         tail: None,
     }
@@ -36,8 +36,8 @@ async fn fresh_context(
     read_context(loaded.read_state, basis)
 }
 
-fn cache_key(context: &RuntimeReadContext) -> WalTailProjectionCacheKey {
-    WalTailProjectionCacheKey {
+fn cache_key(context: &RuntimeReadContext) -> WalTailCacheKey {
+    WalTailCacheKey {
         namespace_id: context.head.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
         head_seq: context.head.seq,
@@ -245,7 +245,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .starts_with(&wal_prefix(&publisher.namespace_id))));
     assert_no_content_requests(&store);
     assert_eq!(
-        context.head_state.tail_stats(),
+        context.head_and_wal_tail_cache.tail_stats(),
         DecodedBlockCacheStats::default(),
         "reads from the position's tail neither look up nor insert a tail"
     );
@@ -359,7 +359,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     assert_no_content_requests(&store);
     assert_eq!(
         context
-            .head_state
+            .head_and_wal_tail_cache
             .get_tail(&cache_key(&context))
             .expect("advanced tail"),
         publisher.wal_fold_input().expect("publish tail").tail_state
@@ -375,8 +375,8 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     .await
     .expect("later publish");
     let newest = publisher.wal_fold_input().expect("publish tail");
-    context.head_state.insert_tail(
-        WalTailProjectionCacheKey {
+    context.head_and_wal_tail_cache.insert_tail(
+        WalTailCacheKey {
             head_seq: newest.head.seq,
             ..cache_key(&context)
         },
@@ -388,7 +388,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     assert!(
         Arc::ptr_eq(
             &context
-                .head_state
+                .head_and_wal_tail_cache
                 .get_tail(&cache_key(&context))
                 .expect("newest tail"),
             &newest.tail_state

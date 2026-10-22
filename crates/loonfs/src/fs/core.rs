@@ -11,7 +11,7 @@ use crate::{
 };
 use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{
-    CompletedUploadSessionCache, HeadStateCache, MetadataSegmentCache, ObjectCache,
+    CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache, ObjectCache,
 };
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
@@ -41,12 +41,12 @@ pub(crate) struct RuntimeCoreInner {
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
     pub(crate) metadata_cache: MetadataCache,
     /// This core's views of `metadata_cache`. The segment view reads under
-    /// the scope of this core's object store, and the head-state view reads
-    /// under a scope minted for this core.
+    /// the scope of this core's object store, and the head and WAL-tail view
+    /// reads under a scope minted for this core.
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
-    pub(crate) head_state: Arc<HeadStateCache>,
+    pub(crate) head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
     /// The completed upload sessions that garbage collection keeps between
-    /// passes, under the same scope as the head-state view.
+    /// passes, under the same scope as the head and WAL-tail view.
     pub(crate) completed_upload_sessions: CompletedUploadSessionCache,
     pub(crate) object_cache: Arc<ObjectCache>,
     /// Publication, collection, completed-compaction, and view-read metrics.
@@ -105,7 +105,7 @@ impl RuntimeCore {
                 wall_clock,
                 metadata_cache: metadata_cache.cache,
                 metadata_segment_cache: Arc::new(metadata_cache.segment_blocks),
-                head_state: Arc::new(metadata_cache.head_state),
+                head_and_wal_tail_cache: Arc::new(metadata_cache.heads_and_wal_tails),
                 completed_upload_sessions: metadata_cache.completed_upload_sessions,
                 object_cache: Arc::new(metadata_cache.objects),
                 instruments,
@@ -173,11 +173,11 @@ impl RuntimeCore {
         Arc::clone(&self.inner.metadata_segment_cache)
     }
 
-    /// This core's view of the head-state cache, where each writer session's
-    /// position becomes the namespace's cached head, with its WAL tail, when
-    /// the position ends.
-    pub(crate) fn head_state(&self) -> Arc<HeadStateCache> {
-        Arc::clone(&self.inner.head_state)
+    /// This core's view of the head and WAL-tail caches, where each writer
+    /// session's position becomes the namespace's cached head, with its WAL
+    /// tail, when the position ends.
+    pub(crate) fn head_and_wal_tail_cache(&self) -> Arc<HeadAndWalTailCache> {
+        Arc::clone(&self.inner.head_and_wal_tail_cache)
     }
 
     pub(crate) fn trace_mode(&self) -> &'static str {
