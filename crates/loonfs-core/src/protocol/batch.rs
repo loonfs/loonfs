@@ -152,12 +152,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 }
             };
             let validated = candidate_request.validated;
-            let record_bytes = crate::commit_wal_size::planned_wal_record_bytes(
-                candidate.intent(),
-                candidate.inline_content(),
-                &validated.deltas,
-                &validated.appended,
-            );
+            let record_bytes =
+                candidate.planned_wal_record_bytes(&validated.deltas, &validated.appended);
             let inline_bytes = candidate
                 .inline_content()
                 .iter()

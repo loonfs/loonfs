@@ -511,6 +511,9 @@ pub struct DeletedBinding {
 }
 
 /// Events retained for recoverable subtree deletion.
+///
+/// The latest event for a root at a sequence decides the root's state there
+/// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TombstoneRowAction {
@@ -525,14 +528,38 @@ pub enum TombstoneRowAction {
         /// The exact `set` event being compensated.
         target: DeltaPosition,
     },
+    /// The deletion recorded at `target` can no longer be undeleted. The
+    /// subtree stays hidden, and like a revoke, the event carries no binding.
+    Expire {
+        /// The exact `set` event being expired.
+        target: DeltaPosition,
+    },
+}
+
+impl TombstoneRowAction {
+    /// Whether a root whose latest event is this one hides its subtree.
+    pub const fn hides_subtree(&self) -> bool {
+        match self {
+            Self::Set { .. } | Self::Expire { .. } => true,
+            Self::Revoke { .. } => false,
+        }
+    }
+
+    /// Whether a root whose latest event is this one can be undeleted.
+    pub const fn is_recoverable(&self) -> bool {
+        match self {
+            Self::Set { .. } => true,
+            Self::Revoke { .. } | Self::Expire { .. } => false,
+        }
+    }
 }
 
 /// Current-state rows for recoverable deletions.
 ///
-/// `Listed` exposes a deletion in trash; `Removed` hides it after undelete.
-/// Both rows share a key prefix, with `Removed` sorting first, so scans can
-/// suppress restored entries. Compaction later removes the cancelled
-/// pair.
+/// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete
+/// or an expiry. Both rows share a key prefix, with `Removed` sorting first,
+/// so scans can suppress cancelled entries. Compaction later removes the
+/// cancelled pair.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActiveDeletionRowAction {
@@ -550,9 +577,11 @@ pub enum ActiveDeletionRowAction {
         /// this row derives from.
         deleted_binding: DeletedBinding,
     },
-    /// The deletion was cancelled by an undelete at `revocation_seq`.
+    /// The deletion was cancelled by an undelete or an expiry at
+    /// `revocation_seq`.
     Removed {
-        /// Commit sequence of the undelete that cancelled the deletion.
+        /// Commit sequence of the undelete or expiry that cancelled the
+        /// deletion.
         revocation_seq: ChangeSeq,
     },
 }

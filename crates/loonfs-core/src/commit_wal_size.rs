@@ -1,12 +1,13 @@
 //! Bounds the WAL records produced by a request before metadata planning.
 
+use crate::commit::DeletionExpiry;
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
     cbor_map_bytes, cbor_string_bytes, WalCommitDelta, WalInlineContent,
 };
 use loonfs_types::{
-    AbsolutePath, AccessRight, FilesystemOperation, NamespaceNaming,
+    AbsolutePath, AccessRight, ActorId, CommitId, FilesystemOperation, NamespaceNaming,
     MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
     MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES,
@@ -168,6 +169,16 @@ const REVOKE_BYTES: usize = delta_bytes(
         ),
     ],
 );
+const EXPIRE_BYTES: usize = delta_bytes(
+    "expire_subtree_tombstone",
+    &[
+        ("root_inode_id", INTEGER_BYTES),
+        (
+            "target",
+            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
+        ),
+    ],
+);
 
 const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
     cbor_map_bytes(&[
@@ -183,31 +194,38 @@ const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
         - 9
 }
 
-pub(crate) fn estimated_wal_record_bytes(
-    request: &CommitIntent,
-    inline_content: &[InlineContent],
-) -> usize {
-    let fixed_bytes = cbor_map_bytes(&[
+/// Bounds a commit record's fields other than its deltas and pieces.
+fn commit_fields_bytes(commit_id: &CommitId, actor_id: &ActorId, message: Option<&str>) -> usize {
+    cbor_map_bytes(&[
         ("committed_seq", INTEGER_BYTES),
-        (
-            "commit_id",
-            cbor_string_bytes(request.commit_id.as_str().len()),
-        ),
-        (
-            "committed_by",
-            cbor_string_bytes(request.actor_id.as_str().len()),
-        ),
+        ("commit_id", cbor_string_bytes(commit_id.as_str().len())),
+        ("committed_by", cbor_string_bytes(actor_id.as_str().len())),
         (
             "semantic_commit_fingerprint",
             cbor_string_bytes("v1:sha256:".len() + 64),
         ),
         ("committed_at_ms", INTEGER_BYTES),
-        (
-            "message",
-            cbor_string_bytes(request.message.as_ref().map_or(0, String::len)),
-        ),
+        ("message", cbor_string_bytes(message.map_or(0, str::len))),
         ("deltas", 9),
-    ]);
+    ])
+}
+
+/// Bounds the WAL record of the writer's commit that expires deletions: one
+/// expire delta for each deletion.
+pub(crate) fn estimated_expiry_record_bytes(expiry: &DeletionExpiry) -> usize {
+    commit_fields_bytes(expiry.commit_id(), &DeletionExpiry::actor_id(), None)
+        .saturating_add(expiry.deletions().len().saturating_mul(EXPIRE_BYTES))
+}
+
+pub(crate) fn estimated_wal_record_bytes(
+    request: &CommitIntent,
+    inline_content: &[InlineContent],
+) -> usize {
+    let fixed_bytes = commit_fields_bytes(
+        &request.commit_id,
+        &request.actor_id,
+        request.message.as_deref(),
+    );
     let carries_pieces = !inline_content.is_empty()
         || request
             .operations

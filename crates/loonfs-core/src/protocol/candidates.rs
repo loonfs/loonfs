@@ -6,7 +6,9 @@ use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
 use crate::authorize::Authorizer;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
-use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
+use crate::commit_engine::{
+    CandidateRequest, CommitCandidate, ContentPreparation, ContentPreparationError,
+};
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::CommitReceiptRecord;
@@ -116,12 +118,18 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }
-    let mutation = candidate.intent();
     let semantic_identity = match candidate.semantic_identity(namespace_id) {
         Ok(semantic_identity) => semantic_identity,
         Err(error) => return CandidateAdmission::independent(Err(error)),
     };
-    match resolve_commit_id_reuse(view, dedup, index, &mutation.commit_id, &semantic_identity).await
+    match resolve_commit_id_reuse(
+        view,
+        dedup,
+        index,
+        candidate.commit_id(),
+        &semantic_identity,
+    )
+    .await
     {
         Ok(Some(admission)) => return admission,
         Ok(None) => {}
@@ -173,9 +181,14 @@ pub(super) fn validate_candidate_content_references(
     namespace_id: &NamespaceId,
     now_ms: u64,
 ) -> Result<()> {
+    let intent = match candidate.request() {
+        CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
+        // An expiry refers to no content.
+        CandidateRequest::Expiry(_) => return Ok(()),
+    };
     match candidate.content_preparation() {
         ContentPreparation::Ready(admissions) => validate_commit_content_references(
-            candidate.intent(),
+            intent,
             admissions,
             candidate.inline_content(),
             namespace_id,

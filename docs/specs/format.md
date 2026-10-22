@@ -172,18 +172,31 @@ Two separate uploads of identical bytes create two objects, because LoonFS doesn
 
 Deleting an item removes its current binding and records a "tombstone" for it. The item's revisions, and everything below it, stay in place, and the tombstone hides them. A tombstone on a directory hides the directory and all of its descendants, so a deletion doesn't need a separate tombstone for every descendant.
 
-A tombstone is a series of events, stored as rows. Each row records its own position in the namespace history (`committed_seq` and `delta_index`), and events are ordered by position. There are two kinds of event:
+A tombstone is a series of events, stored as rows. Each row records its own position in the namespace history (`committed_seq` and `delta_index`), and events are ordered by position. There are three kinds of event:
 
 - A `set` event starts a deletion. It stores the removed binding (`deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`), so the name can be restored even after old binding versions are compacted.
-- A `revoke` event cancels one `set` event, which it identifies by position (a `DeltaPosition` value, `{seq, delta_index}`). A `revoke` MUST NOT contain a deleted binding.
+- A `revoke` event, which an undelete commits, cancels one `set` event. It identifies that event by position (a `DeltaPosition` value, `{seq, delta_index}`). A `revoke` MUST NOT contain a deleted binding.
+- An `expire` event ends the recoverability of one `set` event, so the deletion can no longer be undeleted. It identifies that event by position, like a `revoke`. Only the namespace's writer commits an `expire`, and it's attributed to the actor `loonfs`. An `expire` MUST NOT contain a deleted binding.
 
-At a given sequence, the latest event for the deletion's root inode determines whether the tombstone is active. A `set` after a revoked deletion of the same inode is a new deletion.
+At a given sequence, the latest event for the deletion's root inode determines the state of the root and everything below it:
 
-An undelete request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is the currently active one. A request for a deletion that's no longer active returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't undelete a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) An undelete restores the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be undeleted, because the descendants it hides don't have deletions of their own.
+- After a `set`, the tombstone hides the subtree, and the deletion is recoverable.
+- After an `expire`, the tombstone still hides the subtree, but the deletion isn't recoverable.
+- After a `revoke`, the tombstone hides nothing.
 
-The `active_deletions` family is derived from tombstone events, and it's used to list recoverable deletions in deletion-sequence order. A `set` produces a `listed` row, and a `revoke` produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removed rows sort before listed rows, so a scan can skip cancelled deletions. The tombstone events remain the source of truth.
+An undelete commits its `revoke` together with a new binding for the item, so the subtree reappears. An `expire` restores nothing, so the subtree stays hidden. A `set` after a revoked deletion of the same inode is a new deletion.
+
+For example, suppose the directory `/old` (inode 7) is deleted at sequence 40, and the namespace's writer commits an `expire` for that deletion at sequence 61. At sequence 50, an undelete can restore `/old`. From sequence 61 on, `/old` and everything below it stay hidden, the trash listing leaves the deletion out, and an undelete of the deletion returns `not_deleted`.
+
+An undelete request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is recoverable, which means that its `set` is the root's latest event. A request for a deletion that's no longer recoverable returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't undelete a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) An undelete restores the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be undeleted, because the descendants it hides don't have deletions of their own. The writer validates each `expire` the same way, so it can't expire a deletion that an undelete has already revoked.
+
+The `active_deletions` family is derived from tombstone events, and it's used to list recoverable deletions in deletion-sequence order. A `set` produces a `listed` row, and a `revoke` or an `expire` produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removed rows sort before listed rows, so a scan can skip deletions that were undeleted or expired. The tombstone events remain the source of truth.
 
 Deleting a file doesn't delete its content right away. In a live namespace, file revisions and recoverable deletions are kept under the rules in [Retention and compaction](#10-retention-and-compaction). Deleting a namespace is a separate operation, described in [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks).
+
+Why can a deletion stop being recoverable? LoonFS can't reclaim the rows and content that a deletion hides while an undelete could still restore them, so a deletion needs a point in the namespace's history after which it can't be undone.
+
+Why is expiry an event in the writer's log? An undelete is a writer commit, so recording the end of a deletion's recoverability as another writer commit lets the WAL order the two. An undelete that the writer validated before an `expire` comes before it in the WAL and has already revoked the deletion, so that `expire` fails validation. An undelete that the writer validates after the `expire` returns `not_deleted`. Either way, no request can restore a deletion after its `expire` is committed.
 
 ### 1.7 Attributes and attribution
 
@@ -245,7 +258,7 @@ Every namespace has an "access mode", which is stored in its manifest and set wh
 
 A principal's effective rights on an inode are the union of its grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
 
-A deletion root has no current binding, so its tombstone's saved parent is used for that step of the walk. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited.
+A deletion root has no current binding, so while its deletion is recoverable, its tombstone's saved parent is used for that step of the walk. The walk stops at the root of an expired deletion, so the inodes that an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited.
 
 The `update_access` operation replaces an inode's access row, and it appears in the change feed as an `access_changed` event. The [API specification][api-spec] defines that operation, and how reads, commits, and upload sessions are authorized against access rows.
 
@@ -553,11 +566,11 @@ For example, after another writer takes over the namespace, an `eventual` read i
 
 ### 4.3 Visible metadata
 
-At sequence `N`, a reader ignores events after `N`. A visible inode MUST have been created at or before `N`, and it MUST NOT be covered by an active tombstone on itself or on an ancestor.
+At sequence `N`, a reader ignores events after `N`. A visible inode MUST have been created at or before `N`, and it MUST NOT be hidden by a tombstone on itself or on an ancestor. A tombstone hides its root and the root's descendants at `N` when its latest event at or below `N` is a `set` or an `expire` (see [File and subtree deletion](#16-file-and-subtree-deletion)). For example, a file in a directory whose deletion has expired stays hidden, even though nobody can undelete the directory anymore.
 
 A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child, and an unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index.
 
-Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no active subtree tombstone covers it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. User pins apply these rules through their pinned manifests, at their captured sequences.
+Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no tombstone hides it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. User pins apply these rules through their pinned manifests, at their captured sequences.
 
 A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing recoverable deletions uses the derived active-deletion state, while evaluating a tombstone at a past sequence uses the tombstone events.
 
@@ -848,6 +861,8 @@ Standard requests operate on paths or inode IDs. They create directories, write 
 
 Optional preconditions have no implied value.
 
+The namespace's writer also commits an operation of its own, an expiry, which ends the recoverability of deletions (see [File and subtree deletion](#16-file-and-subtree-deletion)). `POST /commits` doesn't accept an expiry, and no other client route does either. An expiry commit is attributed to the actor `loonfs`, it isn't checked against a subject, and it has no message or preconditions. It records one `expire_subtree_tombstone` delta for each deletion it expires, and each deletion is its own operation, so the change feed reports one event for each.
+
 A replacing move deletes the destination file and binds the source in its place, within the same commit. Only a file destination can be replaced, and moving a path onto itself isn't a replacement. An undelete can use the deleted binding's original parent and name, the caller's replacement path, or the caller's parent inode and name, subject to normal validation.
 
 An append adds bytes as the file's next revision, and its commit includes the new bytes as pieces. The writer computes the new checksum by combining the base reference's checksum with the appended bytes' checksum, in the store's algorithm, without reading the earlier bytes. A base in another algorithm is `namespace_corrupt`, before anything is written.
@@ -859,7 +874,7 @@ An append either extends the same chain or starts a new one:
 
 For example, a fork inherits `/log.txt`, whose chain is owned by the source namespace. The fork doesn't own that chain, so appending 10 bytes starts a new chain, whose layout lists the source's objects followed by a piece with the 10 new bytes. Earlier operations in the same commit count when later appends are planned.
 
-The WAL stores the resulting metadata changes ("deltas"), not the original request bodies or validation inputs. There are eight kinds of delta:
+The WAL stores the resulting metadata changes ("deltas"), not the original request bodies or validation inputs. There are nine kinds of delta:
 
 | Delta | Records |
 | --- | --- |
@@ -869,6 +884,7 @@ The WAL stores the resulting metadata changes ("deltas"), not the original reque
 | `append_file_revision` | A new file revision. |
 | `tombstone_subtree` | A deletion (a tombstone `set` event). |
 | `revoke_subtree_tombstone` | An undelete (a tombstone `revoke` event). |
+| `expire_subtree_tombstone` | An expiry (a tombstone `expire` event). |
 | `append_attributes_revision` | A new attribute revision. |
 | `append_access_revision` | A new access revision. |
 
@@ -1219,8 +1235,8 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `inodes` | Keep every inode row. |
 | `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), keep every version above the floor and the newest version at or below it. Drop that floor version too if it's unbound. |
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. |
-| `tombstones` | Keep every `set` and `revoke` event. |
-| `active_deletions` | Keep listed deletions until they're revoked, and remove a cancelled `listed` and `removed` pair together. The floor doesn't expire a recoverable deletion. |
+| `tombstones` | Keep every `set`, `revoke`, and `expire` event. |
+| `active_deletions` | Keep listed deletions until they're revoked or expired, and remove a cancelled `listed` and `removed` pair together. The floor doesn't expire a recoverable deletion. |
 | `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. |
@@ -1719,10 +1735,11 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `layout?` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
+| `expire_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes, revokes, or expires. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
 A revision delta's `layout` follows these rules:
 
@@ -1766,9 +1783,9 @@ A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), wit
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both binding families store the complete row.
 
-For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, and a revoke action is `{"kind":"revoke","target":...}`.
+For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke or expire target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, a revoke action is `{"kind":"revoke","target":...}`, and an expire action is `{"kind":"expire","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `revocation_seq`. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `revocation_seq`, the sequence of the undelete or expiry that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
 
 Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
 
@@ -1982,10 +1999,13 @@ Every operation starts with `kind`, followed by the fields in the order below. E
 | `restore_revision` | `path`, `source_revision_no` |
 | `restore_revision_by_inode` | `inode_id`, `source_revision_no` |
 | `undelete` | `inode_id`, `deletion_seq`, `destination_path`, `destination_parent_inode_id`, `destination_display_name` |
+| `expire_deletion` | `inode_id`, `deletion_seq` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
 | `update_attributes_by_inode` | `inode_id`, `set`, `remove`, `expected_attributes_revision_no` |
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 | `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
+
+`expire_deletion` is the writer's expiry of one deletion, which no request can contain (see [Operations and WAL deltas](#66-operations-and-wal-deltas)). Like `undelete`, it identifies the deletion by its root's `inode_id` and its `deletion_seq`. An expiry commit's preimage has the `actor_id` `loonfs`, a `null` `subject_id` and `message`, and an empty precondition list, so the deletions it expires, in order, are what distinguish one expiry from another.
 
 Paths use their validated canonical absolute form, and display-name fields contain one validated component. Inode IDs in these operations use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers, and binding versions keep their opaque string representation.
 

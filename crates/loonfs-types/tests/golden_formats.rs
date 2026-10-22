@@ -343,6 +343,17 @@ fn sample_wal_payload() -> WalObjectPayload {
                 }),
             },
         },
+        WalCommitDelta {
+            semantic_operation_index: 7,
+            delta: WalDelta::ExpireSubtreeTombstone {
+                delta_index: 8,
+                root_inode_id: InodeId(8),
+                target: DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
+            },
+        },
     ];
     WalObjectPayload {
         namespace_id: namespace_id(),
@@ -1559,19 +1570,32 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
                 },
             },
         },
+        WalCommitDelta {
+            semantic_operation_index: 2,
+            delta: WalDelta::ExpireSubtreeTombstone {
+                delta_index: 2,
+                root_inode_id: InodeId(8),
+                target: DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
+            },
+        },
     ]);
-    let document = wal_document_with_payload_edit(&envelope, |payload| {
-        with_future_field(cbor_entry(commit_delta(payload, 0), "deleted_binding"));
-        with_future_field(cbor_entry(commit_delta(payload, 1), "target"));
-    });
+    for (position, field) in [(0, "deleted_binding"), (1, "target"), (2, "target")] {
+        let document = wal_document_with_payload_edit(&envelope, |payload| {
+            with_future_field(cbor_entry(commit_delta(payload, position), field));
+        });
 
-    let error = decode_wal_object_envelope_zstd(&document)
-        .expect_err("unknown durable fields must be rejected");
-    assert_matches!(
-        error,
-        EnvelopeCodecError::PayloadDecode(message)
-            if message.contains("unknown field") && message.contains("field_from_the_future")
-    );
+        let error = decode_wal_object_envelope_zstd(&document)
+            .expect_err("unknown durable fields must be rejected");
+        assert_matches!(
+            error,
+            EnvelopeCodecError::PayloadDecode(message)
+                if message.contains("unknown field") && message.contains("field_from_the_future"),
+            "delta {position}, field `{field}`"
+        );
+    }
 }
 
 #[test]
@@ -1823,6 +1847,17 @@ fn wal_delta_wire_tags_match_spec_names() {
             "revoke_subtree_tombstone",
         ),
         (
+            serde_json::to_value(WalDelta::ExpireSubtreeTombstone {
+                delta_index: 0,
+                root_inode_id: InodeId(2),
+                target: DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
+            }),
+            "expire_subtree_tombstone",
+        ),
+        (
             serde_json::to_value(WalDelta::AppendAttributesRevision {
                 delta_index: 0,
                 inode_id: InodeId(2),
@@ -1888,6 +1923,54 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
         committed_at_ms: 4_100,
         committed_by: actor(),
     })
+}
+
+/// A second deletion of the same root, after the undelete above.
+fn sample_tombstone_reset_row() -> MetadataRow {
+    MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
+        root_inode_id: InodeId(5),
+        committed_seq: ChangeSeq(10),
+        delta_index: 0,
+        commit_id: commit_id(),
+        action: TombstoneRowAction::Set {
+            deleted_binding: DeletedBinding {
+                parent_inode_id: InodeId(1),
+                name_key: name_key("docs-archive"),
+                display_name: loonfs_types::DisplayName::parse("Docs-Archive")
+                    .expect("valid display name"),
+            },
+        },
+        committed_at_ms: 4_200,
+        committed_by: actor(),
+    })
+}
+
+/// The writer's expiry of that second deletion, naming the exact position it
+/// expires. The writer commits it as the actor `loonfs`.
+fn sample_tombstone_expire_row() -> MetadataRow {
+    MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
+        root_inode_id: InodeId(5),
+        committed_seq: ChangeSeq(12),
+        delta_index: 0,
+        commit_id: commit_id(),
+        action: TombstoneRowAction::Expire {
+            target: DeltaPosition {
+                seq: ChangeSeq(10),
+                delta_index: 0,
+            },
+        },
+        committed_at_ms: 4_400,
+        committed_by: ActorId::loonfs(),
+    })
+}
+
+fn sample_tombstone_rows() -> [MetadataRow; 4] {
+    [
+        sample_tombstone_set_row(),
+        sample_tombstone_revoke_row(),
+        sample_tombstone_reset_row(),
+        sample_tombstone_expire_row(),
+    ]
 }
 
 /// The active-deletion row the materializer derives from the set above. It
@@ -2374,17 +2457,14 @@ fn sst_block_data_commit_golden_decodes_to_sample_row() {
 fn sst_block_data_tombstone_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
         "sst_block_data_tombstones.v1.bin",
-        &[sample_tombstone_set_row(), sample_tombstone_revoke_row()],
+        &sample_tombstone_rows(),
     );
 }
 
 #[test]
 fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
     let block = decode_golden_data_block("sst_block_data_tombstones.v1.bin");
-    assert_eq!(
-        block.rows,
-        [sample_tombstone_set_row(), sample_tombstone_revoke_row()],
-    );
+    assert_eq!(block.rows, sample_tombstone_rows());
 }
 
 // ---------------------------------------------------------------------------
@@ -2461,16 +2541,20 @@ fn tombstone_rows_reject_unknown_fields_at_every_level() {
 }
 
 #[test]
-fn tombstone_revoke_rows_reject_a_deleted_binding() {
-    let expected = sample_tombstone_revoke_row();
-    let mut row = row_cbor(&expected);
-    cbor_map_of(cbor_entry(&mut row, "action")).push((
-        ciborium::Value::from("deleted_binding"),
-        sample_deleted_binding_cbor(),
-    ));
+fn tombstone_revoke_and_expire_rows_reject_a_deleted_binding() {
+    for expected in [sample_tombstone_revoke_row(), sample_tombstone_expire_row()] {
+        let mut row = row_cbor(&expected);
+        cbor_map_of(cbor_entry(&mut row, "action")).push((
+            ciborium::Value::from("deleted_binding"),
+            sample_deleted_binding_cbor(),
+        ));
 
-    let refusal = assert_row_is_corrupt(&row, "a revoke carries no deleted binding");
-    assert!(refusal.contains("deleted_binding"), "{refusal}");
+        let refusal = assert_row_is_corrupt(&row, "only a set carries a deleted binding");
+        assert!(
+            refusal.contains("deleted_binding"),
+            "{expected:?}: {refusal}"
+        );
+    }
 }
 
 #[test]

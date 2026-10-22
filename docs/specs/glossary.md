@@ -104,7 +104,7 @@ One committed version of a file's contents. Each file revision is assigned a mon
 
 ### Tombstone
 
-A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. The namespace's writer can instead expire the deletion. An expired deletion can't be undeleted, and its tombstone keeps hiding the subtree. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
 
 ### Namespace tombstone
 

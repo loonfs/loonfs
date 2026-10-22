@@ -729,16 +729,31 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(latest)
     }
 
-    pub(crate) async fn active_subtree_tombstone(
+    /// The root's latest tombstone event, when it hides the subtree.
+    pub(crate) async fn hiding_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
         let tombstones = self.tombstones_for_root(root_inode_id).await?;
-        let active = super::rows::active_tombstone_from_records(
+        let hiding = super::rows::hiding_tombstone_from_records(
             tombstones.iter().cloned(),
             self.visible_seq(),
         );
-        Ok(active)
+        Ok(hiding)
+    }
+
+    /// The `set` event of the root's recoverable deletion: its latest
+    /// tombstone event, when that event is a `set`.
+    pub(crate) async fn recoverable_deletion(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
+        let tombstones = self.tombstones_for_root(root_inode_id).await?;
+        let hiding = super::rows::hiding_tombstone_from_records(
+            tombstones.iter().cloned(),
+            self.visible_seq(),
+        );
+        Ok(hiding.filter(|tombstone| tombstone.action.is_recoverable()))
     }
 
     pub(super) async fn direntry_binds_for_parent_name(
@@ -998,11 +1013,11 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
             .await
     }
 
-    async fn find_active_subtree_tombstone(
+    async fn find_hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        self.view.active_subtree_tombstone(root_inode_id).await
+        self.view.hiding_subtree_tombstone(root_inode_id).await
     }
 
     async fn find_access_row(

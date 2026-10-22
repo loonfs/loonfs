@@ -225,6 +225,16 @@ fn event_from_op_deltas(
             display_name: display_name.clone(),
             binding_version: binding_version(namespace_id, committed_seq, *delta_index),
         },
+        // Expiry: the writer ends one deletion's recoverability, which the
+        // target's sequence identifies the way an undelete request does.
+        [WalDelta::ExpireSubtreeTombstone {
+            root_inode_id,
+            target,
+            ..
+        }] => FilesystemChange::DeletionExpired {
+            inode_id: *root_inode_id,
+            deletion_seq: target.seq,
+        },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds
         // the complete resulting map, so the event does too.

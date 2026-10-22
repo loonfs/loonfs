@@ -226,6 +226,7 @@ impl HeapBytes for FilesystemChange {
             Self::Deleted {
                 deleted_binding, ..
             } => deleted_binding.name_key.heap_bytes() + deleted_binding.display_name.heap_bytes(),
+            Self::DeletionExpired { .. } => 0,
             Self::AttributesChanged { attributes, .. } => attributes.heap_bytes(),
             Self::AccessChanged { grants, .. } => grants.heap_bytes(),
             Self::Unknown => 0,
@@ -296,7 +297,7 @@ impl HeapBytes for SubtreeTombstoneRecord {
     fn heap_bytes(&self) -> usize {
         let action = match &self.action {
             TombstoneRowAction::Set { deleted_binding } => deleted_binding.heap_bytes(),
-            TombstoneRowAction::Revoke { .. } => 0,
+            TombstoneRowAction::Revoke { .. } | TombstoneRowAction::Expire { .. } => 0,
         };
         self.commit_id.heap_bytes() + self.committed_by.heap_bytes() + action
     }
@@ -361,7 +362,9 @@ impl HeapBytes for WalObjectPayload {
 impl HeapBytes for WalCommitDelta {
     fn heap_bytes(&self) -> usize {
         match &self.delta {
-            WalDelta::CreateInode { .. } | WalDelta::RevokeSubtreeTombstone { .. } => 0,
+            WalDelta::CreateInode { .. }
+            | WalDelta::RevokeSubtreeTombstone { .. }
+            | WalDelta::ExpireSubtreeTombstone { .. } => 0,
             WalDelta::BindDirentry {
                 name_key,
                 display_name,

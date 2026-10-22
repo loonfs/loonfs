@@ -135,23 +135,23 @@ impl MetadataState {
         )
     }
 
-    pub fn active_subtree_tombstone(
+    pub fn hiding_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
         read_now(
             self.reads_at_seq(base_seq)
-                .find_active_subtree_tombstone(root_inode_id),
+                .find_hiding_subtree_tombstone(root_inode_id),
         )
     }
 
-    pub(super) fn active_subtree_tombstone_scan(
+    pub(super) fn hiding_subtree_tombstone_scan(
         &self,
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        super::rows::active_tombstone_from_records(
+        super::rows::hiding_tombstone_from_records(
             self.subtree_tombstones
                 .iter()
                 .filter(|tombstone| tombstone.root_inode_id == root_inode_id)

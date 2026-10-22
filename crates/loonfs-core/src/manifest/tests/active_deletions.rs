@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::metadata::{
-    active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
+    hiding_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::path::read::load_current_metadata_view;
 use crate::{NamespaceEngine, RuntimeReadContext};
@@ -15,7 +15,7 @@ use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::format::manifest::{
     ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
-use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
+use loonfs_types::{AttributeInclusion, EntryInodeKind, ExpiredDeletion, InodeKind};
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::assert_matches;
 use std::sync::Arc;
@@ -56,6 +56,15 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         action: TombstoneRowAction::Revoke {
             target: position(target_seq),
         },
+    }
+}
+
+fn tombstone_expire(root_inode_id: InodeId, seq: u64, target_seq: u64) -> SubtreeTombstoneRecord {
+    SubtreeTombstoneRecord {
+        action: TombstoneRowAction::Expire {
+            target: position(target_seq),
+        },
+        ..tombstone_revoke(root_inode_id, seq, target_seq)
     }
 }
 
@@ -155,30 +164,48 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
 }
 
 #[test]
-fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
-    let state = state_from_tombstones(vec![
-        tombstone_set(InodeId(7), 5, "notes.txt"),
+fn a_removal_carries_the_undeletes_or_expirys_sequence_so_it_lands_in_that_commits_run() {
+    for cancel in [
         tombstone_revoke(InodeId(7), 9, 5),
-    ]);
-    let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
-        &state,
-        ApiMetadataRowFamily::ActiveDeletions,
-        ChangeSeq(5),
-    );
-    assert_eq!(
-        delta_rows.len(),
-        1,
-        "only the undelete's removal belongs to the run above sequence 5"
-    );
-    assert_matches!(
-        &delta_rows[0],
-        MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-            action: ActiveDeletionRowAction::Removed { revocation_seq },
-            ..
-        }) if *revocation_seq == ChangeSeq(9),
-        "unexpected delta row: {:?}",
-        delta_rows[0]
-    );
+        tombstone_expire(InodeId(7), 9, 5),
+    ] {
+        let state = state_from_tombstones(vec![tombstone_set(InodeId(7), 5, "notes.txt"), cancel]);
+        assert_eq!(
+            active_deletion_rows(&state),
+            vec![
+                (
+                    "active-deletion-00000000000000000005-00000000000000000007-0000000000"
+                        .to_owned(),
+                    "removed"
+                ),
+                (
+                    "active-deletion-00000000000000000005-00000000000000000007-0000000001"
+                        .to_owned(),
+                    "listed"
+                ),
+            ],
+            "the removal repeats the deletion's own position"
+        );
+        let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
+            &state,
+            ApiMetadataRowFamily::ActiveDeletions,
+            ChangeSeq(5),
+        );
+        assert_eq!(
+            delta_rows.len(),
+            1,
+            "only the removal belongs to the run above sequence 5"
+        );
+        assert_matches!(
+            &delta_rows[0],
+            MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
+                action: ActiveDeletionRowAction::Removed { revocation_seq },
+                ..
+            }) if *revocation_seq == ChangeSeq(9),
+            "unexpected delta row: {:?}",
+            delta_rows[0]
+        );
+    }
 }
 
 #[test]
@@ -186,6 +213,8 @@ fn the_merge_drops_cancelled_pairs_and_keeps_every_live_deletion() {
     let state = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt"),
         tombstone_revoke(InodeId(7), 9, 5),
+        tombstone_set(InodeId(9), 10, "old.txt"),
+        tombstone_expire(InodeId(9), 13, 10),
         tombstone_set(InodeId(8), 11, "report.txt"),
         tombstone_set(InodeId(7), 12, "notes.txt"),
     ]);
@@ -213,7 +242,8 @@ fn the_merge_drops_cancelled_pairs_and_keeps_every_live_deletion() {
             "active-deletion-00000000000000000011-00000000000000000008-0000000001".to_owned(),
             "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
         ],
-        "the cancelled pair goes and both live deletions stay, however far the floor advanced"
+        "the undeleted and expired pairs go and both live deletions stay, however far the \
+         floor advanced"
     );
 }
 
@@ -276,6 +306,34 @@ async fn undelete<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+}
+
+/// Commits the writer's expiry of one deletion.
+async fn expire<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    deletion_seq: ChangeSeq,
+    context: &MutationContext,
+) -> Result<loonfs_types::Commit, CoreError> {
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .publish_expiry(
+        store,
+        CommitId::generate(),
+        vec![ExpiredDeletion {
+            inode_id,
+            deletion_seq,
+        }],
+        context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
 }
 
 async fn trash_page<S: ObjectStore + ?Sized>(
@@ -354,12 +412,9 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
     per_root
         .into_iter()
         .filter_map(|(root_inode_id, records)| {
-            let active = active_tombstone_from_records(records, head_seq)?;
-            let deleted_binding = match active.action {
-                TombstoneRowAction::Set { deleted_binding } => deleted_binding,
-                TombstoneRowAction::Revoke { .. } => {
-                    panic!("the active tombstone is a set by construction")
-                }
+            let active = hiding_tombstone_from_records(records, head_seq)?;
+            let TombstoneRowAction::Set { deleted_binding } = active.action else {
+                return None;
             };
             Some(TrashEntry {
                 inode_id: root_inode_id,
@@ -418,6 +473,8 @@ enum HistoryStep {
     /// Undelete the deletion the named path produced, re-binding at the
     /// second path.
     Undelete(&'static str, &'static str),
+    /// Expire the deletion the named path produced.
+    Expire(&'static str),
 }
 
 #[tokio::test]
@@ -451,6 +508,15 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         HistoryStep::Delete("/dir-restored"),
         HistoryStep::Undelete("/dir-restored", "/dir-again"),
         HistoryStep::Undelete("/b.txt", "/b-back.txt"),
+        // Expire a deletion nested under a recovered subtree, then a plain
+        // one, and recreate a path that an expired deletion used to hold.
+        HistoryStep::Expire("/dir/inner.txt"),
+        HistoryStep::Create("/c.txt"),
+        HistoryStep::Delete("/c.txt"),
+        HistoryStep::Create("/d.txt"),
+        HistoryStep::Delete("/d.txt"),
+        HistoryStep::Expire("/c.txt"),
+        HistoryStep::Create("/c.txt"),
     ];
 
     let mut deletions: std::collections::HashMap<String, (InodeId, ChangeSeq)> =
@@ -483,6 +549,14 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
                     &context,
                 )
                 .await;
+            }
+            HistoryStep::Expire(deleted_path) => {
+                let (inode_id, deletion_seq) = deletions
+                    .remove(deleted_path)
+                    .expect("an expiry follows a recorded delete");
+                expire(&store, &namespace_id, inode_id, deletion_seq, &context)
+                    .await
+                    .expect("expire the deletion");
             }
         }
         assert_listing_matches_the_old_walk(&store, &namespace_id, step).await;
@@ -1115,4 +1189,190 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
     );
     assert_eq!(second.head_seq, ChangeSeq(8));
     assert_eq!(second.next_after_seq, None);
+}
+
+/// A namespace in which `/docs` (holding `notes.txt`) and `/keep.txt` are
+/// deleted, and the writer then expires the deletion of `/docs`.
+struct ExpiredDocs {
+    docs: InodeId,
+    notes: InodeId,
+    deletion_seq: ChangeSeq,
+    keep_seq: ChangeSeq,
+    expiry: loonfs_types::Commit,
+}
+
+async fn expire_docs<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> ExpiredDocs {
+    bootstrap_namespace(store, namespace_id, context)
+        .await
+        .expect("bootstrap namespace");
+    write_test_file(store, namespace_id, "/docs/notes.txt", "c_notes", context).await;
+    write_test_file(store, namespace_id, "/keep.txt", "c_keep", context).await;
+    let docs = inode_id_of(store, namespace_id, "/docs").await;
+    let notes = inode_id_of(store, namespace_id, "/docs/notes.txt").await;
+    let deletion_seq = delete_path(store, namespace_id, "/docs", context, None)
+        .await
+        .expect("delete the directory")
+        .committed_seq;
+    let keep_seq = delete_path(store, namespace_id, "/keep.txt", context, None)
+        .await
+        .expect("delete the file")
+        .committed_seq;
+    let expiry = expire(store, namespace_id, docs, deletion_seq, context)
+        .await
+        .expect("expire the directory's deletion");
+    ExpiredDocs {
+        docs,
+        notes,
+        deletion_seq,
+        keep_seq,
+        expiry,
+    }
+}
+
+#[tokio::test]
+async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidden() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
+    let namespace_id = NamespaceId::parse("trash-expiry").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    let expired = expire_docs(&store, &namespace_id, &context).await;
+
+    for folded in [false, true] {
+        if folded {
+            create_checkpoint(&store, &namespace_id, &context)
+                .await
+                .expect("fold the expiry");
+        }
+        let entries = trash_entries(&store, &namespace_id, 10).await;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.deletion_seq)
+                .collect::<Vec<_>>(),
+            vec![expired.keep_seq],
+            "folded {folded}: only the unexpired deletion stays in the trash"
+        );
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("load read view");
+        let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+        for path in ["/docs", "/docs/notes.txt"] {
+            let error = view
+                .resolve_path(path, AttributeInclusion::Omit, &access)
+                .await
+                .expect_err("an expired subtree stays hidden");
+            assert_eq!(
+                error.code(),
+                ErrorCode::PathNotFound,
+                "folded {folded}: {path}"
+            );
+        }
+        for inode_id in [expired.docs, expired.notes] {
+            assert_eq!(
+                view.metadata_view()
+                    .visible_inode(inode_id)
+                    .await
+                    .expect("visibility"),
+                None,
+                "folded {folded}: inode `{inode_id}` stays hidden"
+            );
+        }
+
+        let undelete = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        )
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::undelete(
+                    expired.docs,
+                    expired.deletion_seq,
+                    &loonfs_types::options::UndeleteDestination::Recorded,
+                ),
+            ))],
+            &context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect_err("an expired deletion can't be undeleted");
+        assert_eq!(undelete.code(), ErrorCode::NotDeleted, "folded {folded}");
+    }
+}
+
+#[tokio::test]
+async fn the_change_feed_reports_an_expiry_as_a_deletion_expired_event_by_loonfs() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
+    let namespace_id = NamespaceId::parse("feed-expiry").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    let expired = expire_docs(&store, &namespace_id, &context).await;
+
+    assert_eq!(expired.expiry.committed_by, loonfs_types::ActorId::loonfs());
+    assert_eq!(
+        expired.expiry.events,
+        vec![loonfs_types::api::v0::FilesystemChange::DeletionExpired {
+            inode_id: expired.docs,
+            deletion_seq: expired.deletion_seq,
+        }]
+    );
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("load read view");
+    let page = list_changes_after(
+        &view,
+        expired.keep_seq,
+        EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+    )
+    .await
+    .expect("list changes");
+    assert_eq!(page.changes, vec![expired.expiry.clone()]);
+    let record = view
+        .metadata_view()
+        .commit_at_seq(expired.expiry.committed_seq)
+        .await
+        .expect("read the commit row")
+        .expect("the expiry is committed");
+    let deletions = vec![ExpiredDeletion {
+        inode_id: expired.docs,
+        deletion_seq: expired.deletion_seq,
+    }];
+    assert_eq!(
+        record.semantic_commit_fingerprint,
+        loonfs_types::expiry_commit_fingerprint(
+            &namespace_id,
+            &loonfs_types::ActorId::loonfs(),
+            &deletions,
+        )
+    );
+
+    // A retry with the same commit ID and deletions replays the commit from
+    // its receipt, though the deletion is no longer recoverable.
+    let replayed = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .publish_expiry(
+        &store,
+        expired.expiry.commit_id.clone(),
+        deletions,
+        &context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("replay the expiry");
+    assert_eq!(replayed, expired.expiry);
 }

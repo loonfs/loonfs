@@ -3,8 +3,9 @@
 //!
 //! This vocabulary is internal. Callers speak
 //! [`CommitIntent`](crate::path::write::CommitIntent), whose
-//! path-oriented operations the planner compiles into the ops below; nothing
-//! outside this crate constructs them.
+//! path-oriented operations the planner compiles into the ops below, and the
+//! writer's expiry of deletions compiles into [`CommitOperation::ExpireDeletion`];
+//! nothing outside this crate constructs them.
 
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, ContentRef,
@@ -107,6 +108,17 @@ pub(crate) enum CommitOperation {
         parent_inode_id: InodeId,
         /// Recovered child spelling, whose derived key must be absent.
         display_name: DisplayName,
+    },
+    /// End the recoverability of the deletion recorded at `deletion_seq`.
+    /// The writer commits this once the retention floor reaches the
+    /// deletion. Like an undelete, it applies only while that deletion is
+    /// the root's latest tombstone event, but it restores nothing, so the
+    /// subtree stays hidden.
+    ExpireDeletion {
+        /// Root inode of the deletion.
+        inode_id: InodeId,
+        /// Sequence of the deleting commit.
+        deletion_seq: ChangeSeq,
     },
     /// Replace an inode's attributes with a new complete map.
     ///
