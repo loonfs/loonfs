@@ -23,9 +23,9 @@ const START_MS: u64 = 100 * DAY_MS;
 const WINDOW_MS: u64 = 30 * DAY_MS;
 
 /// Requests the advance adds to the visit of an idle namespace whose floor
-/// already reached the head: three loads of the current manifest, one of
-/// which also checks for a WAL object after it. The docs quote this number.
-const IDLE_ADVANCE_REQUESTS: usize = 14;
+/// already reached the head: one load of the current manifest. The docs
+/// quote this number.
+const IDLE_ADVANCE_REQUESTS: usize = 4;
 
 /// A config with every default, and `window_ms` as its retention window.
 fn retention_config(window_ms: Option<u64>) -> ServerConfig {
