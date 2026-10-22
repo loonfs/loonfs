@@ -52,7 +52,7 @@ The host sets how much memory a server has, and memory is empty after a restart.
 The tiered implementation has two parts. The "memory tier" keeps decoded blocks under the memory budget, as the memory implementation does, and the "SSD tier" keeps blocks in a directory on the local SSD under a byte budget of its own. The two tiers form one cache with one admission rule: every block that's inserted goes into both tiers. To get a block, the tiered implementation:
 
 1. If the block is in memory, marks it as the most recently used block on disk and returns the block.
-2. If the block is on disk, reads it, checks its length and checksum against the caller's handle, decodes it, marks it as the most recently used block on disk, inserts the decoded block into memory, and returns the block.
+2. If the block is on disk, checks the length of the block's file against the stored length that the SSD tier recorded for the block, before it reads any of the file's bytes. Then it reads the block, checks its length and checksum against the caller's handle, decodes it, marks it as the most recently used block on disk, inserts the decoded block into memory, and returns the block.
 3. If the block is in neither tier, returns a miss.
 
 After a miss, a get or load reads the block from the store and inserts it. An insert puts the decoded block into memory and queues the stored bytes for the SSD tier's writer, which writes them to disk, so a read doesn't wait for a disk write. An insert of a block that the disk already keeps writes nothing, and it refreshes the block's place on disk. LoonFS inserts a block in three cases:
@@ -106,7 +106,7 @@ LoonFS keeps each kind of cache entry under a budget of its own, so that one kin
 The SSD tier has two settings, in a `[metadata_cache.ssd]` table under the server's `[metadata_cache]` table ([`config.rs`](../../crates/loonfs-server/src/config.rs)). Both settings are required, and without the table, the server has no SSD tier.
 
 - `directory` is the directory on the local SSD that the SSD tier writes its blocks to. The server creates it if it's missing.
-- `max_segment_bytes` is the byte budget for blocks on disk, shared by every namespace that the server serves.
+- `max_segment_bytes` is the budget for blocks on disk, shared by every namespace that the server serves. The SSD tier charges each block its stored length, or 4 KiB for a smaller block, so the budget limits the number of blocks on disk as well as their bytes.
 
 Each read or write of a block on disk opens and closes the block's file, so the SSD tier keeps no files open between reads, and the server's sizing has no rule for open files.
 
@@ -116,11 +116,13 @@ The SSD tier also keeps its index and its write queue in memory. The index recor
 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B
 ```
 
-The formula assumes that a block on disk is 4 KiB, which was the mean size of a stored block in a compacted namespace of 20,000 files, so the term for a 10 GiB tier is about 484 MiB, and for a 100 GiB tier about 4.2 GiB.
+Because the SSD tier charges each block at least 4 KiB, it keeps at most one block for each 4 KiB of its budget, so the term is the most memory that the write queue and the index use. For a 10 GiB tier, the term is about 484 MiB, and for a 100 GiB tier, about 4.2 GiB. (For comparison, the mean stored block in a compacted namespace of 20,000 files was 4.1 KiB.)
 
 Why does the SSD tier have one budget for every namespace, and not one per namespace? Tenants' working sets differ by orders of magnitude, and they change over the day. For example, one tenant might read 2 GB of metadata all morning and nothing in the evening, while another reads 5 MB once an hour. A shared least-recently-used budget follows those working sets as they change, and a budget per namespace would need an operator to set and adjust a number for each tenant.
 
 Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Namespace heads, WAL tails, WAL objects, and content objects stay in memory under their own budgets.
+
+Why does the SSD tier charge each block at least 4 KiB? The index keeps an entry in memory for each block on disk, and its term in `fixed` covers one entry for each 4 KiB of the budget. If the SSD tier charged each block only its stored length, a tier of small blocks could keep many more entries than the term covers (a tier of 1 KiB blocks would keep more than three times as many), and the server could use more memory than its limit. The 4 KiB minimum costs disk instead, because a tier of blocks smaller than 4 KiB keeps fewer bytes on disk than its budget.
 
 Why does the SSD tier write blocks from a queue, and skip the write when the queue is full? Without the queue, a read that inserts a block would wait for a disk write before it returns. Without the cap, a disk that's slower than the reads would grow the queue past its term in `fixed`. A block that the SSD tier doesn't write stays in memory, and if memory evicts it, the next read of the block costs a GET, as it would on a server without the tier.
 
@@ -148,7 +150,7 @@ A client gets the same results with or without the tier, because the tier change
 
 The block cache's metrics keep one cache name, `segment`, in the grammar of the other cache metrics (`loonfs_<cache>_cache_*`), and they report each tier under a `tier` label with the value `memory` or `ssd`. The object cache's metrics use a `key_class` label in the same way (see [Probes and metrics](../../crates/loonfs-server/docs/self-hosting.md#probes-and-metrics)). For example, `loonfs_segment_cache_gets_total{tier="ssd",result="hit"}` records the gets that the SSD tier served from disk, and `loonfs_segment_cache_gets_total{tier="ssd",result="miss"}` records the gets that went to the store.
 
-The SSD tier records each block that it finds in its directory at startup as an insert, in `loonfs_segment_cache_inserts_total{tier="ssd"}`. The rejections family, `loonfs_segment_cache_rejections_total`, has the same `tier` label and records the blocks that a tier didn't keep. The SSD tier records a rejection when the write queue is full, when the write fails, when the tier is already closed, or when the block is larger than the whole budget, and in each case the block stays in memory. The SSD tier's gauge, `loonfs_segment_cache_retained_stored_bytes`, reports the bytes charged to the blocks on disk. Each block's charge is its stored length plus the index's own allocation for the block, and `metadata_cache.ssd.max_segment_bytes` limits that same charge. The SSD tier has a gauge of its own because the disk keeps stored bytes, and the memory gauge, `loonfs_segment_cache_retained_decoded_bytes`, reports decoded bytes.
+The SSD tier records each block that it finds in its directory at startup as an insert, in `loonfs_segment_cache_inserts_total{tier="ssd"}`. The rejections family, `loonfs_segment_cache_rejections_total`, has the same `tier` label and records the blocks that a tier didn't keep. The SSD tier records a rejection when the write queue is full, when the write fails, when the tier is already closed, or when the block is larger than the whole budget, and in each case the block stays in memory. The SSD tier's gauge, `loonfs_segment_cache_retained_stored_bytes`, reports the bytes charged to the blocks on disk. Each block's charge is the larger of its stored length and 4 KiB, plus the index's own allocation for the block, and `metadata_cache.ssd.max_segment_bytes` limits that same charge. So the gauge can report more bytes than the disk keeps, for example on a tier of blocks smaller than 4 KiB. The SSD tier has a gauge of its own because the disk keeps stored bytes, and the memory gauge, `loonfs_segment_cache_retained_decoded_bytes`, reports decoded bytes.
 
 The [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md#keeping-metadata-blocks-on-local-ssd) describes the two settings, and its [Set one number](../../crates/loonfs-server/docs/self-hosting.md#set-one-number) section states the term that the SSD tier adds to `fixed`.
 
@@ -159,7 +161,7 @@ This section lists what the block cache and its SSD tier cost.
 | | Cost |
 | --- | --- |
 | Memory | The memory tier keeps decoded blocks, as the memory implementation does. The SSD tier's 64 MiB write queue and its index, at 168 bytes for each block on disk, are a term in `fixed` |
-| Disk | The SSD tier's byte budget, and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
+| Disk | Up to the SSD tier's budget (less on a tier of blocks smaller than 4 KiB), and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
 | CPU | A disk hit is checked and decoded again. A read-ahead window decodes every block it fetches, including blocks that no read uses |
 | Requests | The first read of a block that the server didn't write costs a GET, with or without the tier. A disk hit costs no request |
 | Code | One interface with two implementations, and no cache under the block cache |
