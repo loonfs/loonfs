@@ -134,7 +134,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
             MetadataRowFamily::DirentryChildBinds,
             &prefix,
             &filter_probe,
-            Readahead::Stored,
+            Readahead::Enabled,
         )
         .await?
         .into_iter()
@@ -264,7 +264,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
             MetadataRowFamily::Tombstones,
             &prefix,
             &filter_probe,
-            Readahead::Stored,
+            Readahead::Enabled,
         )
         .await?
         .into_iter()

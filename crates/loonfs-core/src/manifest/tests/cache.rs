@@ -547,6 +547,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
         Arc::new(SharedSegmentBlocks::new(0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
+        crate::limits::READAHEAD_WINDOW_BYTES,
     );
     let read_view = super::load_manifest_segments_for_inspection(
         &store,
@@ -1168,6 +1169,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         Arc::new(SharedSegmentBlocks::new(usize::MAX)),
         ObjectStoreScope::new(0),
         Arc::default(),
+        crate::limits::READAHEAD_WINDOW_BYTES,
     );
 
     let (cold, cold_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
@@ -1298,6 +1300,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             Arc::new(SharedSegmentBlocks::new(0)),
             ObjectStoreScope::new(0),
             pool,
+            crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
     let probe_pool = Arc::new(ReadWorkingMemory::default());

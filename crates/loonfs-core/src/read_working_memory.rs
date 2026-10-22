@@ -49,6 +49,12 @@ impl ReadWorkingMemory {
         self.limit
     }
 
+    /// Returns the bytes that reservations can take before the limit refuses
+    /// one.
+    pub fn available_bytes(&self) -> usize {
+        self.limit.saturating_sub(self.in_use())
+    }
+
     pub fn try_reserve(&self, bytes: usize) -> bool {
         let reserved = self
             .in_use

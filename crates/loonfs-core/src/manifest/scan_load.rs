@@ -34,6 +34,9 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: &'a SessionBlockMemo,
     pub(super) readahead: Readahead,
     pub(super) upper_bound: Option<&'a str>,
+    /// Whether a read-ahead window stops at the last block that can hold a
+    /// key below `upper_bound`, and not at the segment's last block.
+    pub(super) windows_stop_at_upper_bound: bool,
 }
 
 /// Visits each row of `segments` whose key is in `[lower_bound, upper_bound)`,
@@ -42,8 +45,10 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
 /// The rows of one segment arrive in key order, and a key that two segments
 /// list arrives once from each. Up to `STORE_READS_IN_FLIGHT` segments are
 /// open and loading through `segment_cache` at once. The blocks of each refill
-/// are charged to the cache's read working memory while they load, and the
-/// charge is released before `visit` sees their rows.
+/// are charged to the cache's read working memory while they load. Before
+/// `visit` sees their rows, the charge for the decoded blocks is released, and
+/// the memo keeps the stored bytes of each open segment's read-ahead window,
+/// so that segment's next refill needs no GET.
 pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -62,6 +67,17 @@ pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
         )
     });
     let mut iterators = Vec::new();
+    let block_memo = SessionBlockMemo::new(read_working_memory(segment_cache));
+    // A visit reads its range once, so a window's blocks past the range would
+    // stay in the memo, unread, for the rest of the visit.
+    let loader = ScanLoader {
+        store,
+        segment_cache,
+        block_memo: &block_memo,
+        readahead: Readahead::Enabled,
+        upper_bound,
+        windows_stop_at_upper_bound: true,
+    };
     loop {
         iterators.extend(
             pending
@@ -74,19 +90,11 @@ pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
         if iterators.is_empty() {
             return Ok(ControlFlow::Continue(()));
         }
-        {
-            // The memo is dropped before `visit` runs, so the scan's blocks
-            // don't take the read working memory that the caller's sets need.
-            let block_memo = SessionBlockMemo::new(read_working_memory(segment_cache));
-            let loader = ScanLoader {
-                store,
-                segment_cache,
-                block_memo: &block_memo,
-                readahead: Readahead::Enabled,
-                upper_bound,
-            };
-            refill_iterators(&loader, &mut iterators, 1).await?;
-        }
+        refill_iterators(&loader, &mut iterators, 1).await?;
+        // The memo drops its decoded blocks before `visit` runs, so the scan
+        // holds no more than one window of stored bytes for each open
+        // segment while the caller's sets take read working memory.
+        block_memo.release_decoded();
         for iterator in &mut iterators {
             while let Some((key, _)) = iterator.head() {
                 if upper_bound.is_some_and(|upper| key >= upper) {
@@ -155,13 +163,21 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'_>
         let index = self.load_index(segment).await?;
         let first = entries.first().expect("a refill should request a block");
         let start = index.partition_point(|entry| entry.block.offset < first.block.offset);
+        let end = start + entries.len();
+        let window_end = if self.windows_stop_at_upper_bound {
+            index_blocks_for_key_range(&index, "", self.upper_bound)
+                .end
+                .max(end)
+        } else {
+            index.len()
+        };
         let blocks = load_segment_blocks_with_readahead(
             self.store,
             self.segment_cache,
             self.block_memo,
             segment.descriptor,
-            &index,
-            start..start + entries.len(),
+            &index[..window_end],
+            start..end,
             self.readahead,
         )
         .await?;

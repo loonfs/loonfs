@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
 
-fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
+pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
     (start..start + count)
         .map(|index| {
             // Long, valid names ensure this fixture exceeds the eager-object
@@ -69,17 +69,53 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
     .expect("write fixture segment")
 }
 
+/// A view whose reads fetch `window_bytes` ahead of a data block they miss,
+/// so that a test's windows can be smaller than its segment.
+fn cache_with_window(max_decoded_bytes: usize, window_bytes: usize) -> MetadataSegmentCache {
+    MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(max_decoded_bytes)),
+        ObjectStoreScope::new(0),
+        Arc::default(),
+        window_bytes,
+    )
+}
+
+/// The stored bytes of `blocks` data blocks of `descriptor` from `start`. A
+/// read-ahead window of that size from `start` covers exactly those blocks.
+async fn window_of_blocks(
+    store: &impl ObjectStore,
+    descriptor: &MetadataSegmentRef,
+    start: usize,
+    blocks: usize,
+) -> usize {
+    let index = index_block_load::load_segment_index(
+        store,
+        None,
+        &load::SessionBlockMemo::default(),
+        descriptor,
+    )
+    .await
+    .expect("index");
+    let window_bytes = index[start + blocks].block.offset - index[start].block.offset;
+    usize::try_from(window_bytes).expect("a test window fits usize")
+}
+
 #[tokio::test]
 async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
+    // A window of 32 blocks from the first one, and of about 32 from the
+    // others (the fixture's blocks are about the same size), so the ranges
+    // and limits below start and end on both sides of a window's end. One
+    // window of the default size would cover the whole segment.
+    let window_bytes = window_of_blocks(&store, &descriptor, 0, 32).await;
     // A one-byte budget keeps no block, and a 64 KiB budget keeps a few data
     // blocks and evicts them during the wide ranges.
     const EVICTING_BUDGET: usize = 64 * 1024;
     for budget in [1, EVICTING_BUDGET, 8 * 1024 * 1024] {
-        let cache = MetadataSegmentCache::unshared(budget);
+        let cache = cache_with_window(budget, window_bytes);
         for (start, end, limit) in [
             (0, 1024, 0),
             (0, 1024, 1),
@@ -323,50 +359,60 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     assert_eq!(data_gets, vec![(object_key, Some(data_range))]);
 }
 
+/// Checks that a page decodes only the block it reads, that a later page of
+/// the same read finds its block in the window that the read's memo keeps,
+/// and that a page of another read fetches a window of its own. A window's
+/// other blocks are kept as stored bytes in the memo of the read that fetched
+/// them, and not in the block cache.
 #[tokio::test]
-async fn bounded_pages_preserve_readahead_without_reading_the_entire_range() {
+async fn bounded_pages_keep_their_window_in_the_memo_of_their_read() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let first = load_manifest_segment_rows_in_key_range_with_cache(
-        &store,
-        Some(&cache),
-        &load::SessionBlockMemo::default(),
-        &descriptor,
-        ChangeSeq(1),
-        "",
-        None,
-        1,
-        scan::Readahead::Enabled,
-    )
-    .await
-    .expect("first page");
+    let memo = load::SessionBlockMemo::default();
+    let page = |position: usize, memo| {
+        let lower = expected[position].row_key_for_family(FAMILY);
+        let (store, cache, descriptor) = (&store, &cache, &descriptor);
+        async move {
+            load_manifest_segment_rows_in_key_range_with_cache(
+                store,
+                Some(cache),
+                memo,
+                descriptor,
+                ChangeSeq(1),
+                &lower,
+                None,
+                1,
+                scan::Readahead::Enabled,
+            )
+            .await
+            .expect("page")
+            .rows()
+            .count()
+        }
+    };
+
+    assert_eq!(page(0, &memo).await, 1, "the page reads one block");
     assert_eq!(
-        first.rows().count(),
-        32,
-        "only the first aligned window is loaded"
+        cache.stats().inserts,
+        3,
+        "the page decodes the index, the filter that the index's GET reads, and the one \
+         data block it reads"
     );
     store.reset();
-    let lower = expected[1].row_key_for_family(FAMILY);
-    load_manifest_segment_rows_in_key_range_with_cache(
-        &store,
-        Some(&cache),
-        &load::SessionBlockMemo::default(),
-        &descriptor,
-        ChangeSeq(1),
-        &lower,
-        None,
-        1,
-        scan::Readahead::Enabled,
-    )
-    .await
-    .expect("next page");
+    page(1, &memo).await;
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
-        "next page uses read-ahead"
+        "the read's next page finds its block in the memo"
+    );
+    page(2, &load::SessionBlockMemo::default()).await;
+    assert_eq!(
+        store.count(OperationSelector::Read),
+        1,
+        "a page of another read fetches a window of its own"
     );
 }
 
@@ -453,7 +499,9 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     )
     .await
     .expect("index");
-    // A budget of four blocks, so the cache keeps fewer blocks than a window.
+    // A budget of four blocks, so the cache keeps fewer blocks than a window,
+    // and windows of 32 blocks, so the scan reads several of them. One
+    // window of the default size would cover the whole segment.
     let probe = MetadataSegmentCache::unshared(usize::MAX);
     data_block_load::load_segment_data_block_with_readahead(
         &store,
@@ -477,6 +525,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         shared,
         ObjectStoreScope::new(0),
         Arc::default(),
+        window_of_blocks(&store, &descriptor, 1, 32).await,
     );
     let runs = vec![MetadataRunManifest {
         run_no: RunNo(1),
@@ -496,7 +545,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
             FAMILY,
             &format!("{filter_probe}-"),
             &filter_probe,
-            scan::Readahead::Stored,
+            scan::Readahead::Enabled,
         )
         .await
         .expect("prefix scan");
@@ -505,7 +554,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     let gets = store.count(OperationSelector::Read);
     assert!(
         reads > 64,
-        "the scan reads three windows of blocks, not {reads}"
+        "the scan reads the blocks of several windows, not {reads}"
     );
     assert_eq!(
         blocks.decodes.load(Ordering::SeqCst),
@@ -543,7 +592,8 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     replace_object(&store, &key, Bytes::from(bytes))
         .await
         .expect("corrupt fixture");
-    // Unrequested, non-read-ahead data need not be eagerly validated.
+    // The first page's window covers the damaged block 64 as stored bytes, and
+    // the page doesn't reach that block, so the page doesn't decode it.
     load_manifest_segment_rows_in_key_range_with_cache(
         &store,
         None,
@@ -638,7 +688,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &lower,
                 loonfs_types::format::segment_blocks::string_prefix_upper_bound(&lower).as_deref(),
                 1,
-                scan::Readahead::Stored,
+                scan::Readahead::Enabled,
             )
             .await;
             if position == 2 {

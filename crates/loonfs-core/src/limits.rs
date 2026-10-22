@@ -57,6 +57,22 @@ pub const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 /// memory in `fixed`.
 pub const SSD_WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Stored bytes of metadata segment blocks that a read fetches ahead when it
+/// misses a data block, counting the missed block.
+///
+/// A read that misses a data block fetches that block and the blocks after
+/// it in the segment, as long as their stored bytes stay within this size,
+/// in one ranged GET. The tail latency of a GET from an object store is
+/// nearly flat from tens of kilobytes to about 1 MiB, and the store charges
+/// the same for each GET, so a window of 1 MiB costs about as much as a GET
+/// of the missed block alone, and each later block of the window that the
+/// read uses needs no GET of its own. For example, with blocks stored in
+/// about 4 KiB each, a window has about 256 blocks. A runtime can set
+/// another size (`MetadataCacheBuilder::read_ahead_window_bytes` in the
+/// `loonfs` crate), and a window never reads more than the 4 MiB that one
+/// ranged GET of blocks reads.
+pub const READAHEAD_WINDOW_BYTES: usize = 1024 * 1024;
+
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
 /// materialization.

@@ -1,11 +1,14 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
 //!
-//! Point loads and scan loads consult the per-view memo and the block cache
-//! first. A scan load fetches the blocks that neither one has with coalesced
+//! Every load consults the per-view memo and the block cache first. A load
+//! that reads ahead fetches the read-ahead window of a block that neither one
+//! has (see [`read_ahead_window_len`]) and keeps the window's other blocks as
+//! stored bytes in the memo. A span load, for compaction and for scans that
+//! don't read ahead, fetches the blocks that neither one has with coalesced
 //! ranged GETs.
 
 use super::block_load::SessionBlockMemo;
-use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
+use super::cache::{read_ahead_window_bytes, DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::index_block_load::{
     decode_stored_block, load_section_bytes, segment_block_cache_key, segment_codec_error,
@@ -14,6 +17,7 @@ use super::segment_block_cache::LoadedSegmentBlock;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::limits::READAHEAD_WINDOW_BYTES;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -30,19 +34,52 @@ pub(super) const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
 // The SSD tier's write queue fits the blocks of at least one bulk GET.
 const _: () = assert!(MAX_BULK_LOAD_BYTES <= crate::limits::SSD_WRITE_QUEUE_BYTES as u64);
+// A default read-ahead window is read in one GET.
+const _: () = assert!(READAHEAD_WINDOW_BYTES as u64 <= MAX_BULK_LOAD_BYTES);
+
+/// Returns how many blocks of `entries` the read-ahead window of a read that
+/// misses `entries[0]` covers.
+///
+/// The window is the missed block and the blocks after it, as long as their
+/// stored bytes stay within `window_bytes` and within `MAX_BULK_LOAD_BYTES`,
+/// so one ranged GET reads the window. A block larger than that is a window
+/// of its own. For example, a window of 1 MiB over blocks stored in 4 KiB
+/// each covers 256 blocks, and over blocks of 300 KiB it covers three.
+pub(super) fn read_ahead_window_len(entries: &[SegmentIndexEntry], window_bytes: usize) -> usize {
+    let (first, rest) = entries
+        .split_first()
+        .expect("a read-ahead window should start at a block");
+    let max_bytes = MAX_BULK_LOAD_BYTES.min(window_bytes as u64);
+    1 + rest
+        .iter()
+        .take_while(|entry| {
+            entry.block.offset + u64::from(entry.block.stored_bytes) - first.block.offset
+                <= max_bytes
+        })
+        .count()
+}
 
 /// Loads the data block of `entries[0]`, and reads ahead over the blocks of
-/// `entries` after it, up to `MAX_BULK_LOAD_BYTES` past the first block's
-/// offset, in the same ranged GET.
+/// `entries` after it in the same ranged GET if neither the memo nor the
+/// block cache has the block.
 ///
-/// The memo records the stored bytes of the window's other blocks, and a
-/// later load by the same read decodes a block from them when the read
-/// reaches it, which inserts the block into the block cache. A scan reads one
-/// block at a time through this function, so decoding the whole window here
-/// would decode blocks that the scan never reads. And when the block cache
-/// keeps fewer blocks than the scan has in flight, the cache could evict the
-/// window's decoded blocks before the scan reaches them, and each later block
-/// of the window would then fetch and decode the rest of the window again.
+/// Every read that reads ahead, a scan or a lookup, loads its blocks one at a
+/// time through this function. The GET reads the read-ahead window that
+/// [`read_ahead_window_len`] describes, and the memo records the stored bytes
+/// of the window's other blocks. A later load by the same read decodes a
+/// block from them when the read reaches it, which inserts the block into the
+/// block cache. Decoding the whole window here would decode blocks that the
+/// read never reaches, and a damaged block that the read doesn't reach would
+/// fail the read. And when the block cache keeps fewer blocks than the read
+/// has in flight, the cache could evict the window's decoded blocks before the
+/// read reaches them, and each later block of the window would then fetch and
+/// decode the rest of the window again.
+///
+/// The memo is the only place that keeps the window's other blocks, so the
+/// window also stops at the read working memory that the memo's pool has
+/// free. A larger window would make the memo evict its own oldest blocks, the
+/// window's among them, to make room for the rest. Without a memo, the GET
+/// reads the block alone.
 pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -65,15 +102,10 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
                 stored,
             });
         }
-        let read_count = entries
-            .iter()
-            .take_while(|entry| {
-                entry.block.offset == handle.offset
-                    || entry.block.offset + u64::from(entry.block.stored_bytes) - handle.offset
-                        <= MAX_BULK_LOAD_BYTES
-            })
-            .count();
-        let entries = &entries[..read_count];
+        let window_bytes = memo.map_or(0, |memo| {
+            read_ahead_window_bytes(segment_cache).min(memo.available_bytes())
+        });
+        let entries = &entries[..read_ahead_window_len(entries, window_bytes)];
         let last = entries[entries.len() - 1].block;
         let object_key = metadata_segment_object_key(descriptor);
         let bytes = Bytes::from(
@@ -375,4 +407,60 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     }
     *winner_decodes = Some(retained);
     Ok(first_block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Index entries for contiguous blocks with the given stored sizes.
+    fn entries(stored_bytes: &[u32]) -> Vec<SegmentIndexEntry> {
+        let mut offset = 0;
+        stored_bytes
+            .iter()
+            .map(|stored_bytes| {
+                let entry = SegmentIndexEntry {
+                    last_row_key: format!("key-{offset:012}"),
+                    block: BlockHandle {
+                        offset,
+                        stored_bytes: *stored_bytes,
+                        decoded_bytes: *stored_bytes,
+                        crc32c: 0,
+                    },
+                };
+                offset += u64::from(*stored_bytes);
+                entry
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_read_ahead_window_covers_the_blocks_whose_stored_bytes_fit_its_size() {
+        const KIB: u32 = 1024;
+        let window = READAHEAD_WINDOW_BYTES;
+        // Each case is the stored size and number of the blocks, the window's
+        // size, and the blocks that the window covers.
+        for (block_bytes, blocks, window_bytes, covered) in [
+            // Small blocks: 256 blocks of 4 KiB fill 1 MiB exactly.
+            (4 * KIB, 1_000, window, 256),
+            // Large blocks: three blocks of 300 KiB fit, and a fourth doesn't.
+            (300 * KIB, 10, window, 3),
+            // A block larger than the window is a window of its own.
+            (2 * 1024 * KIB, 10, window, 1),
+            // A window larger than one GET stops at `MAX_BULK_LOAD_BYTES`.
+            (4 * KIB, 10_000, usize::MAX, 1_024),
+            (4 * KIB, 10_000, 8 * 1024 * 1024, 1_024),
+            // A window stops at the segment's last block.
+            (4 * KIB, 10, window, 10),
+            // A zero window reads the missed block alone.
+            (4 * KIB, 10, 0, 1),
+        ] {
+            let entries = entries(&vec![block_bytes; blocks]);
+            assert_eq!(
+                read_ahead_window_len(&entries, window_bytes),
+                covered,
+                "{blocks} blocks of {block_bytes} bytes, window {window_bytes}"
+            );
+        }
+    }
 }
