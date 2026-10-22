@@ -34,6 +34,7 @@ const EXPECTED_CASES = [
     "pagination",
     "proxy",
     "snapshots",
+    "unknown_event_kinds",
     "upload_abort",
     "upload_direct_put",
     "upload_modes",
@@ -199,6 +200,19 @@ interface ChangesRequest {
 interface ChangesExpected {
     committed_seq: number;
     change_count: number;
+}
+
+interface UnknownEventKindsRequest {
+    namespace_id: string;
+    after_seq: number;
+    unknown_kind: string;
+    page: JsonObject;
+}
+
+interface UnknownEventKindsExpected {
+    committed_seqs: number[];
+    next_after_seq: number;
+    known_events: JsonObject[][];
 }
 
 interface DirectPutRequest {
@@ -543,6 +557,17 @@ const CHANGES_REQUEST_FIELDS = [
     "after_seq",
 ] as const;
 const CHANGES_EXPECTED_FIELDS = ["committed_seq", "change_count"] as const;
+const UNKNOWN_EVENT_KINDS_REQUEST_FIELDS = [
+    "namespace_id",
+    "after_seq",
+    "unknown_kind",
+    "page",
+] as const;
+const UNKNOWN_EVENT_KINDS_EXPECTED_FIELDS = [
+    "committed_seqs",
+    "next_after_seq",
+    "known_events",
+] as const;
 const DIRECT_PUT_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -730,6 +755,17 @@ function decodeChanges(testCase: ConformanceCase): [ChangesRequest, ChangesExpec
     return [
         testCase.request as unknown as ChangesRequest,
         testCase.expected as unknown as ChangesExpected,
+    ];
+}
+
+function decodeUnknownEventKinds(
+    testCase: ConformanceCase,
+): [UnknownEventKindsRequest, UnknownEventKindsExpected] {
+    strictObject(testCase.request, UNKNOWN_EVENT_KINDS_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, UNKNOWN_EVENT_KINDS_EXPECTED_FIELDS, `${testCase.name} expected`);
+    return [
+        testCase.request as unknown as UnknownEventKindsRequest,
+        testCase.expected as unknown as UnknownEventKindsExpected,
     ];
 }
 
@@ -2819,6 +2855,32 @@ conformanceTest("changes", async (activeHarness, testCase) => {
     assert.ok(change.events);
     assert.equal(change.events.length, 1);
     assert.equal(change.events[0]?.kind, "directory_created");
+});
+
+conformanceTest("unknown_event_kinds", async (_activeHarness, testCase) => {
+    const [request, expected] = decodeUnknownEventKinds(testCase);
+    const client = new LoonFSClient({
+        baseUrl: "http://api.test",
+        token: "unused",
+        fetch: async () => Response.json(request.page),
+    });
+    const feed = await client.changes.list({
+        namespace_id: request.namespace_id,
+        after_seq: request.after_seq,
+    });
+
+    assert.deepEqual(
+        feed.changes.map((change) => change.committed_seq),
+        expected.committed_seqs,
+    );
+    assert.equal(feed.next_after_seq, expected.next_after_seq);
+    // The SDK returns an event whose kind it doesn't define unchanged, so a caller skips it by kind.
+    assert.deepEqual(
+        feed.changes.map((change) =>
+            change.events.filter((event) => (event.kind as string) !== request.unknown_kind),
+        ),
+        expected.known_events,
+    );
 });
 
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {

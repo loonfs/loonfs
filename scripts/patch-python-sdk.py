@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Removes the streaming and deprecated options from the generated Python SDK, applies the LoonFS retry and error rules, and moves its entry point to `loonfs.server`."""
+"""Removes the streaming and deprecated options from the generated Python SDK, applies the LoonFS retry and error rules, skips change events of kinds that the SDK doesn't define, and moves its entry point to `loonfs.server`."""
 
+import json
 import pathlib
 import re
 
@@ -115,6 +116,49 @@ source = replace_once(
 ''',
 )
 api_error_path.write_text(source)
+
+# A client must skip a change event whose kind it doesn't know, so that a newer
+# server can add kinds. The generated union rejects an unknown kind, which fails
+# the whole response, so the commit model drops those events before validation.
+openapi = json.loads(pathlib.Path("../docs/specs/openapi.json").read_text())
+event_kinds = "".join(
+    f'    "{kind}",\n'
+    for kind in sorted(openapi["components"]["schemas"]["FilesystemChange"]["discriminator"]["mapping"])
+)
+commit_path = pathlib.Path("generated/python/types/commit.py")
+source = commit_path.read_text()
+source = replace_once(
+    source,
+    "from ..core.pydantic_utilities import IS_PYDANTIC_V2, UniversalBaseModel\n",
+    "from ..core.pydantic_utilities import IS_PYDANTIC_V2, UniversalBaseModel, universal_field_validator\n",
+)
+source = replace_once(
+    source,
+    "from .namespace_id import NamespaceId\n",
+    "from .namespace_id import NamespaceId\n"
+    "\n"
+    f"_EVENT_KINDS = frozenset({{\n{event_kinds}}})\n",
+)
+source = replace_once(
+    source,
+    "    if IS_PYDANTIC_V2:\n",
+    "    @universal_field_validator(\"events\", pre=True)\n"
+    "    def _skip_unknown_event_kinds(cls, events: typing.Any) -> typing.Any:\n"
+    "        # A newer server can return an event kind that this SDK doesn't define, and the\n"
+    "        # API requires a client to skip it. An event without a kind still fails validation.\n"
+    "        if not isinstance(events, list):\n"
+    "            return events\n"
+    "        return [\n"
+    "            event\n"
+    "            for event in events\n"
+    "            if not isinstance(event, dict)\n"
+    "            or not isinstance(event.get(\"kind\"), str)\n"
+    "            or event[\"kind\"] in _EVENT_KINDS\n"
+    "        ]\n"
+    "\n"
+    "    if IS_PYDANTIC_V2:\n",
+)
+commit_path.write_text(source)
 
 client_path = pathlib.Path("generated/python/client.py")
 source = client_path.read_text()

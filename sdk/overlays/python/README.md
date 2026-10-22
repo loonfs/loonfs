@@ -33,6 +33,10 @@ explicitly if you may retry. Use
 `request_options={"additional_headers": {"Loonfs-Actor": actor_id}}`
 to override the client default for a request.
 
+A commit's `events`, from a publishing helper or the change feed, leave out any
+event of a kind that this version of the SDK doesn't define, so a newer server
+can add event kinds without breaking older clients.
+
 Use `client.files.download_stream` in a `with` block for bounded download memory:
 
 ```python

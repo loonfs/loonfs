@@ -4,7 +4,7 @@
 
 ## Cases
 
-The sixteen cases cover:
+The seventeen cases cover:
 
 - standard API errors
 - repeated commit requests
@@ -20,6 +20,7 @@ The sixteen cases cover:
 - reads, copies, restores, and updates by inode (`inode_addressing`)
 - snapshot creation, reads, extension, and deletion (`snapshots`)
 - change feed identity fields
+- change feed events of a kind that the client doesn't define (`unknown_event_kinds`)
 - an end-to-end filesystem workflow
 - requests through a proxy, the routes it forwards, and its authorization hook
 
@@ -27,6 +28,8 @@ Two cases don't run in every harness:
 
 - The proxy case: each SDK's test harness runs it against its own proxy implementation. The Rust harness only checks that the fixture is valid.
 - `upload_modes`: this case runs in the Rust reference harness. SDK harnesses check that it's listed in the case inventory, and the Go harness logs that it skips the case.
+
+The `unknown_event_kinds` case runs in every harness, but not against the conformance server, because the server returns only the event kinds that the API defines. Each harness serves the case's `page` from a local stub instead, and checks that its client decodes the page and returns the other events unchanged. The Python SDK leaves out the events of `unknown_kind`. The other clients return those events as values of a kind they don't define, so their harnesses skip them.
 
 ## JSON format
 
