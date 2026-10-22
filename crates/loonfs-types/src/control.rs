@@ -95,10 +95,6 @@ pub enum PinOwner {
     /// A pin that a caller created, which the API calls a snapshot. It's
     /// deleted by its ID, or by garbage collection after its expiry. The name
     /// is a label, not a key, so several records can have the same name.
-    ///
-    /// A record whose owner kind is `snapshot` (with a required expiry)
-    /// decodes as this owner, with the same name and expiry.
-    #[serde(alias = "snapshot")]
     User {
         /// The label that the creator recorded. Labels don't need to be unique.
         name: String,

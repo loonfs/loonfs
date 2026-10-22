@@ -1067,8 +1067,6 @@ Each pin is stored at `pins/{pin_id}.json`. Its ID includes the pinned manifest'
 | `user` | `name`, optional `expires_at_ms` | Readable before its expiry time. A pin without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace. Without an expiry, only explicit deletion removes it from an active namespace. |
 | `fork` | `target_namespace_id` | Not read through the pin. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Pin cleanup](#117-pin-cleanup)). |
 
-A reader MUST also accept a record whose owner kind is `snapshot`, with a `name` and a required `expires_at_ms`, and read it as a `user` pin with the same name and expiry. A writer MUST NOT write that owner kind.
-
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. A pin has no lifecycle status. Creating the record creates the pin, and deleting the record ends it. Fork pins have no expiry and no renewal protocol.
 
 Expiry, read eligibility, eligibility for garbage collection, and removal are separate. An expired user pin can't be read, but the record still exists. It appears in the complete pin listing, and it keeps its manifest and segments until garbage collection deletes it. [Pin cleanup](#117-pin-cleanup) defines when each kind of pin can be collected.

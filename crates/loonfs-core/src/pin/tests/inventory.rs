@@ -9,7 +9,6 @@ use super::*;
 use crate::pin::list::list_checkpoints_page;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
-use loonfs_test_support::stores::replace_object;
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{CheckpointOwner, ErrorCode, ListCheckpointsResponse, PageRequest};
 
@@ -541,95 +540,6 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
         .await
         .expect("list checkpoints");
     assert_eq!(checkpoints.checkpoints.len(), 6);
-}
-
-/// Checks that a stored record whose owner kind is `snapshot` loads as a
-/// user pin: it lists in both listings, reads by ID, and deletes.
-#[tokio::test]
-async fn a_snapshot_owned_record_lists_reads_and_deletes_as_a_user_pin() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap namespace");
-    let expires_at_ms = context.now_ms + 60_000;
-    let pin_id = pin_named(
-        &store,
-        &namespace_id,
-        "report-run",
-        Some(expires_at_ms),
-        &context,
-    )
-    .await;
-    let mut stored = serde_json::to_value(
-        load_pin(&store, &namespace_id, &pin_id)
-            .await
-            .expect("load pin")
-            .expect("pin")
-            .state,
-    )
-    .expect("encode pin payload");
-    stored["owner"] = serde_json::json!({
-        "kind": "snapshot",
-        "name": "report-run",
-        "expires_at_ms": expires_at_ms,
-    });
-    let encoded = loonfs_types::format::control::encode_control_state(
-        loonfs_types::format::control::ControlObjectKind::Pin,
-        &stored,
-    )
-    .expect("encode a snapshot-owned record");
-    replace_object(
-        &store,
-        &loonfs_objectstore::keys::pin(&namespace_id, &pin_id),
-        Bytes::from(encoded),
-    )
-    .await
-    .expect("write a snapshot-owned record");
-
-    let snapshots = crate::pin::list_snapshots_page(
-        &store,
-        &namespace_id,
-        PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("list snapshots");
-    assert_eq!(snapshots.items.len(), 1);
-    let snapshot = &snapshots.items[0];
-    assert_eq!(snapshot.snapshot_id, pin_id);
-    assert_eq!(snapshot.name, "report-run");
-    assert_eq!(snapshot.expires_at_ms, Some(expires_at_ms));
-    assert_eq!(
-        &crate::pin::get_snapshot(&store, &namespace_id, &pin_id)
-            .await
-            .expect("read the snapshot"),
-        snapshot
-    );
-    let checkpoints = list_all_checkpoints(&store, &namespace_id)
-        .await
-        .expect("list checkpoints");
-    assert_eq!(
-        checkpoints.checkpoints[0].owner,
-        CheckpointOwner::User {
-            name: "report-run".to_owned(),
-        }
-    );
-    crate::pin::load_unexpired_snapshot(&store, &namespace_id, &pin_id, context.now_ms)
-        .await
-        .expect("an unexpired record is readable");
-
-    crate::pin::delete_snapshot(&store, &namespace_id, &pin_id)
-        .await
-        .expect("delete the snapshot");
-    assert!(load_pin(&store, &namespace_id, &pin_id)
-        .await
-        .expect("load pin")
-        .is_none());
 }
 
 #[tokio::test]
