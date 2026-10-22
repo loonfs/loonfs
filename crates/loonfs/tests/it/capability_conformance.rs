@@ -37,10 +37,9 @@ fn without_host_capabilities(mut document: CapabilityDocument) -> CapabilityDocu
     document
         .features
         .retain(|key, _| !is_grep_key(key) && !is_host_feature_key(key));
-    document.limits.retain(|key, _| {
-        !is_grep_key(key)
-            && key != loonfs_types::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION
-    });
+    document
+        .limits
+        .retain(|key, _| !is_grep_key(key) && !is_host_limit_key(key));
     document
 }
 
@@ -58,6 +57,21 @@ fn is_host_feature_key(key: &str) -> bool {
             | "filesystem.uploads.direct_put"
             | "filesystem.uploads.direct_multipart"
             | "filesystem.downloads.direct_get"
+    )
+}
+
+/// A limit the HTTP host sets: the inline content size it accepts, its
+/// request bodies, and its service-proxied transfers.
+fn is_host_limit_key(key: &str) -> bool {
+    matches!(
+        key,
+        "commit.max_inline_content_bytes_per_operation"
+            | "commit.max_request_body_bytes"
+            | "upload.complete.max_request_body_bytes"
+            | "upload.service_proxied.max_content_bytes"
+            | "upload.service_proxied.max_concurrent_requests"
+            | "download.service_proxied.max_content_bytes"
+            | "download.service_proxied.max_concurrent_requests"
     )
 }
 

@@ -17,8 +17,7 @@ use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
     CapabilityDocument, ChangeSeq, ErrorResponse, GrepResponse, NamespaceId,
     RunMaintenanceResponse, API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use serde::de::DeserializeOwned;
 use std::assert_matches;
@@ -301,7 +300,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
     }
-    assert_served_document_covers_the_spec_example(&capabilities);
+    assert_served_document_matches_the_spec_example(&capabilities);
 
     // A search over a namespace whose index trails answers from the
     // exhaustive tail, and the next sweep pass catches the index up.
@@ -810,12 +809,16 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
-        max_upload_bytes: 1024 * 1024,
-        max_download_bytes: 1024 * 1024,
+        max_upload_bytes: loonfs::DEFAULT_MAX_READ_CONTENT_BYTES,
+        max_download_bytes: loonfs::DEFAULT_MAX_READ_CONTENT_BYTES,
         max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
         max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
-        max_concurrent_uploads: const { std::num::NonZeroUsize::new(2).unwrap() },
-        max_concurrent_downloads: const { std::num::NonZeroUsize::new(2).unwrap() },
+        max_concurrent_uploads: const {
+            std::num::NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS).unwrap()
+        },
+        max_concurrent_downloads: const {
+            std::num::NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS).unwrap()
+        },
         max_concurrent_maintenance: const { std::num::NonZeroUsize::new(2).unwrap() },
         tick_interval_ms: 5_000,
         maintenance_interval_ms: 300_000,
@@ -1046,13 +1049,13 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
     )
 }
 
-/// The api.md section 2.1 example describes a reference deployment: the
-/// runtime's filesystem and maintenance API groups plus the query API group the server composes
-/// from `loonfs-grep`. `loonfs`'s `capability_conformance` pins the
-/// runtime's half; this pins the merged document a served deployment
-/// answers with. A deployment adds its own limits on top, so the example is
-/// a subset rather than an equality.
-fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
+/// The api.md section 2.1 example is the reference deployment's document with
+/// the server's default settings: the runtime's filesystem and maintenance API
+/// groups plus the query API group the server composes from `loonfs-grep`.
+/// `loonfs`'s `capability_conformance` pins the runtime's half; this pins the
+/// merged document a served deployment answers with, so `test_config` keeps
+/// the default transfer limits.
+fn assert_served_document_matches_the_spec_example(served: &CapabilityDocument) {
     let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
     let example = spec
         .split("### 2.1")
@@ -1081,19 +1084,14 @@ fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
         served_features, expected.features,
         "the served features drifted from the api.md section 2.1 example"
     );
-    for (limit, value) in &expected.limits {
-        assert_eq!(
-            served.limits.get(limit),
-            Some(value),
-            "the served `{limit}` limit drifted from the api.md section 2.1 example"
-        );
-    }
+    assert_eq!(
+        served.limits, expected.limits,
+        "the served limits drifted from the api.md section 2.1 example"
+    );
 }
 
-fn grep_limits() -> [&'static str; 4] {
+fn grep_limits() -> [&'static str; 2] {
     [
-        LIMIT_QUERY_GREP_DEFAULT,
-        LIMIT_QUERY_GREP_MAX,
         LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
         LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     ]
