@@ -14,10 +14,11 @@ use std::num::NonZeroU64;
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListFileRevisionsOptions, ListOptions,
-    ListTrashOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, StatOptions,
-    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
+    ReadConsistency, ReadFileOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -105,23 +106,6 @@ pub struct CreateSnapshotOptions {
     pub ttl_ms: Option<u64>,
 }
 
-/// Options for a direct download.
-///
-/// The client's `DownloadOptions` can also read a snapshot, which this one
-/// doesn't need because a snapshot is read through its own read view.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DownloadOptions {
-    /// The first byte the download reads, for a caller that already holds
-    /// the bytes below it. The target names `[start_offset, size_bytes)` and
-    /// nothing else, so a resume asks for a new target. An offset at or past
-    /// the end answers `invalid_request`; a revision of zero bytes takes only
-    /// 0.
-    pub start_offset: u64,
-    /// How recently the read confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
-}
-
 /// Options for a streaming file read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
@@ -155,22 +139,6 @@ impl Default for ReadFileStreamOptions {
             consistency: None,
         }
     }
-}
-
-/// Options for a buffered read of a file's current content.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReadFileOptions {
-    /// How recently the read confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
-}
-
-/// Options for reading the change feed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ListChangesOptions {
-    /// How recently each page confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
 }
 
 #[cfg(test)]

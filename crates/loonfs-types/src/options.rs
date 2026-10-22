@@ -156,6 +156,40 @@ pub struct ListOptions {
     pub at: ReadAt,
 }
 
+/// Options for a read of a file's content by path or by inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadFileOptions {
+    /// The live head or the snapshot that the read reads, by default the
+    /// live head at the runtime's default consistency. A snapshot read
+    /// returns the file revision that the snapshot captured.
+    pub at: ReadAt,
+}
+
+/// Options for a direct download of a file's content by path or by inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DownloadOptions {
+    /// The live head or the snapshot that the download reads, by default the
+    /// live head at the runtime's default consistency. A snapshot download
+    /// returns the file revision that the snapshot captured, and a download
+    /// of a numbered revision can't read a snapshot.
+    pub at: ReadAt,
+    /// The first byte that the download reads, for a caller that already has
+    /// the bytes below it. The download covers `[start_offset, size_bytes)`,
+    /// so a caller that resumes a download asks for a new one. An offset at
+    /// or past the end returns `invalid_request`, except 0 for a revision of
+    /// zero bytes.
+    pub start_offset: u64,
+}
+
+/// Options for listing the change feed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListChangesOptions {
+    /// The live head or the snapshot that each page reads, by default the
+    /// live head at the runtime's default consistency. A snapshot's feed ends
+    /// at the sequence that the snapshot captured.
+    pub at: ReadAt,
+}
+
 /// Options for listing a file's revisions by path or by inode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListFileRevisionsOptions {
@@ -460,6 +494,10 @@ mod tests {
         assert_eq!(StatOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListOptions::default().at, ReadAt::Live(None));
         assert_eq!(ReadAt::from(None), ReadAt::Live(None));
+        assert_eq!(ReadFileOptions::default().at, ReadAt::Live(None));
+        assert_eq!(DownloadOptions::default().at, ReadAt::Live(None));
+        assert_eq!(DownloadOptions::default().start_offset, 0);
+        assert_eq!(ListChangesOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListFileRevisionsOptions::default().consistency, None);
         assert_eq!(ListTrashOptions::default().consistency, None);
     }

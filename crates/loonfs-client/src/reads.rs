@@ -3,17 +3,11 @@
 use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
-use loonfs_types::options::{Consistency, ListFileRevisionsOptions, ListTrashOptions, ReadAt};
+use loonfs_types::options::{
+    Consistency, ListChangesOptions, ListFileRevisionsOptions, ListTrashOptions, ReadAt,
+    ReadFileOptions,
+};
 use loonfs_types::PageRequest;
-
-/// Options for a read of a file's content by path or by inode.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReadFileOptions {
-    /// The live head or the snapshot that the read reads, by default the
-    /// live head at the server's default consistency. A snapshot read
-    /// returns the file revision that the snapshot captured.
-    pub at: ReadAt,
-}
 
 /// Options for creating a namespace.
 ///
@@ -34,15 +28,6 @@ impl Default for CreateNamespaceOptions {
             naming: loonfs_types::NamespaceNaming::CaseInsensitive,
         }
     }
-}
-
-/// Optional selectors for the change feed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ListChangesOptions {
-    /// The live head or the snapshot that each page reads, by default the
-    /// live head at the server's default consistency. A snapshot's feed ends
-    /// at the sequence that the snapshot captured.
-    pub at: ReadAt,
 }
 
 /// Adds the query parameters that say what a read reads at: `snapshot_id`

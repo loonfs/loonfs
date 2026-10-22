@@ -266,8 +266,8 @@ impl ReadTarget {
             Self::Snapshot(view) => view.create_download_with_options(path, options).await,
             Self::Live(namespace, consistency) => {
                 let options = DownloadOptions {
-                    consistency: *consistency,
-                    ..*options
+                    at: ReadAt::Live(*consistency),
+                    ..options.clone()
                 };
                 match revision_no {
                     Some(revision_no) => {
@@ -296,8 +296,8 @@ impl ReadTarget {
                     .create_download_by_inode_with_options(
                         inode_id,
                         &DownloadOptions {
-                            consistency: *consistency,
-                            ..*options
+                            at: ReadAt::Live(*consistency),
+                            ..options.clone()
                         },
                     )
                     .await
@@ -311,7 +311,7 @@ impl ReadTarget {
             Self::Live(namespace, consistency) => namespace.list_changes_with_options(
                 after_seq,
                 &ListChangesOptions {
-                    consistency: *consistency,
+                    at: ReadAt::Live(*consistency),
                 },
             ),
         }

@@ -9,7 +9,7 @@ use super::query_params::{live_consistency, parse_revision_no, read_at};
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
-use loonfs::DownloadOptions;
+use loonfs::{DownloadOptions, ReadAt};
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
@@ -209,8 +209,8 @@ pub(super) async fn create_revision_download_by_inode(
         .map_err(with_consistency_field_params)?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
+        at: ReadAt::Live(consistency),
         start_offset: request.start_offset,
-        consistency,
     };
     let target = runtime
         .namespace(&namespace_id)

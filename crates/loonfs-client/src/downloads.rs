@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use futures::stream::Fuse;
 use futures::FutureExt as _;
 use loonfs_types::api::v0::{CreateDownloadByInodeRequest, DownloadRange};
-use loonfs_types::options::{Consistency, ReadAt, ReadConsistency};
+use loonfs_types::options::{Consistency, DownloadOptions, ReadAt, ReadConsistency};
 use loonfs_types::ContentVerifier;
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
@@ -15,24 +15,6 @@ use std::task::{Context, Poll};
 /// The most range responses a download holds open at once: the one being
 /// read and the ones requested behind it, in range order.
 const RANGE_RESPONSES_IN_FLIGHT: usize = 4;
-
-/// Options for a download of a file's content by path or by inode.
-///
-/// The runtime's `DownloadOptions` takes only a consistency, because the
-/// runtime reads a snapshot through a read view.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DownloadOptions {
-    /// The live head or the snapshot that the grant reads, by default the
-    /// live head at the server's default consistency. A snapshot grant
-    /// returns the file revision that the snapshot captured.
-    pub at: ReadAt,
-    /// The first byte the grant reads, for a caller that already holds the
-    /// bytes below it. A grant names `[start_offset, size_bytes)` and
-    /// nothing else, so a resume asks for a new grant. An offset at or past
-    /// the end answers `invalid_request`; a revision of zero bytes takes
-    /// only 0.
-    pub start_offset: u64,
-}
 
 /// The body fields that say what a download reads at: `snapshot_id` for a
 /// snapshot, and the consistency fields of a live read that sets a

@@ -81,6 +81,16 @@ async fn change_feed_page(
         })
 }
 
+/// Returns the error for a read of a numbered revision at a snapshot. A
+/// snapshot captures one revision of each file, so a read of a numbered
+/// revision reads the live head.
+fn revision_at_snapshot() -> Error {
+    Error::InvalidRequest {
+        message: "revision_no cannot be combined with snapshot_id".to_owned(),
+        param: "snapshot_id",
+    }
+}
+
 fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
     let Some(pin_id) = cursor.and_then(ListPageCursor::pin_id) else {
         return Ok(());
@@ -171,16 +181,26 @@ impl ReadView {
         loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let view = view.clone();
             async move {
-                let _permit = view.core.inner.config.execution_budget.read_permit().await;
-                view.read(change_feed_page(
-                    &view.engine,
-                    &view.context,
-                    request.cursor.unwrap_or(after_seq),
-                    request.limit,
-                ))
-                .await
+                let permit = view.core.inner.config.execution_budget.read_permit().await;
+                view.changes_page(request.cursor.unwrap_or(after_seq), request.limit, &permit)
+                    .await
             }
         })
+    }
+
+    async fn changes_page(
+        &self,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<ListChangesResponse> {
+        self.read(change_feed_page(
+            &self.engine,
+            &self.context,
+            after_seq,
+            limit,
+        ))
+        .await
     }
 
     /// Resolves an absolute path against this view.
@@ -432,7 +452,15 @@ impl ReadView {
 
     /// Reads the file selected by this view.
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read_file_with_permit(absolute_path, &permit).await
+    }
+
+    async fn read_file_with_permit(
+        &self,
+        absolute_path: &str,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<FileBytes> {
         self.read(async {
             Ok(self
                 .engine
@@ -493,9 +521,19 @@ impl ReadView {
         absolute_path: &str,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.create_download_with_permit(absolute_path, options, &permit)
+            .await
+    }
+
+    async fn create_download_with_permit(
+        &self,
+        absolute_path: &str,
+        options: &DownloadOptions,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<DirectDownloadTarget> {
         self.read(async {
-            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .direct_download_target(absolute_path, None, options.start_offset, &self.context)
@@ -507,7 +545,15 @@ impl ReadView {
     /// Reads the revision of a file inode that this view selects, wherever
     /// the view binds it, plus the entry it came from.
     pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read_file_by_inode_with_permit(inode_id, &permit).await
+    }
+
+    async fn read_file_by_inode_with_permit(
+        &self,
+        inode_id: InodeId,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<FileBytes> {
         self.read(async {
             Ok(self
                 .engine
@@ -574,9 +620,19 @@ impl ReadView {
         inode_id: InodeId,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.create_download_by_inode_with_permit(inode_id, options, &permit)
+            .await
+    }
+
+    async fn create_download_by_inode_with_permit(
+        &self,
+        inode_id: InodeId,
+        options: &DownloadOptions,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<DirectDownloadByInodeTarget> {
         self.read(async {
-            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .direct_download_target_by_inode(
@@ -1004,12 +1060,22 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .read_file_with_permit(absolute_path, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(
                 &self.namespace_id,
-                options.consistency,
+                consistency,
                 |engine, context| async move {
                     Ok(engine
                         .read_file(
@@ -1143,6 +1209,9 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Prepares the content object of one retained file revision for a
     /// direct download, as `options` asks. See [`Self::create_download`].
+    ///
+    /// A snapshot captures one revision of each file, so options that read a
+    /// snapshot return `invalid_request`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_revision_download",
@@ -1171,13 +1240,24 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match (&options.at, revision_no) {
+            (ReadAt::Live(consistency), _) => *consistency,
+            (ReadAt::Snapshot(_), Some(_)) => return Err(revision_at_snapshot()),
+            (ReadAt::Snapshot(snapshot_id), None) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .create_download_with_permit(absolute_path, options, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
         let start_offset = options.start_offset;
         self.core
             .read(
                 &self.namespace_id,
-                options.consistency,
+                consistency,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target(
@@ -1242,6 +1322,9 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Prepares the content object of one retained inode revision for a
     /// direct download, as `options` asks.
+    ///
+    /// A snapshot captures one revision of each file, so options that read a
+    /// snapshot return `invalid_request`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_revision_download_by_inode",
@@ -1270,13 +1353,24 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match (&options.at, revision_no) {
+            (ReadAt::Live(consistency), _) => *consistency,
+            (ReadAt::Snapshot(_), Some(_)) => return Err(revision_at_snapshot()),
+            (ReadAt::Snapshot(snapshot_id), None) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .create_download_by_inode_with_permit(inode_id, options, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
         let start_offset = options.start_offset;
         self.core
             .read(
                 &self.namespace_id,
-                options.consistency,
+                consistency,
                 |engine, read_context| async move {
                     let target = engine
                         .direct_download_target_by_inode(
@@ -1741,12 +1835,22 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<FileBytes> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match &options.at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .read_file_by_inode_with_permit(inode_id, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(
                 &self.namespace_id,
-                options.consistency,
+                consistency,
                 |engine, read_context| async move {
                     let read = engine
                         .read_file_by_inode(
@@ -1920,16 +2024,13 @@ impl<M: crate::Mode> Namespace<M> {
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let reader = self.read_only();
-        let consistency = options.consistency;
+        let at = options.at.clone();
         loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let reader = reader.clone();
+            let at = at.clone();
             async move {
                 reader
-                    .changes_page(
-                        request.cursor.unwrap_or(after_seq),
-                        request.limit,
-                        consistency,
-                    )
+                    .changes_page(request.cursor.unwrap_or(after_seq), request.limit, &at)
                     .await
             }
         })
@@ -1951,9 +2052,19 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
-        consistency: Option<Consistency>,
+        at: &ReadAt,
     ) -> Result<ListChangesResponse> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match at {
+            ReadAt::Live(consistency) => *consistency,
+            ReadAt::Snapshot(snapshot_id) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .changes_page(after_seq, limit, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(

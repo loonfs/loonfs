@@ -159,14 +159,16 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
         at: ReadAt::Live(consistency),
         ..ListOptions::default()
     };
-    let file = ReadFileOptions { consistency };
+    let file = ReadFileOptions {
+        at: ReadAt::Live(consistency),
+    };
     let stream = ReadFileStreamOptions {
         consistency,
         ..ReadFileStreamOptions::default()
     };
     let revisions = ListFileRevisionsOptions { consistency };
     let download = DownloadOptions {
-        consistency,
+        at: ReadAt::Live(consistency),
         ..DownloadOptions::default()
     };
     fixture.recording.reset();
@@ -203,7 +205,12 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
             .await
             .err(),
         reader
-            .list_changes_with_options(ChangeSeq(0), &ListChangesOptions { consistency })
+            .list_changes_with_options(
+                ChangeSeq(0),
+                &ListChangesOptions {
+                    at: ReadAt::Live(consistency),
+                },
+            )
             .next()
             .await
             .and_then(Result::err),
@@ -268,7 +275,7 @@ async fn an_eventual_read_of_a_pinned_view_is_rejected_before_any_request() {
         ..ReadFileStreamOptions::default()
     };
     let download = DownloadOptions {
-        consistency,
+        at: ReadAt::Live(consistency),
         ..DownloadOptions::default()
     };
     fixture.recording.reset();
@@ -324,7 +331,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .read_file_with_options(
             "/file.txt",
             &ReadFileOptions {
-                consistency: Some(Consistency::Strong),
+                at: ReadAt::Live(Some(Consistency::Strong)),
             },
         )
         .await
@@ -356,7 +363,12 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .expect("a page")
         .expect("eventual list");
     let file = reader
-        .read_file_with_options("/file.txt", &ReadFileOptions { consistency })
+        .read_file_with_options(
+            "/file.txt",
+            &ReadFileOptions {
+                at: ReadAt::Live(consistency),
+            },
+        )
         .await
         .expect("eventual read");
     assert_eq!(file.bytes, b"file");
