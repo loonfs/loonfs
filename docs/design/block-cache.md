@@ -58,7 +58,7 @@ The tiered implementation has two parts. The "memory tier" keeps decoded blocks 
 After a miss, a get or load reads the block from the store and inserts it. An insert puts the decoded block into memory and queues the stored bytes for the SSD tier's writer, which writes them to disk, so a read doesn't wait for a disk write. An insert of a block that the disk already keeps writes nothing, and it refreshes the block's place on disk. LoonFS inserts a block in three cases:
 
 - After it loads the block from the store, with the stored bytes from the GET.
-- After a [fold](../specs/glossary.md#fold) or a [compaction](../specs/glossary.md#compaction) writes a segment, with the bytes that it just wrote.
+- After a [fold](../specs/glossary.md#fold) or a [compaction](../specs/glossary.md#compaction) writes a segment, with the bytes that it just wrote. A fold inserts every block of the segment, and a compaction inserts the segment's index and filter blocks, and its data blocks only when the segment's stored size is at most 256 KiB.
 - When a manifest's segment descriptor includes an inline copy of the filter (`filter_inline`), with the copy's decoded bytes. The filter is stored uncompressed, so those bytes match the stored filter, with the same length and checksum.
 
 Each tier evicts its least recently used block when it's over its budget. A hit in either tier refreshes the block's place on disk, so the disk evicts blocks that neither tier has used recently. A block that leaves memory needs no write, because it went to disk when it was inserted.
@@ -81,7 +81,9 @@ Why does the disk key use the store's identity and not its scope number? A proce
 
 Why does the SSD tier rebuild its index from file names, and not store the index in a file? A separate index file would need writes of its own, and after a crash it could list blocks that aren't on disk, or miss blocks that are. An index rebuilt from the file names lists exactly the blocks in the directory.
 
-Why do the segments that a fold or a compaction writes go to disk? The next reads of a namespace that just folded read those segments, so with their blocks on disk and in memory, those reads hit the cache instead of the store.
+Why does a fold insert every block of the segments it writes? The writer that just folded is the process most likely to read the folded rows next. For example, after a fold of a batch of new files, the writer's next stats and reads of those files look up the rows that the fold just wrote. With every block of the fold's segments in memory (and on disk, when the SSD tier is on), those lookups hit the cache instead of the store. The blocks are ordinary entries, charged to `metadata_cache.max_segment_bytes` and evicted like any other block. A fold of 4,500 new files inserts about 13 MiB of decoded blocks, which is about 5% of the default 256 MiB budget.
+
+Why doesn't a compaction insert every block too? A compaction rewrites rows that are already in segments, and no read asked for those rows. So a compaction inserts only the blocks that the first read of a new segment would load: the index and filter blocks, which every lookup in the segment reads, and the data blocks of a segment small enough that a read fetches the whole segment in one GET (at most 256 KiB stored).
 
 Why write a block to disk when it's inserted, and not when it leaves memory? When a block is inserted, the caller has its stored bytes, which the handle's checksum covers. Writing them then keeps the memory tier to decoded blocks, as in the memory implementation, and keeps the disk to exactly the bytes that the store has. A write when a block leaves memory would need either the block's stored bytes kept in memory beside its decoded form, or a second encoding of the decoded block on disk with a checksum of its own.
 
@@ -150,7 +152,7 @@ Why check a block from disk if it passed the check when it was loaded from the s
 
 This section describes what an operator configures and sees, and what a client sees.
 
-An operator chooses whether a server keeps blocks on local disk, and how much disk to use, and needs to see whether the disk saves requests. The SSD tier is optional and off by default. With it off, the server uses the memory implementation. With it on, `loonfs-server --check-config` creates the SSD tier's directory if it's missing, and checks that the server can write a file in it, so a directory that the server can't use is reported before the server starts. On a server with the tier, the first read of a block that the server didn't write costs a GET, as it does without the tier, and later reads of that block come from memory or from disk instead of the store, including reads after a restart. A tenant whose blocks aren't cached pays for its first pass over its metadata, and its later passes read from memory or disk, even when other tenants' reads have pushed its blocks out of memory.
+An operator chooses whether a server keeps blocks on local disk, and how much disk to use, and needs to see whether the disk saves requests. The SSD tier is optional and off by default. With it off, the server uses the memory implementation. With it on, `loonfs-server --check-config` creates the SSD tier's directory if it's missing, and checks that the server can write a file in it, so a directory that the server can't use is reported before the server starts. On a server with the tier, the first read of a block that the server hasn't inserted costs a GET, as it does without the tier, and later reads of that block come from memory or from disk instead of the store, including reads after a restart. A tenant whose blocks aren't cached pays for its first pass over its metadata, and its later passes read from memory or disk, even when other tenants' reads have pushed its blocks out of memory.
 
 A client gets the same results with or without the tier, because the tier changes what a read costs and not what it returns. A read that misses memory and finds its block on disk waits for a read from local disk instead of a GET.
 
@@ -169,7 +171,7 @@ This section lists what the block cache and its SSD tier cost.
 | Memory | The memory tier keeps decoded blocks, as the memory implementation does. The SSD tier's 64 MiB write queue and its index, at 168 bytes for each block on disk, are a term in `fixed` |
 | Disk | Up to the SSD tier's budget (less on a tier of blocks smaller than 4 KiB), and a write for each inserted block that isn't on disk yet, including the blocks of the segments that folds and compactions write |
 | CPU | A disk hit is checked and decoded again. A read decodes only the blocks of its read-ahead window that it reaches |
-| Requests | The first read of a block that the server didn't write costs a GET, with or without the tier. A disk hit costs no request |
+| Requests | The first read of a block that the server hasn't inserted costs a GET, with or without the tier. A disk hit costs no request |
 | Code | One interface with two implementations, and no cache under the block cache |
 
 ## Acceptance measurements
