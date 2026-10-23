@@ -16,14 +16,14 @@ use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Version 1: a zstd-compressed JSON envelope document carrying the payload as
-/// a raw JSON fragment.
+/// Version 1 is a zstd-compressed JSON envelope document that contains the
+/// payload as a raw JSON fragment.
 ///
 /// `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
-/// Largest decompressed manifest document allowed by
-/// [Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
+/// Largest decompressed manifest document allowed by [Control and manifest
+/// payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 ///
 /// A manifest lists every segment of its namespace, and no other format limit
 /// bounds how many segments that is, so this limit also bounds how much
@@ -31,7 +31,7 @@ pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 /// manifest document of about 193 KiB, so the limit is reached at about 2.7
 /// billion files. The value is the same as
 /// [`MAX_WAL_OBJECT_BYTES`](crate::wal::MAX_WAL_OBJECT_BYTES), so a reader
-/// needs the same memory at most to decompress either object. It's a separate
+/// needs at most the same memory to decompress either object. It's a separate
 /// constant, so a change to one limit doesn't change which objects of the
 /// other family a reader accepts.
 pub const MAX_NAMESPACE_MANIFEST_BYTES: usize = 512 * 1024 * 1024;
@@ -1408,7 +1408,8 @@ impl NamespaceManifestPayload {
 /// A manifest decoded through its checked durable codec.
 pub type NamespaceManifestEnvelope = crate::envelope::VerifiedEnvelope<NamespaceManifestPayload>;
 
-/// Encodes a manifest once, then checksums and compresses its JSON document.
+/// Encodes a manifest once into a JSON envelope document, with the payload's
+/// checksum, and compresses the document.
 ///
 /// [`EncodedEnvelope::document_bytes`](crate::envelope::EncodedEnvelope::document_bytes)
 /// is the JSON document's length, which [`MAX_NAMESPACE_MANIFEST_BYTES`] limits.

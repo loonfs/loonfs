@@ -1678,15 +1678,15 @@ To encode an object, a writer:
 1. Serializes the payload, to JSON for a JSON family or to CBOR for the WAL.
 2. Calculates `payload_checksum`, the SHA-256 of those payload bytes.
 3. Builds the envelope document around the payload bytes. A JSON document includes them as an inline fragment, and a CBOR document includes them as a byte string.
-4. Compresses the whole document with zstd, if the object is a manifest or a WAL object. A control record is stored as the document itself.
+4. Compresses the whole document with zstd, if the object is a manifest or a WAL object. A [control object](glossary.md#control-object) is stored as the document itself.
 
-The checksum covers the payload bytes exactly as they appear in the document, including a JSON fragment's internal whitespace and spelling. It doesn't cover the rest of the envelope (so a JSON envelope's own whitespace isn't part of it), the compressed representation, or a second encoding of the decoded payload. Don't parse and re-serialize the payload to calculate its checksum.
+The checksum covers the payload bytes exactly as they appear in the document, including a JSON fragment's internal whitespace and spelling. It doesn't cover the rest of the envelope (so a JSON envelope's own whitespace isn't part of it), the compressed representation, or a second encoding of the decoded payload. Neither a writer nor a reader parses and serializes the payload again to calculate its checksum.
 
 Every manifest and every WAL object is compressed, so a reader doesn't check whether an object of those families is compressed. (The reference writer uses zstd level 3, and a reader accepts any level.) A reader decompresses the object first, and it refuses a document longer than the family's limit: `MAX_NAMESPACE_MANIFEST_BYTES` for a manifest (see [Control and manifest payloads](#a4-control-and-manifest-payloads)) or `MAX_WAL_OBJECT_BYTES` for a WAL object (see [WAL records](#a5-wal-records)).
 
 A reader then identifies the declared kind and version, validates the envelope and checksum, and interprets the payload under the supported schema. Field and protocol validation still apply after the checksum matches, because a matching checksum doesn't make an inconsistent record valid.
 
-Why are manifests and WAL objects compressed, but control records aren't? A manifest grows with the namespace and a WAL object grows with its commits, and readers load both on a cold read. For example, a manifest of 193 KiB of JSON is 36 KiB compressed. A control record is under 1 KiB, so compressing it would save almost nothing.
+Why are manifests and WAL objects compressed, but control objects aren't? A manifest grows with the namespace and a WAL object grows with its commits, and a reader with an empty cache loads both. For example, a manifest of 193 KiB of JSON is 36 KiB compressed. A control object is under 1 KiB, so compressing it would save almost nothing.
 
 ### A.3 Content references and checksums
 
