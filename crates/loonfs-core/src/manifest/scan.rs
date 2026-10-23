@@ -163,28 +163,29 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     }
 
     /// Returns up to `limit` rows of `prefix` from the newest run that has a
-    /// row for it.
+    /// row for that prefix.
     ///
-    /// A lookup that wants the newest fact for one key prefix (the latest
-    /// revision of an inode, the newest version of a directory slot, or the
-    /// newest attribute or access revision) gets the same answer here as from
-    /// the merge of every run, for two reasons:
+    /// A lookup for the newest fact about one key prefix (the latest revision
+    /// of an inode, the newest version of a directory slot, or the newest
+    /// attribute or access revision) finds the same fact here as in the merge
+    /// of every run, for two reasons:
     ///
     /// - Each run covers its own range of commit sequences, and `scan_runs`
     ///   lists the runs newest first, so every row of a run is newer than
     ///   every row of the runs after it. A fold writes the commits after the
     ///   manifest's folded WAL object into one new run. A compaction merges
     ///   a contiguous window of a family group's runs into one run at the
-    ///   window's position, and the group's base run comes before every
-    ///   delta run, whatever its sequence stamp. (Run numbers don't give this
-    ///   order, because a compaction's output gets a new number.) See
+    ///   window's position, and the group's base run is older than every
+    ///   delta run, whatever its sequence stamp. (Run numbers don't follow
+    ///   this order, because a compaction's output is assigned a new number.)
+    ///   See
     ///   [Manifests, runs, and segments](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#71-manifests-runs-and-segments),
     ///   [Compaction windows](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#102-compaction-windows),
     ///   and "Runs cover separate sequence ranges" in [Row retention during
     ///   a base compaction](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction).
-    /// - A later commit gives an inode a higher revision, attribute revision,
-    ///   or access revision number, and a later version of a directory slot
-    ///   has a higher position. See [Metadata rows and row
+    /// - A later commit assigns an inode a higher revision, attribute
+    ///   revision, or access revision number, and a later version of a
+    ///   directory slot has a higher position. See [Metadata rows and row
     ///   keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
     ///
     /// So the newest run with a row for the prefix has the newest fact, and
