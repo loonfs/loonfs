@@ -273,7 +273,7 @@ Each namespace's objects are stored under its own prefix ([Object keys](#a8-obje
 ```text
 namespaces/{namespace_id}/
 ├── hint.json
-├── manifests/{manifest_no:020}.json
+├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
@@ -2018,7 +2018,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Family | Object key pattern |
 | --- | --- |
 | WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
-| Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
+| Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
 | Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | Upload sessions | `namespaces/{namespace_id}/uploads/{upload_id}.json` |

@@ -2091,7 +2091,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
             b"foreign key".as_slice(),
         ),
         (
-            format!("{manifest_prefix}invalid.manifest.json"),
+            format!("{manifest_prefix}invalid.manifest.json.zst"),
             b"invalid manifest number".as_slice(),
         ),
     ];

@@ -47,7 +47,7 @@ pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
 /// Builds the immutable manifest key for one namespace manifest number.
 pub fn metadata_manifest_object(namespace_id: &NamespaceId, manifest_no: &ManifestNo) -> String {
     format!(
-        "namespaces/{namespace_id}/manifests/{:020}.json",
+        "namespaces/{namespace_id}/manifests/{:020}.json.zst",
         manifest_no.0
     )
 }
