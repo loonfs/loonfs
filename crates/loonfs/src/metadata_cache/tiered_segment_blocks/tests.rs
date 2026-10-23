@@ -138,7 +138,7 @@ impl Tiered {
         scope: u64,
         max_memory_bytes: usize,
     ) -> Self {
-        let shared = Arc::new(SharedSegmentBlocks::new(max_memory_bytes));
+        let shared = Arc::new(SharedSegmentBlocks::new(max_memory_bytes, 0));
         let scope = ObjectStoreScope::new(scope);
         Self {
             blocks: TieredSegmentBlocks::new(
@@ -165,7 +165,7 @@ impl Tiered {
 
 /// Returns the bytes that a memory tier charges `block`.
 fn memory_charge(block: &TestBlock) -> usize {
-    let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX));
+    let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, 0));
     MemorySegmentBlocks::new(Arc::clone(&shared), ObjectStoreScope::new(0)).insert_block(
         block.key.clone(),
         block.block.clone(),

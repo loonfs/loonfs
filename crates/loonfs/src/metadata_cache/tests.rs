@@ -300,8 +300,54 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
     );
     assert!(warm.segment_hits > cold.segment_hits, "{warm:?}");
     assert_eq!(
-        warm.segment_misses, cold.segment_misses,
-        "the second runtime reads the blocks the first runtime decoded: {warm:?}"
+        (warm.segment_misses, warm.segment_index_misses),
+        (cold.segment_misses, cold.segment_index_misses),
+        "the second runtime reads the blocks and the manifest the first runtime decoded: {warm:?}"
+    );
+}
+
+/// Checks that the builder's segment index limit sets the budget of index
+/// blocks, filter blocks, and manifests. By default, a read charges those
+/// entries to that budget and its data blocks to the segment limit. With a
+/// zero segment index limit, the same read charges every entry to the
+/// segment limit.
+#[tokio::test]
+async fn the_segment_index_limit_sets_the_budget_of_index_blocks_filters_and_manifests() {
+    let root = tempdir().expect("tempdir");
+    same_shape_store(
+        &local_store(root.path()),
+        &MetadataCache::default(),
+        b"file",
+    )
+    .await;
+    let read = |cache: MetadataCache| {
+        let store = local_store(root.path());
+        async move {
+            assert_reads(&reader(&store, &cache).await, b"file").await;
+            cache.stats()
+        }
+    };
+
+    let separate = read(MetadataCache::default()).await;
+    assert!(separate.segment_inserts > 0, "{separate:?}");
+    assert!(separate.segment_index_inserts > 0, "{separate:?}");
+    let shared = read(MetadataCache::builder().max_segment_index_bytes(0).build()).await;
+    assert_eq!(
+        (
+            shared.segment_index_inserts,
+            shared.segment_index_misses,
+            shared.segment_index_bytes
+        ),
+        (0, 0, 0),
+        "{shared:?}"
+    );
+    assert_eq!(
+        (shared.segment_inserts, shared.segment_bytes),
+        (
+            separate.segment_inserts + separate.segment_index_inserts,
+            separate.segment_bytes + separate.segment_index_bytes
+        ),
+        "{shared:?} against {separate:?}"
     );
 }
 
@@ -344,6 +390,7 @@ async fn bindings_share_one_capacity() {
     let one_binding = measured.stats();
     let cache = MetadataCache::builder()
         .max_segment_bytes(one_binding.segment_bytes)
+        .max_segment_index_bytes(one_binding.segment_index_bytes)
         .max_head_bytes(one_binding.head_bytes)
         .max_wal_tail_bytes(one_binding.wal_tail_bytes)
         .build();
@@ -357,12 +404,17 @@ async fn bindings_share_one_capacity() {
         stats.segment_bytes <= one_binding.segment_bytes,
         "{stats:?}"
     );
+    assert!(
+        stats.segment_index_bytes <= one_binding.segment_index_bytes,
+        "{stats:?}"
+    );
     assert!(stats.head_bytes <= one_binding.head_bytes, "{stats:?}");
     assert!(
         stats.wal_tail_bytes <= one_binding.wal_tail_bytes,
         "{stats:?}"
     );
     assert!(stats.segment_evictions > 0, "{stats:?}");
+    assert!(stats.segment_index_evictions > 0, "{stats:?}");
     assert!(stats.head_evictions > 0, "{stats:?}");
     assert!(stats.wal_tail_evictions > 0, "{stats:?}");
 }
@@ -417,7 +469,10 @@ async fn read_policy_stays_with_each_binding() {
     .await;
     // The cache keeps no segment blocks, so a lookup that a block memo does
     // not answer goes to the store.
-    let cache = MetadataCache::builder().max_segment_bytes(0).build();
+    let cache = MetadataCache::builder()
+        .max_segment_bytes(0)
+        .max_segment_index_bytes(0)
+        .build();
     let binding =
         |configure: fn(crate::LoonFsBuilder<ReadOnly>) -> crate::LoonFsBuilder<ReadOnly>| {
             let recording = Arc::new(RecordingStore::new(
@@ -559,7 +614,10 @@ async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
     )
     .await;
     writer.shutdown().await.expect("shutdown");
-    let cache = MetadataCache::builder().max_segment_bytes(0).build();
+    let cache = MetadataCache::builder()
+        .max_segment_bytes(0)
+        .max_segment_index_bytes(0)
+        .build();
     let reader = |budget: ExecutionBudget| {
         let store = Arc::new(BlockingStore::new(
             RecordingStore::metadata_segments(LocalFsStore::new(root.path()).expect("store")),
@@ -800,17 +858,38 @@ async fn reads_of_empty_files_keep_no_content_objects() {
     }
 }
 
-/// Checks that reads use the read-ahead window that their runtime's cache
-/// was built with. A cold listing of a directory whose entries fill several
-/// data blocks fetches them in one GET with the default window, and in a GET
-/// for each block with no window.
-#[tokio::test]
-async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
+/// The directory that [`write_long_named_entries`] fills.
+const LONG_NAMED: &str = "/dirs";
+
+/// Returns the paths of the 3,000 entries of [`LONG_NAMED`], each with a
+/// name of 200 random letters after its number.
+fn long_named_entries() -> Vec<String> {
+    let mut state = 1_u64;
+    (0..3_000)
+        .map(|index| {
+            let suffix: String = (0..200)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(b'a' + (state % 26) as u8)
+                })
+                .collect();
+            format!("{LONG_NAMED}/{index:05}-{suffix}")
+        })
+        .collect()
+}
+
+/// Writes a namespace whose [`LONG_NAMED`] directory has the entries of
+/// [`long_named_entries`], folded into segments. Their long names don't
+/// compress well, so the
+/// directory's entries fill several data blocks, and a segment too large to
+/// be read whole.
+async fn write_long_named_entries(root: &Path) {
     use crate::publish::{CommitIntent, FilesystemOperation};
     use crate::{AbsolutePath, CommitId};
 
-    let root = tempdir().expect("tempdir");
-    let writer = LoonFs::builder_with_store(local_store(root.path()))
+    let writer = LoonFs::builder_with_store(local_store(root))
         .writer_id(writer_id("window-writer"))
         .build()
         .await
@@ -821,26 +900,14 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
         .expect("create namespace");
     let namespace = writer.open_namespace(&demo()).expect("open namespace");
     namespace
-        .create_directory("/dirs", &test_actor())
+        .create_directory(LONG_NAMED, &test_actor())
         .await
         .expect("create the listed directory");
-    // Long names that don't compress well make the directory's entries fill
-    // several data blocks, and a segment too large to be read whole.
-    let mut state = 1_u64;
-    let operations = (0..3_000)
-        .map(|index| {
-            let suffix: String = (0..200)
-                .map(|_| {
-                    state ^= state << 13;
-                    state ^= state >> 7;
-                    state ^= state << 17;
-                    char::from(b'a' + (state % 26) as u8)
-                })
-                .collect();
-            FilesystemOperation::CreateDirectory {
-                path: AbsolutePath::parse(format!("/dirs/{index:05}-{suffix}")).expect("path"),
-                parents: false,
-            }
+    let operations = long_named_entries()
+        .into_iter()
+        .map(|path| FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(path).expect("path"),
+            parents: false,
         })
         .collect();
     namespace
@@ -860,6 +927,16 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
         .await
         .expect("fold the entries into segments");
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that reads use the read-ahead window that their runtime's cache
+/// was built with. A cold listing of a directory whose entries fill several
+/// data blocks fetches them in one GET with the default window, and in a GET
+/// for each block with no window.
+#[tokio::test]
+async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
+    let root = tempdir().expect("tempdir");
+    write_long_named_entries(root.path()).await;
 
     let mut segment_reads = Vec::new();
     for window_bytes in [crate::READAHEAD_WINDOW_BYTES, 0] {
@@ -878,7 +955,7 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
             .expect("build reader");
         let page = reader
             .namespace(&demo())
-            .list("/dirs")
+            .list(LONG_NAMED)
             .page()
             .await
             .expect("list the directory");
@@ -890,5 +967,76 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
         without_window >= with_window + 4,
         "no window reads each block alone: {without_window} GETs, and {with_window} with the \
          default window"
+    );
+}
+
+/// Checks that a stat after a listing that evicts the stat's data blocks
+/// reads no index block, filter block, or manifest from the store, because
+/// those have a budget of their own. With a zero segment index limit, they
+/// share the data blocks' budget, the listing evicts them too, and the same
+/// stat reads more objects.
+#[tokio::test]
+async fn a_stat_after_a_listing_that_evicts_data_blocks_reads_only_data_blocks() {
+    let root = tempdir().expect("tempdir");
+    write_long_named_entries(root.path()).await;
+    let stat_path = long_named_entries().swap_remove(2_500);
+
+    let mut stat_reads = Vec::new();
+    for max_segment_index_bytes in [crate::DEFAULT_MAX_SEGMENT_INDEX_BYTES, 0] {
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(root.path()).expect("store"),
+            KeyPredicate::any(),
+        ));
+        let cache = MetadataCache::builder()
+            .max_segment_bytes(256 * 1024)
+            .max_segment_index_bytes(max_segment_index_bytes)
+            .build();
+        let reader = LoonFs::builder_with_store(store.clone())
+            .read_only()
+            .metadata_cache(cache.clone())
+            .build()
+            .await
+            .expect("build reader");
+        let namespace = reader.namespace(&demo());
+        namespace.stat(&stat_path).await.expect("warm stat");
+        let mut cursor = None;
+        loop {
+            let page = namespace
+                .list(LONG_NAMED)
+                .cursor(cursor)
+                .page()
+                .await
+                .expect("list a page");
+            match page.next_cursor {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+        let before = cache.stats();
+        assert!(before.segment_evictions > 0, "{before:?}");
+        store.reset();
+        namespace
+            .stat(&stat_path)
+            .await
+            .expect("stat after the listing");
+        let after = cache.stats();
+        let operations = store.take();
+        let reads = object_gets(&operations, DurableObjectFamily::MetadataSegment)
+            + object_gets(&operations, DurableObjectFamily::MetadataManifest);
+        if max_segment_index_bytes > 0 {
+            assert_eq!(
+                (after.segment_index_misses, after.segment_index_evictions),
+                (before.segment_index_misses, 0),
+                "{after:?}"
+            );
+        }
+        stat_reads.push(reads);
+    }
+    assert!(
+        stat_reads[1] > stat_reads[0],
+        "the stat reads {} objects with a budget for index blocks, filter blocks, and manifests, \
+         and {} without one",
+        stat_reads[0],
+        stat_reads[1]
     );
 }

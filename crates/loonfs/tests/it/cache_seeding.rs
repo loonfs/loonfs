@@ -282,6 +282,7 @@ fn a_cache_with_zero_limits_keeps_nothing() {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_segment_index_bytes(0)
                 .max_wal_tail_bytes(0)
                 .max_content_object_bytes(0)
                 .build(),

@@ -322,6 +322,12 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         segment_filter_skips,
         segment_filter_false_positives,
         segment_bytes,
+        segment_index_hits,
+        segment_index_misses,
+        segment_index_inserts,
+        segment_index_evictions,
+        segment_index_rejections,
+        segment_index_bytes,
         segment_ssd,
         head_hits,
         head_misses,
@@ -362,6 +368,12 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     );
     for (name, description, hits, misses) in [
         (
+            "loonfs_segment_index_cache_gets",
+            "Lookups of metadata segment index blocks, filter blocks, and manifests in memory, by outcome",
+            segment_index_hits,
+            segment_index_misses,
+        ),
+        (
             "loonfs_head_cache_gets",
             "Namespace head cache lookups, by outcome",
             head_hits,
@@ -392,6 +404,21 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             "loonfs_segment_cache_filter_false_positives",
             "Filter admissions that matched no metadata rows",
             segment_filter_false_positives,
+        ),
+        (
+            "loonfs_segment_index_cache_inserts",
+            "Metadata segment index blocks, filter blocks, and manifests inserted into memory",
+            segment_index_inserts,
+        ),
+        (
+            "loonfs_segment_index_cache_evictions",
+            "Metadata segment index blocks, filter blocks, and manifests evicted to stay within the segment index budget",
+            segment_index_evictions,
+        ),
+        (
+            "loonfs_segment_index_cache_rejections",
+            "Metadata segment index blocks, filter blocks, and manifests heavier than the whole segment index budget",
+            segment_index_rejections,
         ),
         (
             "loonfs_head_cache_evictions",
@@ -452,6 +479,11 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         write_counter(rendered, name, description, &[(NO_LABELS, value)]);
     }
     for (name, description, value) in [
+        (
+            "loonfs_segment_index_cache_retained_decoded_bytes",
+            "Bytes currently charged to metadata segment index blocks, filter blocks, and manifests in memory, including keys and per-entry bookkeeping",
+            segment_index_bytes,
+        ),
         (
             "loonfs_head_cache_retained_decoded_bytes",
             "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",

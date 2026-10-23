@@ -84,6 +84,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 const DIRECTORIES: usize = 16;
 const SEGMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+const SEGMENT_INDEX_BUDGET_BYTES: usize = 64 * 1024;
 const TOLERANCE: f64 = 0.10;
 const PRINCIPAL_SCOPE: &str = "org_dense";
 
@@ -666,6 +667,7 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
     let heads = |max_head_bytes| {
         MetadataCache::builder()
             .max_segment_bytes(0)
+            .max_segment_index_bytes(0)
             .max_head_bytes(max_head_bytes)
             .max_wal_tail_bytes(0)
             .max_content_object_bytes(0)
@@ -735,7 +737,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         },
     ];
     let mut failures = Vec::new();
-    println!("shape | segment budget | segment heap | ratio | heads and tails accounted | heads and tails heap | ratio");
+    println!("shape | segment budgets | segment accounted | segment heap | ratio | heads and tails accounted | heads and tails heap | ratio");
     for shape in &shapes {
         let root = tempfile::tempdir().expect("tempdir");
         let store: SharedObjectStore =
@@ -743,13 +745,15 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         seed(&store, shape).await;
         drop(store);
 
-        // This fills the segment cache past its budget and compares the heap
-        // with the budget. The last eviction can leave the cache up to one
-        // block short of it.
+        // This fills the segment cache's data blocks past their budget, and
+        // compares the heap with the bytes charged to both of the segment
+        // cache's budgets. The last eviction can leave the data blocks up to
+        // one block short of their budget.
         let (segment_heap, reader) = retained_heap(
             root.path(),
             MetadataCache::builder()
                 .max_segment_bytes(SEGMENT_BUDGET_BYTES)
+                .max_segment_index_bytes(SEGMENT_INDEX_BUDGET_BYTES)
                 .max_head_bytes(0)
                 .max_wal_tail_bytes(0)
                 .max_content_object_bytes(0)
@@ -757,10 +761,19 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             |reader| list_every_directory(shape, reader),
         )
         .await;
+        let segments = reader.metadata_cache().stats();
         assert!(
-            reader.metadata_cache().stats().segment_evictions > 0,
+            segments.segment_evictions > 0,
             "the {} dataset should outgrow the segment budget",
             shape.label
+        );
+        let segment_accounted = segments.segment_bytes + segments.segment_index_bytes;
+        println!(
+            "{} segment index | {} inserts | {} evictions | {} rejections",
+            shape.label,
+            segments.segment_index_inserts,
+            segments.segment_index_evictions,
+            segments.segment_index_rejections
         );
         drop(reader);
 
@@ -768,6 +781,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         let heads_and_tails = |max_head_bytes, max_wal_tail_bytes| {
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_segment_index_bytes(0)
                 .max_head_bytes(max_head_bytes)
                 .max_wal_tail_bytes(max_wal_tail_bytes)
                 .max_content_object_bytes(0)
@@ -790,11 +804,12 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         drop(reader);
         let heads_and_tails_heap = with_heads_and_tails.saturating_sub(without_heads_and_tails);
 
-        let segment_ratio = ratio(segment_heap, SEGMENT_BUDGET_BYTES);
+        let segment_ratio = ratio(segment_heap, segment_accounted);
         let heads_and_tails_ratio = ratio(heads_and_tails_heap, accounted);
         println!(
-            "{} | {SEGMENT_BUDGET_BYTES} | {segment_heap} | {segment_ratio:.2} | {accounted} | {heads_and_tails_heap} | {heads_and_tails_ratio:.2}",
-            shape.label
+            "{} | {} | {segment_accounted} | {segment_heap} | {segment_ratio:.2} | {accounted} | {heads_and_tails_heap} | {heads_and_tails_ratio:.2}",
+            shape.label,
+            SEGMENT_BUDGET_BYTES + SEGMENT_INDEX_BUDGET_BYTES,
         );
         for (what, value) in [
             ("segment", segment_ratio),

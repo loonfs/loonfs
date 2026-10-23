@@ -544,7 +544,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
     let cache = MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(0)),
+        Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
         crate::limits::READAHEAD_WINDOW_BYTES,
@@ -1166,7 +1166,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
     let blocks = Arc::new(CountingBlockCache::default());
     let cache = MetadataSegmentCache::with_blocks(
         blocks.clone(),
-        Arc::new(SharedSegmentBlocks::new(usize::MAX)),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, 0)),
         ObjectStoreScope::new(0),
         Arc::default(),
         crate::limits::READAHEAD_WINDOW_BYTES,
@@ -1297,7 +1297,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     let manifest_number = current_manifest_number(&store, namespace_id).await;
     let cache = |pool| {
         MetadataSegmentCache::new(
-            Arc::new(SharedSegmentBlocks::new(0)),
+            Arc::new(SharedSegmentBlocks::new(0, 0)),
             ObjectStoreScope::new(0),
             pool,
             crate::limits::READAHEAD_WINDOW_BYTES,

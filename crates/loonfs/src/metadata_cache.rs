@@ -21,8 +21,11 @@ pub use ssd_segment_blocks::{
     SSD_INDEX_ENTRY_BYTES,
 };
 
-/// Default limit for decoded segment blocks and manifests: 256 MiB.
+/// Default limit for decoded segment data blocks: 256 MiB.
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
+/// Default limit for decoded segment index blocks, filter blocks, and
+/// manifests: 32 MiB.
+pub const DEFAULT_MAX_SEGMENT_INDEX_BYTES: usize = 32 * 1024 * 1024;
 /// Default limit for namespace heads: 16 MiB (enough for about 18,000
 /// namespaces).
 pub const DEFAULT_MAX_HEAD_BYTES: usize = 16 * 1024 * 1024;
@@ -105,6 +108,7 @@ impl MetadataCache {
     pub fn builder() -> MetadataCacheBuilder {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+            max_segment_index_bytes: DEFAULT_MAX_SEGMENT_INDEX_BYTES,
             max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
             max_wal_tail_bytes: DEFAULT_MAX_WAL_TAIL_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
@@ -132,6 +136,12 @@ impl MetadataCache {
             segment_filter_false_positives: segments.filter_false_positives,
             segment_rejections: segments.rejections,
             segment_bytes: segments.cached_decoded_bytes,
+            segment_index_hits: segments.index.hits,
+            segment_index_misses: segments.index.misses,
+            segment_index_inserts: segments.index.inserts,
+            segment_index_evictions: segments.index.evictions,
+            segment_index_rejections: segments.index.rejections,
+            segment_index_bytes: segments.index.cached_decoded_bytes,
             segment_ssd: self
                 .inner
                 .ssd_segment_blocks
@@ -291,6 +301,7 @@ impl ObjectStoreScopes {
 #[must_use]
 pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
+    max_segment_index_bytes: usize,
     max_head_bytes: usize,
     max_wal_tail_bytes: usize,
     max_completed_upload_session_bytes: usize,
@@ -301,10 +312,26 @@ pub struct MetadataCacheBuilder {
 }
 
 impl MetadataCacheBuilder {
-    /// Sets the decoded bytes of segment blocks and manifests the cache
-    /// holds. Defaults to [`DEFAULT_MAX_SEGMENT_BYTES`]; zero keeps none.
+    /// Sets the decoded bytes of segment data blocks that the cache keeps.
+    /// Defaults to [`DEFAULT_MAX_SEGMENT_BYTES`]. Zero keeps none. When
+    /// [`Self::max_segment_index_bytes`] is zero, this limit also covers
+    /// index blocks, filter blocks, and manifests.
     pub fn max_segment_bytes(mut self, max_segment_bytes: usize) -> Self {
         self.max_segment_bytes = max_segment_bytes;
+        self
+    }
+
+    /// Sets the decoded bytes of segment index blocks, filter blocks, and
+    /// manifests that the cache keeps. Defaults to
+    /// [`DEFAULT_MAX_SEGMENT_INDEX_BYTES`]. Zero keeps them under
+    /// [`Self::max_segment_bytes`] with the data blocks.
+    ///
+    /// A lookup reads its manifest, and the filter and index blocks of the
+    /// segments that it checks, before it reads a data block. These entries
+    /// have a limit of their own, so a scan that loads many data blocks
+    /// can't evict them.
+    pub fn max_segment_index_bytes(mut self, max_segment_index_bytes: usize) -> Self {
+        self.max_segment_index_bytes = max_segment_index_bytes;
         self
     }
 
@@ -401,7 +428,10 @@ impl MetadataCacheBuilder {
     pub fn build(self) -> MetadataCache {
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
-                segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
+                segment_blocks: Arc::new(SharedSegmentBlocks::new(
+                    self.max_segment_bytes,
+                    self.max_segment_index_bytes,
+                )),
                 ssd_segment_blocks: self.ssd_segment_blocks.map(Arc::new),
                 heads_and_wal_tails: Arc::new(SharedHeadsAndWalTails::new(
                     self.max_head_bytes,
@@ -426,29 +456,54 @@ impl MetadataCacheBuilder {
 
 /// Counters and occupancy of a [`MetadataCache`], summed over every runtime
 /// that reads through it.
+///
+/// The `segment_` fields report the segment data blocks in memory, and the
+/// `segment_index_` fields report the index blocks, filter blocks, and
+/// manifests. When the segment index limit is zero (see
+/// [`MetadataCacheBuilder::max_segment_index_bytes`]), those entries are
+/// kept under the segment limit, so the `segment_` fields include them and
+/// the `segment_index_` fields are zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataCacheStats {
-    /// Segment block and manifest lookups that found their entry in memory.
+    /// Segment data block lookups that found their entry in memory.
     pub segment_hits: usize,
-    /// Segment block and manifest lookups that didn't find their entry in
-    /// memory.
+    /// Segment data block lookups that didn't find their entry in memory.
     pub segment_misses: usize,
-    /// Segment blocks and manifests inserted into memory.
+    /// Segment data blocks inserted into memory.
     pub segment_inserts: usize,
-    /// Segment blocks and manifests evicted from memory to stay within the
-    /// segment limit.
+    /// Segment data blocks evicted from memory to stay within the segment
+    /// limit.
     pub segment_evictions: usize,
-    /// Segment blocks and manifests heavier than the whole segment limit,
-    /// which are never kept in memory.
+    /// Segment data blocks heavier than the whole segment limit, which are
+    /// never kept in memory.
     pub segment_rejections: usize,
     /// Segments skipped because their bloom filter ruled out a lookup before
     /// any index or data read.
     pub segment_filter_skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.
     pub segment_filter_false_positives: usize,
-    /// Bytes charged to segment blocks and manifests in memory now,
-    /// including their keys and the cache's own allocation for each entry.
+    /// Bytes charged to segment data blocks in memory now, including their
+    /// keys and the cache's own allocation for each entry.
     pub segment_bytes: usize,
+    /// Segment index block, filter block, and manifest lookups that found
+    /// their entry in memory.
+    pub segment_index_hits: usize,
+    /// Segment index block, filter block, and manifest lookups that didn't
+    /// find their entry in memory.
+    pub segment_index_misses: usize,
+    /// Segment index blocks, filter blocks, and manifests inserted into
+    /// memory.
+    pub segment_index_inserts: usize,
+    /// Segment index blocks, filter blocks, and manifests evicted from
+    /// memory to stay within the segment index limit.
+    pub segment_index_evictions: usize,
+    /// Segment index blocks, filter blocks, and manifests heavier than the
+    /// whole segment index limit, which are never kept in memory.
+    pub segment_index_rejections: usize,
+    /// Bytes charged to segment index blocks, filter blocks, and manifests
+    /// in memory now, including their keys and the cache's own allocation
+    /// for each entry.
+    pub segment_index_bytes: usize,
     /// The counters and occupancy of the SSD tier of the segment blocks, or
     /// `None` if the cache has no SSD tier.
     pub segment_ssd: Option<SsdSegmentBlocksStats>,
