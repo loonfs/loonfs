@@ -283,13 +283,14 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
         watched.inner().arm();
         let view = scan::VerifiedMetadataSegments::from_runs(&watched, &cache, runs.clone());
         let mut page = std::pin::pin!(view.scan_range_page(FAMILY, &lower, None, limit));
-        // The watcher yields once before each request reaches the holding
-        // store, and the window yields after a few of its requests do.
+        // Yield between polls so Tokio can replenish the cooperative budget
+        // after cache hits, before the next store request starts.
         for _ in 0..64 {
             assert!(futures::poll!(page.as_mut()).is_pending());
             if watched.reads().total == 16 {
                 break;
             }
+            tokio::task::yield_now().await;
         }
         assert!(futures::poll!(page.as_mut()).is_pending());
         let waiting = watched.reads();
