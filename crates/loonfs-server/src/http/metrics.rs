@@ -338,11 +338,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         wal_tail_rejections,
         wal_tail_rejected_bytes,
         wal_tail_bytes,
-        wal_object_hits,
-        wal_object_misses,
-        wal_object_inserts,
-        wal_object_evictions,
-        wal_object_bytes,
         content_object_hits,
         content_object_misses,
         content_object_inserts,
@@ -377,12 +372,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             "WAL-tail cache lookups, by outcome",
             wal_tail_hits,
             wal_tail_misses,
-        ),
-        (
-            "loonfs_wal_object_cache_gets",
-            "WAL object cache lookups, by outcome",
-            wal_object_hits,
-            wal_object_misses,
         ),
         (
             "loonfs_content_object_cache_gets",
@@ -450,16 +439,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             wal_tail_rejected_bytes,
         ),
         (
-            "loonfs_wal_object_cache_inserts",
-            "WAL objects inserted into the WAL object cache",
-            wal_object_inserts,
-        ),
-        (
-            "loonfs_wal_object_cache_evictions",
-            "WAL objects evicted to stay within the WAL object budget",
-            wal_object_evictions,
-        ),
-        (
             "loonfs_content_object_cache_inserts",
             "Content objects inserted into the content object cache",
             content_object_inserts,
@@ -482,11 +461,6 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             "loonfs_wal_tail_cache_retained_decoded_bytes",
             "Bytes currently charged to WAL-tail projections, including keys and per-entry bookkeeping",
             wal_tail_bytes,
-        ),
-        (
-            "loonfs_wal_object_cache_retained_decoded_bytes",
-            "Bytes currently charged to WAL objects, including keys and per-entry bookkeeping",
-            wal_object_bytes,
         ),
         (
             "loonfs_content_object_cache_retained_decoded_bytes",

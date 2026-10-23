@@ -97,8 +97,7 @@ The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of manag
 | --- | ---: | --- |
 | Metadata segment cache | 30% | `metadata_cache.max_segment_bytes` |
 | WAL tail cache | 10% | `metadata_cache.max_wal_tail_bytes` |
-| WAL object cache | 3% | `metadata_cache.max_wal_object_bytes` |
-| Content object cache | 7% | `metadata_cache.max_content_object_bytes` |
+| Content object cache | 10% | `metadata_cache.max_content_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
 | Read working memory | 20% | `max_read_working_bytes` |
 | Admitted publication bytes | 10% | `publication.max_estimated_bytes` |
@@ -322,7 +321,6 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs_segment_cache_rejections_total` | Counter, `tier` label | A tier doesn't keep a block. In memory, the block is larger than the whole budget. On disk, the block is larger than the whole budget, the write queue is full, or the write failed, and the block stays in memory. |
 | `loonfs_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the entries in the metadata segment cache in memory, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_segment_cache_retained_stored_bytes` | Gauge | Bytes charged to the blocks on the SSD tier, up to `metadata_cache.ssd.max_segment_bytes`. Each block's charge is its stored length (4 KiB for a smaller block) and its index entry's allocation in memory, so the gauge is larger than the bytes on disk when blocks are small. |
-| `loonfs_wal_object_cache_evictions_total` | Counter | A decoded WAL object is evicted at the `metadata_cache.max_wal_object_bytes` limit. |
 | `loonfs_content_object_cache_evictions_total` | Counter | A content object is evicted at the `metadata_cache.max_content_object_bytes` limit. |
 | `loonfs_grep_cache_gets_total` | Counter, `result` label | A grep query looks up a decoded manifest or block of the grep index in the grep cache: `hit` or `miss`. A server that doesn't serve grep has no grep cache, so it reports no `loonfs_grep_cache_*` series. |
 | `loonfs_grep_cache_evictions_total` | Counter | A decoded grep manifest or block is evicted at the `grep.max_cache_bytes` limit. |
@@ -389,8 +387,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Head cache | `metadata_cache.max_head_bytes` | 16 MiB, with or without a memory limit | Cached namespace heads for reads, about 18,000 namespaces at 0.9 KB each | Steady |
 | WAL tail cache | `metadata_cache.max_wal_tail_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
-| WAL object cache | `metadata_cache.max_wal_object_bytes` | Derived: 3%. 32 MiB without a memory limit | Decoded WAL objects that reads keep for later reads | Steady |
-| Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 7%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
+| Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 10%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
 | Publication queue | `publication.max_estimated_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |

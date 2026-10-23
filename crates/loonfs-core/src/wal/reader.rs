@@ -10,7 +10,6 @@ use crate::error::MetadataProjectionLoadError;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
-use crate::object_cache::ObjectCache;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
@@ -23,26 +22,14 @@ pub(super) struct LoadedWalObject {
     pub(super) envelope: Result<Option<Arc<WalObjectEnvelope>>, WalTailLoadError>,
 }
 
-/// Loads the WAL object at `wal_no` from `object_cache`, or from the store.
-///
-/// An object read from the store is added to `object_cache` once it decodes
-/// and matches the number and namespace of its key. An absent number isn't
-/// cached, because a writer can still publish it.
+/// Loads the WAL object at `wal_no`, if it exists, and checks that it
+/// decodes and matches the number and namespace of its key.
 pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
     store: &S,
-    object_cache: Option<&ObjectCache>,
     namespace_id: &NamespaceId,
     wal_no: WalNo,
 ) -> LoadedWalObject {
     let object_key = wal_object_key(namespace_id, &wal_no);
-    if let Some(envelope) =
-        object_cache.and_then(|cache| cache.get_wal_object(namespace_id, wal_no))
-    {
-        return LoadedWalObject {
-            object_key,
-            envelope: Ok(Some(envelope)),
-        };
-    }
     let envelope = async {
         let Some(bytes) =
             store
@@ -81,9 +68,6 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
         Ok(Some(Arc::new(envelope)))
     }
     .await;
-    if let (Some(object_cache), Ok(Some(envelope))) = (object_cache, &envelope) {
-        object_cache.insert_wal_object(envelope);
-    }
     LoadedWalObject {
         object_key,
         envelope,
@@ -167,7 +151,6 @@ impl<'a> WalWalk<'a> {
 
 pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
-    object_cache: Option<&ObjectCache>,
     request: WalTailLoadRequest<'_>,
 ) -> Result<ValidatedWalTail, WalTailLoadError> {
     let mut walk = WalWalk::after(
@@ -177,7 +160,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         request.writer_epoch,
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
-        .map(|number| load_wal_object(store, object_cache, request.namespace_id, WalNo(number + 1)))
+        .map(|number| load_wal_object(store, request.namespace_id, WalNo(number + 1)))
         .buffered(STORE_READS_IN_FLIGHT);
     let mut objects = Vec::new();
     while let Some(LoadedWalObject {
@@ -202,14 +185,12 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
-    object_cache: Option<&ObjectCache>,
     base_head: &NamespaceReadState,
     current_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
 ) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
     let tail = load_wal_tail(
         store,
-        object_cache,
         WalTailLoadRequest {
             namespace_id: &current_head.namespace_id,
             base_seq: base_head.seq,

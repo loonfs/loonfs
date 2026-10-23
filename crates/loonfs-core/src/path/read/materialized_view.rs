@@ -257,16 +257,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             head_seq: head.seq,
         };
         let replay = || async {
-            load_replayed_wal_tail(
-                store,
-                load_context.object_cache,
-                &manifest_head,
-                &head,
-                &loaded_basis.base_state,
-            )
-            .await
-            .map(|replayed| Arc::new(replayed.projected_tail))
-            .map_err(CoreError::MetadataProjection)
+            load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
+                .await
+                .map(|replayed| Arc::new(replayed.projected_tail))
+                .map_err(CoreError::MetadataProjection)
         };
         let wal_tail = match load_context.head_and_wal_tail_cache {
             Some(cache) => cache.get_or_load_tail(&cache_key, replay).await?,

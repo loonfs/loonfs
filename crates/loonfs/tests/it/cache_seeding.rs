@@ -283,7 +283,6 @@ fn a_cache_with_zero_limits_keeps_nothing() {
             MetadataCache::builder()
                 .max_segment_bytes(0)
                 .max_wal_tail_bytes(0)
-                .max_wal_object_bytes(0)
                 .max_content_object_bytes(0)
                 .build(),
         )
@@ -370,13 +369,11 @@ fn heads_and_wal_tails_evict_by_bytes_anchors_included() {
         &namespace_id("first"),
     ));
     let (first, other) = two_namespaces_with_one_file(raw_store.store());
-    // Without cached WAL objects, a reload reads the WAL tail from the store.
     let fs = open_runtime_with(raw_store.store(), "head-and-tail-budget", |builder| {
         builder.metadata_cache(
             MetadataCache::builder()
                 .max_head_bytes(head_budget)
                 .max_wal_tail_bytes(budget)
-                .max_wal_object_bytes(0)
                 .build(),
         )
     });
@@ -488,12 +485,7 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
         loonfs::LoonFs::builder_with_store(object_store)
             .read_only()
             .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
-            .metadata_cache(
-                MetadataCache::builder()
-                    .max_wal_tail_bytes(budget)
-                    .max_wal_object_bytes(0)
-                    .build(),
-            )
+            .metadata_cache(MetadataCache::builder().max_wal_tail_bytes(budget).build())
             .build(),
     )
     .expect("reader");
