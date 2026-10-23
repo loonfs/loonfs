@@ -132,7 +132,7 @@ pub(super) fn read_ahead_window_bytes(segment_cache: Option<&MetadataSegmentCach
     })
 }
 
-/// The cache of one budget of the shared segment blocks.
+/// A cache of decoded segment entries under one byte budget.
 pub(super) type SegmentEntries =
     DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>;
 
@@ -164,7 +164,7 @@ struct MetadataSegmentFilterStatsInner {
 }
 
 impl SharedSegmentBlocks {
-    /// Returns segment blocks that keep up to `max_data_bytes` of data
+    /// Returns an empty cache that keeps up to `max_data_bytes` of data
     /// blocks and up to `max_index_bytes` of index blocks, filter blocks,
     /// and manifests.
     pub fn new(max_data_bytes: usize, max_index_bytes: usize) -> Self {
@@ -178,8 +178,7 @@ impl SharedSegmentBlocks {
         }
     }
 
-    /// Returns the cache of the budget that entries of `kind` are charged
-    /// to.
+    /// Returns the cache that keeps entries of `kind`.
     pub(super) fn entries(&self, kind: SegmentBlockKind) -> &SegmentEntries {
         match kind {
             SegmentBlockKind::Data => &self.data,
@@ -276,9 +275,9 @@ impl MetadataSegmentCache {
     }
 
     /// A view over blocks no other view reads, with a budget of
-    /// `max_decoded_bytes` for data blocks and another for index blocks,
-    /// filter blocks, and manifests, and the default block memo budget and
-    /// read-ahead window.
+    /// `max_decoded_bytes` for data blocks, another of the same size for
+    /// index blocks, filter blocks, and manifests, and the default block memo
+    /// budget and read-ahead window.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(

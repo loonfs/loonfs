@@ -56,7 +56,7 @@ Each budget applies across every runtime that shares the metadata cache, and eve
 
 Why one cache type? All seven caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
 
-Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay. In the same way, a scan that loads data blocks could evict the index blocks, filter blocks, and manifests that every lookup reads first, and the next lookup in each namespace would pay a GET for each of them.
+Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay. In the same way, a scan that loads data blocks could evict the index blocks, filter blocks, and manifests that every lookup reads first, and the next lookup in each namespace would pay a GET for each evicted entry.
 
 ## Costs
 

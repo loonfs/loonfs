@@ -96,7 +96,7 @@ The budgets for namespace heads (`metadata_cache.max_head_bytes`) and for the in
 
 | Pool | Share of managed memory | Setting |
 | --- | ---: | --- |
-| Metadata segment cache (data blocks) | 30% | `metadata_cache.max_segment_bytes` |
+| Metadata segment cache, data blocks | 30% | `metadata_cache.max_segment_bytes` |
 | WAL tail cache | 10% | `metadata_cache.max_wal_tail_bytes` |
 | Content object cache | 10% | `metadata_cache.max_content_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
