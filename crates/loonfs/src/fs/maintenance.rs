@@ -314,19 +314,20 @@ impl Maintenance {
         }))
     }
 
-    /// Reads what a pass decides on and folds the WAL tail when a fold is
-    /// due. Returns the current manifest for the pass's compaction unit to
-    /// decide on, the unfolded WAL objects the pass found, what the fold did,
-    /// and whether the WAL tail leaves metadata caught up.
+    /// Reads the state that a pass plans from, and folds the WAL tail when a
+    /// fold is due. Returns the current manifest for the pass's compaction
+    /// unit to plan from, the unfolded WAL objects that the pass found, what
+    /// the fold did, and whether the WAL tail leaves metadata caught up.
     ///
-    /// A fold attempt can move the manifest, so after one the unit observes
-    /// the manifest again, and this returns `None` for it. A tail that waits
-    /// for its idle fold age leaves metadata due. A session's own compaction
-    /// (`TailFold::Never`) doesn't fold, so it reads only the current
-    /// manifest and takes the unfolded WAL objects from the session's
-    /// position (`None` without one). A tail that the position shows
-    /// unfolded leaves metadata due for the session's fold task or the host's
-    /// idle fold.
+    /// A fold attempt can move the manifest, so after a fold attempt this
+    /// returns `None` for the manifest, and the compaction unit loads the
+    /// current manifest itself. A tail that waits for its idle fold age leaves
+    /// metadata due. A session's own compaction (`TailFold::Never`) doesn't
+    /// fold, so it reads only the current manifest and takes the unfolded WAL
+    /// objects from the session's position (`None` when the runtime has no
+    /// position for the namespace). A tail that the position shows unfolded
+    /// leaves metadata due for the session's fold task or the host's idle
+    /// fold.
     async fn fold_if_due(
         &self,
         namespace_id: &NamespaceId,

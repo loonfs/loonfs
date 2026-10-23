@@ -273,7 +273,7 @@ async fn a_session_streaming_compaction_survives_its_own_next_fold() {
     parked.writer.shutdown().await.expect("shut down writer");
 }
 
-/// The session's compaction decides each unit on the current manifest and
+/// The session's compaction plans each unit from the current manifest and
 /// takes the tail from the session's position. So while two of the session's
 /// writes wait unfolded above the manifest, and the loop's own unit and the
 /// next fold publish manifests under it, the loop reads none of the WAL

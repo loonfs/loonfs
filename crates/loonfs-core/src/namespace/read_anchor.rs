@@ -35,7 +35,8 @@ impl NamespaceReadAnchor {
         MetadataBasis(self.manifest.state.manifest().clone())
     }
 
-    /// The manifest that the anchor's tail was discovered above.
+    /// Returns the current manifest that the anchor loaded before it read
+    /// the WAL tail above that manifest.
     pub fn current_manifest(&self) -> &CurrentManifest {
         &self.manifest.state
     }

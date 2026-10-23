@@ -473,8 +473,8 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
-    /// The unfolded WAL objects in the namespace's writer position, or `None`
-    /// when this runtime has no position for the namespace.
+    /// Returns the unfolded WAL objects in the namespace's writer position,
+    /// or `None` when this runtime has no position for the namespace.
     pub(crate) async fn wal_tail_objects(&self, namespace_id: &NamespaceId) -> Option<u64> {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
