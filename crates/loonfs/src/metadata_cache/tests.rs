@@ -308,9 +308,11 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
 
 /// Checks that the builder's segment index limit sets the budget of index
 /// blocks, filter blocks, and manifests. By default, a read charges those
-/// entries to that budget and its data blocks to the segment limit. With a
-/// zero segment index limit, the same read charges every entry to the
-/// segment limit.
+/// entries to that budget and its data blocks to the segment limit, and a
+/// second pass of the same reads fetches none of them again. With a zero
+/// segment index limit, the cache keeps none of those entries and charges
+/// none of them to the segment limit, so the second pass fetches them from
+/// the store again.
 #[tokio::test]
 async fn the_segment_index_limit_sets_the_budget_of_index_blocks_filters_and_manifests() {
     let root = tempdir().expect("tempdir");
@@ -320,34 +322,43 @@ async fn the_segment_index_limit_sets_the_budget_of_index_blocks_filters_and_man
         b"file",
     )
     .await;
-    let read = |cache: MetadataCache| {
-        let store = local_store(root.path());
+    let read_twice = |cache: MetadataCache| {
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(root.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ));
         async move {
-            assert_reads(&reader(&store, &cache).await, b"file").await;
-            cache.stats()
+            let store: SharedObjectStore = recording.clone();
+            let runtime = reader(&store, &cache).await;
+            assert_reads(&runtime, b"file").await;
+            recording.reset();
+            assert_reads(&runtime, b"file").await;
+            let second_pass = recording.take();
+            let fetched = object_gets(&second_pass, DurableObjectFamily::MetadataManifest)
+                + object_gets(&second_pass, DurableObjectFamily::MetadataSegment);
+            (cache.stats(), fetched)
         }
     };
 
-    let separate = read(MetadataCache::default()).await;
-    assert!(separate.segment_inserts > 0, "{separate:?}");
-    assert!(separate.segment_index_inserts > 0, "{separate:?}");
-    let shared = read(MetadataCache::builder().max_segment_index_bytes(0).build()).await;
+    let (kept, kept_fetches) = read_twice(MetadataCache::default()).await;
+    assert!(kept.segment_inserts > 0, "{kept:?}");
+    assert!(kept.segment_index_inserts > 0, "{kept:?}");
+    assert_eq!(kept_fetches, 0, "the second pass reads warm: {kept:?}");
+    let (unkept, unkept_fetches) =
+        read_twice(MetadataCache::builder().max_segment_index_bytes(0).build()).await;
     assert_eq!(
-        (
-            shared.segment_index_inserts,
-            shared.segment_index_misses,
-            shared.segment_index_bytes
-        ),
-        (0, 0, 0),
-        "{shared:?}"
+        (unkept.segment_index_inserts, unkept.segment_index_bytes),
+        (0, 0),
+        "{unkept:?}"
     );
     assert_eq!(
-        (shared.segment_inserts, shared.segment_bytes),
-        (
-            separate.segment_inserts + separate.segment_index_inserts,
-            separate.segment_bytes + separate.segment_index_bytes
-        ),
-        "{shared:?} against {separate:?}"
+        (unkept.segment_inserts, unkept.segment_bytes),
+        (kept.segment_inserts, kept.segment_bytes),
+        "no index block, filter block, or manifest is charged to the segment limit: {unkept:?}"
+    );
+    assert!(
+        unkept_fetches > 0,
+        "the second pass fetches the manifest and the index and filter blocks again"
     );
 }
 
@@ -972,71 +983,60 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
 
 /// Checks that a stat after a listing that evicts the stat's data blocks
 /// reads no index block, filter block, or manifest from the store, because
-/// those have a budget of their own. With a zero segment index limit, they
-/// share the data blocks' budget, the listing evicts them too, and the same
-/// stat reads more objects.
+/// those have a budget of their own.
 #[tokio::test]
 async fn a_stat_after_a_listing_that_evicts_data_blocks_reads_only_data_blocks() {
     let root = tempdir().expect("tempdir");
     write_long_named_entries(root.path()).await;
     let stat_path = long_named_entries().swap_remove(2_500);
-
-    let mut stat_reads = Vec::new();
-    for max_segment_index_bytes in [crate::DEFAULT_MAX_SEGMENT_INDEX_BYTES, 0] {
-        let store = Arc::new(RecordingStore::new(
-            LocalFsStore::new(root.path()).expect("store"),
-            KeyPredicate::any(),
-        ));
-        let cache = MetadataCache::builder()
-            .max_segment_bytes(256 * 1024)
-            .max_segment_index_bytes(max_segment_index_bytes)
-            .build();
-        let reader = LoonFs::builder_with_store(store.clone())
-            .read_only()
-            .metadata_cache(cache.clone())
-            .build()
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(root.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let cache = MetadataCache::builder()
+        .max_segment_bytes(256 * 1024)
+        .build();
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .metadata_cache(cache.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let namespace = reader.namespace(&demo());
+    namespace.stat(&stat_path).await.expect("warm stat");
+    let mut cursor = None;
+    loop {
+        let page = namespace
+            .list(LONG_NAMED)
+            .cursor(cursor)
+            .page()
             .await
-            .expect("build reader");
-        let namespace = reader.namespace(&demo());
-        namespace.stat(&stat_path).await.expect("warm stat");
-        let mut cursor = None;
-        loop {
-            let page = namespace
-                .list(LONG_NAMED)
-                .cursor(cursor)
-                .page()
-                .await
-                .expect("list a page");
-            match page.next_cursor {
-                Some(next_cursor) => cursor = Some(next_cursor),
-                None => break,
-            }
+            .expect("list a page");
+        match page.next_cursor {
+            Some(next_cursor) => cursor = Some(next_cursor),
+            None => break,
         }
-        let before = cache.stats();
-        assert!(before.segment_evictions > 0, "{before:?}");
-        store.reset();
-        namespace
-            .stat(&stat_path)
-            .await
-            .expect("stat after the listing");
-        let after = cache.stats();
-        let operations = store.take();
-        let reads = object_gets(&operations, DurableObjectFamily::MetadataSegment)
-            + object_gets(&operations, DurableObjectFamily::MetadataManifest);
-        if max_segment_index_bytes > 0 {
-            assert_eq!(
-                (after.segment_index_misses, after.segment_index_evictions),
-                (before.segment_index_misses, 0),
-                "{after:?}"
-            );
-        }
-        stat_reads.push(reads);
     }
+    let before = cache.stats();
+    assert!(before.segment_evictions > 0, "{before:?}");
+
+    store.reset();
+    namespace
+        .stat(&stat_path)
+        .await
+        .expect("stat after the listing");
+    let after = cache.stats();
     assert!(
-        stat_reads[1] > stat_reads[0],
-        "the stat reads {} objects with a budget for index blocks, filter blocks, and manifests, \
-         and {} without one",
-        stat_reads[0],
-        stat_reads[1]
+        after.segment_misses > before.segment_misses,
+        "the listing evicted the stat's data blocks: {after:?}"
+    );
+    assert_eq!(
+        (after.segment_index_misses, after.segment_index_evictions),
+        (before.segment_index_misses, 0),
+        "{after:?}"
+    );
+    assert_eq!(
+        object_gets(&store.take(), DurableObjectFamily::MetadataManifest),
+        0
     );
 }

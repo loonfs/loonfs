@@ -290,10 +290,14 @@ async fn a_scan_decodes_only_the_blocks_it_reads() {
         .expect("first page");
     assert_eq!(first.len(), 1);
     assert_eq!(
-        (cache.stats().inserts, store.count(OperationSelector::Read)),
-        (3, 2),
-        "the page reads the index and one window, and decodes the index, the filter that \
-         the index's GET reads, and one data block"
+        (
+            cache.stats().inserts,
+            cache.stats().index.inserts,
+            store.count(OperationSelector::Read)
+        ),
+        (1, 2, 2),
+        "the page reads the index and one window, and decodes one data block, and the \
+         index and the filter that the index's GET reads"
     );
     let window = read_ahead_window_len(&index, READAHEAD_WINDOW_BYTES);
     let rows_in_window: usize = expected
@@ -307,8 +311,12 @@ async fn a_scan_decodes_only_the_blocks_it_reads() {
         .expect("the rest of the window");
     assert_eq!(rest.len(), rows_in_window - 1);
     assert_eq!(
-        (cache.stats().inserts, store.count(OperationSelector::Read)),
-        (window + 2, 2),
+        (
+            cache.stats().inserts,
+            cache.stats().index.inserts,
+            store.count(OperationSelector::Read)
+        ),
+        (window, 2, 2),
         "the read's next page decodes each block of the window when it reads it"
     );
 }
@@ -329,7 +337,7 @@ async fn a_visit_keeps_only_the_stored_bytes_of_its_window_while_it_visits_rows(
     let filter_offset = descriptor.filter_block.offset;
     let pool = Arc::new(ReadWorkingMemory::default());
     let cache = MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(usize::MAX, 0)),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
         Arc::clone(&pool),
         READAHEAD_WINDOW_BYTES,

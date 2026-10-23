@@ -52,7 +52,7 @@ When a limit is available, each memory setting is derived from it by default. A 
 | `publication.max_estimated_bytes` | Derived: 10% | 64 MiB |
 | `max_merge_input_bytes` | Derived: 10% divided by `max_concurrent_compactions` | 64 MiB per compaction |
 
-You can set a cache size or `max_read_working_bytes` to zero to disable retention. The exception is `metadata_cache.max_segment_index_bytes`. At zero, the server keeps segment index blocks, filter blocks, and manifests under `metadata_cache.max_segment_bytes` with the data blocks. The publication byte limit and the merge input limit must be positive. `grep.max_cache_bytes` applies only when the configured grep mode serves queries.
+You can set a cache size or `max_read_working_bytes` to zero to disable retention. The publication byte limit and the merge input limit must be positive. `grep.max_cache_bytes` applies only when the configured grep mode serves queries.
 
 The host admission settings are top-level positive integers:
 

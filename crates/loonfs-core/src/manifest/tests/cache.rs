@@ -1166,7 +1166,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
     let blocks = Arc::new(CountingBlockCache::default());
     let cache = MetadataSegmentCache::with_blocks(
         blocks.clone(),
-        Arc::new(SharedSegmentBlocks::new(usize::MAX, 0)),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
         Arc::default(),
         crate::limits::READAHEAD_WINDOW_BYTES,
@@ -1467,12 +1467,17 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
     assert!(!output.is_empty(), "the compaction writes segments");
     let stats = cache.stats();
     assert_eq!(
-        (stats.hits, stats.misses),
-        (0, 0),
+        (
+            stats.hits,
+            stats.misses,
+            stats.index.hits,
+            stats.index.misses
+        ),
+        (0, 0, 0, 0),
         "a compaction looks up no input block"
     );
     assert_eq!(
-        stats.inserts,
+        stats.inserts + stats.index.inserts,
         written_segment_blocks(&store, &output).await,
         "a compaction inserts its output's blocks and nothing else"
     );

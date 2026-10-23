@@ -313,9 +313,7 @@ pub struct MetadataCacheBuilder {
 
 impl MetadataCacheBuilder {
     /// Sets the decoded bytes of segment data blocks that the cache keeps.
-    /// Defaults to [`DEFAULT_MAX_SEGMENT_BYTES`]. Zero keeps none. When
-    /// [`Self::max_segment_index_bytes`] is zero, this limit also covers
-    /// index blocks, filter blocks, and manifests.
+    /// Defaults to [`DEFAULT_MAX_SEGMENT_BYTES`]. Zero keeps none.
     pub fn max_segment_bytes(mut self, max_segment_bytes: usize) -> Self {
         self.max_segment_bytes = max_segment_bytes;
         self
@@ -323,8 +321,8 @@ impl MetadataCacheBuilder {
 
     /// Sets the decoded bytes of segment index blocks, filter blocks, and
     /// manifests that the cache keeps. Defaults to
-    /// [`DEFAULT_MAX_SEGMENT_INDEX_BYTES`]. Zero keeps them under
-    /// [`Self::max_segment_bytes`] with the data blocks.
+    /// [`DEFAULT_MAX_SEGMENT_INDEX_BYTES`]. Zero keeps none, so every read
+    /// fetches them from the store.
     ///
     /// A lookup reads its manifest, and the filter and index blocks of the
     /// segments that it checks, before it reads a data block. These entries
@@ -459,10 +457,7 @@ impl MetadataCacheBuilder {
 ///
 /// The `segment_` fields report the segment data blocks in memory, and the
 /// `segment_index_` fields report the index blocks, filter blocks, and
-/// manifests. When the segment index limit is zero (see
-/// [`MetadataCacheBuilder::max_segment_index_bytes`]), those entries are
-/// kept under the segment limit, so the `segment_` fields include them and
-/// the `segment_index_` fields are zero.
+/// manifests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataCacheStats {
     /// Segment data block lookups that found their entry in memory.

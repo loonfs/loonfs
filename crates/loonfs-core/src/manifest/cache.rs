@@ -80,10 +80,9 @@ impl DecodedBlockKey for ObjectStoreScope {
 ///
 /// The first fields are the counters that every cache reports (see
 /// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats))
-/// for the data blocks' budget, which also covers index blocks, filter
-/// blocks, and manifests when they don't have a budget of their own.
-/// `index` reports the same counters for the budget of index blocks, filter
-/// blocks, and manifests, and the rest count what the segment filters did.
+/// for the data blocks' budget, `index` reports the same counters for the
+/// budget of index blocks, filter blocks, and manifests, and the rest count
+/// what the segment filters did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataSegmentCacheStats {
     pub hits: usize,
@@ -95,8 +94,7 @@ pub struct MetadataSegmentCacheStats {
     pub rejected_decoded_bytes: usize,
     pub cached_decoded_bytes: usize,
     /// The counters of the budget for index blocks, filter blocks, and
-    /// manifests, which are all zero when those entries share the data
-    /// blocks' budget.
+    /// manifests.
     pub index: DecodedBlockCacheStats,
     /// Segments a scan skipped because their bloom filter ruled the lookup
     /// key out before any index or data fetch.
@@ -142,13 +140,11 @@ pub(super) type SegmentEntries =
 ///
 /// Data blocks have one byte budget, and index blocks, filter blocks, and
 /// manifests have another, so a burst of data blocks can't evict the entries
-/// that every lookup reads first. With a zero budget for index blocks,
-/// filter blocks, and manifests, every entry shares the data blocks' budget.
+/// that every lookup reads first.
 pub struct SharedSegmentBlocks {
     data: SegmentEntries,
-    /// The index blocks, filter blocks, and manifests, or `None` if they
-    /// share the data blocks' budget.
-    index: Option<SegmentEntries>,
+    /// The index blocks, filter blocks, and manifests.
+    index: SegmentEntries,
     filter_stats: MetadataSegmentFilterStatsInner,
 }
 
@@ -170,16 +166,14 @@ struct MetadataSegmentFilterStatsInner {
 impl SharedSegmentBlocks {
     /// Returns segment blocks that keep up to `max_data_bytes` of data
     /// blocks and up to `max_index_bytes` of index blocks, filter blocks,
-    /// and manifests. If `max_index_bytes` is zero, index blocks, filter
-    /// blocks, and manifests are kept under `max_data_bytes` with the data
-    /// blocks.
+    /// and manifests.
     pub fn new(max_data_bytes: usize, max_index_bytes: usize) -> Self {
         let budget = |max_decoded_bytes| {
             DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes))
         };
         Self {
             data: budget(max_data_bytes),
-            index: (max_index_bytes > 0).then(|| budget(max_index_bytes)),
+            index: budget(max_index_bytes),
             filter_stats: MetadataSegmentFilterStatsInner::default(),
         }
     }
@@ -190,7 +184,7 @@ impl SharedSegmentBlocks {
         match kind {
             SegmentBlockKind::Data => &self.data,
             SegmentBlockKind::Index | SegmentBlockKind::Filter | SegmentBlockKind::Manifest => {
-                self.index.as_ref().unwrap_or(&self.data)
+                &self.index
             }
         }
     }
@@ -206,11 +200,7 @@ impl SharedSegmentBlocks {
             rejections: blocks.rejections,
             rejected_decoded_bytes: blocks.rejected_decoded_bytes,
             cached_decoded_bytes: blocks.cached_decoded_bytes,
-            index: self
-                .index
-                .as_ref()
-                .map(SegmentEntries::stats)
-                .unwrap_or_default(),
+            index: self.index.stats(),
             filter_skips: self.filter_stats.filter_skips.load(Ordering::Relaxed),
             filter_false_positives: self
                 .filter_stats
@@ -285,13 +275,17 @@ impl MetadataSegmentCache {
         }
     }
 
-    /// A view over blocks no other view reads, with one budget for every
-    /// kind of entry, and the default block memo budget and read-ahead
-    /// window.
+    /// A view over blocks no other view reads, with a budget of
+    /// `max_decoded_bytes` for data blocks and another for index blocks,
+    /// filter blocks, and manifests, and the default block memo budget and
+    /// read-ahead window.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedSegmentBlocks::new(max_decoded_bytes, 0)),
+            Arc::new(SharedSegmentBlocks::new(
+                max_decoded_bytes,
+                max_decoded_bytes,
+            )),
             ObjectStoreScope::new(0),
             Arc::default(),
             READAHEAD_WINDOW_BYTES,
@@ -760,7 +754,7 @@ mod tests {
     /// blocks.
     #[tokio::test]
     async fn views_read_only_the_blocks_of_their_own_object_store() {
-        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, 0));
+        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX));
         let view = |scope| {
             MetadataSegmentCache::new(
                 Arc::clone(&shared),
@@ -862,37 +856,33 @@ mod tests {
 
     /// Checks that index blocks, filter blocks, and manifests stay cached
     /// through a burst of data blocks that's larger than the data blocks'
-    /// budget, and that without a budget of their own they're evicted with
-    /// the data blocks.
+    /// budget.
     #[test]
     fn index_blocks_filters_and_manifests_survive_a_burst_of_data_blocks() {
         let data_charge = charged_bytes(&(ObjectStoreScope::new(0), key("data-00")), &block(600));
-        for (index_bytes, survives) in [(64 * 1024, true), (0, false)] {
-            let cache = view_with_budgets(4 * data_charge, index_bytes);
-            for kind in INDEX_KINDS {
-                cache.insert(kind_key("segment", kind), entry(kind, 100));
-            }
-            for burst in 0..16 {
-                cache.insert(key(&format!("data-{burst:02}")), block(600));
-            }
+        let cache = view_with_budgets(4 * data_charge, 64 * 1024);
+        for kind in INDEX_KINDS {
+            cache.insert(kind_key("segment", kind), entry(kind, 100));
+        }
+        for burst in 0..16 {
+            cache.insert(key(&format!("data-{burst:02}")), block(600));
+        }
 
-            let stats = cache.stats();
-            assert!(stats.evictions >= 12, "{stats:?}");
-            assert_eq!(stats.index.evictions, 0, "{stats:?}");
-            for kind in INDEX_KINDS {
-                assert_eq!(
-                    cache.get(&kind_key("segment", kind)).is_some(),
-                    survives,
-                    "the {kind:?} entry with a budget of {index_bytes} for index entries"
-                );
-            }
+        let stats = cache.stats();
+        assert!(stats.evictions >= 12, "{stats:?}");
+        assert_eq!(stats.index.evictions, 0, "{stats:?}");
+        for kind in INDEX_KINDS {
+            assert!(
+                cache.get(&kind_key("segment", kind)).is_some(),
+                "the {kind:?} entry survives the burst"
+            );
         }
     }
 
     /// Checks that each entry is charged to the budget of its kind: a data
-    /// block to the data blocks' budget, even when that budget is zero, and
-    /// an index block, a filter block, or a manifest to the budget of its
-    /// own.
+    /// block to the data blocks' budget, and an index block, a filter block,
+    /// or a manifest to the budget of its own. A zero budget keeps no entry
+    /// of its kind, and charges none to the other budget.
     #[test]
     fn each_entry_is_charged_to_the_budget_of_its_kind() {
         let charge = |key: &MetadataSegmentCacheKey, entry: &DecodedMetadataSegmentBlock| {
@@ -902,6 +892,19 @@ mod tests {
         no_data.insert(key("data"), block(600));
         assert!(no_data.get(&key("data")).is_none());
         assert_eq!(no_data.stats().index, DecodedBlockCacheStats::default());
+
+        let no_index = view_with_budgets(64 * 1024, 0);
+        for kind in INDEX_KINDS {
+            no_index.insert(kind_key("segment", kind), entry(kind, 100));
+            assert!(no_index.get(&kind_key("segment", kind)).is_none());
+        }
+        let stats = no_index.stats();
+        assert_eq!(
+            (stats.inserts, stats.cached_decoded_bytes),
+            (0, 0),
+            "{stats:?}"
+        );
+        assert_eq!(stats.index, DecodedBlockCacheStats::default());
 
         let cache = view_with_budgets(64 * 1024, 64 * 1024);
         cache.insert(key("data"), block(600));

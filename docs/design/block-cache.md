@@ -110,7 +110,7 @@ This section describes the budgets of each tier, the memory that the SSD tier ad
 LoonFS keeps each kind of cache entry under a budget of its own, so that one kind can't evict another, and every cache reports the same family of counters (hits, misses, inserts, evictions, and rejections), as [Cache ownership](cache-ownership.md) describes. The memory tier keeps two kinds of entry, each under its own budget and with its own counters:
 
 - Data blocks, under `metadata_cache.max_segment_bytes`. The budget is 256 MiB on a server without a memory limit, and a share of managed memory on a sized server.
-- Index blocks, filter blocks, and manifests, which a lookup reads before it reads a data block, under `metadata_cache.max_segment_index_bytes`. The budget is 32 MiB, with or without a memory limit. With this budget at zero, LoonFS keeps these entries under the data blocks' budget.
+- Index blocks, filter blocks, and manifests, which a lookup reads before it reads a data block, under `metadata_cache.max_segment_index_bytes`. The budget is 32 MiB, with or without a memory limit.
 
 Both budgets are separate from the budgets for namespace [heads](../specs/glossary.md#head), [WAL tails](../specs/glossary.md#wal-tail), and content objects, so a burst of block reads doesn't evict a reader's WAL tail.
 
@@ -204,7 +204,7 @@ Each case compares the two servers' store requests per call and their latency di
 
 ## Alternatives considered
 
-Keep index blocks, filter blocks, and manifests under the data blocks' budget. A scan that loads many data blocks then evicts the entries that every lookup reads first, in every namespace that the server serves, and the next lookup in each of those namespaces costs a GET for each of them. (A server can still choose this, by setting the budget for index and filter blocks to zero.)
+Keep index blocks, filter blocks, and manifests under the data blocks' budget. A scan that loads many data blocks then evicts the entries that every lookup reads first, in every namespace that the server serves, and the next lookup in each of those namespaces costs a GET for each of them.
 
 Put a disk tier under the decoded cache, with its own budget and its own rules, that keeps the stored bytes of some block kinds and not others (for example, index and filter blocks but not the data blocks that scans read). The server then has two caches that keep different sets of blocks under different rules. A block that one cache evicts can stay in the other, a block that a read uses can be one that the disk tier skips, and each cache needs its own counters and its own term in the sizing formula.
 
