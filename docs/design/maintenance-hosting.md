@@ -13,7 +13,7 @@ Each session that the host has open is in one of four maintenance states:
 | Quiet | Metadata is caught up, the maintained index is current, and collection isn't due. Ticks cost no store requests. | A commit arrives, an index lifecycle changes, or collection becomes due. |
 | Closed | A Quiet session passed its idle threshold, and no caller had its handle. | A later open creates a fresh session. |
 
-The runtime records the last published sequence number and the monotonic time of that publish. A publish clears the "metadata caught up" flag. After its fold, the publisher sets the flag again from the maintenance result, but only if the published sequence number still matches. If the publisher's own maintenance leaves a tail that needs a later idle fold, the flag stays cleared. The host records metadata results with the same sequence check, so a concurrent publish stays due.
+The runtime records the last published sequence number and the monotonic time of that publish. A publish clears the "metadata caught up" flag. After its fold, the publisher sets the flag again from the maintenance result, but only if the published sequence number still matches. If the publisher's own maintenance leaves a tail that needs a later idle fold, the flag stays cleared. Before each unit, the publisher's compaction reads only the current manifest, and it checks the session's [writer position](../specs/glossary.md#writer-position) for an unfolded tail, so it doesn't read back the WAL objects that the session wrote. The host records metadata results with the same sequence check, so a concurrent publish stays due.
 
 Each entry in `Namespaces` for an open session stores:
 

@@ -473,6 +473,16 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
+    /// The unfolded WAL objects in the namespace's writer position, or `None`
+    /// when this runtime has no position for the namespace.
+    pub(crate) async fn wal_tail_objects(&self, namespace_id: &NamespaceId) -> Option<u64> {
+        let publisher = self.live_publisher(namespace_id)?;
+        let slot = publisher.lock_engine().await;
+        slot.engine
+            .as_ref()
+            .and_then(NamespaceCommitEngine::wal_tail_objects)
+    }
+
     /// Whether [`Self::close_admission`] has run: later submissions fail
     /// with `shutting_down`. Readiness probes report this state.
     pub(crate) fn is_admission_closed(&self) -> bool {

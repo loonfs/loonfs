@@ -6,7 +6,8 @@ use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{
-    load_current_manifest_with_hint, load_manifest_by_no, LoadedHint, LoadedManifest,
+    load_current_manifest_with_hint, load_manifest_by_no, CurrentManifest, LoadedHint,
+    LoadedManifest,
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::{
@@ -14,7 +15,7 @@ use crate::wal::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::{ChangeSeq, CompactorEpoch, ManifestNo, NamespaceId, WriterEpoch};
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, WriterEpoch};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -34,8 +35,9 @@ impl NamespaceReadAnchor {
         MetadataBasis(self.manifest.state.manifest().clone())
     }
 
-    pub fn compactor_epoch(&self) -> CompactorEpoch {
-        self.manifest.state.compactor_epoch()
+    /// The manifest that the anchor's tail was discovered above.
+    pub fn current_manifest(&self) -> &CurrentManifest {
+        &self.manifest.state
     }
 }
 

@@ -22,8 +22,7 @@ use super::streaming_compaction::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
-use crate::namespace::read_anchor::NamespaceReadAnchor;
+use crate::namespace::control::{ensure_namespace_live, load_current_manifest, CurrentManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
@@ -293,13 +292,13 @@ pub(super) fn plan_group(
     ))
 }
 
-/// Checks an anchor's manifest descriptors for compaction work without
-/// reading the store.
+/// Checks a manifest's descriptors for compaction work without reading the
+/// store.
 pub fn metadata_compaction_due(
-    anchor: &NamespaceReadAnchor,
+    manifest: &CurrentManifest,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
-    let manifest = anchor.manifest.state.envelope.payload();
+    let manifest = manifest.envelope.payload();
     select_family_group(
         &runs_newest_first(manifest),
         manifest,
