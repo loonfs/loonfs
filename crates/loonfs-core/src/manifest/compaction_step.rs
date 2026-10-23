@@ -620,10 +620,9 @@ mod planning_tests {
     /// implies. That exercises GiB-scale layouts without allocating their
     /// data.
     fn manifest(sizes_mib: &[u64]) -> NamespaceManifestPayload {
-        let fixture = decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-types/tests/golden/manifest.v1.json"
-        ))
-        .expect("manifest fixture");
+        let document = include_bytes!("../../../loonfs-types/tests/golden/manifest.v1.json");
+        let stored = zstd::stream::encode_all(&document[..], 0).expect("compress fixture");
+        let fixture = decode_namespace_manifest_json(&stored).expect("manifest fixture");
         let mut payload = fixture.payload().clone();
         let mut template = payload.runs[0].clone();
         template

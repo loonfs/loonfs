@@ -15,6 +15,7 @@ use loonfs_types::format::control::{
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MAX_NAMESPACE_MANIFEST_BYTES,
 };
 use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::HashSet;
@@ -173,6 +174,15 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
 ) -> Result<(ManifestPublicationOutcome, Option<LoadedHint>)> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
+    // A reader refuses a larger document, so publishing one would leave the
+    // namespace unreadable.
+    if manifest.document_bytes() > MAX_NAMESPACE_MANIFEST_BYTES {
+        return Err(CoreError::ManifestTooLarge {
+            namespace_id: namespace_id.clone(),
+            document_bytes: manifest.document_bytes(),
+            max_bytes: MAX_NAMESPACE_MANIFEST_BYTES,
+        });
+    }
     let expected_predecessor = manifest
         .envelope()
         .payload()

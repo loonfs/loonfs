@@ -4050,11 +4050,10 @@ async fn a_pass_fails_when_its_pinned_manifests_do_not_fit_the_read_memory() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     folded_namespace_with_two_files(&store, &namespace_id).await;
-    let head_bytes = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+    let head = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
-        .expect("current manifest")
-        .manifest_bytes;
-    let budget = 8 * loonfs_types::usize_from_u64(head_bytes);
+        .expect("current manifest");
+    let budget = 8 * crate::heap_bytes::manifest_heap_bytes(&head.state.envelope);
     let memory = Arc::new(crate::cache::ReadWorkingMemory::new(budget, None));
     let cache = root_scan_cache(Arc::clone(&memory));
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);

@@ -2,13 +2,15 @@
 //!
 //! Durable objects declare `kind`, `format_version`, and `payload_checksum`
 //! before their payload. Checksums cover the stored payload bytes rather than
-//! a re-encoding. JSON control objects and CBOR WAL objects use the same
-//! validation rules and errors.
+//! a re-encoding. JSON control objects, JSON manifests, and CBOR WAL objects
+//! use the same validation rules and errors, and manifests and WAL objects
+//! store their documents zstd-compressed.
 
 use crate::digest::sha256_digest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use std::io::Read;
 use thiserror::Error;
 
 /// Identifying prefix of a durable envelope document.
@@ -53,6 +55,12 @@ pub enum EnvelopeCodecError {
     /// Reports a WAL document that exceeds the decompressed format limit.
     #[error("decompressed WAL document exceeds the {max_bytes}-byte limit")]
     WalObjectTooLarge {
+        /// Largest accepted decompressed document.
+        max_bytes: usize,
+    },
+    /// Reports a manifest document that exceeds the decompressed format limit.
+    #[error("decompressed manifest document exceeds the {max_bytes}-byte limit")]
+    ManifestTooLarge {
         /// Largest accepted decompressed document.
         max_bytes: usize,
     },
@@ -156,8 +164,34 @@ pub fn verify_payload_checksum(
     Ok(())
 }
 
+/// Compresses an envelope document into the bytes that a zstd-compressed
+/// family stores.
+pub(crate) fn compress_document(document: &[u8]) -> Result<Vec<u8>, EnvelopeCodecError> {
+    zstd::stream::encode_all(document, crate::segment_blocks::ZSTD_LEVEL)
+        .map_err(|err| EnvelopeCodecError::Compress(err.to_string()))
+}
+
+/// Decompresses stored bytes into an envelope document, or returns `None`
+/// when the document is longer than `max_bytes`.
+///
+/// Decompression stops one byte past the limit, so a small object can't make
+/// a reader allocate more than `max_bytes + 1` bytes.
+pub(crate) fn decompress_document(
+    stored: &[u8],
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, EnvelopeCodecError> {
+    let decoder = zstd::stream::read::Decoder::new(stored)
+        .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
+    let mut document = Vec::new();
+    decoder
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut document)
+        .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
+    Ok((document.len() <= max_bytes).then_some(document))
+}
+
 /// Durable layout of a JSON-bodied envelope: the shared fields plus the
-/// payload as a raw JSON fragment, kept inline so the object remains
+/// payload as a raw JSON fragment, kept inline so the document remains
 /// directly readable JSON while `payload_checksum` covers the exact
 /// fragment bytes as stored.
 #[derive(Serialize, Deserialize)]

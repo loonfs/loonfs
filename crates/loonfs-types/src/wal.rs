@@ -12,7 +12,6 @@ use crate::{
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Read;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload as
 /// an opaque CBOR byte string.
@@ -399,8 +398,7 @@ pub fn encode_wal_object_envelope_zstd(
     let mut encoded = Vec::new();
     into_writer(&document, &mut encoded)
         .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
-    let bytes = zstd::stream::encode_all(encoded.as_slice(), crate::segment_blocks::ZSTD_LEVEL)
-        .map_err(|err| EnvelopeCodecError::Compress(err.to_string()))?;
+    let bytes = envelope::compress_document(&encoded)?;
     Ok(crate::envelope::EncodedEnvelope {
         envelope: crate::envelope::VerifiedEnvelope {
             payload_checksum,
@@ -426,16 +424,9 @@ fn decode_wal_object_envelope_zstd_with_limit(
     bytes: &[u8],
     limit: usize,
 ) -> Result<WalObjectEnvelope, EnvelopeCodecError> {
-    let decoder = zstd::stream::read::Decoder::new(bytes)
-        .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
-    let mut decompressed = Vec::new();
-    decoder
-        .take(limit as u64 + 1)
-        .read_to_end(&mut decompressed)
-        .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
-    if decompressed.len() > limit {
+    let Some(decompressed) = envelope::decompress_document(bytes, limit)? else {
         return Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: limit });
-    }
+    };
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     let expected_kind = WalEnvelopeKind::WalObject;
