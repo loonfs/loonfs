@@ -6567,7 +6567,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -6702,7 +6701,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"
@@ -7756,7 +7754,6 @@
             "name": "consistency",
             "required": false,
             "schema": {
-              "default": "eventual",
               "enum": [
                 "strong",
                 "eventual"

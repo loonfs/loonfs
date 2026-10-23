@@ -4,7 +4,7 @@
 
 ## Cases
 
-The eighteen cases cover:
+The nineteen cases cover:
 
 - standard API errors
 - repeated commit requests
