@@ -37,8 +37,8 @@ pub enum GrepIndexStatus {
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
-        /// User-checkpoint pin backing this immutable manifest walk.
-        checkpoint_id: PinId,
+        /// The user pin whose manifest this backfill walks.
+        pin_id: PinId,
     },
     /// Backfill is complete and changes are consumed incrementally.
     Active {
@@ -84,11 +84,11 @@ impl From<&GrepIndexStatus> for loonfs_types::api::v0::GrepIndexStatus {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
-                checkpoint_id,
+                pin_id,
             } => Self::Backfilling {
                 captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
-                checkpoint_id: checkpoint_id.clone(),
+                checkpoint_id: pin_id.clone(),
             },
             GrepIndexStatus::Active {
                 built_through_seq,
@@ -105,8 +105,9 @@ impl From<&GrepIndexStatus> for loonfs_types::api::v0::GrepIndexStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepReorganizeState {
-    /// Fixed input snapshot retained until the completing manifest publication.
-    pub snapshot_segment_ids: Vec<IndexSegmentId>,
+    /// Segments this reorganize merges, chosen when it starts and kept until
+    /// the manifest that completes it is published.
+    pub input_segment_ids: Vec<IndexSegmentId>,
     /// Outputs written by completed reorganize steps and retained until publication.
     pub output_segment_ids: Vec<IndexSegmentId>,
     /// Inclusive row key at which the next reorganize step resumes.
@@ -306,17 +307,17 @@ impl GrepManifestState {
             (
                 GrepIndexStatus::Backfilling {
                     captured_seq,
-                    checkpoint_id,
+                    pin_id,
                     cursor_inode_id,
                 },
                 GrepIndexStatus::Backfilling {
                     captured_seq: next_target,
-                    checkpoint_id: next_checkpoint,
+                    pin_id: next_pin_id,
                     cursor_inode_id: next_cursor,
                 },
             ) => {
                 if next_target < captured_seq
-                    || (next_checkpoint == checkpoint_id
+                    || (next_pin_id == pin_id
                         && (next_target != captured_seq || next_cursor < cursor_inode_id))
                 {
                     return invalid("status");
@@ -394,15 +395,15 @@ fn validate_reorganize(
         });
     }
 
-    let mut snapshot_ids = BTreeSet::new();
-    for segment_id in &reorganize.snapshot_segment_ids {
-        if !snapshot_ids.insert(segment_id) {
+    let mut input_ids = BTreeSet::new();
+    for segment_id in &reorganize.input_segment_ids {
+        if !input_ids.insert(segment_id) {
             return Err(GrepManifestStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });
         }
         if !segments.contains_key(segment_id) {
-            return Err(GrepManifestStateError::MissingReorganizeSnapshotSegment {
+            return Err(GrepManifestStateError::MissingReorganizeInputSegment {
                 segment_id: segment_id.clone(),
             });
         }
@@ -410,7 +411,7 @@ fn validate_reorganize(
 
     let mut output_ids = BTreeSet::new();
     for segment_id in &reorganize.output_segment_ids {
-        if snapshot_ids.contains(segment_id) || !output_ids.insert(segment_id) {
+        if input_ids.contains(segment_id) || !output_ids.insert(segment_id) {
             return Err(GrepManifestStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });

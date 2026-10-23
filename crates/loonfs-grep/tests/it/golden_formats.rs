@@ -93,7 +93,7 @@ pub(crate) fn sample_active_manifest(
     next_event_index: u32,
 ) -> GrepManifestState {
     let reorganize = GrepReorganizeState {
-        snapshot_segment_ids: vec![segment_id(1), segment_id(2)],
+        input_segment_ids: vec![segment_id(1), segment_id(2)],
         output_segment_ids: vec![segment_id(3)],
         row_key_cursor: "gram-6d6e6f-00000000000000000042".to_owned(),
         output_level: 1,
@@ -129,8 +129,8 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
         GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
-            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
-                .expect("valid checkpoint id"),
+            pin_id: PinId::parse("pin_00000000000000000001-0000000000000009")
+                .expect("valid pin id"),
         },
         GrepIndexState {
             reorganize: None,

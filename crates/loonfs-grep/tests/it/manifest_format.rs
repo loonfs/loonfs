@@ -209,7 +209,7 @@ fn decoder_rejects_truncated_payload() {
 fn constructor_rejects_reorganization_segment_mismatch() {
     let index = GrepIndexState {
         reorganize: Some(GrepReorganizeState {
-            snapshot_segment_ids: vec![segment_id(9)],
+            input_segment_ids: vec![segment_id(9)],
             output_segment_ids: Vec::new(),
             row_key_cursor: String::new(),
             output_level: 1,
@@ -229,7 +229,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
             index,
             vec![segment_ref(1, 1, 0)]
         ),
-        Err(GrepManifestStateError::MissingReorganizeSnapshotSegment { .. })
+        Err(GrepManifestStateError::MissingReorganizeInputSegment { .. })
     );
 }
 

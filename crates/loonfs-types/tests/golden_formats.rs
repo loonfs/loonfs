@@ -1012,33 +1012,6 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     );
 }
 
-/// Checks that a stored record whose owner kind is `snapshot` decodes as a
-/// user pin with the same name and expiry.
-///
-/// The fixture is an existing record, so no golden check rewrites it.
-#[test]
-fn a_snapshot_owned_record_decodes_as_a_user_pin_with_its_expiry() {
-    let decoded: ControlObjectEnvelope<PinPayload> = decode_control_object(
-        &read_golden("control_pin_snapshot.v1.json"),
-        ControlObjectKind::Pin,
-    )
-    .expect("decode a snapshot-owned pin");
-    assert_eq!(
-        decoded.into_payload(),
-        PinPayload {
-            pin_id: pin_id("pin_00000000000000000006-0000000000000006"),
-            namespace_id: namespace_id(),
-            head_seq: (sample_manifest_ref(6)).head_seq,
-            payload_checksum: (sample_manifest_ref(6)).payload_checksum.clone(),
-            created_at_ms: 3_000,
-            owner: PinOwner::User {
-                name: "report-run".to_owned(),
-                expires_at_ms: Some(9_000),
-            },
-        }
-    );
-}
-
 #[test]
 fn pins_reject_an_untagged_or_unknown_owner() {
     assert_control_payload_edit_is_corrupt::<PinPayload>(
@@ -1049,7 +1022,7 @@ fn pins_reject_an_untagged_or_unknown_owner() {
     assert_control_payload_edit_is_corrupt::<PinPayload>(
         "control_pin.v1.json",
         ControlObjectKind::Pin,
-        |payload| payload["owner"] = serde_json::Value::from("snapshot"),
+        |payload| payload["owner"] = serde_json::Value::from("user"),
     );
 }
 
@@ -2002,7 +1975,7 @@ fn sample_active_deletion_removed_row() -> MetadataRow {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Removed {
-            revocation_seq: ChangeSeq(9),
+            removed_seq: ChangeSeq(9),
         },
     })
 }

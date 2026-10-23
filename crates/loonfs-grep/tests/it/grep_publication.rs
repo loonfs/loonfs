@@ -79,8 +79,8 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
                 .expect("load successor")
                 .expect("enabled");
         assert_eq!(current.manifest_no(), ManifestNo(2));
-        let checkpoint_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
+        let pin_id = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
             _ => None,
         }
         .expect("the successor must still need its checkpoint");
@@ -99,13 +99,11 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             .expect("collect the old manifest");
         assert!(base.get(&first_key, None).await.expect("first").is_none());
         blocking.release();
-        checkpoint_id
+        pin_id
     };
-    let (outcome, checkpoint_id) = tokio::join!(enable, advance);
+    let (outcome, pin_id) = tokio::join!(enable, advance);
     assert!(
-        control::pin(&base, &namespace_id, &checkpoint_id)
-            .await
-            .is_some(),
+        control::pin(&base, &namespace_id, &pin_id).await.is_some(),
         "uncertain publication cleanup must preserve the successor's checkpoint"
     );
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);

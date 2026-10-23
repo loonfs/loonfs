@@ -300,14 +300,13 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("load manifest")
         .expect("manifest exists");
-    let GrepIndexStatus::Backfilling { checkpoint_id, .. } = manifest.manifest_state().status()
-    else {
+    let GrepIndexStatus::Backfilling { pin_id, .. } = manifest.manifest_state().status() else {
         panic!(
             "enable must publish checkpointed backfill: {:?}",
             manifest.manifest_state()
         );
     };
-    let checkpoint_id = checkpoint_id.clone();
+    let pin_id = pin_id.clone();
 
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
@@ -324,9 +323,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    assert!(control::pin(&store, &namespace_id, &checkpoint_id)
-        .await
-        .is_none());
+    assert!(control::pin(&store, &namespace_id, &pin_id).await.is_none());
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -996,7 +993,7 @@ async fn assert_fresh_backfill_attempt(
         .expect("grep manifest exists");
     let GrepIndexStatus::Backfilling {
         cursor_inode_id,
-        checkpoint_id,
+        pin_id,
         ..
     } = manifest.manifest_state().status()
     else {
@@ -1013,10 +1010,8 @@ async fn assert_fresh_backfill_attempt(
         manifest.manifest_state().segments().is_empty(),
         "a rebootstrap discards the incomplete projection"
     );
-    assert!(control::pin(store, namespace_id, checkpoint_id)
-        .await
-        .is_some());
-    checkpoint_id.clone()
+    assert!(control::pin(store, namespace_id, pin_id).await.is_some());
+    pin_id.clone()
 }
 
 /// Every grep segment the namespace's manifest names, for asserting that an
@@ -1614,7 +1609,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
 }
 
 #[tokio::test]
-async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
+async fn backfilling_manifest_without_pin_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1642,17 +1637,17 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         .expect("read backfilling manifest")
         .expect("backfilling manifest exists");
     let corrupt_manifest_no =
-        write_manifest_without_checkpoint_id(&*store, &namespace_id, &manifest_bytes).await;
+        write_manifest_without_pin_id(&*store, &namespace_id, &manifest_bytes).await;
     write_hint(&*store, &namespace_id, corrupt_manifest_no).await;
 
     assert_corrupt_index_error(
-        "backfilling manifest missing checkpoint id",
+        "backfilling manifest missing pin id",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
     writer.shutdown().await.expect("shutdown");
 }
 
-async fn write_manifest_without_checkpoint_id(
+async fn write_manifest_without_pin_id(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_bytes: &[u8],
@@ -1662,8 +1657,8 @@ async fn write_manifest_without_checkpoint_id(
     document["payload"]["status"]
         .as_object_mut()
         .expect("backfilling status is an object")
-        .remove("checkpoint_id")
-        .expect("valid backfilling manifest carries checkpoint id");
+        .remove("pin_id")
+        .expect("valid backfilling manifest has a pin id");
     let payload_bytes =
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
@@ -2301,7 +2296,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
             captured_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
-                GrepIndexStatus::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+                GrepIndexStatus::Backfilling { pin_id, .. } => pin_id.clone(),
                 other => panic!("expected a backfill: {other:?}"),
             },
         }

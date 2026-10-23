@@ -842,7 +842,7 @@ For example, suppose request A creates `/reports`, and request B also tries to c
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
+Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the optional `subject_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
 The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt.
 
@@ -1066,8 +1066,6 @@ Each pin is stored at `pins/{pin_id}.json`. Its ID includes the pinned manifest'
 | --- | --- | --- | --- |
 | `user` | `name`, optional `expires_at_ms` | Readable before its expiry time. A pin without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace. Without an expiry, only explicit deletion removes it from an active namespace. |
 | `fork` | `target_namespace_id` | Not read through the pin. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Pin cleanup](#117-pin-cleanup)). |
-
-A reader MUST also accept a record whose owner kind is `snapshot`, with a `name` and a required `expires_at_ms`, and read it as a `user` pin with the same name and expiry. A writer MUST NOT write that owner kind.
 
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. A pin has no lifecycle status. Creating the record creates the pin, and deleting the record ends it. Fork pins have no expiry and no renewal protocol.
 
@@ -1851,7 +1849,7 @@ For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke or expire target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, a revoke action is `{"kind":"revoke","target":...}`, and an expire action is `{"kind":"expire","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `revocation_seq`, the sequence of the undelete or expiry that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the undelete or expiry that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
 
 Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
 
@@ -2298,13 +2296,13 @@ The manifest's `status` contains the position fields for its lifecycle state:
 
 | Kind | Status fields |
 | --- | --- |
-| `backfilling` | `captured_seq`, `checkpoint_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
+| `backfilling` | `captured_seq`, `pin_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
 | `active` | `built_through_seq`, `next_event_index` |
 | `disabled` | No other status fields |
 
 Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
-The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
+The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
 
 Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
 

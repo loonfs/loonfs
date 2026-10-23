@@ -31,8 +31,8 @@ pub enum GrepManifestStateError {
     UnallocatedReorganizeRunNo { run_no: RunNo, next_run_no: RunNo },
     #[error("grep reorganization repeats segment id `{segment_id}`")]
     DuplicateReorganizeSegmentId { segment_id: IndexSegmentId },
-    #[error("grep reorganization snapshot references missing segment `{segment_id}`")]
-    MissingReorganizeSnapshotSegment { segment_id: IndexSegmentId },
+    #[error("grep reorganization input references missing segment `{segment_id}`")]
+    MissingReorganizeInputSegment { segment_id: IndexSegmentId },
     #[error("grep reorganization output references missing segment `{segment_id}`")]
     MissingReorganizeOutputSegment { segment_id: IndexSegmentId },
     #[error(

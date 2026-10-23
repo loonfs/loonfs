@@ -94,7 +94,7 @@ An index is in one of three lifecycle states, and the current grep manifest reco
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No segment set that queries can see, and no pending reorganization. |
-| `backfilling` | The ID of the backfill's snapshot (`checkpoint_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `backfilling` | The ID of the backfill's snapshot (`pin_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
 | `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 ```text
