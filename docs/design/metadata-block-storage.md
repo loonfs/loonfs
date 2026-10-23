@@ -50,6 +50,14 @@ The index contains the last row key and the block handle of each data block. A b
 
 For example, a directory lookup might overlap the descriptor ranges of several delta runs. The inline filters can rule out some of those segments without a fetch, and the indexes of the remaining segments identify the relevant blocks. So the read doesn't have to download every segment whose broad key range overlaps the directory.
 
+A key can also have rows in several runs. For example, a file that's written once between each of seven folds has a revision in each of seven runs, and the filters of all seven runs admit the file's key. A lookup that wants the newest fact for a key (a file's latest revision, the newest version of a name's [directory binding](../specs/glossary.md#directory-binding-direntry), or an inode's newest attributes or access row) needs only the newest of those runs. Each run covers its own range of commits, and a compaction keeps its output where the runs it merged were, so a newer run's rows for a key are newer than every older run's rows for it. ([Compaction windows](../specs/format.md#102-compaction-windows) in the storage format defines that order.)
+
+So after it checks the filters of every run, LoonFS reads the admitted runs newest first, four at a time, and stops at the first run that has a row for the key. A run whose filter admitted the key by a false positive has no rows for it, and the lookup goes on to the next run. The visibility rules then apply to those rows as they would to the rows of every run. In the example, a cold lookup of the file's latest revision sends four GETs instead of seven, and a warm lookup decodes the index and data blocks of one run instead of seven. (The window of four runs is an implementation default, not a format requirement.)
+
+A lookup that needs every fact for a key, such as a file's revision listing or a tombstone check, still merges the rows of every run.
+
+Why read four runs at once instead of one? If the newest admitted run turns out to be a false positive, the reads of the next runs have already been sent, so the false positive doesn't add a round trip. The cost is the reads of the other runs in the window when the newest run has the row, which it does unless its filter gave a false positive.
+
 ## Caching and combined reads
 
 LoonFS caches decoded index, filter, and data blocks in memory, up to a byte budget. A server can also keep every block that the cache inserts on its local SSD, as a second tier of the same cache with a byte budget of its own. The SSD tier keeps each block in its stored form, which is the block's section exactly as the segment stores it. So LoonFS checks a block that it reads back from disk against the block's stored length and CRC32C, and decodes it, with the same code as a block read from the store. The cache affects how much a read costs, but not the metadata it returns.
