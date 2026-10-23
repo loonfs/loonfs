@@ -19,7 +19,7 @@ use super::compaction_step::{
     build_replacement_manifest, group_run_descriptors, CompactionUnitOutcome, MergePlacement,
     ReplacementOutput,
 };
-use super::index_block_load::segment_object_bytes;
+use super::index_block_load::{segment_object_bytes, SegmentWriter};
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use super::publish::{update_manifest, ManifestChange};
 use super::published::PublishedManifest;
@@ -598,7 +598,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         if let Some(stop) = self.load_chain_filter(control).await? {
             return Ok(Err(stop));
         }
-        let mut puts = MetadataSegmentPuts::new(self.store, self.output_cache);
+        let mut puts =
+            MetadataSegmentPuts::new(self.store, self.output_cache, SegmentWriter::Compaction);
         for cluster in retention_clusters(self.group) {
             if let Some(stopped) = self.run_cluster(cluster, control, &mut puts).await? {
                 return Ok(Err(stopped));

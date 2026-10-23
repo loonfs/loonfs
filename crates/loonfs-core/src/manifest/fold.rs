@@ -458,7 +458,8 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         })?;
     let head_seq = projection.head.seq;
     let tail_state = projection.tail_with_deletion_inodes().await?;
-    // The fold inserts the segments it writes into the cache it read through.
+    // The fold inserts every block of the segments it writes into the cache
+    // it read through.
     let segment_cache = projection.manifest_segments.segment_cache;
     // A WAL fold keeps existing runs and writes the WAL delta as one new delta
     // run. Compaction merges delta runs into the base separately.
