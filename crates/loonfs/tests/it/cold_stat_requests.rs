@@ -1,8 +1,9 @@
 //! Pins the cold first-stat request shape: a fresh handle resolving a path
 //! over a manifest that carries several unmerged delta runs must not pay a
 //! per-run filter fetch (the manifest's inline filter copies answer those),
-//! and every metadata-segment object it does touch is small enough to load
-//! whole with a single ranged GET.
+//! every metadata-segment object it does touch is small enough to load
+//! whole with a single ranged GET, and a file written in every run costs
+//! the segments of its newest runs, not of all of them.
 //!
 //! This is the regression guard for the cold-stat latency cliff: the run
 //! count multiplying into filter-block round-trips on `DirentryBinds`
@@ -12,7 +13,9 @@
 use loonfs::{LoonFs, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
+use loonfs_test_support::stores::{
+    ConcurrencyWatchStore, KeyPredicate, RecordedGet, RecordingStore,
+};
 use loonfs_types::format::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_types::AbsolutePath;
 use std::collections::BTreeSet;
@@ -37,11 +40,18 @@ async fn publish_candidates(
 #[tokio::test]
 async fn cold_stat_pays_no_per_run_filter_fetches() {
     let temp_dir = tempdir().expect("tempdir");
-    let log = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::any(),
+    // The recording store logs each GET when it finishes, and the watch
+    // store counts each segment GET when it's sent, including one that a
+    // lookup cancels.
+    let watch = Arc::new(ConcurrencyWatchStore::new(
+        RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::metadata_segment(),
     ));
-    let store: loonfs::SharedObjectStore = log.clone();
+    let log = watch.inner();
+    let store: loonfs::SharedObjectStore = watch.clone();
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
@@ -84,12 +94,14 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("load namespace catalog");
 
-    // Three commit batches, checkpointed one delta run each, with names
+    // Six commit batches, checkpointed one delta run each, with names
     // interleaved by stride so every run's direntry key range straddles the
     // whole directory span: range pruning alone cannot rule any run out of
     // a name lookup, which is exactly the shape a bulk-loaded backlog takes.
+    // Each batch also writes `hot.txt` again, so every run lists one of its
+    // revisions.
     const FILES: usize = 180;
-    const RUNS: usize = 3;
+    const RUNS: usize = 6;
     for run in 0..RUNS {
         let mut candidates = Vec::new();
         for index in (0..FILES).filter(|index| index % RUNS == run) {
@@ -128,6 +140,18 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             ));
         }
         publish_candidates(&namespace_writer, candidates).await;
+        namespace_writer
+            .put_file_with_options(
+                "/tree/dir-000000/hot.txt",
+                format!("hot {run}").as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &loonfs::PutFileOptions {
+                    behavior: loonfs::DestinationBehavior::Replace,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("write the file that every run lists");
         maintenance
             .fold_wal(&namespace_id)
             .await
@@ -194,66 +218,76 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .map(metadata_segment_object_key)
         .collect();
 
-    // The measured operation: first stat on a fresh handle, nothing warm.
-    let reader = LoonFs::builder_with_store(store.clone())
-        .read_only()
-        .build()
-        .await
-        .expect("build reader");
-    let namespace = reader.namespace(&namespace_id);
-    let _ = log.take_gets();
-    let entry = namespace
-        .stat("/tree/dir-000000/file-000000042.txt")
-        .await
-        .expect("cold stat");
-    assert_eq!(
-        entry
-            .display_name
-            .as_ref()
-            .expect("file entry should carry a display name")
-            .as_str(),
-        "file-000000042.txt"
-    );
-    assert!(
-        entry.revision_no().is_some(),
-        "file stat carries a revision"
-    );
-
-    let gets = log.take_gets();
-    assert_eq!(
-        gets.iter().filter(|(key, _)| key.contains("/wal/")).count(),
-        1
-    );
-    let segment_gets: Vec<&RecordedGet> = gets
-        .iter()
-        .filter(|(key, _)| segment_keys.contains(key))
-        .collect();
-    assert!(
-        !segment_gets.is_empty(),
-        "a cold stat reads metadata segments"
-    );
-    for (key, range) in &segment_gets {
-        let start = range.map(|(start, _)| start);
-        assert!(
-            !filter_offsets.contains(&(key.clone(), start.unwrap_or(0))),
-            "cold stat fetched a filter block from `{key}`: inline copies \
-             and whole-object reads should answer every filter consultation"
+    // The measured operation: first stat on a fresh handle, nothing warm,
+    // of a file that one run lists and of a file that every run lists.
+    let mut segment_gets_per_stat = Vec::new();
+    let mut gets_per_stat = Vec::new();
+    for (name, revision_no) in [("file-000000042.txt", 1), ("hot.txt", RUNS as u64)] {
+        let reader = LoonFs::builder_with_store(store.clone())
+            .read_only()
+            .build()
+            .await
+            .expect("build reader");
+        let namespace = reader.namespace(&namespace_id);
+        let _ = log.take_gets();
+        let sent = watch.reads().total;
+        let entry = namespace
+            .stat(&format!("/tree/dir-000000/{name}"))
+            .await
+            .expect("cold stat");
+        assert_eq!(
+            entry
+                .display_name
+                .as_ref()
+                .expect("file entry should carry a display name")
+                .as_str(),
+            name
         );
         assert_eq!(
-            start,
-            Some(0),
-            "small segments should load whole with one ranged GET, got a \
-             partial read of `{key}` at {start:?}"
+            entry.revision_no(),
+            Some(loonfs_types::RevisionNo(revision_no)),
+            "file stat carries its newest revision"
         );
+
+        let gets = log.take_gets();
+        assert_eq!(
+            gets.iter().filter(|(key, _)| key.contains("/wal/")).count(),
+            1
+        );
+        let segment_gets: Vec<&RecordedGet> = gets
+            .iter()
+            .filter(|(key, _)| segment_keys.contains(key))
+            .collect();
+        for (key, range) in &segment_gets {
+            let start = range.map(|(start, _)| start);
+            assert!(
+                !filter_offsets.contains(&(key.clone(), start.unwrap_or(0))),
+                "cold stat fetched a filter block from `{key}`: inline copies \
+                 and whole-object reads should answer every filter consultation"
+            );
+            assert_eq!(
+                start,
+                Some(0),
+                "small segments should load whole with one ranged GET, got a \
+                 partial read of `{key}` at {start:?}"
+            );
+        }
+        // The wave budget: a handful of control-plane reads plus one
+        // whole-object read per touched segment. The exact count is pinned
+        // loosely so genuine wave regressions (per-run filter sweeps, split
+        // filter/index/data fetches) trip it while block-size tuning does not.
+        assert!(
+            gets.len() <= 16,
+            "cold stat issued {} GETs; expected a bounded, near-flat set: {:?}",
+            gets.len(),
+            gets
+        );
+        segment_gets_per_stat.push((name, watch.reads().total - sent));
+        gets_per_stat.push(gets.len());
     }
-    // The wave budget: a handful of control-plane reads plus one
-    // whole-object read per touched segment. The exact count is pinned
-    // loosely so genuine wave regressions (per-run filter sweeps, split
-    // filter/index/data fetches) trip it while block-size tuning does not.
-    assert!(
-        gets.len() <= 16,
-        "cold stat issued {} GETs; expected a bounded, near-flat set: {:?}",
-        gets.len(),
-        gets
+    assert_eq!(
+        segment_gets_per_stat,
+        [("file-000000042.txt", 3), ("hot.txt", 6)],
+        "segment GETs that each cold stat sends, of {gets_per_stat:?} finished GETs in all"
     );
 }

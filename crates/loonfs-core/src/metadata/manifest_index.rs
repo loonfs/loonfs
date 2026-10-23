@@ -103,43 +103,76 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         .collect()
 }
 
+/// The versions of one directory slot that its newest version at
+/// `visible_seq` can be among.
 pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
+    visible_seq: ChangeSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
-    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key);
-    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
-    segments
-        .scan_prefix_for_lookup(
-            MetadataRowFamily::DirentryBinds,
-            &prefix,
-            &filter_probe,
-            Readahead::Disabled,
-        )
-        .await?
-        .into_iter()
-        .map(direntry_binding_from_manifest_row)
-        .collect()
+    newest_fact_rows(
+        segments,
+        MetadataRowFamily::DirentryBinds,
+        &lookup_keys::direntry_bind_prefix(parent_inode_id, name_key),
+        &lookup_keys::direntry_bind_probe(parent_inode_id, name_key),
+        Readahead::Disabled,
+        visible_seq,
+    )
+    .await?
+    .into_iter()
+    .map(direntry_binding_from_manifest_row)
+    .collect()
 }
 
+/// The binding versions of one child that its newest binding at
+/// `visible_seq` can be among.
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
+    visible_seq: ChangeSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
-    let filter_probe = lookup_keys::direntry_child_probe(child_inode_id);
-    let prefix = lookup_keys::direntry_child_prefix(child_inode_id);
-    segments
-        .scan_prefix_for_lookup(
-            MetadataRowFamily::DirentryChildBinds,
-            &prefix,
-            &filter_probe,
-            Readahead::Enabled,
-        )
-        .await?
-        .into_iter()
-        .map(direntry_binding_from_manifest_row)
-        .collect()
+    newest_fact_rows(
+        segments,
+        MetadataRowFamily::DirentryChildBinds,
+        &lookup_keys::direntry_child_prefix(child_inode_id),
+        &lookup_keys::direntry_child_probe(child_inode_id),
+        Readahead::Enabled,
+        visible_seq,
+    )
+    .await?
+    .into_iter()
+    .map(direntry_binding_from_manifest_row)
+    .collect()
+}
+
+/// The rows of `prefix` that its newest fact at `visible_seq` can be among:
+/// the rows of the newest run that has any, when the read sees every row of
+/// the manifest, and the rows of every run otherwise.
+async fn newest_fact_rows<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    family: MetadataRowFamily,
+    prefix: &str,
+    filter_probe: &str,
+    readahead: Readahead,
+    visible_seq: ChangeSeq,
+) -> Result<Vec<MetadataRow>> {
+    let rows = if segments.every_row_is_visible_at(visible_seq) {
+        segments
+            .scan_prefix_in_newest_run_for_lookup(
+                family,
+                prefix,
+                filter_probe,
+                usize::MAX,
+                readahead,
+            )
+            .await?
+    } else {
+        segments
+            .scan_prefix_for_lookup(family, prefix, filter_probe, readahead)
+            .await?
+    };
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,14 +196,26 @@ impl RevisionPagePosition {
     }
 }
 
+/// The inode's revision with the highest number in the manifest, whatever
+/// the read's sequence, as [`super::MetadataView::latest_revision_record`]
+/// expects.
 pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<RevisionRecord>> {
-    Ok(revisions_by_inode_page_desc(segments, inode_id, None, 1)
+    segments
+        .scan_prefix_in_newest_run_for_lookup(
+            MetadataRowFamily::Revisions,
+            &lookup_keys::revision_prefix(inode_id),
+            &lookup_keys::revision_probe(inode_id),
+            1,
+            Readahead::Enabled,
+        )
         .await?
         .into_iter()
-        .next())
+        .next()
+        .map(revision_from_manifest_row)
+        .transpose()
 }
 
 pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
@@ -329,9 +374,9 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
         .max_by_key(|receipt| receipt.committed_seq))
 }
 
-/// Rows one attribute lookup fetches per manifest round-trip. The answer is
-/// almost always the first row; the page exists for a read that sits below
-/// the head and has to walk past revisions committed after it.
+/// Rows that one attribute lookup below a run's sequence fetches per
+/// manifest round-trip, as it walks past the revisions committed after its
+/// sequence.
 const WHOLE_STATE_RAW_SCAN_LIMIT: usize = 16;
 
 pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
@@ -372,6 +417,10 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
 /// a family whose keys invert the revision, the sequence, and the delta
 /// index, so an ascending prefix scan reads one inode's rows newest first
 /// and the first row at or below the sequence is the answer.
+///
+/// A read that sees every row of the manifest takes the first row of the
+/// newest run that has one. A read below a run's sequence merges every run,
+/// because the newest run's rows could all be above the read.
 async fn newest_row_by_inode<S, R>(
     segments: &VerifiedMetadataSegments<'_, S>,
     family: MetadataRowFamily,
@@ -384,6 +433,21 @@ async fn newest_row_by_inode<S, R>(
 where
     S: ObjectStore + ?Sized,
 {
+    if segments.every_row_is_visible_at(visible_seq) {
+        return segments
+            .scan_prefix_in_newest_run_for_lookup(
+                family,
+                &prefix,
+                &filter_probe,
+                1,
+                Readahead::Enabled,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(decode)
+            .transpose();
+    }
     let upper_bound = string_prefix_upper_bound(&prefix);
     let mut lower_bound = prefix;
     loop {

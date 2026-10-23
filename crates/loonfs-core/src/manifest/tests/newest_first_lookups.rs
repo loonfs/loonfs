@@ -1,11 +1,12 @@
 //! Point lookups that walk a manifest's runs newest first, checked against
-//! the merge of every run.
+//! the merge of every run, and the segment reads those lookups cost.
 
 use super::*;
 use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, MetadataView, RevisionRecord,
 };
 use crate::test_support::ops::append_wal_commit;
+use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::format::segment_blocks::key_range_may_intersect;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
@@ -515,5 +516,169 @@ async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row()
         cache.stats().filter_false_positives >= false_positives + 2,
         "both lookups open a delta segment that has no row for the key: {:?}",
         cache.stats()
+    );
+}
+
+/// Runs that list `/docs/hot.txt`'s revisions and attributes and versions
+/// of the `/docs/flip.txt` slot: the base and six delta runs.
+const HOT_KEY_RUNS: u64 = 7;
+
+/// Builds a namespace where `/docs/hot.txt` has a revision and an attribute
+/// revision in each of [`HOT_KEY_RUNS`] runs, and `/docs/flip.txt` is bound
+/// to a new inode in each of them. Returns the inodes of `/docs` and of
+/// `/docs/hot.txt`.
+async fn hot_key_fixture<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> (InodeId, InodeId) {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let paths = docs_paths(&["hot", "flip", "aaa", "zzz"]);
+    write_files_bytes(store, namespace_id, &paths, b"base\n", &context)
+        .await
+        .expect("write the base files");
+    let inodes = inodes_at(store, namespace_id, &["/docs".to_owned(), paths[0].clone()]).await;
+    let (docs, hot) = (inodes[0], inodes[1]);
+    append_whole_state_revisions(store, namespace_id, &[hot], 1).await;
+    checkpoint_then_compact(store, namespace_id, &context, MetadataRunPolicy::default()).await;
+    for run in 2..=HOT_KEY_RUNS {
+        // Names at both ends of the directory keep each run's binding range
+        // across the slot, so only the filters can rule a run out.
+        let paths = docs_paths(&["hot", &format!("aaa-{run}"), &format!("zzz-{run}")]);
+        write_files_bytes(store, namespace_id, &paths, b"delta\n", &context)
+            .await
+            .expect("write the delta files");
+        delete_path(store, namespace_id, "/docs/flip.txt", &context, None)
+            .await
+            .expect("unbind the slot");
+        write_file_bytes(
+            store,
+            namespace_id,
+            "/docs/flip.txt",
+            b"flip\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("bind the slot to a new inode");
+        append_whole_state_revisions(store, namespace_id, &[hot], run).await;
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("fold a delta run");
+    }
+    (docs, hot)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotLookup {
+    Revision,
+    Binding,
+    Attributes,
+}
+
+async fn look_up_hot_key<S: ObjectStore + ?Sized>(
+    view: &MetadataView<'_, '_, S>,
+    lookup: HotLookup,
+    docs: InodeId,
+    hot: InodeId,
+) {
+    match lookup {
+        HotLookup::Revision => {
+            let revision = view.latest_revision_record(hot).await.expect("revision");
+            assert_eq!(
+                revision.map(|revision| revision.revision_no),
+                Some(RevisionNo(HOT_KEY_RUNS))
+            );
+        }
+        HotLookup::Binding => {
+            let slot = NameKey::parse("flip.txt").expect("name key");
+            let binding = view.bound_child(docs, &slot).await.expect("slot lookup");
+            assert!(binding.is_some_and(|binding| binding.is_bound()));
+        }
+        HotLookup::Attributes => {
+            let attributes = view
+                .latest_attributes_revision(hot)
+                .await
+                .expect("attributes");
+            assert_eq!(
+                attributes.map(|record| record.attributes_revision_no),
+                Some(AttributesRevisionNo(HOT_KEY_RUNS))
+            );
+        }
+    }
+}
+
+/// Measures, for a key that [`HOT_KEY_RUNS`] runs list, the segment GETs
+/// that a cold lookup sends (including any that it cancels), and the decoded
+/// blocks that a warm lookup reads from the block cache.
+#[tokio::test]
+async fn a_lookup_of_a_key_in_many_runs_reads_only_the_newest_runs() {
+    let directory = tempdir().expect("tempdir");
+    let store = ConcurrencyWatchStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::metadata_segment(),
+    );
+    let namespace_id = NamespaceId::parse("hot-key").expect("namespace id");
+    let (docs, hot) = hot_key_fixture(&store, &namespace_id).await;
+    let manifest_no = current_manifest_number(&store, &namespace_id).await;
+    let head = head_seq(&store, &namespace_id).await;
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
+    let mut measured = Vec::new();
+    for lookup in [
+        HotLookup::Revision,
+        HotLookup::Binding,
+        HotLookup::Attributes,
+    ] {
+        let verified =
+            load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_no)
+                .await
+                .expect("load segments");
+        let sent = store.reads().total;
+        look_up_hot_key(
+            &MetadataView::over_manifest_segments(&verified, head),
+            lookup,
+            docs,
+            hot,
+        )
+        .await;
+        let cold_gets = store.reads().total - sent;
+        // The first warm pass fills the block cache, and the second one,
+        // on a view with an empty block memo, reads every block from it.
+        let mut warm = (0, 0);
+        for _ in 0..2 {
+            let verified = load_manifest_segments_for_inspection(
+                &store,
+                Some(&cache),
+                &namespace_id,
+                &manifest_no,
+            )
+            .await
+            .expect("load segments");
+            let (sent, hits) = (store.reads().total, cache.stats().hits);
+            look_up_hot_key(
+                &MetadataView::over_manifest_segments(&verified, head),
+                lookup,
+                docs,
+                hot,
+            )
+            .await;
+            warm = (store.reads().total - sent, cache.stats().hits - hits);
+        }
+        let (warm_gets, warm_blocks) = warm;
+        assert_eq!(warm_gets, 0, "a warm {lookup:?} lookup reads no segment");
+        measured.push((lookup, cold_gets, warm_blocks));
+    }
+    assert_eq!(
+        measured,
+        [
+            (HotLookup::Revision, 4, 2),
+            (HotLookup::Binding, 4, 2),
+            (HotLookup::Attributes, 4, 2),
+        ],
+        "(lookup, cold segment GETs, warm decoded blocks) for a key in {HOT_KEY_RUNS} runs: \
+         a cold lookup sends one GET for each run in its window, and a warm one decodes the \
+         index and data block of the newest run"
     );
 }

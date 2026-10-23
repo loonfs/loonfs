@@ -782,6 +782,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                         segments,
                         parent_inode_id,
                         name_key,
+                        self.visible_seq(),
                     )
                     .await
                 } else {
@@ -805,7 +806,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             child_inode_id,
             Box::pin(async {
                 if let Some(segments) = self.manifest_segments() {
-                    manifest_index::direntry_binds_for_child(segments, child_inode_id).await
+                    manifest_index::direntry_binds_for_child(
+                        segments,
+                        child_inode_id,
+                        self.visible_seq(),
+                    )
+                    .await
                 } else {
                     Ok(Vec::new())
                 }
