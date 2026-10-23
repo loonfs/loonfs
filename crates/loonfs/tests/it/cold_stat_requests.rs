@@ -13,9 +13,7 @@
 use loonfs::{LoonFs, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, KeyPredicate, RecordedGet, RecordingStore,
-};
+use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
 use loonfs_types::format::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_types::AbsolutePath;
 use std::collections::BTreeSet;
@@ -40,18 +38,11 @@ async fn publish_candidates(
 #[tokio::test]
 async fn cold_stat_pays_no_per_run_filter_fetches() {
     let temp_dir = tempdir().expect("tempdir");
-    // The recording store logs each GET when it finishes, and the watch
-    // store counts each segment GET when it's sent, including one that a
-    // lookup cancels.
-    let watch = Arc::new(ConcurrencyWatchStore::new(
-        RecordingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::any(),
-        ),
-        KeyPredicate::metadata_segment(),
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
     ));
-    let log = watch.inner();
-    let store: loonfs::SharedObjectStore = watch.clone();
+    let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
@@ -230,7 +221,6 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("build reader");
         let namespace = reader.namespace(&namespace_id);
         let _ = log.take_gets();
-        let sent = watch.reads().total;
         let entry = namespace
             .stat(&format!("/tree/dir-000000/{name}"))
             .await
@@ -282,12 +272,12 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             gets.len(),
             gets
         );
-        segment_gets_per_stat.push((name, watch.reads().total - sent));
+        segment_gets_per_stat.push((name, segment_gets.len()));
         gets_per_stat.push(gets.len());
     }
     assert_eq!(
         segment_gets_per_stat,
-        [("file-000000042.txt", 3), ("hot.txt", 6)],
-        "segment GETs that each cold stat sends, of {gets_per_stat:?} finished GETs in all"
+        [("file-000000042.txt", 3), ("hot.txt", 3)],
+        "segment GETs of each cold stat, of {gets_per_stat:?} GETs in all"
     );
 }

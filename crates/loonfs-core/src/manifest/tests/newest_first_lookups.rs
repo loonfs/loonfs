@@ -33,7 +33,8 @@ const FILLERS: usize = 512;
 ///   delta records a tombstone for `/trash`.
 struct ManyRunFixture {
     _directory: TempDir,
-    store: LocalFsStore,
+    /// Counts the segment GETs that the lookups send.
+    store: ConcurrencyWatchStore<LocalFsStore>,
     namespace_id: NamespaceId,
     /// The head of the base run and of each delta run, oldest first.
     run_heads: Vec<ChangeSeq>,
@@ -57,7 +58,7 @@ impl ManyRunFixture {
         &'a self,
         cache: Option<&'a MetadataSegmentCache>,
     ) -> (
-        scan::VerifiedMetadataSegments<'a, LocalFsStore>,
+        scan::VerifiedMetadataSegments<'a, ConcurrencyWatchStore<LocalFsStore>>,
         MetadataState,
     ) {
         let manifest_no = current_manifest_number(&self.store, &self.namespace_id).await;
@@ -166,7 +167,10 @@ fn docs_names(paths: &[String]) -> impl Iterator<Item = NameKey> + '_ {
 
 async fn many_run_fixture() -> ManyRunFixture {
     let directory = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(directory.path()).expect("store");
+    let store = ConcurrencyWatchStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::metadata_segment(),
+    );
     let namespace_id = NamespaceId::parse("newest-first").expect("namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -436,8 +440,8 @@ async fn visibility_over_newest_first_lookups_matches_the_merge() {
 /// Whether a delta run's filter admits `probe` for a segment whose key
 /// range meets `prefix`.
 async fn a_delta_run_admits(
-    store: &LocalFsStore,
-    verified: &scan::VerifiedMetadataSegments<'_, LocalFsStore>,
+    store: &ConcurrencyWatchStore<LocalFsStore>,
+    verified: &scan::VerifiedMetadataSegments<'_, ConcurrencyWatchStore<LocalFsStore>>,
     family: ApiMetadataRowFamily,
     prefix: &str,
     probe: &str,
@@ -471,51 +475,120 @@ async fn a_delta_run_admits(
     false
 }
 
+/// A filler key that a delta run's filter admits by a false positive, and
+/// one that no delta run's filter admits, for each of two families.
+struct FalsePositiveKeys {
+    binding: NameKey,
+    plain_binding: NameKey,
+    revision: InodeId,
+    plain_revision: InodeId,
+}
+
+async fn false_positive_keys(
+    fixture: &ManyRunFixture,
+    verified: &scan::VerifiedMetadataSegments<'_, ConcurrencyWatchStore<LocalFsStore>>,
+) -> FalsePositiveKeys {
+    let (mut bindings, mut revisions) = ([None, None], [None, None]);
+    for (name, inode_id) in &fixture.fillers {
+        let admitted = a_delta_run_admits(
+            &fixture.store,
+            verified,
+            ApiMetadataRowFamily::DirentryBinds,
+            &lookup_keys::direntry_bind_prefix(fixture.docs, name),
+            &lookup_keys::direntry_bind_probe(fixture.docs, name),
+        )
+        .await;
+        bindings[usize::from(!admitted)].get_or_insert_with(|| name.clone());
+        let admitted = a_delta_run_admits(
+            &fixture.store,
+            verified,
+            ApiMetadataRowFamily::Revisions,
+            &lookup_keys::revision_prefix(*inode_id),
+            &lookup_keys::revision_probe(*inode_id),
+        )
+        .await;
+        revisions[usize::from(!admitted)].get_or_insert(*inode_id);
+    }
+    let [Some(binding), Some(plain_binding)] = bindings else {
+        panic!("some filler names are admitted by a delta filter and some aren't");
+    };
+    let [Some(revision), Some(plain_revision)] = revisions else {
+        panic!("some filler inodes are admitted by a delta filter and some aren't");
+    };
+    FalsePositiveKeys {
+        binding,
+        plain_binding,
+        revision,
+        plain_revision,
+    }
+}
+
+/// The segment GETs that a cold lookup of `name`'s slot and of `inode_id`'s
+/// latest revision send, each on a view with no block cache.
+async fn cold_lookup_gets(
+    fixture: &ManyRunFixture,
+    name: &NameKey,
+    inode_id: InodeId,
+) -> [usize; 2] {
+    let mut gets = [0; 2];
+    for (lookup, gets) in gets.iter_mut().enumerate() {
+        let (verified, _) = fixture.load(None).await;
+        let view = MetadataView::over_manifest_segments(&verified, fixture.head());
+        let sent = fixture.store.reads().total;
+        if lookup == 0 {
+            view.bound_child(fixture.docs, name)
+                .await
+                .expect("slot lookup");
+        } else {
+            view.latest_revision_record(inode_id)
+                .await
+                .expect("revision");
+        }
+        *gets = fixture.store.reads().total - sent;
+    }
+    gets
+}
+
+/// Checks that a lookup whose newest admitted run is a filter false
+/// positive returns the older run's row, at the cost of one more GET (and
+/// round trip) than a lookup that no newer filter admits.
 #[tokio::test]
 async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row() {
     let fixture = many_run_fixture().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
     let (verified, merged) = fixture.load(Some(&cache)).await;
-    let docs = fixture.docs;
-    let mut binding_false_positive = None;
-    let mut revision_false_positive = None;
-    for (name, inode_id) in &fixture.fillers {
-        let prefix = lookup_keys::direntry_bind_prefix(docs, name);
-        let probe = lookup_keys::direntry_bind_probe(docs, name);
-        let family = ApiMetadataRowFamily::DirentryBinds;
-        if binding_false_positive.is_none()
-            && a_delta_run_admits(&fixture.store, &verified, family, &prefix, &probe).await
-        {
-            binding_false_positive = Some(name.clone());
-        }
-        let prefix = lookup_keys::revision_prefix(*inode_id);
-        let probe = lookup_keys::revision_probe(*inode_id);
-        let family = ApiMetadataRowFamily::Revisions;
-        if revision_false_positive.is_none()
-            && a_delta_run_admits(&fixture.store, &verified, family, &prefix, &probe).await
-        {
-            revision_false_positive = Some(*inode_id);
-        }
-    }
-    let name = binding_false_positive.expect("a delta filter admits a filler's name");
-    let inode_id = revision_false_positive.expect("a delta filter admits a filler's revisions");
+    let keys = false_positive_keys(&fixture, &verified).await;
+    let (docs, head) = (fixture.docs, fixture.head());
 
-    let head = fixture.head();
     let view = MetadataView::over_manifest_segments(&verified, head);
     let false_positives = cache.stats().filter_false_positives;
-    let binding = view.bound_child(docs, &name).await.expect("slot lookup");
+    let binding = view
+        .bound_child(docs, &keys.binding)
+        .await
+        .expect("slot lookup");
     assert!(binding.as_ref().is_some_and(|binding| binding.is_bound()));
-    assert_eq!(binding, merged.bound_child_at_seq(docs, &name, head));
+    assert_eq!(
+        binding,
+        merged.bound_child_at_seq(docs, &keys.binding, head)
+    );
     let revision = view
-        .latest_revision_record(inode_id)
+        .latest_revision_record(keys.revision)
         .await
         .expect("revision");
     assert!(revision.is_some());
-    assert_eq!(revision, newest_revision(&merged, inode_id));
+    assert_eq!(revision, newest_revision(&merged, keys.revision));
     assert!(
         cache.stats().filter_false_positives >= false_positives + 2,
         "both lookups open a delta segment that has no row for the key: {:?}",
         cache.stats()
+    );
+
+    let plain = cold_lookup_gets(&fixture, &keys.plain_binding, keys.plain_revision).await;
+    let false_positive = cold_lookup_gets(&fixture, &keys.binding, keys.revision).await;
+    assert_eq!(
+        false_positive,
+        plain.map(|gets| gets + 1),
+        "a false positive costs the GET of the small delta segment it admits"
     );
 }
 
@@ -611,10 +684,10 @@ async fn look_up_hot_key<S: ObjectStore + ?Sized>(
 }
 
 /// Measures, for a key that [`HOT_KEY_RUNS`] runs list, the segment GETs
-/// that a cold lookup sends (including any that it cancels), and the decoded
-/// blocks that a warm lookup reads from the block cache.
+/// that a cold lookup sends, and the decoded blocks that a warm lookup reads
+/// from the block cache.
 #[tokio::test]
-async fn a_lookup_of_a_key_in_many_runs_reads_only_the_newest_runs() {
+async fn a_lookup_of_a_key_in_many_runs_reads_only_the_newest_run() {
     let directory = tempdir().expect("tempdir");
     let store = ConcurrencyWatchStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -673,12 +746,11 @@ async fn a_lookup_of_a_key_in_many_runs_reads_only_the_newest_runs() {
     assert_eq!(
         measured,
         [
-            (HotLookup::Revision, 4, 2),
-            (HotLookup::Binding, 4, 2),
-            (HotLookup::Attributes, 4, 2),
+            (HotLookup::Revision, 1, 2),
+            (HotLookup::Binding, 1, 2),
+            (HotLookup::Attributes, 1, 2),
         ],
         "(lookup, cold segment GETs, warm decoded blocks) for a key in {HOT_KEY_RUNS} runs: \
-         a cold lookup sends one GET for each run in its window, and a warm one decodes the \
-         index and data block of the newest run"
+         a lookup reads only the newest run, whose small segment loads whole with one GET"
     );
 }

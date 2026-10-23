@@ -25,13 +25,6 @@ use std::sync::Arc;
 /// first blocks load in one refill.
 const SCAN_ITERATORS_OPEN: usize = 16;
 
-/// Admitted runs that a newest-first lookup reads at once. The newest
-/// admitted run has the lookup's row unless its filter admitted the key by a
-/// false positive, so a wider window mostly reads blocks that the lookup
-/// then drops, and a narrower one adds a round trip after each false
-/// positive.
-const NEWEST_FIRST_RUNS_IN_FLIGHT: usize = 4;
-
 /// Whether a scan reads ahead when it misses a data block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
@@ -198,10 +191,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     /// the older runs can only add older facts.
     ///
     /// The lookup checks the candidate segments' filters in every run at
-    /// once, as the merge does, and then reads the admitted runs newest
-    /// first, [`NEWEST_FIRST_RUNS_IN_FLIGHT`] at a time. A run that a filter
-    /// admitted by a false positive has no rows for the prefix, so the
-    /// lookup goes on to the next run. A lookup that needs every fact for a
+    /// once, as the merge does, and then reads the admitted runs one at a
+    /// time, newest first. The newest admitted run has the rows unless its
+    /// filter admitted the prefix by a false positive, and then the lookup
+    /// reads the next admitted run. A lookup that needs every fact for a
     /// prefix (a revision listing or a tombstone check) uses
     /// [`Self::scan_prefix_for_lookup`] instead, and so does a read below a
     /// run's sequence ([`Self::every_row_is_visible_at`]), because the newest
@@ -223,7 +216,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             run_ends.push(candidates.len());
         }
         let admissions = self.filter_admissions(&candidates, filter_probe).await?;
-        let mut admitted_runs = Vec::new();
         let mut run_start = 0;
         for run_end in run_ends {
             let admitted: Vec<_> = candidates[run_start..run_end]
@@ -231,26 +223,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .zip(&admissions[run_start..run_end])
                 .filter_map(|(candidate, admits)| admits.then_some(*candidate))
                 .collect();
-            if !admitted.is_empty() {
-                admitted_runs.push(admitted);
-            }
             run_start = run_end;
-        }
-        // The stream maps indices, not borrowed descriptors, so that the
-        // lookup's future stays `Send` for every lifetime it borrows.
-        let mut pages = stream::iter(0..admitted_runs.len())
-            .map(|index| {
-                self.merge_segment_rows(
-                    admitted_runs[index].clone(),
-                    prefix,
-                    upper_bound,
-                    limit,
-                    readahead,
-                    true,
-                )
-            })
-            .buffered(NEWEST_FIRST_RUNS_IN_FLIGHT);
-        while let Some(page) = pages.try_next().await? {
+            if admitted.is_empty() {
+                continue;
+            }
+            let page = self
+                .merge_segment_rows(admitted, prefix, upper_bound, limit, readahead, true)
+                .await?;
             if !page.is_empty() {
                 return Ok(strip_row_keys(page));
             }
