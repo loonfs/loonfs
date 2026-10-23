@@ -44,18 +44,19 @@ LoonFS builds every cache from `DecodedBlockCache`:
 
 | Cache | Default budget | Entries shared by | Contents |
 | --- | ---: | --- | --- |
-| Segment blocks | 256 MiB | Runtimes over one object store | Decoded metadata segment blocks and manifests |
+| Segment data blocks | 256 MiB | Runtimes over one object store | Decoded data blocks of metadata segments |
+| Segment index and filter blocks | 32 MiB | Runtimes over one object store | Decoded index blocks, filter blocks, and manifests, which a lookup reads before it reads a data block |
 | Heads | 16 MiB | One runtime | Namespace heads |
 | WAL tails | 64 MiB | One runtime | Projections of the WAL tails of cached views |
 | Content objects | 96 MiB | Runtimes over one object store | Content objects of up to 1 MiB |
 | Completed upload sessions | 32 MiB | One runtime | The content ID and completion time of each completed upload session |
 | Segment blocks on local SSD | None, because a server has no SSD tier unless its config sets one | Runtimes whose object stores have an identity | The disk key and stored length of each segment block on local SSD, charged at the block's stored length or 4 KiB, whichever is larger, so the budget bounds both the bytes on disk and the number of entries |
 
-Each budget applies across every runtime that shares the metadata cache, and every cache evicts the least recently used entry first. The completed-session budget is 32 MiB, which keeps about 110,000 sessions. (The engine charges each session its recency position and table slot as well as its record, so 16 MiB would keep about half as many.) Segment block loads and tail replays go through `get_or_load`, so concurrent callers of one key load it once, and every load or refresh of a cached head goes through the head's in-flight entry. Every cache keeps the same family of counters (hits, misses, evictions, and rejections), and the engine applies the zero-budget rule (a cache with a zero budget keeps nothing), so no caller checks for a zero budget itself. The block memo and the read working memory pool don't use the engine, because they're reservations against a pool, not caches.
+Each budget applies across every runtime that shares the metadata cache, and every cache evicts the least recently used entry first. The completed-session budget is 32 MiB, which keeps about 110,000 sessions. (The engine charges each session its recency position and table slot as well as its record, so 16 MiB would keep about half as many.) Segment block loads and tail replays go through `get_or_load`, so concurrent callers of one key load it once, and every load or refresh of a cached head goes through the head's in-flight entry. Every cache keeps the same family of counters (hits, misses, evictions, and rejections), and the engine applies the zero-budget rule (a cache with a zero budget keeps nothing), so no caller checks for a zero budget itself. The budget for segment index and filter blocks is the one setting whose zero doesn't mean an empty cache. At zero, LoonFS keeps index blocks, filter blocks, and manifests under the data blocks' budget, so a host can keep the segment cache under one budget. The block memo and the read working memory pool don't use the engine, because they're reservations against a pool, not caches.
 
-Why one cache type? All six caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
+Why one cache type? All seven caches keep immutable or rebuildable values under a byte budget, and nothing that they store needs a structure, an eviction rule, or a counter family of its own.
 
-Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay.
+Why a budget for each kind instead of one budget? With one budget, a scan that loads segment blocks could evict a reader's tail, and the reader would then pay a replay. In the same way, a scan that loads data blocks could evict the index blocks, filter blocks, and manifests that every lookup reads first, and the next lookup in each namespace would pay a GET for each of them.
 
 ## Costs
 
@@ -75,7 +76,7 @@ The format's requirements don't cover caches, because the caches belong to the r
 The API specification leaves caches to the implementation. The documentation that describes them says:
 
 - The Rust API's documentation of `max_head_bytes` and `max_wal_tail_bytes`, and the server's [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md), describe the head budget (16 MiB by default) and the tail budget (64 MiB by default in the Rust API) as two settings. The guide says that a session keeps its own tail in memory until a fold moves it into segments.
-- The server reports evictions of heads in `loonfs_head_cache_evictions_total` and evictions of tails in `loonfs_wal_tail_cache_evictions_total`, each in its cache's family of counters.
+- The server reports evictions of heads in `loonfs_head_cache_evictions_total`, evictions of tails in `loonfs_wal_tail_cache_evictions_total`, and evictions of segment index blocks, filter blocks, and manifests in `loonfs_segment_index_cache_evictions_total`, each in its cache's family of counters.
 - The `loonfs.publisher.tail_replays` counter records a publish that reads the WAL tail from the store, and an eviction isn't one of its causes.
 - The documentation of `max_completed_upload_session_bytes` describes LRU eviction, and the self-hosting guide's table of caches lists the completed-session budget as 32 MiB.
 
