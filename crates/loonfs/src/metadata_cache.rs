@@ -1,6 +1,6 @@
 //! The decoded metadata cache that one or more runtimes read through.
 
-use crate::{ObjectStore, SharedObjectStore};
+use crate::{ObjectStore, SharedObjectStore, READAHEAD_WINDOW_BYTES};
 use loonfs_core::cache::{
     CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MemorySegmentBlocks,
     MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
@@ -80,6 +80,7 @@ struct MetadataCacheInner {
     objects: Arc<SharedObjects>,
     next_runtime_scope: AtomicU64,
     object_store_scopes: Mutex<ObjectStoreScopes>,
+    read_ahead_window_bytes: usize,
     head_hits: AtomicUsize,
     head_misses: AtomicUsize,
 }
@@ -109,6 +110,7 @@ impl MetadataCache {
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
             max_content_object_bytes: DEFAULT_MAX_CONTENT_OBJECT_BYTES,
             max_cached_object_bytes: DEFAULT_MAX_CACHED_OBJECT_BYTES,
+            read_ahead_window_bytes: READAHEAD_WINDOW_BYTES,
             ssd_segment_blocks: None,
         }
     }
@@ -193,12 +195,14 @@ impl MetadataCache {
                     shared_segment_blocks,
                     object_store_scope,
                     read_working_memory,
+                    self.inner.read_ahead_window_bytes,
                 )
             }
             _ => MetadataSegmentCache::new(
                 shared_segment_blocks,
                 object_store_scope,
                 read_working_memory,
+                self.inner.read_ahead_window_bytes,
             ),
         };
         MetadataCacheBinding {
@@ -292,6 +296,7 @@ pub struct MetadataCacheBuilder {
     max_completed_upload_session_bytes: usize,
     max_content_object_bytes: usize,
     max_cached_object_bytes: u64,
+    read_ahead_window_bytes: usize,
     ssd_segment_blocks: Option<SsdSegmentBlocks>,
 }
 
@@ -361,6 +366,25 @@ impl MetadataCacheBuilder {
         self
     }
 
+    /// Sets the stored bytes of segment blocks that a metadata read fetches
+    /// ahead when it misses a data block. Defaults to
+    /// [`READAHEAD_WINDOW_BYTES`], which says why the default is 1 MiB.
+    ///
+    /// A read that misses a data block fetches that block and the blocks
+    /// after it in the segment, as long as their stored bytes stay within
+    /// this size, in one ranged GET. Every runtime that reads through the
+    /// cache uses this size. A size above 4 MiB (the most that one ranged GET
+    /// of blocks reads) acts as 4 MiB, and zero reads no blocks ahead. A
+    /// window also stops at the read working memory that's free (see
+    /// [`ExecutionBudgetBuilder::max_read_working_bytes`]), because the
+    /// read's memo is the only place that keeps the window's other blocks.
+    ///
+    /// [`ExecutionBudgetBuilder::max_read_working_bytes`]: crate::ExecutionBudgetBuilder::max_read_working_bytes
+    pub fn read_ahead_window_bytes(mut self, read_ahead_window_bytes: usize) -> Self {
+        self.read_ahead_window_bytes = read_ahead_window_bytes;
+        self
+    }
+
     /// Sets the SSD tier of the segment blocks, which keeps every block that
     /// the cache inserts on local disk as well as in memory. Defaults to
     /// none, so blocks stay in memory alone.
@@ -392,6 +416,7 @@ impl MetadataCacheBuilder {
                 )),
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),
+                read_ahead_window_bytes: self.read_ahead_window_bytes,
                 head_hits: AtomicUsize::new(0),
                 head_misses: AtomicUsize::new(0),
             }),

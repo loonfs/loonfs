@@ -1,6 +1,10 @@
 //! SST block-range selection and per-view block memoization.
 
+#[cfg(test)]
+use super::cache::read_ahead_window_bytes;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
+#[cfg(test)]
+use super::data_block_load::read_ahead_window_len;
 use super::data_block_load::{
     load_segment_data_block_span, load_segment_data_block_with_readahead,
 };
@@ -158,6 +162,39 @@ impl SessionBlockMemo {
             })
     }
 
+    /// Returns the read working memory that the memo's pool has free.
+    pub(super) fn available_bytes(&self) -> usize {
+        self.pool.available_bytes()
+    }
+
+    /// Evicts the memo's decoded blocks, and keeps the stored bytes of the
+    /// blocks that the read fetched ahead and hasn't used yet.
+    pub(super) fn release_decoded(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("session block memo lock should not be poisoned");
+        let SessionBlockMemoInner {
+            blocks,
+            insertion_order,
+            entry_bytes,
+            ..
+        } = &mut *inner;
+        blocks.retain(|key, block| {
+            let stored = matches!(block, MemoBlock::Stored(_));
+            if !stored {
+                *entry_bytes -= block.bytes() + key_bytes(key);
+            }
+            stored
+        });
+        insertion_order.retain(|key| blocks.contains_key(key));
+        blocks.shrink_to_fit();
+        insertion_order.shrink_to_fit();
+        let bytes = inner.bytes();
+        self.pool.release(inner.reserved_bytes - bytes);
+        inner.reserved_bytes = bytes;
+    }
+
     pub(super) fn record_stored(&self, cache_key: &MetadataSegmentCacheKey, bytes: &[u8]) {
         self.record_block(cache_key, MemoBlock::Stored(Arc::from(bytes)));
     }
@@ -221,8 +258,6 @@ impl Drop for SessionBlockMemo {
     }
 }
 
-// Adjacent lookups share fetched bytes within one aligned window.
-const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// Loads the rows of one segment whose keys can fall in
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
 /// index says can match. Callers trim edge blocks with
@@ -250,14 +285,12 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     let mut remaining_rows = row_limit;
     let mut start = needed.start;
     while start < needed.end && remaining_rows > 0 {
-        let required_end = if readahead == Readahead::Stored {
+        let required_end = if readahead == Readahead::Enabled {
             start + 1
         } else if row_limit == usize::MAX {
             needed.end
         } else {
-            (start + 1)
-                .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
-                .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
+            (start + read_ahead_window_len(&index[start..], read_ahead_window_bytes(segment_cache)))
                 .min(needed.end)
         };
         let blocks = load_segment_blocks_with_readahead(
@@ -287,6 +320,9 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     Ok(result)
 }
 
+/// Loads the data blocks of `index[range]`, and reads ahead as `readahead`
+/// says. A read-ahead window starts at a block that the read misses and
+/// stops at the segment's last block at the latest.
 pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -296,42 +332,33 @@ pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
     range: std::ops::Range<usize>,
     readahead: Readahead,
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
-    let extended_end = if readahead != Readahead::Disabled {
-        range
-            .end
-            .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
-            .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
-            .min(index.len())
-    } else {
-        range.end
-    };
-    if readahead == Readahead::Stored {
-        let mut blocks = Vec::new();
-        for position in range {
-            blocks.push(
-                load_segment_data_block_with_readahead(
-                    store,
-                    segment_cache,
-                    Some(memo),
-                    descriptor,
-                    &index[position..extended_end],
-                )
-                .await?,
-            );
+    match readahead {
+        Readahead::Enabled => {
+            let mut blocks = Vec::with_capacity(range.len());
+            for position in range {
+                blocks.push(
+                    load_segment_data_block_with_readahead(
+                        store,
+                        segment_cache,
+                        Some(memo),
+                        descriptor,
+                        &index[position..],
+                    )
+                    .await?,
+                );
+            }
+            Ok(blocks)
         }
-        Ok(blocks)
-    } else {
-        Ok(load_segment_data_block_span(
-            store,
-            segment_cache,
-            Some(memo),
-            descriptor,
-            &index[range.start..extended_end],
-        )
-        .await?
-        .into_iter()
-        .take(range.len())
-        .collect())
+        Readahead::Disabled => {
+            load_segment_data_block_span(
+                store,
+                segment_cache,
+                Some(memo),
+                descriptor,
+                &index[range],
+            )
+            .await
+        }
     }
 }
 
@@ -346,6 +373,31 @@ mod tests {
             block_kind: SegmentBlockKind::Data,
             block_offset: offset,
         }
+    }
+
+    #[test]
+    fn releasing_decoded_blocks_keeps_the_stored_bytes_and_their_charge() {
+        let pool = Arc::new(ReadWorkingMemory::new(1024 * 1024, None));
+        let memo = SessionBlockMemo::new(Arc::clone(&pool));
+        memo.record_stored(&key(1), &[1; 1024]);
+        let stored_bytes = pool.in_use();
+        memo.record(
+            &key(2),
+            &DecodedMetadataSegmentBlock::Data {
+                block: Arc::new(DecodedDataBlock {
+                    rows: Vec::new(),
+                    row_keys: Vec::new(),
+                }),
+                decoded_bytes: 2048,
+            },
+        );
+        assert!(pool.in_use() > stored_bytes + 2048);
+        memo.release_decoded();
+        assert!(memo.get(&key(2)).is_none());
+        assert_eq!(memo.stored(&key(1)).as_deref(), Some(&[1; 1024][..]));
+        assert!((1024..=stored_bytes).contains(&pool.in_use()));
+        drop(memo);
+        assert_eq!(pool.in_use(), 0);
     }
 
     #[test]

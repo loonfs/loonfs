@@ -14,6 +14,7 @@ mod index_parity;
 pub(crate) mod inspection_materialization;
 mod manifest_gc_races;
 mod manifest_round_trips;
+mod read_ahead_windows;
 mod retention;
 mod streaming_compaction;
 

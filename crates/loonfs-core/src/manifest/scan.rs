@@ -24,10 +24,14 @@ use std::sync::Arc;
 /// first blocks load in one refill.
 const SCAN_ITERATORS_OPEN: usize = 16;
 
+/// Whether a scan reads ahead when it misses a data block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
+    /// The scan fetches a read-ahead window from each data block that it
+    /// misses, and the read's memo keeps the window's other blocks as stored
+    /// bytes until the scan reaches them.
     Enabled,
-    Stored,
+    /// The scan fetches the blocks that it asks for and no others.
     Disabled,
 }
 
@@ -115,7 +119,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Stored)
+            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Enabled)
             .await?
             .into_iter()
             .find(|(row_key, _)| row_key == key)
@@ -188,11 +192,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             upper_bound,
             limit,
             None,
-            if family == MetadataRowFamily::Commits {
-                Readahead::Stored
-            } else {
-                Readahead::Enabled
-            },
+            Readahead::Enabled,
         )
         .await
     }
@@ -216,7 +216,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             upper_bound,
             limit,
             Some(filter_probe),
-            Readahead::Stored,
+            Readahead::Enabled,
         )
         .await
     }
@@ -349,6 +349,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             block_memo: &self.block_memo,
             readahead,
             upper_bound,
+            // A window reads on past the range, so that the read's later
+            // lookups and scans of nearby keys find their blocks in the memo.
+            windows_stop_at_upper_bound: false,
         };
         let mut iterators = Vec::new();
         let mut descriptors = matching_descriptors.into_iter();
