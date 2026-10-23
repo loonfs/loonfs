@@ -23,6 +23,7 @@ use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuil
 use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::NonZeroUsize;
 
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
@@ -117,7 +118,7 @@ where
     let mut puts = MetadataSegmentPuts::new(store, segment_cache);
     let mut segments_by_family = Vec::with_capacity(MANIFEST_ROW_FAMILIES.len());
     for family in MANIFEST_ROW_FAMILIES {
-        let mut writer = MetadataSegmentWriter::new(family, namespace_id);
+        let mut writer = MetadataSegmentWriter::new(family, namespace_id, policy);
         for row in rows_for_family(family) {
             writer.push(row, &mut |_| {});
             writer.roll_full_segments(&mut puts, policy).await?;
@@ -268,16 +269,22 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
 pub(super) struct MetadataSegmentWriter<'a> {
     family: MetadataRowFamily,
     namespace_id: &'a NamespaceId,
+    target_block_bytes: NonZeroUsize,
     builder: SegmentBlocksBuilder,
     segments: Vec<MetadataSegmentRef>,
 }
 
 impl<'a> MetadataSegmentWriter<'a> {
-    pub(super) fn new(family: MetadataRowFamily, namespace_id: &'a NamespaceId) -> Self {
+    pub(super) fn new(
+        family: MetadataRowFamily,
+        namespace_id: &'a NamespaceId,
+        policy: MetadataRunPolicy,
+    ) -> Self {
         Self {
             family,
             namespace_id,
-            builder: SegmentBlocksBuilder::default(),
+            target_block_bytes: policy.target_block_bytes,
+            builder: SegmentBlocksBuilder::new(policy.target_block_bytes),
             segments: Vec::new(),
         }
     }
@@ -322,7 +329,8 @@ impl<'a> MetadataSegmentWriter<'a> {
         puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<()> {
         puts.wait_for_capacity(0).await?;
-        let built = std::mem::take(&mut self.builder)
+        let next = SegmentBlocksBuilder::new(self.target_block_bytes);
+        let built = std::mem::replace(&mut self.builder, next)
             .build()
             .expect("a metadata segment should encode");
         let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);

@@ -9,7 +9,7 @@ use crate::metrics::{
 use crate::publisher::{FoldTrigger, PublisherRegistry};
 use crate::{
     Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationPolicy, ReadConsistency,
-    Result, SharedObjectStore, StoreConfig, TraceMode,
+    Result, SharedObjectStore, StoreConfig, TraceMode, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::MetadataRunPolicy;
@@ -17,7 +17,8 @@ use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::WriterId;
 use std::marker::PhantomData;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
@@ -66,7 +67,11 @@ struct WriterConfig {
     publication_policy: PublicationPolicy,
     inline_content: InlineContentPolicy,
     idle_fold_after_ms: Option<NonZeroU64>,
+    target_block_bytes: usize,
 }
+
+/// The data-block targets that [`LoonFsBuilder::target_block_bytes`] accepts.
+const TARGET_BLOCK_BYTES: RangeInclusive<usize> = 4 * 1024..=256 * 1024;
 
 impl<M> LoonFsBuilder<M> {
     pub(super) fn from_config(store_config: StoreConfig) -> Self {
@@ -101,6 +106,7 @@ impl<M> LoonFsBuilder<M> {
                 publication_policy: PublicationPolicy::default(),
                 inline_content: InlineContentPolicy::default(),
                 idle_fold_after_ms: NonZeroU64::new(crate::config::DEFAULT_IDLE_FOLD_AFTER_MS),
+                target_block_bytes: DEFAULT_TARGET_BLOCK_BYTES,
             },
             mode: PhantomData,
         }
@@ -265,7 +271,7 @@ impl LoonFsBuilder<ReadOnly> {
     /// no background work, so it needs no ambient Tokio runtime of its own.
     pub async fn build(self) -> Result<LoonFs<ReadOnly>> {
         Ok(LoonFs {
-            core: self.core.open()?,
+            core: self.core.open(MetadataRunPolicy::default())?,
             mode: ReadOnly,
         })
     }
@@ -325,6 +331,22 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
+    /// Sets the decoded size at which this runtime's folds and compactions
+    /// close a data block of a metadata segment.
+    ///
+    /// Defaults to [`DEFAULT_TARGET_BLOCK_BYTES`], 64 KiB. The setting exists
+    /// so that a benchmark can compare block sizes, and it isn't a tuning
+    /// recommendation. The target isn't part of the storage format, because
+    /// readers use the size of each block that a segment's index records, so
+    /// segments written with different targets can be read together. The row
+    /// that reaches the target closes its block, so a block can be larger
+    /// than the target by up to one row. [`Self::build`] rejects a target
+    /// below 4 KiB or above 256 KiB.
+    pub fn target_block_bytes(mut self, target_block_bytes: usize) -> Self {
+        self.writer.target_block_bytes = target_block_bytes;
+        self
+    }
+
     /// Turns this builder into one for a read-only runtime.
     ///
     /// It keeps the settings both modes share, such as the store, the
@@ -348,12 +370,25 @@ impl LoonFsBuilder<Writable> {
     pub async fn build(self) -> Result<LoonFs<Writable>> {
         let writer = self.writer;
         writer.inline_content.validate()?;
+        if !TARGET_BLOCK_BYTES.contains(&writer.target_block_bytes) {
+            return Err(Error::Config(format!(
+                "`target_block_bytes` is {} bytes, which is outside {} to {} bytes",
+                writer.target_block_bytes,
+                TARGET_BLOCK_BYTES.start(),
+                TARGET_BLOCK_BYTES.end()
+            )));
+        }
+        let target_block_bytes = NonZeroUsize::new(writer.target_block_bytes)
+            .expect("an accepted block target should be positive");
         let writer_id = writer
             .writer_id
             .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
         let identity = WriterIdentity { writer_id };
         let runtime = owning_runtime()?;
-        let core = self.core.open()?;
+        let core = self.core.open(MetadataRunPolicy {
+            target_block_bytes,
+            ..MetadataRunPolicy::default()
+        })?;
         let execution_budget = core.inner.config.execution_budget.clone();
         let bits = Arc::new(WriterBits {
             fold_trigger: FoldTrigger::new(&writer.inline_content, writer.idle_fold_after_ms),
@@ -380,12 +415,14 @@ impl LoonFsBuilder<Writable> {
 
 impl CoreConfig {
     /// Resolves the object-store client, wraps it for metrics when the
-    /// builder was given a recorder, and opens the runtime core.
+    /// builder was given a recorder, and opens the runtime core, whose folds
+    /// and compactions run under `metadata_run_policy` with the execution
+    /// budget's merge input limit.
     ///
     /// A builder given no recorder of either kind wraps nothing: the store
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
-    fn open(self) -> Result<RuntimeCore> {
+    fn open(self, metadata_run_policy: MetadataRunPolicy) -> Result<RuntimeCore> {
         if !loonfs_core::time::system_clock_reads_after_epoch() {
             return Err(Error::Config(
                 "the system clock reads before the unix epoch; LoonFS stamps unix milliseconds \
@@ -433,7 +470,7 @@ impl CoreConfig {
         });
         let metadata_run_policy = MetadataRunPolicy {
             max_decoded_input_bytes_per_step: execution_budget.max_merge_input_bytes(),
-            ..MetadataRunPolicy::default()
+            ..metadata_run_policy
         };
         // Bind the cache to the store the caller supplied, not to the metrics
         // wrapper below. Each runtime builds its own wrapper, so runtimes over

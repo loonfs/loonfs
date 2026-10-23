@@ -86,6 +86,7 @@ pub use loonfs_types::api::v0::{
     Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
     ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
 };
+pub use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,

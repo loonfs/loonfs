@@ -12,7 +12,7 @@ use std::num::NonZeroUsize;
 pub(super) use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
     DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
-    DEFAULT_MIN_COMPACTION_RUNS,
+    DEFAULT_MIN_COMPACTION_RUNS, DEFAULT_TARGET_BLOCK_BYTES,
 };
 pub use loonfs_types::MetadataFamilyGroup;
 
@@ -61,6 +61,9 @@ pub struct MetadataRunPolicy {
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
+    /// Decoded bytes at which a fold or a compaction closes a segment's data
+    /// block, which can be larger by up to one row.
+    pub target_block_bytes: NonZeroUsize,
     /// Complete logical runs one compaction unit may merge, up to eight.
     pub max_input_runs_per_step: NonZeroUsize,
     /// Rows, by its runs' descriptor counts, that a window may list when the
@@ -84,6 +87,7 @@ impl Default for MetadataRunPolicy {
                 )
                 .unwrap()
             },
+            target_block_bytes: const { NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).unwrap() },
             max_input_runs_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_RUNS).unwrap()
             },

@@ -752,7 +752,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .map(|family| {
                 (
                     *family,
-                    MetadataSegmentWriter::new(*family, self.namespace_id),
+                    MetadataSegmentWriter::new(*family, self.namespace_id, self.policy),
                 )
             })
             .collect();
