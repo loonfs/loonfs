@@ -3147,7 +3147,7 @@ async fn a_closed_session_hands_its_head_and_tail_to_the_read_cache() {
 }
 
 #[tokio::test]
-async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it() {
+async fn a_quiet_writer_confirms_its_tip_but_the_revalidation_bound_replays_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
