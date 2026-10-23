@@ -69,8 +69,8 @@ pub use maintenance::CheckpointsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
 pub use reads::{
-    ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager,
-    ListChangesOptions, PathEntriesPager, ReadFileOptions, SnapshotsPager, TrashPager,
+    ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
+    SnapshotsPager, TrashPager,
 };
 use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
 pub use transport_error::TransportError;
@@ -80,15 +80,16 @@ pub use transport_error::TransportError;
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    ReadAt, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
+    ReadFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
     UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-pub use downloads::{DirectDownloadStream, DownloadOptions};
+pub use downloads::DirectDownloadStream;
 pub use namespace_path::NamespacePath;
 pub use uploads::staging::{
     MultipartUploadResume, PreparedContent, PutFileJournal, MIN_STREAMING_PUT_BYTES,

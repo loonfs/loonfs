@@ -586,6 +586,89 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     );
 }
 
+/// Checks that each grant request sends `snapshot_id` for a snapshot, the
+/// consistency fields of a live read that sets a consistency, and none of
+/// them for a live read that sets none, so the server's default applies.
+#[tokio::test]
+async fn grants_send_only_the_fields_of_what_they_read_at() {
+    let content_ref = ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        b"report",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let path_grant = grant(content_ref, "http://example.invalid/object");
+    let inode_grant = CreateDownloadByInodeResponse {
+        namespace_id: path_grant.namespace_id.clone(),
+        inode_id: loonfs_types::InodeId(2),
+        revision_no: path_grant.revision_no,
+        content_ref: path_grant.content_ref.clone(),
+        ranges: path_grant.ranges.clone(),
+    };
+    let snapshot_id =
+        PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+    let cases = [
+        (ReadAt::Live(None), serde_json::json!({})),
+        (
+            ReadAt::Live(Some(Consistency::Strong)),
+            serde_json::json!({"consistency": "strong"}),
+        ),
+        (
+            ReadAt::Live(Some(Consistency::Eventual {
+                max_staleness_ms: Some(2_500),
+            })),
+            serde_json::json!({"consistency": "eventual", "max_staleness_ms": 2500}),
+        ),
+        (
+            ReadAt::Snapshot(snapshot_id.clone()),
+            serde_json::json!({"snapshot_id": snapshot_id}),
+        ),
+    ];
+    let transport = scripted_transport::script(cases.iter().flat_map(|_| {
+        [
+            Outcome::Success(serde_json::to_vec(&path_grant).expect("encode grant")),
+            Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
+            Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
+        ]
+    }));
+    let client = client_for(&transport);
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let spec = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
+    let mut expected = Vec::new();
+    for (at, fields) in cases {
+        let options = DownloadOptions {
+            at,
+            ..DownloadOptions::default()
+        };
+        client
+            .create_download_with_options(&spec, &options)
+            .await
+            .expect("path grant");
+        client
+            .create_download_by_inode_with_options(&namespace_id, InodeId(2), &options)
+            .await
+            .expect("inode grant");
+        client
+            .create_revision_download_by_inode_with_options(
+                &namespace_id,
+                InodeId(2),
+                RevisionNo(1),
+                &options,
+            )
+            .await
+            .expect("revision grant");
+        let mut path_fields = fields.clone();
+        path_fields["path"] = serde_json::json!("/report.txt");
+        expected.extend([path_fields, fields.clone(), fields]);
+    }
+    let bodies: Vec<serde_json::Value> = transport
+        .sent()
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).expect("grant request body"))
+        .collect();
+    assert_eq!(bodies, expected);
+}
+
 #[tokio::test]
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();

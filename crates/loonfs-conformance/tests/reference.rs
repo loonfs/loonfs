@@ -5,9 +5,9 @@
 use bytes::Bytes;
 use loonfs_client::{
     AccessState, AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError,
-    CommitOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions, MoveOptions,
-    NamespacePath, PutFileOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAttributesByInodeOptions,
+    CommitOptions, Consistency, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
+    ListFileRevisionsOptions, ListTrashOptions, MoveOptions, NamespacePath, PutFileOptions, ReadAt,
+    UndeleteDestination, UndeleteOptions, UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -69,6 +69,7 @@ async fn run_reference_corpus(shape: StoreShape, checksum_algorithm: ChecksumAlg
             "upload_multipart" => run_multipart(&harness, case).await,
             "upload_abort" => run_abort(&harness, case).await,
             "download" => run_download(&harness, case).await,
+            "read_consistency" => run_read_consistency(&harness, case).await,
             "pagination" => run_pagination(&harness, case).await,
             "changes" => run_changes(&harness, case).await,
             "snapshots" => run_snapshots(&harness, case).await,
@@ -877,6 +878,162 @@ struct AppendExpected {
     empty_append: ErrorStatusExpected,
     empty_put_committed_seq: u64,
     append_to_empty_committed_seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadConsistencyRequest {
+    namespace_id: String,
+    path: String,
+    deleted_path: String,
+    actor_id: ActorId,
+    content_utf8: String,
+    commit_ids: ReadConsistencyCommitIds,
+    max_staleness_ms: u64,
+    snapshot_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadConsistencyCommitIds {
+    put: String,
+    put_deleted: String,
+    delete: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadConsistencyExpected {
+    revision_no: u64,
+    trash_entry_count: usize,
+    snapshot_with_consistency: ErrorStatusExpected,
+}
+
+async fn run_read_consistency(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<ReadConsistencyRequest, ReadConsistencyExpected>(case);
+    let client = &harness.client;
+    let namespace = namespace_id(&request.namespace_id);
+    client
+        .create_namespace(&namespace, &request.actor_id)
+        .await
+        .expect("create read consistency namespace");
+    let spec = namespace_path(&request.namespace_id, &request.path);
+    let deleted = namespace_path(&request.namespace_id, &request.deleted_path);
+    for (path, commit_id) in [
+        (&spec, &request.commit_ids.put),
+        (&deleted, &request.commit_ids.put_deleted),
+    ] {
+        client
+            .put_file_with_options(
+                path,
+                request.content_utf8.as_bytes(),
+                &request.actor_id,
+                &put_options(commit_id),
+            )
+            .await
+            .expect("put read consistency file");
+    }
+    client
+        .delete_path_with_options(
+            &deleted,
+            &request.actor_id,
+            &DeleteOptions {
+                commit: commit_options(&request.commit_ids.delete),
+                ..DeleteOptions::default()
+            },
+        )
+        .await
+        .expect("delete read consistency file");
+    let inode_id = client.stat(&spec).await.expect("stat file").inode_id;
+    let revision_no = RevisionNo(expected.revision_no);
+
+    for consistency in [
+        Consistency::Strong,
+        Consistency::Eventual {
+            max_staleness_ms: Some(request.max_staleness_ms),
+        },
+    ] {
+        let trash = client
+            .list_trash_with_options(
+                &namespace,
+                &ListTrashOptions {
+                    consistency: Some(consistency),
+                },
+            )
+            .page()
+            .await
+            .expect("list trash");
+        assert_eq!(trash.entries.len(), expected.trash_entry_count);
+        let revisions = ListFileRevisionsOptions {
+            consistency: Some(consistency),
+        };
+        for listing in [
+            client.list_file_revisions_with_options(&spec, &revisions),
+            client.list_file_revisions_by_inode_with_options(&namespace, inode_id, &revisions),
+        ] {
+            let page = listing.page().await.expect("list revisions");
+            assert_eq!(page.revisions[0].revision_no, revision_no);
+        }
+        let download = DownloadOptions {
+            at: ReadAt::Live(Some(consistency)),
+            ..DownloadOptions::default()
+        };
+        let path_grant = client
+            .create_download_with_options(&spec, &download)
+            .await
+            .expect("grant by path");
+        assert_eq!(path_grant.revision_no, revision_no);
+        let inode_grant = client
+            .create_download_by_inode_with_options(&namespace, inode_id, &download)
+            .await
+            .expect("grant by inode");
+        let revision_grant = client
+            .create_revision_download_by_inode_with_options(
+                &namespace,
+                inode_id,
+                revision_no,
+                &download,
+            )
+            .await
+            .expect("grant of a revision by inode");
+        for grant in [inode_grant, revision_grant] {
+            assert_eq!(grant.revision_no, revision_no);
+        }
+    }
+
+    let snapshot = client
+        .create_snapshot(&namespace, &request.snapshot_name, None)
+        .await
+        .expect("create snapshot");
+    let captured = client
+        .create_download_with_options(
+            &spec,
+            &DownloadOptions {
+                at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
+                ..DownloadOptions::default()
+            },
+        )
+        .await
+        .expect("grant at the snapshot");
+    assert_eq!(captured.revision_no, revision_no);
+    // `ReadAt` can't combine a snapshot with a consistency, so the typed
+    // client can't send that request, and the raw client sends it instead.
+    let response = harness
+        .raw_client
+        .post(format!(
+            "{}/v0/namespaces/{}/filesystem/downloads",
+            harness.server_url, request.namespace_id
+        ))
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "path": request.path,
+            "snapshot_id": snapshot.snapshot_id,
+            "consistency": "strong",
+        }))
+        .send()
+        .await
+        .expect("send a snapshot grant with a consistency");
+    assert_raw_status_error(response, &expected.snapshot_with_consistency).await;
 }
 
 fn append_options(id: &str) -> AppendFileOptions {

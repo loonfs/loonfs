@@ -137,7 +137,7 @@ impl ResolvedTarget {
                         .create_download_with_options(
                             spec,
                             &DownloadOptions {
-                                snapshot_id: snapshot_id.cloned(),
+                                at: ReadAt::from(snapshot_id.cloned()),
                                 start_offset,
                             },
                         )

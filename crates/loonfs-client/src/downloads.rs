@@ -7,6 +7,7 @@ use futures::future::BoxFuture;
 use futures::stream::Fuse;
 use futures::FutureExt as _;
 use loonfs_types::api::v0::{CreateDownloadByInodeRequest, DownloadRange};
+use loonfs_types::options::{Consistency, DownloadOptions, ReadAt, ReadConsistency};
 use loonfs_types::ContentVerifier;
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
@@ -15,21 +16,32 @@ use std::task::{Context, Poll};
 /// read and the ones requested behind it, in range order.
 const RANGE_RESPONSES_IN_FLIGHT: usize = 4;
 
-/// Options for a download of a file's content by path or by inode.
-///
-/// `snapshot_id` has no field in the runtime's `DownloadOptions`, which
-/// reads a snapshot through a read view.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DownloadOptions {
-    /// Download the file revision captured by this snapshot instead of the
-    /// current one.
-    pub snapshot_id: Option<PinId>,
-    /// The first byte the grant reads, for a caller that already holds the
-    /// bytes below it. A grant names `[start_offset, size_bytes)` and
-    /// nothing else, so a resume asks for a new grant. An offset at or past
-    /// the end answers `invalid_request`; a revision of zero bytes takes
-    /// only 0.
-    pub start_offset: u64,
+/// The body fields that say what a download reads at: `snapshot_id` for a
+/// snapshot, and the consistency fields of a live read that sets a
+/// consistency. A live read that sets none sends neither, so the server's
+/// default applies.
+struct ReadAtFields {
+    snapshot_id: Option<PinId>,
+    consistency: Option<ReadConsistency>,
+    max_staleness_ms: Option<u64>,
+}
+
+impl From<&ReadAt> for ReadAtFields {
+    fn from(at: &ReadAt) -> Self {
+        let (snapshot_id, consistency, max_staleness_ms) = match at {
+            ReadAt::Snapshot(snapshot_id) => (Some(snapshot_id.clone()), None, None),
+            ReadAt::Live(None) => (None, None, None),
+            ReadAt::Live(Some(Consistency::Strong)) => (None, Some(ReadConsistency::Strong), None),
+            ReadAt::Live(Some(Consistency::Eventual { max_staleness_ms })) => {
+                (None, Some(ReadConsistency::Eventual), *max_staleness_ms)
+            }
+        };
+        Self {
+            snapshot_id,
+            consistency,
+            max_staleness_ms,
+        }
+    }
 }
 
 /// A direct download returned in verified, bounded chunks.
@@ -267,10 +279,13 @@ impl Client {
             self.base_url,
             spec.namespace().as_str()
         );
+        let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadRequest {
             path: spec.absolute_path().clone(),
             revision_no,
-            snapshot_id: options.snapshot_id.clone(),
+            snapshot_id: at.snapshot_id,
+            consistency: at.consistency,
+            max_staleness_ms: at.max_staleness_ms,
             start_offset: options.start_offset,
         };
         // Repeating the request writes only the same immutable extent bytes.
@@ -364,8 +379,11 @@ impl Client {
         options: &DownloadOptions,
         policy: SendPolicy,
     ) -> Result<CreateDownloadByInodeResponse> {
+        let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadByInodeRequest {
-            snapshot_id: options.snapshot_id.clone(),
+            snapshot_id: at.snapshot_id,
+            consistency: at.consistency,
+            max_staleness_ms: at.max_staleness_ms,
             start_offset: options.start_offset,
         };
         self.request_json::<_, CreateDownloadByInodeResponse>(

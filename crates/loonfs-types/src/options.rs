@@ -51,6 +51,39 @@ pub enum Consistency {
     },
 }
 
+/// How recently a live read confirms the namespace head, without a maximum
+/// staleness.
+///
+/// A runtime's default consistency and the `consistency` field of a download
+/// request take one of these values. `eventual` reads at the head that was
+/// confirmed last while that confirmation is younger than the maximum
+/// staleness, and `strong` confirms the head before the read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReadConsistency {
+    /// Read at the head that was confirmed last while that confirmation is
+    /// younger than the maximum staleness.
+    #[default]
+    Eventual,
+    /// Confirm the head before the read, for a reader that follows writes
+    /// made in other processes.
+    Strong,
+}
+
+impl From<ReadConsistency> for Consistency {
+    /// Returns the consistency of a read at `consistency`, with the
+    /// runtime's default maximum staleness.
+    fn from(consistency: ReadConsistency) -> Self {
+        match consistency {
+            ReadConsistency::Eventual => Self::Eventual {
+                max_staleness_ms: None,
+            },
+            ReadConsistency::Strong => Self::Strong,
+        }
+    }
+}
+
 /// The state that a read reads: the namespace's live head, or a snapshot.
 ///
 /// A snapshot selects the state that a read of it sees, so only a live read
@@ -121,6 +154,56 @@ pub struct ListOptions {
     /// The live head or the snapshot that each page reads, by default the
     /// live head at the runtime's default consistency.
     pub at: ReadAt,
+}
+
+/// Options for a read of a file's content by path or by inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadFileOptions {
+    /// The live head or the snapshot that the read reads, by default the
+    /// live head at the runtime's default consistency. A snapshot read
+    /// returns the file revision that the snapshot captured.
+    pub at: ReadAt,
+}
+
+/// Options for a direct download of a file's content by path or by inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DownloadOptions {
+    /// The live head or the snapshot that the download reads, by default the
+    /// live head at the runtime's default consistency. A snapshot download
+    /// returns the file revision that the snapshot captured, and a download
+    /// of a numbered revision can't read a snapshot.
+    pub at: ReadAt,
+    /// The first byte that the download reads, for a caller that already has
+    /// the bytes below it. The download covers `[start_offset, size_bytes)`,
+    /// so a caller that resumes a download asks for a new one. An offset at
+    /// or past the end returns `invalid_request`, except 0 for a revision of
+    /// zero bytes.
+    pub start_offset: u64,
+}
+
+/// Options for listing the change feed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListChangesOptions {
+    /// The live head or the snapshot that each page reads, by default the
+    /// live head at the runtime's default consistency. A snapshot's feed ends
+    /// at the sequence that the snapshot captured.
+    pub at: ReadAt,
+}
+
+/// Options for listing a file's revisions by path or by inode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListFileRevisionsOptions {
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
+}
+
+/// Options for listing the namespace's recoverable deletions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListTrashOptions {
+    /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
 }
 
 /// The attribute writes and removals one update applies.
@@ -411,5 +494,11 @@ mod tests {
         assert_eq!(StatOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListOptions::default().at, ReadAt::Live(None));
         assert_eq!(ReadAt::from(None), ReadAt::Live(None));
+        assert_eq!(ReadFileOptions::default().at, ReadAt::Live(None));
+        assert_eq!(DownloadOptions::default().at, ReadAt::Live(None));
+        assert_eq!(DownloadOptions::default().start_offset, 0);
+        assert_eq!(ListChangesOptions::default().at, ReadAt::Live(None));
+        assert_eq!(ListFileRevisionsOptions::default().consistency, None);
+        assert_eq!(ListTrashOptions::default().consistency, None);
     }
 }

@@ -1,0 +1,26 @@
+{
+  "name": "read_consistency",
+  "intent": "Checks that the trash and revision listings and the download grants accept a strong and an eventual read consistency, and that a download grant refuses a consistency together with a snapshot.",
+  "request": {
+    "namespace_id": "conf-read-consistency",
+    "path": "/kept.txt",
+    "deleted_path": "/removed.txt",
+    "actor_id": "conformance-read-consistency",
+    "content_utf8": "read consistency payload",
+    "commit_ids": {
+      "put": "conf-read-consistency-put",
+      "put_deleted": "conf-read-consistency-put-deleted",
+      "delete": "conf-read-consistency-delete"
+    },
+    "max_staleness_ms": 2500,
+    "snapshot_name": "consistency"
+  },
+  "expected": {
+    "revision_no": 1,
+    "trash_entry_count": 1,
+    "snapshot_with_consistency": {
+      "status": 400,
+      "code": "invalid_request"
+    }
+  }
+}

@@ -225,7 +225,7 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
         .read_file_with_options(
             "/small.txt",
             &ReadFileOptions {
-                consistency: Some(Consistency::Strong),
+                at: ReadAt::Live(Some(Consistency::Strong)),
             },
         )
         .await

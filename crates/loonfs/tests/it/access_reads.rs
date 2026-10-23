@@ -2,7 +2,8 @@
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    Consistency, CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs, ReadFileOptions,
+    Consistency, CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs, ReadAt,
+    ReadFileOptions,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -275,9 +276,9 @@ async fn check_eventual_read_access(content_size: usize) {
         .with_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
     let eventual = ReadFileOptions {
-        consistency: Some(Consistency::Eventual {
+        at: ReadAt::Live(Some(Consistency::Eventual {
             max_staleness_ms: None,
-        }),
+        })),
     };
     let read = namespace
         .read_file_with_options("/team/file", &eventual)
@@ -434,7 +435,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
             .read_file_with_options(
                 "/team/file",
                 &ReadFileOptions {
-                    consistency: Some(consistency),
+                    at: ReadAt::Live(Some(consistency)),
                 },
             )
             .await

@@ -40,6 +40,7 @@ const EXPECTED_CASES: &[&str] = &[
     "inode_mutations",
     "pagination",
     "proxy",
+    "read_consistency",
     "snapshots",
     "unknown_event_kinds",
     "unknown_inode_kinds",

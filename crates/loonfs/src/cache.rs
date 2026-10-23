@@ -218,8 +218,7 @@ impl RuntimeCore {
     ) -> Result<RuntimeReadContext> {
         let (consistency, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
-                let consistency =
-                    consistency.unwrap_or(self.inner.config.consistency.consistency());
+                let consistency = consistency.unwrap_or(self.inner.config.consistency.into());
                 (consistency, self.max_staleness_ms(consistency))
             }
             HeadConfirmation::View => (Consistency::Strong, Some(READ_REVALIDATION_BOUND_MS)),

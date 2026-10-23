@@ -6,8 +6,8 @@
 use crate::{GrepError, Result};
 use loonfs::{
     CheckpointFilesPager, Consistency, CoreError, CurrentFileState, ListChangesOptions,
-    ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadOnly, ReadView, StatOptions,
-    MAX_CURRENT_FILES_PER_STAT,
+    ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
+    StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
@@ -89,7 +89,7 @@ impl NamespaceReads {
         limit: usize,
     ) -> Result<ListChangesResponse> {
         let options = ListChangesOptions {
-            consistency: Some(Consistency::Strong),
+            at: ReadAt::Live(Some(Consistency::Strong)),
         };
         Ok(self
             .namespace

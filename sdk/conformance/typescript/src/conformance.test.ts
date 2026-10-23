@@ -33,6 +33,7 @@ const EXPECTED_CASES = [
     "inode_mutations",
     "pagination",
     "proxy",
+    "read_consistency",
     "snapshots",
     "unknown_event_kinds",
     "unknown_inode_kinds",
@@ -292,6 +293,23 @@ interface DownloadExpected {
     size_bytes: number;
     checksum_algorithm: string;
     committed_seq: number;
+}
+
+interface ReadConsistencyRequest {
+    namespace_id: string;
+    path: string;
+    deleted_path: string;
+    actor_id: LoonFS.ActorId;
+    content_utf8: string;
+    commit_ids: { put: string; put_deleted: string; delete: string };
+    max_staleness_ms: number;
+    snapshot_name: string;
+}
+
+interface ReadConsistencyExpected {
+    revision_no: number;
+    trash_entry_count: number;
+    snapshot_with_consistency: ErrorStatusExpected;
 }
 
 interface AppendCommitIds {
@@ -632,6 +650,21 @@ const DOWNLOAD_REQUEST_FIELDS = [
     "content_utf8",
 ] as const;
 const DOWNLOAD_EXPECTED_FIELDS = ["size_bytes", "checksum_algorithm", "committed_seq"] as const;
+const READ_CONSISTENCY_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "deleted_path",
+    "actor_id",
+    "content_utf8",
+    "commit_ids",
+    "max_staleness_ms",
+    "snapshot_name",
+] as const;
+const READ_CONSISTENCY_EXPECTED_FIELDS = [
+    "revision_no",
+    "trash_entry_count",
+    "snapshot_with_consistency",
+] as const;
 const APPEND_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -837,6 +870,27 @@ function decodeDownload(testCase: ConformanceCase): [DownloadRequest, DownloadEx
     return [
         testCase.request as unknown as DownloadRequest,
         testCase.expected as unknown as DownloadExpected,
+    ];
+}
+
+function decodeReadConsistency(
+    testCase: ConformanceCase,
+): [ReadConsistencyRequest, ReadConsistencyExpected] {
+    strictObject(testCase.request, READ_CONSISTENCY_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(
+        testCase.request.commit_ids,
+        ["put", "put_deleted", "delete"],
+        `${testCase.name} commit_ids`,
+    );
+    strictObject(testCase.expected, READ_CONSISTENCY_EXPECTED_FIELDS, `${testCase.name} expected`);
+    strictObject(
+        testCase.expected.snapshot_with_consistency,
+        ["status", "code"],
+        `${testCase.name} snapshot_with_consistency`,
+    );
+    return [
+        testCase.request as unknown as ReadConsistencyRequest,
+        testCase.expected as unknown as ReadConsistencyExpected,
     ];
 }
 
@@ -3216,6 +3270,100 @@ conformanceTest("download", async (activeHarness, testCase) => {
         download.content_ref.checksum,
     );
     assert.deepEqual(download.content, payload);
+});
+
+conformanceTest("read_consistency", async (activeHarness, testCase) => {
+    const [request, expected] = decodeReadConsistency(testCase);
+    const client = activeHarness.client;
+    const namespaceId = request.namespace_id;
+    const actor = { headers: { "Loonfs-Actor": request.actor_id } };
+    await client.namespaces.create({ namespace_id: namespaceId }, actor);
+    const puts: Array<[string, string]> = [
+        [request.path, request.commit_ids.put],
+        [request.deleted_path, request.commit_ids.put_deleted],
+    ];
+    for (const [path, commitId] of puts) {
+        await client.files.upload(
+            {
+                namespace_id: namespaceId,
+                path,
+                content: new TextEncoder().encode(request.content_utf8),
+                commit_id: commitId,
+            },
+            actor,
+        );
+    }
+    await client.commits.create(
+        deleteCommit(namespaceId, request.commit_ids.delete, request.deleted_path),
+        actor,
+    );
+    const inodeId = fileEntry(
+        await client.files.retrieve({ namespace_id: namespaceId, path: request.path }),
+    ).inode_id;
+
+    const settings: Array<{ consistency: LoonFS.ReadConsistency; max_staleness_ms?: number }> = [
+        { consistency: "strong" },
+        { consistency: "eventual", max_staleness_ms: request.max_staleness_ms },
+    ];
+    for (const setting of settings) {
+        const trash = await client.trash.list({ namespace_id: namespaceId, ...setting });
+        assert.equal(trash.data.length, expected.trash_entry_count, setting.consistency);
+        const revisionPages = [
+            await client.files.listRevisions({
+                namespace_id: namespaceId,
+                path: request.path,
+                ...setting,
+            }),
+            await client.inodes.listRevisions({
+                namespace_id: namespaceId,
+                inode_id: inodeId,
+                ...setting,
+            }),
+        ];
+        for (const revisions of revisionPages) {
+            assert.equal(revisions.data[0]?.revision_no, expected.revision_no, setting.consistency);
+        }
+        const grants = [
+            await client.files.createDownload({
+                namespace_id: namespaceId,
+                path: request.path,
+                ...setting,
+            }),
+            await client.inodes.createDownload({
+                namespace_id: namespaceId,
+                inode_id: inodeId,
+                ...setting,
+            }),
+            await client.inodes.createRevisionDownload({
+                namespace_id: namespaceId,
+                inode_id: inodeId,
+                revision_no: expected.revision_no,
+                ...setting,
+            }),
+        ];
+        for (const grant of grants) {
+            assert.equal(grant.revision_no, expected.revision_no, setting.consistency);
+        }
+    }
+
+    const snapshot = await client.snapshots.create({
+        namespace_id: namespaceId,
+        name: request.snapshot_name,
+    });
+    await assert.rejects(
+        client.files.createDownload({
+            namespace_id: namespaceId,
+            path: request.path,
+            snapshot_id: snapshot.snapshot_id,
+            consistency: "strong",
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.BadRequestError);
+            assert.equal(error.statusCode, expected.snapshot_with_consistency.status);
+            assert.equal(error.body.code, expected.snapshot_with_consistency.code);
+            return true;
+        },
+    );
 });
 
 function signedRange(access: LoonFS.ObjectTransferAccess): string | undefined {

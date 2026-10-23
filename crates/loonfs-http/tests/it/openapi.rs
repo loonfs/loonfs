@@ -940,10 +940,13 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         "/v0/namespaces/{namespace_id}/filesystem/entry",
         "/v0/namespaces/{namespace_id}/filesystem/entries",
         "/v0/namespaces/{namespace_id}/filesystem/content",
+        "/v0/namespaces/{namespace_id}/filesystem/trash",
+        "/v0/namespaces/{namespace_id}/filesystem/revisions",
         "/v0/namespaces/{namespace_id}/changes",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     ] {
         let consistency = query_parameter(paths, path, "get", "consistency");
@@ -971,6 +974,32 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             Some(loonfs::engine::READ_REVALIDATION_BOUND_MS)
         );
     }
+
+    let schemas = &spec["components"]["schemas"];
+    for request_name in [
+        "CreateDownloadRequest",
+        "CreateDownloadByInodeRequest",
+        "CreateRevisionDownloadByInodeRequest",
+    ] {
+        let properties = &schemas[request_name]["properties"];
+        assert_eq!(
+            properties["consistency"]["$ref"],
+            json!("#/components/schemas/ReadConsistency"),
+            "{request_name}"
+        );
+        let max_staleness = &properties["max_staleness_ms"];
+        assert_eq!(max_staleness["type"], json!("integer"), "{request_name}");
+        assert_eq!(max_staleness["minimum"], json!(0), "{request_name}");
+        assert_eq!(
+            max_staleness["maximum"],
+            json!(loonfs::engine::READ_REVALIDATION_BOUND_MS),
+            "{request_name}"
+        );
+    }
+    assert_eq!(
+        schemas["ReadConsistency"]["enum"],
+        json!(["eventual", "strong"])
+    );
 
     let grep_path = "/v0/namespaces/{namespace_id}/grep";
     for name in ["case_insensitive", "allow_scan", "allow_stale"] {

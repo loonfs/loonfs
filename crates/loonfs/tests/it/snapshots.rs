@@ -2,13 +2,15 @@
 
 use crate::common::*;
 use loonfs::{
-    CheckpointOwner, CreateSnapshotOptions, ErrorCode, ForkNamespaceOptions, ListSnapshotsResponse,
-    LoonFs, NamespaceId, ReadOnly, SharedObjectStore,
+    ChangeSeq, CheckpointOwner, CreateSnapshotOptions, DownloadOptions, ErrorCode,
+    ForkNamespaceOptions, ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt,
+    ReadFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
 };
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -479,4 +481,99 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     assert_eq!(paths.entries.len(), 1);
     assert_eq!(paths.entries, inodes.entries);
     assert_eq!(paths.head_seq, snapshot.captured_seq);
+}
+
+/// Checks that the shared file read, change feed, and download options read
+/// the state that a snapshot captured through the namespace handle, and that
+/// a download of a numbered revision refuses a snapshot.
+#[tokio::test]
+async fn shared_file_and_download_options_select_the_snapshot() {
+    let directory = tempdir().expect("directory");
+    let writer = LoonFs::builder_with_store(Arc::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+    ))
+    .writer_id(loonfs_test_support::ids::writer_id("snapshot-file-options"))
+    .build()
+    .await
+    .expect("writer");
+    let namespace = namespace_id("file-options");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    namespace_writer
+        .put_file("/file", b"before", &actor)
+        .await
+        .expect("file");
+    let snapshot = namespace_writer
+        .create_snapshot("file-options", &CreateSnapshotOptions::default())
+        .await
+        .expect("snapshot");
+    namespace_writer
+        .append_file("/file", b" and after", &actor)
+        .await
+        .expect("append");
+    let reader = writer.read_only().namespace(&namespace);
+    let live = reader.read_file("/file").await.expect("live read");
+    assert_eq!(live.bytes, b"before and after");
+
+    let at = ReadAt::Snapshot(snapshot.snapshot_id.clone());
+    let file = ReadFileOptions { at: at.clone() };
+    let captured = reader
+        .read_file_with_options("/file", &file)
+        .await
+        .expect("snapshot read");
+    assert_eq!(captured.bytes, b"before");
+    let inode_id = live.entry.inode_id;
+    let by_inode = reader
+        .read_file_by_inode_with_options(inode_id, &file)
+        .await
+        .expect("snapshot read by inode");
+    assert_eq!(by_inode.bytes, b"before");
+    let feed = reader
+        .list_changes_with_options(ChangeSeq(0), &ListChangesOptions { at: at.clone() })
+        .page()
+        .await
+        .expect("snapshot feed");
+    assert_eq!(feed.head_seq, snapshot.captured_seq);
+    assert_eq!(
+        feed.changes.last().map(|change| change.committed_seq),
+        Some(snapshot.captured_seq)
+    );
+
+    let download = DownloadOptions {
+        at,
+        ..DownloadOptions::default()
+    };
+    let grant = reader
+        .create_download_with_options("/file", &download)
+        .await
+        .expect("snapshot grant");
+    assert_eq!(grant.revision_no, RevisionNo(1));
+    let grant = reader
+        .create_download_by_inode_with_options(inode_id, &download)
+        .await
+        .expect("snapshot grant by inode");
+    assert_eq!(grant.revision_no, RevisionNo(1));
+    for error in [
+        reader
+            .create_revision_download_with_options("/file", RevisionNo(1), &download)
+            .await
+            .err(),
+        reader
+            .create_revision_download_by_inode_with_options(inode_id, RevisionNo(1), &download)
+            .await
+            .err(),
+    ] {
+        assert_matches!(
+            error,
+            Some(loonfs::Error::InvalidRequest {
+                param: "snapshot_id",
+                ..
+            })
+        );
+    }
+    writer.shutdown().await.expect("shutdown");
 }
