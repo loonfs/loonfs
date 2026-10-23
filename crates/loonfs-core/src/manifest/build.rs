@@ -455,8 +455,8 @@ mod tests {
         (descriptor, bytes)
     }
 
-    /// Puts the segment through segment puts for `writer` into a new store,
-    /// and inserts its blocks into `cache`.
+    /// Writes the segment to a new store through `MetadataSegmentPuts` for
+    /// `writer`, which inserts the segment's blocks into `cache`.
     async fn put_segment(
         cache: &MetadataSegmentCache,
         writer: SegmentWriter,
@@ -471,7 +471,7 @@ mod tests {
     }
 
     /// Checks that a fold inserts every block of a segment larger than a
-    /// segment that LoonFS fetches whole, and a compaction inserts only the
+    /// segment that LoonFS fetches whole, that a compaction inserts only the
     /// segment's index and filter blocks, and that a fold's data blocks are
     /// charged to the cache's budget and evicted like any other block.
     #[tokio::test]

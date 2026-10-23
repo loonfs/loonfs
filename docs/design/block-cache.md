@@ -58,7 +58,7 @@ The tiered implementation has two parts. The "memory tier" keeps decoded blocks 
 After a miss, a get or load reads the block from the store and inserts it. An insert puts the decoded block into memory and queues the stored bytes for the SSD tier's writer, which writes them to disk, so a read doesn't wait for a disk write. An insert of a block that the disk already keeps writes nothing, and it refreshes the block's place on disk. LoonFS inserts a block in three cases:
 
 - After it loads the block from the store, with the stored bytes from the GET.
-- After a [fold](../specs/glossary.md#fold) or a [compaction](../specs/glossary.md#compaction) writes a segment, with the bytes that it just wrote. A fold inserts every block of the segment, and a compaction inserts the segment's index and filter blocks, and its data blocks only when the segment's stored size is at most 256 KiB.
+- After a [fold](../specs/glossary.md#fold) or a [compaction](../specs/glossary.md#compaction) writes a segment, with the bytes that it just wrote. A fold inserts every block of the segment. A compaction inserts the segment's index and filter blocks, and it inserts the segment's data blocks only when the segment's stored size is at most 256 KiB.
 - When a manifest's segment descriptor includes an inline copy of the filter (`filter_inline`), with the copy's decoded bytes. The filter is stored uncompressed, so those bytes match the stored filter, with the same length and checksum.
 
 Each tier evicts its least recently used block when it's over its budget. A hit in either tier refreshes the block's place on disk, so the disk evicts blocks that neither tier has used recently. A block that leaves memory needs no write, because it went to disk when it was inserted.

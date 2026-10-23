@@ -199,9 +199,9 @@ pub(super) enum SegmentWriter {
 /// `segment_cache`, and returns an error if one of those blocks doesn't
 /// decode.
 ///
-/// A fold inserts every block of its segments, and a compaction inserts each
-/// segment's index and filter blocks, and its data blocks only when the
-/// segment is small enough to fetch whole. The writer that just folded is the
+/// A fold inserts every block of its segments. A compaction inserts each
+/// segment's index and filter blocks, and it inserts the segment's data blocks
+/// only when the segment is small enough to fetch whole. The writer that just folded is the
 /// process most likely to read the folded rows next. No read asked for the
 /// rows that a compaction rewrites, so a compaction inserts only the blocks
 /// that the first fetch of the segment would insert. Each inserted block is
