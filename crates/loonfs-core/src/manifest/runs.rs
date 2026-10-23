@@ -62,7 +62,7 @@ pub struct MetadataRunPolicy {
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
     /// Decoded bytes at which a fold or a compaction closes a segment's data
-    /// block, which can be larger by up to one row.
+    /// block. A block can be larger than this target by up to one row.
     pub target_block_bytes: NonZeroUsize,
     /// Complete logical runs one compaction unit may merge, up to eight.
     pub max_input_runs_per_step: NonZeroUsize,

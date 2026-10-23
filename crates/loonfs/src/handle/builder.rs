@@ -338,9 +338,9 @@ impl LoonFsBuilder<Writable> {
     /// so that a benchmark can compare block sizes, and it isn't a tuning
     /// recommendation. The target isn't part of the storage format, because
     /// readers use the size of each block that a segment's index records, so
-    /// segments written with different targets can be read together. The row
-    /// that reaches the target closes its block, so a block can be larger
-    /// than the target by up to one row. [`Self::build`] rejects a target
+    /// segments written with different targets can be read together. LoonFS
+    /// closes a block after the row that reaches the target, so a block can
+    /// be larger than the target by up to one row. [`Self::build`] rejects a target
     /// below 4 KiB or above 256 KiB.
     pub fn target_block_bytes(mut self, target_block_bytes: usize) -> Self {
         self.writer.target_block_bytes = target_block_bytes;
