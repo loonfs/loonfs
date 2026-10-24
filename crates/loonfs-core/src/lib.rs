@@ -88,6 +88,7 @@ mod read_working_memory;
 mod recency;
 mod shared_check;
 mod storage;
+mod upload_records;
 mod wal;
 
 /// Commit planning, validation, and materialization. Consumed by the `loonfs`

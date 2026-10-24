@@ -22,6 +22,63 @@ pub fn content_writes() -> crate::PermitPool {
     )
 }
 
+/// Builds the record of a service-proxied upload session with new IDs.
+#[cfg(test)]
+pub(crate) fn proxied_upload_session(
+    namespace_id: &loonfs_types::NamespaceId,
+    expires_at_ms: u64,
+) -> loonfs_types::format::control::UploadSessionPayload {
+    loonfs_types::format::control::UploadSessionPayload {
+        namespace_id: namespace_id.clone(),
+        upload_id: loonfs_types::UploadId::generate(),
+        content_id: loonfs_types::ContentId::generate(),
+        subject_id: None,
+        mode: loonfs_types::format::control::UploadSessionMode::ServiceProxied {},
+        expires_at_ms,
+    }
+}
+
+/// Writes an upload session's record, and its outcome record when `outcome`
+/// is set, as a session that ended that way leaves them. Returns the key of
+/// the session record.
+#[cfg(test)]
+pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    session: &loonfs_types::format::control::UploadSessionPayload,
+    outcome: Option<loonfs_types::format::control::UploadOutcome>,
+) -> String {
+    use loonfs_types::format::control::{
+        encode_control_state, ControlObjectKind, UploadOutcomePayload,
+    };
+    let key = loonfs_objectstore::keys::upload_session(&session.namespace_id, &session.upload_id);
+    let bytes =
+        encode_control_state(ControlObjectKind::UploadSession, session).expect("encode session");
+    store
+        .put_if_absent(&key, bytes::Bytes::from(bytes))
+        .await
+        .expect("write session");
+    if let Some(outcome) = outcome {
+        let record = UploadOutcomePayload {
+            namespace_id: session.namespace_id.clone(),
+            upload_id: session.upload_id.clone(),
+            outcome,
+        };
+        let bytes = encode_control_state(ControlObjectKind::UploadOutcome, &record)
+            .expect("encode outcome");
+        store
+            .put_if_absent(
+                &loonfs_objectstore::keys::upload_outcome(
+                    &session.namespace_id,
+                    &session.upload_id,
+                ),
+                bytes::Bytes::from(bytes),
+            )
+            .await
+            .expect("write outcome");
+    }
+    key
+}
+
 /// Compares an opaque token with its golden fixture in `tests/golden/tokens`.
 ///
 /// `UPDATE_GOLDEN=1` rewrites the fixture first.

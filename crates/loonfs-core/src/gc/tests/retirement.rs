@@ -303,7 +303,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let open_session = read_upload_session(&store, &namespace_id, &upload.session.upload_id)
         .await
         .expect("open session");
-    assert_matches!(open_session.status, UploadSessionRecordStatus::Open { .. });
+    assert_eq!(open_session.outcome, None);
     clock.advance_ms(
         setup.now_ms + UPLOAD_SESSION_LEASE_MS + options.grace_window_ms - clock.now_ms(),
     );

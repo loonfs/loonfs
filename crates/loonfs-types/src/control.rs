@@ -1,5 +1,5 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, upload sessions, and their envelopes
+//! pins, upload session and outcome records, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
@@ -22,13 +22,20 @@ pub enum ControlObjectKind {
     Hint,
     /// Pins a manifest basis for a user or fork lifecycle.
     Pin,
-    /// Tracks staged content through upload completion or cleanup.
+    /// Starts one upload session.
     UploadSession,
+    /// Records how one upload session ended.
+    UploadOutcome,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 3] = [Self::Hint, Self::Pin, Self::UploadSession];
+    pub const ALL: [Self; 4] = [
+        Self::Hint,
+        Self::Pin,
+        Self::UploadSession,
+        Self::UploadOutcome,
+    ];
 
     /// Returns the durable format version for this control object kind.
     ///
@@ -41,6 +48,7 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::Pin => 1,
             Self::UploadSession => 1,
+            Self::UploadOutcome => 1,
         }
     }
 
@@ -50,6 +58,7 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
+            Self::UploadOutcome => "upload_outcome",
         }
     }
 
@@ -214,36 +223,18 @@ pub fn genesis_commit_id() -> CommitId {
     CommitId::parse(GENESIS_COMMIT_ID).expect("the genesis commit ID should parse")
 }
 
-/// Staging progress for a service-proxied upload.
+/// How an upload session's bytes reach object storage.
 ///
-/// The braces on `Idle` and `Claimed` make serde reject a stray field; a
-/// unit variant would silently accept and discard one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ProxiedStaging {
-    /// No request owns the staging slot and no staged reference is retained.
-    Idle {},
-    /// One request owns the staging slot.
-    Claimed {},
-    /// Content that passed validation and was recorded by the session.
-    Staged {
-        /// Verified reference to the staged object.
-        content_ref: ContentRef,
-    },
-}
-
-/// Upload mode and its mode-specific state.
-///
-/// The mode never changes.
+/// The mode is set when the session starts and can't be changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UploadSessionMode {
     /// The service receives the bytes and writes the content object itself,
     /// so it learns size and digest from the bytes as they pass.
-    ServiceProxied {
-        /// Exclusive staging progress, which applies only to this mode.
-        staging: ProxiedStaging,
-    },
+    ///
+    /// The braces make serde reject a stray field; a unit variant would
+    /// silently accept and discard one.
+    ServiceProxied {},
     /// The client writes the whole object through one presigned request.
     DirectPut {
         /// Checksum algorithm chosen when the session began.
@@ -277,100 +268,91 @@ impl UploadSessionMode {
     /// Returns the checksum algorithm fixed by a direct upload mode.
     pub fn checksum_algorithm(&self) -> Option<ChecksumAlgorithm> {
         match self {
-            Self::ServiceProxied { .. } => None,
+            Self::ServiceProxied {} => None,
             Self::DirectPut { checksum_algorithm }
             | Self::DirectMultipart {
                 checksum_algorithm, ..
             } => Some(*checksum_algorithm),
         }
     }
-
-    /// Returns the content reference stored by this mode, when present.
-    fn content_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::ServiceProxied {
-                staging: ProxiedStaging::Staged { content_ref, .. },
-            } => Some(content_ref),
-            Self::ServiceProxied { .. } | Self::DirectPut { .. } | Self::DirectMultipart { .. } => {
-                None
-            }
-        }
-    }
 }
 
-/// Monotonic status of a durable upload session.
+/// The record that starts one upload session.
 ///
-/// A session starts open and ends as completed or aborted. The terminal update
-/// uses compare-and-swap and cannot be reversed.
+/// LoonFS writes it once, with put-if-absent, when the session starts, and
+/// never changes it. How the session ended is a separate record,
+/// [`UploadOutcomePayload`], so no upload writes the same object twice. A
+/// session without an outcome record is open.
+///
+/// See [upload sessions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#51-upload-sessions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadSessionPayload {
+    /// Namespace authorized to consume the uploaded content.
+    pub namespace_id: NamespaceId,
+    /// Durable session identity used by upload and completion requests.
+    pub upload_id: UploadId,
+    /// Content object this session writes, allocated when the session began.
+    ///
+    /// The identity exists before any byte is read, so the final object key
+    /// is known up front and belongs to exactly this session.
+    pub content_id: ContentId,
+    /// The subject that opened the session, recorded in an ACL namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<SubjectId>,
+    /// How the bytes reach object storage, settled when the session opened.
+    pub mode: UploadSessionMode,
+    /// Unix-millisecond instant at which an open session stops accepting
+    /// upload work. The record includes it so no session transition depends
+    /// on an object's provider timestamp.
+    pub expires_at_ms: u64,
+}
+
+/// How an upload session ended.
+///
+/// A session ends at most once: its outcome record is created with
+/// put-if-absent, so completion and abort race on that one create.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UploadSessionRecordStatus {
-    /// Accepts staged bytes until its lease expires.
-    Open {
-        /// Unix-millisecond instant after which the session is abandoned.
-        /// The record carries it so no session transition depends on an
-        /// object's provider timestamp.
-        expires_at_ms: u64,
-    },
-    /// The content is durable and verified. Only completed sessions can issue
-    /// receipts or replay completion.
+pub enum UploadOutcome {
+    /// The content is durable and verified. Only a completed session can
+    /// issue receipts or replay completion.
     Completed {
-        /// Unix-millisecond stamp written by the completing compare-and-swap,
-        /// and the only input to when the record may be deleted.
+        /// Unix-millisecond stamp of the completion, and the only input to
+        /// when the session's records may be deleted.
         completed_at_ms: u64,
-        /// Verified immutable content produced by this session.
+        /// Verified immutable content produced by the session.
         content_ref: ContentRef,
     },
-    /// The session cannot publish content. Its unreferenced object is deleted.
+    /// The session can't provide content. Its unpublished object is deleted.
     Aborted {
-        /// Unix-millisecond stamp written by the aborting compare-and-swap,
-        /// and the only input to when the record may be deleted.
+        /// Unix-millisecond stamp of the abort, and the only input to when
+        /// the session's records may be deleted.
         aborted_at_ms: u64,
     },
 }
 
-impl UploadSessionRecordStatus {
-    /// Returns the completed content reference, if present.
-    fn content_ref(&self) -> Option<&ContentRef> {
-        match self {
-            Self::Open { .. } => None,
-            Self::Completed { content_ref, .. } => Some(content_ref),
-            Self::Aborted { .. } => None,
-        }
-    }
-
-    /// Moves an open session to aborted at `aborted_at_ms`.
+impl UploadOutcome {
+    /// Returns the first abort's stamp, for an abort that finds the session
+    /// already ended.
     ///
-    /// An aborted session stays as it is and reports when it was aborted. A
-    /// completed session refuses, because its content may already be
-    /// published.
-    pub fn abort(
-        &mut self,
-        aborted_at_ms: u64,
-    ) -> Result<UploadAbortOutcome, UploadAlreadyCompletedError> {
+    /// A repeated abort reports the first abort's time. A completed session
+    /// refuses, because a commit may already reference its content.
+    pub fn repeated_abort(&self) -> Result<u64, UploadAlreadyCompletedError> {
         match self {
-            Self::Open { .. } => {
-                *self = Self::Aborted { aborted_at_ms };
-                Ok(UploadAbortOutcome::Aborted)
-            }
-            Self::Aborted { aborted_at_ms } => Ok(UploadAbortOutcome::AlreadyAborted {
-                aborted_at_ms: *aborted_at_ms,
-            }),
+            Self::Aborted { aborted_at_ms } => Ok(*aborted_at_ms),
             Self::Completed { .. } => Err(UploadAlreadyCompletedError),
         }
     }
 }
 
-/// What [`UploadSessionRecordStatus::abort`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadAbortOutcome {
-    /// The session was open and is now aborted.
-    Aborted,
-    /// The session was already aborted at `aborted_at_ms`, and is unchanged.
-    AlreadyAborted {
-        /// Unix-millisecond stamp of the earlier abort.
-        aborted_at_ms: u64,
-    },
+impl std::fmt::Display for UploadOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Completed { .. } => "completed",
+            Self::Aborted { .. } => "aborted",
+        })
+    }
 }
 
 /// Describes an abort of an upload session that already completed.
@@ -378,95 +360,39 @@ pub enum UploadAbortOutcome {
 #[error("a completed upload session cannot be aborted")]
 pub struct UploadAlreadyCompletedError;
 
-impl std::fmt::Display for UploadSessionRecordStatus {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let status = match self {
-            Self::Open { .. } => "open",
-            Self::Completed { .. } => "completed",
-            Self::Aborted { .. } => "aborted",
-        };
-        formatter.write_str(status)
-    }
-}
-
-/// Tracks one durable content-upload workflow independently of commit publication.
+/// The record of how one upload session ended.
 ///
-/// The tagged mode and status variants permit only valid field
-/// combinations.
+/// LoonFS creates it once, with put-if-absent, beside the session record,
+/// and never changes it. It counts only while the session record exists.
 ///
-/// See [upload before publish](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#5-uploading-content).
+/// See [upload sessions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#51-upload-sessions).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UploadSessionPayload {
-    /// Namespace authorized to consume the staged content.
+pub struct UploadOutcomePayload {
+    /// Namespace of the session.
     pub namespace_id: NamespaceId,
-    /// Durable session identity used by staging and completion requests.
+    /// The session that ended.
     pub upload_id: UploadId,
-    /// Content object this session writes, allocated when the session began.
-    ///
-    /// The identity exists before any byte is read, so the final object key
-    /// is known up front and belongs to exactly this session. Every
-    /// reference the record holds names this object; see `validate` below,
-    /// which refuses a record that disagrees with itself.
-    pub content_id: ContentId,
-    /// The subject that opened the session, recorded in an ACL namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject_id: Option<SubjectId>,
-    /// How the bytes reach object storage, settled when the session opened.
-    pub mode: UploadSessionMode,
-    /// The session's status, and the field every upload operation
-    /// compare-and-swaps against.
-    pub status: UploadSessionRecordStatus,
+    /// How the session ended.
+    pub outcome: UploadOutcome,
 }
 
-impl UploadSessionPayload {
+impl UploadOutcomePayload {
     fn validate(&self) -> Result<(), String> {
-        if !matches!(self.status, UploadSessionRecordStatus::Open { .. })
-            && self.mode.content_ref().is_some()
-        {
+        let UploadOutcome::Completed { content_ref, .. } = &self.outcome else {
+            return Ok(());
+        };
+        content_ref.validate().map_err(|error| {
+            format!(
+                "upload outcome `{}` holds an invalid content ref: {error}",
+                self.upload_id
+            )
+        })?;
+        if content_ref.owner_namespace_id != self.namespace_id {
             return Err(format!(
-                "upload session `{}` is {} but still holds a staged content reference",
-                self.upload_id, self.status
+                "upload outcome `{}` belongs to namespace `{}` but holds a reference owned by \
+                 namespace `{}`",
+                self.upload_id, self.namespace_id, content_ref.owner_namespace_id,
             ));
-        }
-        for content_ref in self
-            .mode
-            .content_ref()
-            .into_iter()
-            .chain(self.status.content_ref())
-        {
-            content_ref.validate().map_err(|error| {
-                format!(
-                    "upload session `{}` holds an invalid content ref: {error}",
-                    self.upload_id
-                )
-            })?;
-            if content_ref.content_id != self.content_id {
-                return Err(format!(
-                    "upload session `{}` owns content `{}` but holds a reference to `{}`",
-                    self.upload_id, self.content_id, content_ref.content_id
-                ));
-            }
-            if content_ref.owner_namespace_id != self.namespace_id {
-                return Err(format!(
-                    "upload session `{}` belongs to namespace `{}` but holds a reference owned by namespace `{}`",
-                    self.upload_id,
-                    self.namespace_id,
-                    content_ref.owner_namespace_id,
-                ));
-            }
-        }
-        if let (
-            Some(checksum_algorithm),
-            UploadSessionRecordStatus::Completed { content_ref, .. },
-        ) = (self.mode.checksum_algorithm(), &self.status)
-        {
-            if content_ref.checksum.algorithm != checksum_algorithm {
-                return Err(format!(
-                    "upload session `{}` requires `{checksum_algorithm}` but its completed \
-                     content uses `{}`",
-                    self.upload_id, content_ref.checksum.algorithm
-                ));
-            }
         }
         Ok(())
     }
@@ -474,35 +400,27 @@ impl UploadSessionPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StrictUploadSessionPayload {
+struct StrictUploadOutcomePayload {
     namespace_id: NamespaceId,
     upload_id: UploadId,
-    content_id: ContentId,
-    #[serde(default)]
-    subject_id: Option<SubjectId>,
-    mode: UploadSessionMode,
-    status: UploadSessionRecordStatus,
+    outcome: UploadOutcome,
 }
 
-impl<'de> Deserialize<'de> for UploadSessionPayload {
-    /// Reads one session record and refuses one that `validate` finds
-    /// disagreeing with itself, like any other corruption and with no shim
-    /// or salvage.
+impl<'de> Deserialize<'de> for UploadOutcomePayload {
+    /// Reads one outcome record and refuses one that `validate` finds
+    /// disagreeing with itself, like any other corruption.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let record = StrictUploadSessionPayload::deserialize(deserializer)?;
-        let session = Self {
+        let record = StrictUploadOutcomePayload::deserialize(deserializer)?;
+        let outcome = Self {
             namespace_id: record.namespace_id,
             upload_id: record.upload_id,
-            content_id: record.content_id,
-            subject_id: record.subject_id,
-            mode: record.mode,
-            status: record.status,
+            outcome: record.outcome,
         };
-        session.validate().map_err(serde::de::Error::custom)?;
-        Ok(session)
+        outcome.validate().map_err(serde::de::Error::custom)?;
+        Ok(outcome)
     }
 }
 
@@ -556,66 +474,35 @@ mod tests {
     use crate::{Checksum, ContentRefKind};
 
     #[test]
-    fn terminal_upload_modes_reject_only_retained_staged_references() {
-        let content_ref = ContentRef {
+    fn a_completed_outcome_rejects_a_reference_owned_by_another_namespace() {
+        let content_ref = |owner: &str| ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: NamespaceId::parse(owner).expect("namespace id"),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
             checksum: Checksum::crc64nvme(b"hello"),
         };
-        let modes = [
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle {},
-            },
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed {},
-            },
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged {
-                    content_ref: content_ref.clone(),
-                },
-            },
-            UploadSessionMode::DirectPut {
-                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            },
-            UploadSessionMode::DirectMultipart {
-                provider_upload_id: "provider-upload".to_owned(),
-                part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
-                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            },
-        ];
-        for mode in modes {
-            for status in [
-                UploadSessionRecordStatus::Completed {
+        for (owner, valid) in [("demo", true), ("other", false)] {
+            let record = UploadOutcomePayload {
+                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
+                    .expect("upload id"),
+                outcome: UploadOutcome::Completed {
                     completed_at_ms: 2_000,
-                    content_ref: content_ref.clone(),
+                    content_ref: content_ref(owner),
                 },
-                UploadSessionRecordStatus::Aborted {
-                    aborted_at_ms: 2_000,
-                },
-            ] {
-                let session = UploadSessionPayload {
-                    namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                    upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
-                        .expect("upload id"),
-                    content_id: content_ref.content_id.clone(),
-                    subject_id: None,
-                    mode: mode.clone(),
-                    status,
-                };
-                let encoded = serde_json::to_value(&session).expect("encode session");
-                let decoded = serde_json::from_value::<UploadSessionPayload>(encoded);
-                if mode.content_ref().is_some() {
-                    let error = decoded
-                        .expect_err("terminal staging is corrupt")
-                        .to_string();
-                    assert!(error.contains(session.upload_id.as_str()));
-                    assert!(error.contains("still holds a staged content reference"));
-                } else {
-                    assert_eq!(decoded.expect("valid terminal session"), session);
-                }
+            };
+            let encoded = serde_json::to_value(&record).expect("encode outcome");
+            let decoded = serde_json::from_value::<UploadOutcomePayload>(encoded);
+            if valid {
+                assert_eq!(decoded.expect("valid outcome"), record);
+            } else {
+                let error = decoded
+                    .expect_err("a foreign reference is corrupt")
+                    .to_string();
+                assert!(error.contains(record.upload_id.as_str()));
+                assert!(error.contains("owned by namespace `other`"));
             }
         }
     }

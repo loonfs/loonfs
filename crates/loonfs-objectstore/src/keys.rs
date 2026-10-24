@@ -75,14 +75,23 @@ pub fn pin_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/pins/")
 }
 
-/// Builds the listing prefix containing durable upload sessions for one namespace.
+/// Builds the listing prefix containing the upload session and outcome
+/// records for one namespace.
 pub fn upload_session_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/uploads/")
 }
 
-/// Builds the mutable lifecycle key for one upload session.
+/// Builds the key of the record that starts one upload session.
 pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> String {
     format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
+}
+
+/// Builds the key of the record of how one upload session ended.
+///
+/// The key sorts directly after the session record's key, so a listing of
+/// the uploads prefix returns a session's two records next to each other.
+pub fn upload_outcome(namespace_id: &NamespaceId, upload_id: &UploadId) -> String {
+    format!("namespaces/{namespace_id}/uploads/{upload_id}.outcome.json")
 }
 
 /// Builds the listing prefix containing every content object one namespace owns.
@@ -142,7 +151,7 @@ mod tests {
     use super::{
         content_blob, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_object_key, pin, probe_run_prefix, probe_runs_prefix, temporary_object,
-        upload_session, wal_object, wal_prefix,
+        upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -248,6 +257,10 @@ mod tests {
             (
                 "Upload sessions",
                 upload_session(&namespace_id(), &upload_id()),
+            ),
+            (
+                "Upload outcomes",
+                upload_outcome(&namespace_id(), &upload_id()),
             ),
             ("Hint", hint(&namespace_id())),
             (

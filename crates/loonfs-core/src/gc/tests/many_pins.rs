@@ -2,9 +2,10 @@
 
 use super::*;
 use loonfs_objectstore::keys::{
-    content_prefix, pin, temporary_prefix, upload_session, upload_session_prefix,
+    content_prefix, pin, temporary_prefix, upload_outcome, upload_session_prefix,
 };
 use loonfs_test_support::stores::RecordedOperation;
+use loonfs_types::format::control::UploadOutcome;
 
 #[tokio::test]
 async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_pins() {
@@ -43,33 +44,15 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             .await
             .expect("expired pin");
     }
-    let session = UploadSessionPayload {
-        namespace_id: namespace_id.clone(),
-
-        upload_id: UploadId::generate(),
-        content_id: loonfs_types::ContentId::generate(),
-        subject_id: None,
-        mode: UploadSessionMode::ServiceProxied {
-            staging: ProxiedStaging::Idle {},
-        },
-        status: UploadSessionRecordStatus::Aborted {
+    let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
+    let session_key = crate::test_support::write_upload_records(
+        &store,
+        &session,
+        Some(UploadOutcome::Aborted {
             aborted_at_ms: 2_000,
-        },
-    };
-    let session_key = upload_session(&namespace_id, &session.upload_id);
-    store
-        .put_if_absent(
-            &session_key,
-            Bytes::from(
-                loonfs_types::format::control::encode_control_state(
-                    ControlObjectKind::UploadSession,
-                    &session,
-                )
-                .expect("encode session"),
-            ),
-        )
-        .await
-        .expect("write aborted upload");
+        }),
+    )
+    .await;
     store.reset();
     let report = gc_namespace(
         &store,
@@ -85,7 +68,8 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
-    assert_eq!(store.counts().deletes, 1027);
+    // The pins, and the session's two records.
+    assert_eq!(store.counts().deletes, 1028);
     let operations = store.take();
     assert_eq!(
         operations
@@ -115,17 +99,17 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
             pin_prefix(&namespace_id),
-            upload_session_prefix(&namespace_id),
             format!("{}con_", content_prefix(&namespace_id)),
             temporary_prefix(&namespace_id),
+            upload_session_prefix(&namespace_id),
         ]
     );
-    assert!(store
-        .inner()
-        .head(&session_key)
-        .await
-        .expect("session")
-        .is_none());
+    for key in [
+        session_key,
+        upload_outcome(&namespace_id, &session.upload_id),
+    ] {
+        assert!(store.inner().head(&key).await.expect("head").is_none());
+    }
     assert_eq!(
         store
             .inner()

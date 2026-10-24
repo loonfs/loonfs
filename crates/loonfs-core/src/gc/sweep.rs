@@ -4,14 +4,15 @@ use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{sweep_pin, GraceAge, PinSweep};
 use super::session_cache::CompletedUploadSessionCache;
-use super::uploads::{sweep_completed_session, sweep_upload_session, UploadSessionSweep};
+use super::uploads::{
+    load_swept_session, sweep_completed_session, sweep_upload_session, ListedUpload,
+    UploadSessionSweep,
+};
 use crate::context::MutationContext;
-use crate::control_update::load_upload_session_state;
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
-use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{NamespaceId, RetainedReason};
+use loonfs_types::{NamespaceId, RetainedReason, UploadId};
 
 pub(super) enum Decision {
     Retain {
@@ -21,6 +22,12 @@ pub(super) enum Decision {
     Delete {
         key: String,
         counter: DeletedCounter,
+    },
+    /// Deletes an ended upload session's records, in the order that
+    /// [`crate::upload_records::delete_upload_session_records`] requires.
+    DeleteUploadSession {
+        namespace_id: NamespaceId,
+        upload_id: UploadId,
     },
     Gone,
 }
@@ -56,7 +63,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 self.process_aged_family(family, entry, |report| &mut report.deleted.manifests)
             }
             CandidateFamily::Pins => self.process_pin(entry.key).await?,
-            CandidateFamily::UploadSessions => self.process_upload_session(entry.key).await?,
             CandidateFamily::Content => self
                 .process_aged_family(family, entry, |report| &mut report.deleted.content_objects),
             CandidateFamily::Temporary => self.process_aged_family(family, entry, |report| {
@@ -111,10 +117,36 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         Ok(Decision::Delete { key, counter })
     }
 
-    async fn process_upload_session(&self, key: String) -> Result<Decision> {
-        let Some(upload_id) = upload_id_of(&key) else {
-            return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
-        };
+    /// Decides what to do with one upload session's records.
+    pub(super) async fn upload(&self, listed: ListedUpload) -> Result<Decision> {
+        match listed {
+            ListedUpload::Session {
+                upload_id,
+                outcome_listed,
+            } => self.process_upload_session(upload_id, outcome_listed).await,
+            // An outcome record without its session record is deleted only
+            // once it's at least the grace window old by the listing's
+            // modification time, the age rule of the other unreferenced
+            // families. A listing isn't a snapshot, so it can miss the
+            // session record of a session that was created and ended while
+            // the listing ran. Deleting that session's new outcome would make
+            // the session read as open, and a later pass would abort it and
+            // delete content that a commit might reference. That outcome was
+            // created after the pass started, so it's younger than the window.
+            ListedUpload::OrphanOutcome { entry } => {
+                Ok(self.sweep_aged(entry, self.grace_window_ms, |report| {
+                    &mut report.deleted.upload_sessions
+                }))
+            }
+            ListedUpload::Unrecognized => Ok(self.retain(RetainedReason::UnrecognizedKey, None)),
+        }
+    }
+
+    async fn process_upload_session(
+        &self,
+        upload_id: UploadId,
+        outcome_listed: bool,
+    ) -> Result<Decision> {
         let sweep = match self.live.completed_sessions.get(&upload_id) {
             Some(session) => {
                 let sweep = sweep_completed_session(
@@ -133,22 +165,15 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 }
                 sweep
             }
-            // An open session's record can change during the pass, and an
-            // aborted session's cleanup needs the whole record, so the sweep
-            // reads these records again.
+            // An open session can end during the pass, and an aborted
+            // session's cleanup needs its session record, so the sweep reads
+            // these records again.
             None => {
-                let state = match load_upload_session_state(
-                    self.store,
-                    self.namespace_id,
-                    &upload_id,
-                )
-                .await
-                {
-                    Ok(state) => state,
-                    Err(CoreError::UploadNotFound { .. }) => {
-                        return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
-                    }
-                    Err(error) => return Err(error),
+                let Some(state) =
+                    load_swept_session(self.store, self.namespace_id, &upload_id, outcome_listed)
+                        .await?
+                else {
+                    return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
                 };
                 sweep_upload_session(
                     self.store,
@@ -163,14 +188,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         if let (Some(cache), UploadSessionSweep::Delete) = (self.session_cache, sweep) {
             cache.invalidate(&upload_id);
         }
-        Ok(self.upload_session_decision(key, sweep))
-    }
-
-    fn upload_session_decision(&self, key: String, sweep: UploadSessionSweep) -> Decision {
-        match sweep {
-            UploadSessionSweep::Delete => Decision::Delete {
-                key,
-                counter: |report| &mut report.deleted.upload_sessions,
+        Ok(match sweep {
+            UploadSessionSweep::Delete => Decision::DeleteUploadSession {
+                namespace_id: self.namespace_id.clone(),
+                upload_id,
             },
             UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
                 match reclaimable_at_ms {
@@ -179,7 +200,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 },
                 reclaimable_at_ms,
             ),
-        }
+        })
     }
 
     pub(super) fn content_candidate(&self, entry: ListedObject, protected: bool) -> Decision {

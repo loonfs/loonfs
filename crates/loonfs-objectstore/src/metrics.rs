@@ -843,7 +843,9 @@ fn classify_key(key: &str) -> KeyClass {
         }
         DurableObjectFamily::MetadataSegment => KeyClass::MetadataSegment,
         DurableObjectFamily::Pin => KeyClass::GcControl,
-        DurableObjectFamily::UploadSession => KeyClass::Metadata,
+        DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome => {
+            KeyClass::Metadata
+        }
     }
 }
 

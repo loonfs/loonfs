@@ -20,6 +20,7 @@ use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::pin::record::delete_pin;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
+use crate::upload_records::{load_upload_session_state, UploadSessionState};
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
@@ -28,8 +29,8 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::GcResponse;
 use loonfs_types::format::control::{
-    decode_control_object, ControlObjectKind, PinOwner, PinPayload, ProxiedStaging,
-    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus,
+    decode_control_object, ControlObjectKind, PinOwner, PinPayload, UploadOutcome,
+    UploadOutcomePayload,
 };
 use loonfs_types::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use std::collections::BTreeSet;
@@ -60,6 +61,7 @@ mod retirement;
 mod session_cache;
 mod shared_bases;
 mod superseded_roots;
+mod upload_records;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 
@@ -126,54 +128,45 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         .expect("resolve root");
 }
 
+/// Which upload outcome a blocked put-if-absent creates.
 #[derive(Debug, Clone, Copy)]
-enum BlockingControlCasTarget {
-    UploadCompleted,
-    UploadAborted,
+enum BlockedOutcome {
+    Completed,
+    Aborted,
 }
 
-impl BlockingControlCasTarget {
+impl BlockedOutcome {
     fn matches(self, bytes: &[u8]) -> bool {
-        match self {
-            BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
-                let Ok(envelope) = decode_control_object::<UploadSessionPayload>(
-                    bytes,
-                    ControlObjectKind::UploadSession,
-                ) else {
-                    return false;
-                };
-                match self {
-                    BlockingControlCasTarget::UploadCompleted => matches!(
-                        envelope.payload().status,
-                        UploadSessionRecordStatus::Completed { .. }
-                    ),
-                    BlockingControlCasTarget::UploadAborted => {
-                        matches!(
-                            envelope.payload().status,
-                            UploadSessionRecordStatus::Aborted { .. }
-                        )
-                    }
-                }
-            }
+        let Ok(envelope) =
+            decode_control_object::<UploadOutcomePayload>(bytes, ControlObjectKind::UploadOutcome)
+        else {
+            return false;
+        };
+        match (self, &envelope.payload().outcome) {
+            (Self::Completed, UploadOutcome::Completed { .. })
+            | (Self::Aborted, UploadOutcome::Aborted { .. }) => true,
+            (Self::Completed, UploadOutcome::Aborted { .. })
+            | (Self::Aborted, UploadOutcome::Completed { .. }) => false,
         }
     }
 }
 
-fn blocking_control_cas_store(
+/// Blocks the next put that would create an upload outcome record of `target`.
+fn blocking_outcome_store(
     inner: LocalFsStore,
-    target: BlockingControlCasTarget,
+    target: BlockedOutcome,
 ) -> BlockingStore<LocalFsStore> {
-    let store = BlockingStore::matching(inner, move |operation: &OperationContext<'_>| {
-        let bytes = match operation.kind() {
-            OperationKind::CompareAndSwap { bytes, .. }
-            | OperationKind::Put {
-                bytes,
-                mode: PutMode::CompareAndSwap { .. },
-            } => bytes,
-            _ => return false,
-        };
-        target.matches(bytes)
-    });
+    let store =
+        BlockingStore::matching(
+            inner,
+            move |operation: &OperationContext<'_>| match operation.kind() {
+                OperationKind::Put {
+                    bytes,
+                    mode: PutMode::CreateIfAbsent,
+                } => target.matches(bytes),
+                _ => false,
+            },
+        );
     store.block_next();
     store
 }
@@ -273,32 +266,9 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
 }
 
 async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
-    let upload_id = loonfs_types::UploadId::parse("upl_0123456789abcdef0123456789abcdef")
-        .expect("valid upload id");
-    let state = loonfs_types::format::control::UploadSessionPayload {
-        namespace_id: namespace_id.clone(),
-
-        upload_id: upload_id.clone(),
-        content_id: loonfs_types::ContentId::generate(),
-        subject_id: None,
-        mode: UploadSessionMode::ServiceProxied {
-            staging: ProxiedStaging::Idle {},
-        },
-        status: loonfs_types::format::control::UploadSessionRecordStatus::Open {
-            expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
-        },
-    };
-    let bytes = loonfs_types::format::control::encode_control_state(
-        loonfs_types::format::control::ControlObjectKind::UploadSession,
-        &state,
-    )
-    .expect("encode session");
-    let key = loonfs_objectstore::keys::upload_session(namespace_id, &upload_id);
-    store
-        .put_if_absent(&key, bytes::Bytes::from(bytes))
-        .await
-        .expect("write session");
-    key
+    let session =
+        crate::test_support::proxied_upload_session(namespace_id, 1_000 + UPLOAD_SESSION_LEASE_MS);
+    crate::test_support::write_upload_records(store, &session, None).await
 }
 
 async fn stage_upload<S: ObjectStore + ?Sized>(
@@ -325,18 +295,18 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     )
 }
 
+/// Reads an upload session's records, or returns `None` once its session
+/// record is gone.
 async fn read_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-) -> Option<UploadSessionPayload> {
-    let key = loonfs_objectstore::keys::upload_session(namespace_id, upload_id);
-    let body = store.get(&key, None).await.expect("read upload session")?;
-    Some(
-        decode_control_object::<UploadSessionPayload>(&body, ControlObjectKind::UploadSession)
-            .expect("decode upload session")
-            .into_payload(),
-    )
+) -> Option<UploadSessionState> {
+    match load_upload_session_state(store, namespace_id, upload_id).await {
+        Ok(state) => Some(state),
+        Err(CoreError::UploadNotFound { .. }) => None,
+        Err(error) => panic!("read upload session: {error}"),
+    }
 }
 
 #[tokio::test]
@@ -693,7 +663,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("aborted session retained");
-    assert_matches!(session.status, UploadSessionRecordStatus::Aborted { .. });
+    assert_matches!(session.outcome, Some(UploadOutcome::Aborted { .. }));
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "aborting deletes the object the session owned"
@@ -781,8 +751,8 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
         read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .expect("aborted session retained")
-            .status,
-        UploadSessionRecordStatus::Aborted { .. }
+            .outcome,
+        Some(UploadOutcome::Aborted { .. })
     );
 
     let report = gc_namespace(
@@ -986,7 +956,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         &content_ref.owner_namespace_id,
         &content_ref.content_id,
     );
-    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
+    let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
     let gc_options = options();
     let gc = gc_namespace(
         &store,
@@ -1018,7 +988,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("completed session retained");
-    assert_matches!(session.status, UploadSessionRecordStatus::Completed { .. });
+    assert_matches!(session.outcome, Some(UploadOutcome::Completed { .. }));
     assert!(
         store.head(&content_key).await.expect("head").is_some(),
         "the losing abort must not clean up the winner's content"
@@ -1041,7 +1011,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         &content_ref.owner_namespace_id,
         &content_ref.content_id,
     );
-    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
+    let store = blocking_outcome_store(store, BlockedOutcome::Completed);
     let completion = crate::protocol::complete_upload(
         &store,
         &namespace_id,
@@ -1073,7 +1043,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("aborted session retained for a grace window");
-    assert_matches!(session.status, UploadSessionRecordStatus::Aborted { .. });
+    assert_matches!(session.outcome, Some(UploadOutcome::Aborted { .. }));
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "the winning abort cleans up, and the losing completion does not resurrect"

@@ -19,8 +19,8 @@
 
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, UploadOutcome, UploadOutcomePayload,
+    UploadSessionMode, UploadSessionPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
@@ -818,13 +818,8 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: None,
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle {},
-            },
-            status: UploadSessionRecordStatus::Completed {
-                completed_at_ms: 2_000,
-                content_ref: sample_content_ref(),
-            },
+            mode: UploadSessionMode::ServiceProxied {},
+            expires_at_ms: 87_400_000,
         },
     );
     check_control_golden(
@@ -839,9 +834,7 @@ fn control_objects_match_golden_bytes() {
             mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
-            status: UploadSessionRecordStatus::Open {
-                expires_at_ms: 87_400_000,
-            },
+            expires_at_ms: 87_400_000,
         },
     );
     // The one session shape that carries a provider handle, and the one
@@ -862,30 +855,7 @@ fn control_objects_match_golden_bytes() {
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
-            status: UploadSessionRecordStatus::Open {
-                expires_at_ms: 87_400_000,
-            },
-        },
-    );
-    // A proxied session mid-flight: it has written its bytes and recorded
-    // what they were, and is still open to complete.
-    check_control_golden(
-        "control_upload_session_staged.v1.json",
-        ControlObjectKind::UploadSession,
-        UploadSessionPayload {
-            namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_33333333333333333333333333333333")
-                .expect("valid upload id"),
-            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            subject_id: None,
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged {
-                    content_ref: sample_content_ref(),
-                },
-            },
-            status: UploadSessionRecordStatus::Open {
-                expires_at_ms: 87_400_000,
-            },
+            expires_at_ms: 87_400_000,
         },
     );
     check_control_golden(
@@ -897,46 +867,31 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: Some(loonfs_types::SubjectId::parse("usr_ada").expect("subject id")),
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged {
-                    content_ref: sample_content_ref(),
-                },
-            },
-            status: UploadSessionRecordStatus::Open {
-                expires_at_ms: 87_400_000,
-            },
+            mode: UploadSessionMode::ServiceProxied {},
+            expires_at_ms: 87_400_000,
         },
     );
     check_control_golden(
-        "control_upload_session_claimed.v1.json",
-        ControlObjectKind::UploadSession,
-        UploadSessionPayload {
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
+        UploadOutcomePayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_44444444444444444444444444444444")
+            upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
-            content_id: content_id("con_44444444444444444444444444444444"),
-            subject_id: None,
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed {},
-            },
-            status: UploadSessionRecordStatus::Open {
-                expires_at_ms: 87_400_000,
+            outcome: UploadOutcome::Completed {
+                completed_at_ms: 2_000,
+                content_ref: sample_content_ref(),
             },
         },
     );
     check_control_golden(
-        "control_upload_session_aborted.v1.json",
-        ControlObjectKind::UploadSession,
-        UploadSessionPayload {
+        "control_upload_outcome_aborted.v1.json",
+        ControlObjectKind::UploadOutcome,
+        UploadOutcomePayload {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
-            content_id: content_id("con_11111111111111111111111111111111"),
-            subject_id: None,
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle {},
-            },
-            status: UploadSessionRecordStatus::Aborted {
+            outcome: UploadOutcome::Aborted {
                 aborted_at_ms: 5_000,
             },
         },
@@ -946,27 +901,28 @@ fn control_objects_match_golden_bytes() {
 #[test]
 fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
-        "manifest.v1.json",
-        "manifest.deleted.v1.json",
-        "control_upload_session.v1.json",
+        ("manifest.v1.json", "status"),
+        ("manifest.deleted.v1.json", "status"),
+        ("control_upload_outcome_completed.v1.json", "outcome"),
+        ("control_upload_outcome_aborted.v1.json", "outcome"),
     ];
-    for fixture in fixtures {
+    for (fixture, field) in fixtures {
         let document: serde_json::Value =
             serde_json::from_slice(&read_golden(fixture)).expect("decode control fixture");
         let payload = document["payload"]
             .as_object()
             .unwrap_or_else(|| panic!("`{fixture}` has an object payload"));
         let status = payload
-            .get("status")
-            .unwrap_or_else(|| panic!("`{fixture}` writes a `status`"));
+            .get(field)
+            .unwrap_or_else(|| panic!("`{fixture}` writes a `{field}`"));
         let tag = status
             .as_object()
-            .unwrap_or_else(|| panic!("`{fixture}` writes `status` as an object"))
+            .unwrap_or_else(|| panic!("`{fixture}` writes `{field}` as an object"))
             .get("kind")
-            .unwrap_or_else(|| panic!("`{fixture}` tags its `status` with `kind`"));
+            .unwrap_or_else(|| panic!("`{fixture}` tags its `{field}` with `kind`"));
         assert!(
             tag.is_string(),
-            "`{fixture}` tags its `status` with a string, got {tag}"
+            "`{fixture}` tags its `{field}` with a string, got {tag}"
         );
     }
 }
@@ -991,6 +947,11 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::UploadSession,
         add_unknown,
     );
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
+        add_unknown,
+    );
 }
 
 #[test]
@@ -1000,28 +961,28 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         ControlObjectKind::Pin,
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| payload["status"]["field_from_the_future"] = serde_json::Value::from(true),
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
+        |payload| payload["outcome"]["field_from_the_future"] = serde_json::Value::from(true),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session_staged.v1.json",
-        ControlObjectKind::UploadSession,
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
         |payload| {
-            payload["mode"]["staging"]["content_ref"]["field_from_the_future"] =
+            payload["outcome"]["content_ref"]["field_from_the_future"] =
                 serde_json::Value::from(true);
         },
     );
     let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session_claimed.v1.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["mode"]["staging"]["at_ms"] = serde_json::Value::from(1_500);
+            payload["mode"]["staging"] = serde_json::json!({ "kind": "idle" });
         },
     );
     assert!(
-        message.contains("unknown field `at_ms`"),
+        message.contains("unknown field `staging`"),
         "unexpected refusal: {message}"
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
@@ -1048,37 +1009,48 @@ fn pins_reject_an_untagged_or_unknown_owner() {
 }
 
 #[test]
-fn upload_sessions_reject_an_untagged_or_incomplete_status() {
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| payload["status"] = serde_json::Value::from("open"),
+fn upload_outcomes_reject_an_untagged_or_incomplete_outcome() {
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
+        |payload| payload["outcome"] = serde_json::Value::from("completed"),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| payload["status"]["kind"] = serde_json::Value::from("unknown_status"),
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
+        |payload| payload["outcome"]["kind"] = serde_json::Value::from("open"),
     );
-    // Every status is defined by its own stamp: without one it cannot be
-    // aged, so it is not that status.
-    for tagged_without_its_stamp in ["open", "completed", "aborted"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-            "control_upload_session.v1.json",
-            ControlObjectKind::UploadSession,
+    // Every outcome is defined by its own stamp: without one it cannot be
+    // aged, so it is not that outcome.
+    for tagged_without_its_stamp in ["completed", "aborted"] {
+        assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+            "control_upload_outcome_completed.v1.json",
+            ControlObjectKind::UploadOutcome,
             |payload| {
-                payload["status"] = serde_json::json!({ "kind": tagged_without_its_stamp });
+                payload["outcome"] = serde_json::json!({ "kind": tagged_without_its_stamp });
             },
         );
     }
+    // A session record carries its lease, so it can't be aged without one.
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove("expires_at_ms");
+        },
+    );
 }
 
 #[test]
 fn mutable_control_enums_fail_closed_on_unknown_variants() {
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session_staged.v1.json",
-        ControlObjectKind::UploadSession,
+    assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
         |payload| {
-            payload["mode"]["staging"]["content_ref"]["kind"] =
+            payload["outcome"]["content_ref"]["kind"] =
                 serde_json::Value::from("future_content_kind");
         },
     );
@@ -1114,19 +1086,18 @@ fn upload_sessions_require_a_tagged_mode_and_reject_unknown_fields() {
 }
 
 #[test]
-fn upload_sessions_reject_a_reference_to_another_content_object() {
-    let other = serde_json::Value::from("con_99999999999999999999999999999999");
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| payload["status"]["content_ref"]["content_id"] = other.clone(),
-    );
-    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session_staged.v1.json",
-        ControlObjectKind::UploadSession,
+fn upload_outcomes_reject_a_reference_owned_by_another_namespace() {
+    let message = assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
+        "control_upload_outcome_completed.v1.json",
+        ControlObjectKind::UploadOutcome,
         |payload| {
-            payload["mode"]["staging"]["content_ref"]["content_id"] = other.clone();
+            payload["outcome"]["content_ref"]["owner_namespace_id"] =
+                serde_json::Value::from("other");
         },
+    );
+    assert!(
+        message.contains("holds a reference owned by namespace `other`"),
+        "unexpected refusal: {message}"
     );
 }
 
@@ -1148,32 +1119,6 @@ fn direct_put_sessions_reject_the_pre_completion_claim_record() {
         message.contains("unknown field `promised_content`"),
         "unexpected refusal: {message}"
     );
-}
-
-#[test]
-fn completed_direct_sessions_require_the_session_algorithm() {
-    for mode in [
-        serde_json::json!({
-            "kind": "direct_put",
-            "checksum_algorithm": "crc32c"
-        }),
-        serde_json::json!({
-            "kind": "direct_multipart",
-            "provider_upload_id": "provider-upload",
-            "part_size_bytes": 8_388_608,
-            "checksum_algorithm": "crc32c"
-        }),
-    ] {
-        let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-            "control_upload_session.v1.json",
-            ControlObjectKind::UploadSession,
-            |payload| payload["mode"] = mode,
-        );
-        assert!(
-            message.contains("requires `crc32c` but its completed content uses `crc64nvme`"),
-            "unexpected refusal: {message}"
-        );
-    }
 }
 
 #[test]
@@ -1264,14 +1209,22 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
                 subject_id: None,
-                mode: UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Idle {},
-                },
-                status: UploadSessionRecordStatus::Aborted {
+                mode: UploadSessionMode::ServiceProxied {},
+                expires_at_ms: 87_400_000,
+            })
+            .expect("upload state"),
+        ),
+        (
+            ControlObjectKind::UploadOutcome,
+            serde_json::to_value(UploadOutcomePayload {
+                namespace_id: namespace_id(),
+                upload_id: UploadId::parse("upl_11111111111111111111111111111111")
+                    .expect("valid upload id"),
+                outcome: UploadOutcome::Aborted {
                     aborted_at_ms: 5_000,
                 },
             })
-            .expect("upload state"),
+            .expect("upload outcome"),
         ),
     ];
     for (kind, state) in cases {

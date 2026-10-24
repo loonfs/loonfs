@@ -2,9 +2,8 @@
 
 use super::*;
 use crate::cache::CompletedUploadSessionCache;
-use loonfs_objectstore::keys::{upload_session, upload_session_prefix};
-use loonfs_types::format::control::encode_control_state;
-use loonfs_types::ContentId;
+use loonfs_objectstore::keys::{upload_outcome, upload_session, upload_session_prefix};
+use loonfs_types::format::control::UploadOutcome;
 use std::collections::BTreeMap;
 
 /// Creates a local store that records requests for the namespace's upload
@@ -82,11 +81,11 @@ async fn a_second_pass_reads_no_completed_session_record() {
 
     let expected: BTreeMap<String, usize> = upload_ids
         .iter()
-        .map(|upload_id| (upload_session(&namespace_id, upload_id), 1))
+        .map(|upload_id| (upload_outcome(&namespace_id, upload_id), 1))
         .collect();
     assert_eq!(
         first_reads, expected,
-        "the first pass reads each record once"
+        "the first pass reads each outcome record once"
     );
     assert_eq!(second_reads, BTreeMap::new(), "the second pass reads none");
     assert_eq!(first.retained.upload_session_window, 20);
@@ -118,7 +117,7 @@ async fn a_pass_reads_only_the_sessions_that_the_cache_dropped() {
     let dropped: BTreeMap<String, usize> = upload_ids
         .iter()
         .filter(|upload_id| cache.get(upload_id).is_none())
-        .map(|upload_id| (upload_session(&namespace_id, upload_id), 1))
+        .map(|upload_id| (upload_outcome(&namespace_id, upload_id), 1))
         .collect();
     assert!(
         !dropped.is_empty() && dropped.len() < 40,
@@ -145,31 +144,17 @@ async fn a_pass_reads_only_the_sessions_that_the_cache_dropped() {
     assert_eq!(remaining, late_ids, "the late sessions are kept");
 }
 
-/// Creates an upload session record with `status` and returns its key.
+/// Creates an upload session's records, ended with `outcome` if it's set,
+/// and returns the session record's key.
 async fn put_session(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    status: UploadSessionRecordStatus,
-) -> String {
-    let upload_id = UploadId::generate();
-    let state = UploadSessionPayload {
-        namespace_id: namespace_id.clone(),
-        upload_id: upload_id.clone(),
-        content_id: ContentId::generate(),
-        subject_id: None,
-        mode: UploadSessionMode::ServiceProxied {
-            staging: ProxiedStaging::Idle {},
-        },
-        status,
-    };
-    let bytes =
-        encode_control_state(ControlObjectKind::UploadSession, &state).expect("encode session");
-    let key = upload_session(namespace_id, &upload_id);
-    store
-        .put_if_absent(&key, Bytes::from(bytes))
-        .await
-        .expect("write session");
-    key
+    expires_at_ms: u64,
+    outcome: Option<UploadOutcome>,
+) -> UploadId {
+    let session = crate::test_support::proxied_upload_session(namespace_id, expires_at_ms);
+    crate::test_support::write_upload_records(store, &session, outcome).await;
+    session.upload_id
 }
 
 /// Checks that every pass reads the records of open and aborted sessions,
@@ -183,34 +168,36 @@ async fn open_and_aborted_session_records_are_read_on_every_pass() {
     create(store.inner(), &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    let open = put_session(
-        store.inner(),
-        &namespace_id,
-        UploadSessionRecordStatus::Open {
-            expires_at_ms: setup.now_ms + UPLOAD_SESSION_LEASE_MS,
-        },
-    )
-    .await;
+    let expires_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS;
+    let open = put_session(store.inner(), &namespace_id, expires_at_ms, None).await;
     let aborted = put_session(
         store.inner(),
         &namespace_id,
-        UploadSessionRecordStatus::Aborted {
+        expires_at_ms,
+        Some(UploadOutcome::Aborted {
             aborted_at_ms: setup.now_ms,
-        },
+        }),
     )
     .await;
     let completed = completed_sessions(&store, &namespace_id, 1, &setup).await;
-    let completed = upload_session(&namespace_id, completed.first().expect("one session"));
+    let completed = upload_outcome(&namespace_id, completed.first().expect("one session"));
     let cache = CompletedUploadSessionCache::unshared(1024 * 1024);
 
     let (first, first_reads) = collect(&store, &cache, &namespace_id, setup.now_ms + 1).await;
     let (second, second_reads) = collect(&store, &cache, &namespace_id, setup.now_ms + 1).await;
 
-    assert_eq!(
-        first_reads,
-        BTreeMap::from([(open.clone(), 2), (aborted.clone(), 2), (completed, 1)])
-    );
-    assert_eq!(second_reads, BTreeMap::from([(open, 2), (aborted, 2)]));
+    // The listing shows that the open session has no outcome record, so only
+    // its session record is read, once to root its content and once to
+    // sweep it. An aborted session's two records are each read twice.
+    let every_pass = BTreeMap::from([
+        (upload_session(&namespace_id, &open), 2),
+        (upload_session(&namespace_id, &aborted), 2),
+        (upload_outcome(&namespace_id, &aborted), 2),
+    ]);
+    let mut first_expected = every_pass.clone();
+    first_expected.insert(completed, 1);
+    assert_eq!(first_reads, first_expected);
+    assert_eq!(second_reads, every_pass);
     assert_eq!(first.retained.upload_session_window, 3);
     assert_eq!(second.retained.upload_session_window, 3);
     assert_eq!(cache.len(), 1, "the cache keeps only the completed session");

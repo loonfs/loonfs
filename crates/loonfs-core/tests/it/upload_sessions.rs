@@ -4,7 +4,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::upload_session;
+use loonfs_objectstore::keys::{upload_outcome, upload_session};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
@@ -13,13 +13,47 @@ use loonfs_test_support::stores::{
 use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::Checksum;
 use loonfs_types::{
-    format::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
+    format::control::{
+        decode_control_object, ControlObjectKind, UploadOutcome, UploadOutcomePayload,
+        UploadSessionMode, UploadSessionPayload,
+    },
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
 use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+
+/// Reads an upload session's record and its outcome record, if it has one.
+async fn read_upload_records<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+) -> (UploadSessionPayload, Option<UploadOutcome>) {
+    let session = store
+        .get(&upload_session(namespace_id, upload_id), None)
+        .await
+        .expect("read session")
+        .expect("session exists");
+    let session =
+        decode_control_object::<UploadSessionPayload>(&session, ControlObjectKind::UploadSession)
+            .expect("decode session")
+            .into_payload();
+    let outcome = store
+        .get(&upload_outcome(namespace_id, upload_id), None)
+        .await
+        .expect("read outcome")
+        .map(|outcome| {
+            decode_control_object::<UploadOutcomePayload>(
+                &outcome,
+                ControlObjectKind::UploadOutcome,
+            )
+            .expect("decode outcome")
+            .into_payload()
+            .outcome
+        });
+    (session, outcome)
+}
 
 async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
@@ -346,7 +380,6 @@ mod streamed_content {
     use super::*;
     use futures::StreamExt;
     use loonfs_objectstore::keys::content_blob;
-    use std::assert_matches;
 
     #[tokio::test]
     async fn slow_upload_cannot_outlive_its_durable_cleanup_record() {
@@ -360,7 +393,6 @@ mod streamed_content {
 
     async fn staging_cleanup_schedule(forget_before_resume: bool) {
         use loonfs_types::api::v0::UploadSessionStatus;
-        use loonfs_types::format::control::decode_control_object;
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -388,7 +420,9 @@ mod streamed_content {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let stream = futures::stream::once(async move {
-            started_tx.send(()).expect("signal body poll after claim");
+            started_tx
+                .send(())
+                .expect("signal that the upload is waiting for its body");
             resume_rx.await.expect("resume body");
             Ok(Bytes::from_static(b"late bytes"))
         })
@@ -396,9 +430,7 @@ mod streamed_content {
         let engine = namespace_engine(&store, &namespace_id, &context);
         let uploading = engine.upload_content_stream(&begin.upload_id, None, stream);
         let collecting = async {
-            started_rx
-                .await
-                .expect("staging claimed and waiting for body");
+            started_rx.await.expect("upload waiting for its body");
             let aborted = engine
                 .abort_upload(&begin.upload_id, None)
                 .await
@@ -466,7 +498,6 @@ mod streamed_content {
 
     async fn owned_stream_expiry_schedule(forget_before_resume: bool) {
         use loonfs_objectstore::keys::upload_session_prefix;
-        use loonfs_types::format::control::{decode_control_object, UploadSessionRecordStatus};
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -507,9 +538,7 @@ mod streamed_content {
             )
             .expect("decode")
             .into_payload();
-            let UploadSessionRecordStatus::Open { expires_at_ms } = session.status else {
-                panic!("expected open");
-            };
+            let expires_at_ms = session.expires_at_ms;
             let content_key = content_blob(&namespace_id, &session.content_id);
             let options = loonfs_core::GcOptions::default();
             // Model a source stalled past its lease and both collection graces.
@@ -529,21 +558,13 @@ mod streamed_content {
             )
             .await
             .expect("GC aborts expired implicit session");
-            let encoded = store
-                .get(&session_key, None)
-                .await
-                .expect("get")
-                .expect("first GC retains aborted owner");
-            let aborted = decode_control_object::<UploadSessionPayload>(
-                &encoded,
-                ControlObjectKind::UploadSession,
-            )
-            .expect("decode")
-            .into_payload();
-            assert_matches!(
-                aborted.status,
-                UploadSessionRecordStatus::Aborted { aborted_at_ms }
-                    if aborted_at_ms == expired.now_ms
+            let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
+            assert_eq!(
+                aborted,
+                Some(UploadOutcome::Aborted {
+                    aborted_at_ms: expired.now_ms
+                }),
+                "the first pass keeps the aborted session"
             );
             let aged = MutationContext {
                 now_ms: expired.now_ms + options.grace_window_ms + 1,
@@ -752,7 +773,7 @@ mod streamed_content {
         });
         blocking.wait_until_blocked().await;
 
-        // The second request arrives while the first still holds the claim.
+        // The second request arrives while the first is still writing.
         let second = upload_streamed(
             blocking.as_ref(),
             &namespace_id,
@@ -765,11 +786,11 @@ mod streamed_content {
         blocking.release();
         let first = first.await.expect("first staging task");
 
-        // Whichever request the protocol lets through, the session must end
-        // up holding a digest that describes the object. This is the
-        // assertion the shared-key race breaks: without the claim both
-        // requests write, and the session records one request's digest over
-        // the other request's bytes.
+        // Whichever request the protocol lets through, the session must
+        // report a digest that describes the object. This is the assertion
+        // the shared-key race breaks: if the store didn't make the create
+        // conditional, both requests would write, and one request's digest
+        // would describe the other request's bytes.
         let staged = match (first, second) {
             (Ok(staged), Err(refused)) => {
                 assert_eq!(refused.code(), ErrorCode::UploadContentConflict);
@@ -817,8 +838,10 @@ mod streamed_content {
             ),
             "the recorded reference must describe the object byte for byte"
         );
-        // The claim admits the first writer, so those are the bytes that last.
-        assert_eq!(stored, Bytes::from(first_bytes));
+        // The parked request reaches the store second, so the conditional
+        // create refuses it, and the other request's bytes are the ones that
+        // last.
+        assert_eq!(stored, Bytes::from(second_bytes));
     }
 }
 
@@ -830,7 +853,6 @@ mod direct_multipart {
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
     use loonfs_types::api::v0::{CompletedUploadPart, UploadContentClaim};
-    use loonfs_types::format::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_types::options::DirectMultipartUploadOptions;
     use std::assert_matches;
     use std::sync::Arc;
@@ -900,15 +922,15 @@ mod direct_multipart {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> UploadSessionPayload {
-        let key = upload_session(namespace_id, upload_id);
-        let bytes = store
-            .get(&key, None)
-            .await
-            .expect("read session")
-            .expect("session exists");
-        decode_control_object::<UploadSessionPayload>(&bytes, ControlObjectKind::UploadSession)
-            .expect("decode session")
-            .into_payload()
+        read_upload_records(store, namespace_id, upload_id).await.0
+    }
+
+    async fn session_outcome<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Option<UploadOutcome> {
+        read_upload_records(store, namespace_id, upload_id).await.1
     }
 
     /// Uploads every part, the way a client would after asking for the
@@ -1202,10 +1224,8 @@ mod direct_multipart {
         .expect_err("a conflicting completion claim is rejected");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Open { .. }
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None
         );
         assert_eq!(
             store
@@ -1261,10 +1281,8 @@ mod direct_multipart {
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Open { .. },
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None,
             "a rejected claim leaves the session open"
         );
         assert!(
@@ -1310,10 +1328,8 @@ mod direct_multipart {
         .expect_err("a refused assembly cannot complete");
         assert_eq!(error.code(), ErrorCode::ServerError);
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Open { .. },
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None,
             "a provider failure the server cannot read is not proof about content"
         );
 
@@ -1328,10 +1344,8 @@ mod direct_multipart {
         .expect_err("neither an upload nor matching object evidence is available");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Open { .. }
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None
         );
         assert!(store
             .head(&session.object_key)
@@ -1368,10 +1382,8 @@ mod direct_multipart {
         assert_eq!(error.code(), ErrorCode::ServerError);
         assert_eq!(failing.attempts(), 1, "the read-back is what failed");
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Open { .. },
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None,
             "a store failure must not end the session"
         );
         assert_eq!(
@@ -1413,13 +1425,14 @@ mod direct_multipart {
         // The session carries its own expiry, so collection is decided
         // against that stamp and never against an object's provider
         // timestamp.
-        let UploadSessionRecordStatus::Open { expires_at_ms, .. } =
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status
-        else {
-            panic!("a fresh session is open");
-        };
+        assert_eq!(
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            None,
+            "a fresh session is open"
+        );
+        let expires_at_ms = session_state(&store, &session.namespace_id, &session.upload_id)
+            .await
+            .expires_at_ms;
         let options = GcOptions::default();
         let expired = MutationContext {
             writer_id: context.writer_id.clone(),
@@ -1438,10 +1451,8 @@ mod direct_multipart {
         .expect("garbage collection");
 
         assert_matches!(
-            session_state(&store, &session.namespace_id, &session.upload_id)
-                .await
-                .status,
-            UploadSessionRecordStatus::Aborted { .. }
+            session_outcome(&store, &session.namespace_id, &session.upload_id).await,
+            Some(UploadOutcome::Aborted { .. })
         );
         assert_eq!(
             store.open_uploads(),

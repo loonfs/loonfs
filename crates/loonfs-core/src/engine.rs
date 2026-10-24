@@ -1063,9 +1063,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// upload session.
     ///
     /// This combines session creation, content upload, and completion without a
-    /// network round trip or receipt. It still writes the upload-session record
-    /// required by garbage collection. The content write is followed by two
-    /// small control-object writes.
+    /// network round trip or receipt. It still writes the upload session's
+    /// records that garbage collection needs: the session record before the
+    /// content write, and the outcome record after it.
     pub async fn stage_owned_bytes(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,

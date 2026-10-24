@@ -512,7 +512,9 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
             .content_ref()
             .expect("completed content ref")
     );
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+    // Completion reads the object's stored size and checksum with one HEAD,
+    // the way a direct PUT completion does.
+    assert_content_counts(harness.recording.snapshot(), 1, 0, 0, 0);
     harness.recording.reset();
 
     namespace

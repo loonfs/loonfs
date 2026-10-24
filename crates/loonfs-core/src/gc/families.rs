@@ -1,8 +1,12 @@
-//! Object families swept by namespace collection.
+//! Object families swept one key at a time by namespace collection.
+//!
+//! Upload sessions aren't one of these families: each session has two
+//! records, so the pass sweeps them from their own listing (see
+//! `super::uploads`).
 
 use loonfs_objectstore::keys::{
     content_prefix, metadata_manifest_prefix, metadata_segment_prefix, pin_prefix,
-    temporary_prefix, upload_session_prefix, wal_prefix,
+    temporary_prefix, wal_prefix,
 };
 use loonfs_objectstore::layout::{
     content_id_of, manifest_no_of, parse_object_key, DurableObjectFamily,
@@ -15,18 +19,16 @@ pub(super) enum CandidateFamily {
     WalObjects,
     MetadataSegments,
     Pins,
-    UploadSessions,
     Content,
     Temporary,
 }
 
 impl CandidateFamily {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Manifests,
         Self::WalObjects,
         Self::MetadataSegments,
         Self::Pins,
-        Self::UploadSessions,
         Self::Content,
         Self::Temporary,
     ];
@@ -40,7 +42,6 @@ impl CandidateFamily {
             Self::WalObjects => loonfs_objectstore::layout::wal_no_of(key).is_some(),
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::Pins => family == DurableObjectFamily::Pin,
-            Self::UploadSessions => family == DurableObjectFamily::UploadSession,
             Self::Content => content_id_of(key).is_some(),
             Self::Temporary => family == DurableObjectFamily::TemporaryObject,
         }
@@ -52,7 +53,6 @@ impl CandidateFamily {
             Self::WalObjects => wal_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::Pins => pin_prefix(namespace_id),
-            Self::UploadSessions => upload_session_prefix(namespace_id),
             Self::Content => content_prefix(namespace_id),
             Self::Temporary => temporary_prefix(namespace_id),
         }

@@ -7,6 +7,7 @@ use super::live_set::{LiveSet, RetirementStatus};
 use super::reclaim::reclaim_namespace;
 use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
+use super::uploads::list_uploads;
 use super::GcOptions;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -87,6 +88,11 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
             .boxed();
         apply_decisions(store, decisions, &mut report).await?;
     }
+    // Upload sessions are swept as pairs of records, from their own listing.
+    let decisions = list_uploads(store, namespace_id)
+        .and_then(|listed| sweep.upload(listed))
+        .boxed();
+    apply_decisions(store, decisions, &mut report).await?;
     reclaim_namespace(store, &live, &mut report).await?;
     Ok(report)
 }
