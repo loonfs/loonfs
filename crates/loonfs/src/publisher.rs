@@ -43,7 +43,7 @@ use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
-    SharedWriterSessionStatus, TailSource, WalPublishError, WriterSessionStatus,
+    SharedWriterSessionStatus, TailSource, WalFoldInput, WalPublishError, WriterSessionStatus,
 };
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_core::{PublicationReport, PublishedManifest};
@@ -473,14 +473,15 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
-    /// Returns the unfolded WAL objects in the namespace's writer position,
-    /// or `None` when this runtime has no position for the namespace.
-    pub(crate) async fn wal_tail_objects(&self, namespace_id: &NamespaceId) -> Option<u64> {
+    /// Returns the namespace's writer position as a fold input: the manifest
+    /// it plans against and the unfolded WAL tail above that manifest. Returns
+    /// `None` when this runtime has no position for the namespace.
+    pub(crate) async fn wal_fold_input(&self, namespace_id: &NamespaceId) -> Option<WalFoldInput> {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
         slot.engine
             .as_ref()
-            .and_then(NamespaceCommitEngine::wal_tail_objects)
+            .and_then(NamespaceCommitEngine::wal_fold_input)
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail

@@ -1472,3 +1472,155 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
     assert_eq!(gets.get(&segment), None, "GETs after compaction: {gets:?}");
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Forwards every call to a local store, and holds the answer to one read of
+/// a namespace's hint until the test releases it, as a slow store would. The
+/// read itself runs when it's sent, so the held answer is the hint as it was
+/// before anything the test does while the answer waits.
+#[derive(Debug)]
+struct HeldHintAnswer {
+    inner: LocalFsStore,
+    hint_key: String,
+    /// Hint reads to let through before the held one, plus one. Zero holds
+    /// none.
+    reads_until_held: std::sync::atomic::AtomicUsize,
+    held: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for HeldHintAnswer {
+    loonfs_test_support::delegate_object_store!(self => self.inner;
+        head,
+        checksum_algorithm,
+        identity,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        get,
+        put,
+        put_streamed,
+        put_if_absent,
+        put_immutable_verified,
+        assemble,
+        compare_and_swap,
+        delete,
+        list_prefix_stream,
+        list_entries_from_stream,
+        list_prefix,
+        list_child_prefixes,
+    );
+
+    async fn get_with_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<loonfs_objectstore::ObjectBody>, loonfs_objectstore::ObjectStoreError> {
+        let answer = self.inner.get_with_metadata(key).await;
+        if key == self.hint_key
+            && self.reads_until_held.try_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |reads| reads.checked_sub(1),
+            ) == Ok(1)
+        {
+            self.held.notify_one();
+            self.release.notified().await;
+        }
+        answer
+    }
+}
+
+/// Checks that a session's compaction step reads the writer position before
+/// the manifest. The step's manifest read ends with a second read of the
+/// hint, and the answer to that read is held while the session's fold
+/// publishes the next manifest and moves the position onto it. The step must
+/// then plan from a manifest at least as new as the position that it read,
+/// so the tail that it saw unfolded leaves metadata due instead of caught up.
+#[tokio::test]
+async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("position-before-manifest");
+    let store = Arc::new(HeldHintAnswer {
+        inner: LocalFsStore::new(directory.path()).expect("store"),
+        hint_key: loonfs_objectstore::keys::hint(&namespace_id),
+        reads_until_held: std::sync::atomic::AtomicUsize::new(0),
+        held: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    // Each write leaves inline bytes in the tail, so the session folds each
+    // write.
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .inline_content(crate::InlineContentPolicy {
+            inline_content_fold_at_bytes: 1,
+            ..crate::InlineContentPolicy::default()
+        })
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create the namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    namespace
+        .put_file("/folded", b"body", &actor)
+        .await
+        .expect("put a file");
+    namespace.wait_for_fold().await.expect("the fold settles");
+    writer.drain().await.expect("nothing else runs");
+
+    // With the fold permits held, the next write waits unfolded in the
+    // session's position.
+    let mut fold_permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+        fold_permits.push(writer.execution_budget().fold_permit().await);
+    }
+    namespace
+        .put_file("/unfolded", b"body", &actor)
+        .await
+        .expect("put a file whose fold waits for a permit");
+    let before = current_manifest_payload(store.as_ref(), &namespace_id)
+        .await
+        .manifest_no;
+
+    store
+        .reads_until_held
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let cancellation = crate::MaintenanceCancellation::new();
+    let step = maintenance.metadata_step(
+        &namespace_id,
+        super::TailFold::Never,
+        MetadataCompactionPolicy::SizeTiered,
+        &cancellation,
+    );
+    let fold_while_the_answer_waits = async {
+        store.held.notified().await;
+        drop(fold_permits);
+        namespace.wait_for_fold().await.expect("the fold settles");
+        store.release.notify_one();
+    };
+    let (step, ()) = tokio::join!(step, fold_while_the_answer_waits);
+    let step = step
+        .expect("the step runs")
+        .expect("the step isn't cancelled");
+    writer.drain().await.expect("the fold's compaction settles");
+
+    assert!(
+        current_manifest_payload(store.as_ref(), &namespace_id)
+            .await
+            .manifest_no
+            > before,
+        "the fold published while the step's manifest read waited"
+    );
+    assert_eq!(
+        step.wal_fold,
+        crate::MetadataMaintenanceOutcome::Due,
+        "the step saw the tail unfolded, so it can't report metadata caught up"
+    );
+    writer.shutdown().await.expect("shutdown");
+}

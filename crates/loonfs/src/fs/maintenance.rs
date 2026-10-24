@@ -323,11 +323,11 @@ impl Maintenance {
     /// returns `None` for the manifest, and the compaction unit loads the
     /// current manifest itself. A tail that waits for its idle fold age leaves
     /// metadata due. A session's own compaction (`TailFold::Never`) doesn't
-    /// fold, so it reads only the current manifest and takes the unfolded WAL
-    /// objects from the session's position (`None` when the runtime has no
-    /// position for the namespace). A tail that the position shows unfolded
-    /// leaves metadata due for the session's fold task or the host's idle
-    /// fold.
+    /// fold, so it takes the unfolded WAL objects from the session's position
+    /// (`None` when the runtime has no position for the namespace), and then
+    /// reads only the current manifest. A tail that the position shows
+    /// unfolded leaves metadata due for the session's fold task or the host's
+    /// idle fold.
     async fn fold_if_due(
         &self,
         namespace_id: &NamespaceId,
@@ -342,8 +342,20 @@ impl Maintenance {
             max_wal_tail_objects,
         } = tail_fold
         else {
+            // The position comes first. A fold publishes its manifest before
+            // it moves the position, so the manifest loaded after the position
+            // is the position's manifest or a newer one, and a tail that the
+            // position shows folded is folded into that manifest.
+            let position = self.publisher.wal_fold_input(namespace_id).await;
             let manifest = self.load_live_manifest(namespace_id).await?;
-            let objects = self.publisher.wal_tail_objects(namespace_id).await;
+            if let Some(position) = &position {
+                assert!(
+                    manifest.manifest().manifest_no >= position.basis.manifest_no(),
+                    "the current manifest should be at least as new as the writer position's, \
+                     which was published before the position moved onto it"
+                );
+            }
+            let objects = position.map(|position| position.wal_tail_objects);
             return Ok((
                 Some(manifest),
                 objects,
