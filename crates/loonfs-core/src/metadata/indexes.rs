@@ -112,8 +112,9 @@ impl MetadataIndexes {
         self.latest_bind_in_slot(&(parent_inode_id, name_key.clone()))
     }
 
-    /// [`Self::latest_bind`] for a caller that builds the slot key once and
-    /// probes several states with it.
+    /// Returns the newest binding in a directory slot (a parent inode ID and a
+    /// name key), like [`Self::latest_bind`], for a caller that builds the slot
+    /// once and looks up the same slot in several row states.
     pub(super) fn latest_bind_in_slot(
         &self,
         slot: &(InodeId, NameKey),
@@ -131,7 +132,7 @@ impl MetadataIndexes {
             .cloned()
     }
 
-    /// The child's newest binding, bound or unbound.
+    /// Returns the child's newest binding, bound or unbound.
     pub(super) fn latest_binding_for_child(
         &self,
         child_inode_id: InodeId,
@@ -139,7 +140,7 @@ impl MetadataIndexes {
         self.latest_binding_by_child.get(&child_inode_id).cloned()
     }
 
-    /// The root's newest tombstone event, whatever its action.
+    /// Returns the root's newest tombstone event, whatever its action.
     pub(super) fn latest_tombstone(
         &self,
         root_inode_id: InodeId,

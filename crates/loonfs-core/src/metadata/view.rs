@@ -265,16 +265,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.sources.manifest
     }
 
-    /// Reads the rows of one key for a caller that keeps the newest row at
-    /// the visible sequence.
+    /// Returns the rows of one key that a caller needs to find the key's
+    /// newest row at the view's visible sequence.
     ///
-    /// The manifest contributes every row that `fetch` reads. A row state
-    /// whose rows are all at or below the visible sequence contributes only
-    /// its newest row of the key, which `newest_in` reads from the state's
-    /// index. Any other row state contributes each row that `matches`
-    /// selects. Without the index, every lookup would read every row of the
-    /// WAL tail and of the batch's earlier commits. Both grow with the batch
-    /// size, so a batch's validation would grow with the square of its size.
+    /// The manifest contributes every row that `fetch` reads. A row state (the
+    /// rows of one WAL tail chunk, of the batch's earlier commits, or of the
+    /// commit being validated) contributes only its newest row of the key when
+    /// all of its rows are at or below the visible sequence, and `newest_in`
+    /// reads that row from the state's index. Any other row state contributes
+    /// each row that `matches` selects.
+    ///
+    /// Without the index, every lookup would read every row of the WAL tail
+    /// and of the batch's earlier commits. Both sets of rows grow with the
+    /// batch size, and commit validation makes several lookups per commit, so
+    /// a batch's validation cost would grow with the square of its size.
     async fn shared_rows<T, K>(
         &self,
         select_map: fn(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, Arc<Vec<T>>>,

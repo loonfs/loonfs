@@ -36,9 +36,14 @@ pub(crate) fn prepare_wal_object(
     )
 }
 
-/// Builds the WAL object of commits whose payloads the caller already built,
-/// such as a batch that applied each payload to its planning session.
-/// `next_inode_id` is the last commit's resulting next inode ID.
+/// Builds a WAL object from commit payloads that the caller has already
+/// built.
+///
+/// A batch publish calls this function instead of [`prepare_wal_object`],
+/// because the batch already built each commit's payload to apply the commit
+/// to its planning session. The caller passes `next_inode_id` (the
+/// namespace's next inode ID after the last commit, or the head's when there
+/// are no commits) because a commit payload doesn't include that ID.
 pub(crate) fn prepare_wal_object_from_payloads(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,

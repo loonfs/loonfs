@@ -1032,9 +1032,10 @@ fn queries_above_indexed_seq_match_at_head_results() {
     );
 }
 
-/// A view answers a binding lookup from each row state's index when every
-/// row of the state is visible, and from a scan of its rows otherwise. Both
-/// have to agree with a scan of all the rows at every sequence.
+/// A view reads a row state's newest binding from the state's index when
+/// every row of the state is visible, and scans the state's rows otherwise.
+/// Either way, the view has to return the same binding as a scan of all the
+/// rows at every sequence.
 #[tokio::test]
 async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
     let tail = churned_binding_state();
