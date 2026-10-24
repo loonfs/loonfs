@@ -538,8 +538,8 @@ pub(crate) enum StreamedPayloadKind {
 /// Stages and hashes a payload without buffering the complete stream.
 ///
 /// The write is create-only, and the store enforces that atomically with
-/// completion at every size. Upload session claims prevent concurrent writes
-/// to the same random content ID.
+/// completion at every size, so when two requests write one content ID,
+/// only one of them creates the object and the other finds it present.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: NamespaceId,
@@ -616,7 +616,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
             });
         }
         Ok(_) => false,
-        // The caller compares the checksum with the session's recorded value.
+        // The caller compares the stored checksum with the bytes it sent.
         Err(ObjectStoreError::PreconditionFailed { .. }) => true,
         Err(ObjectStoreError::InvalidContentRef(message))
             if payload_kind == StreamedPayloadKind::ContentImport =>
@@ -630,21 +630,6 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
         content_ref: observed.into_content_ref(owner_namespace_id, content_id),
         already_present,
     })
-}
-
-/// Reads and hashes a stream without storing it.
-pub(crate) async fn identify_streamed_payload(
-    owner_namespace_id: NamespaceId,
-    content_id: ContentId,
-    mut body: ByteStream,
-    algorithm: ChecksumAlgorithm,
-) -> Result<ContentRef> {
-    let mut observed = StreamedPayload::new(algorithm);
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|err| CoreError::store("upload body", &err))?;
-        observed.update(&chunk);
-    }
-    Ok(observed.into_content_ref(owner_namespace_id, content_id))
 }
 
 #[derive(Debug)]

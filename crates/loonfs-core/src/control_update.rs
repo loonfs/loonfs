@@ -1,19 +1,9 @@
-//! Shared writes and compare-and-swap loops for mutable control objects.
+//! Shared creates and compare-and-swap retry loops for control objects.
 
-use crate::control_object::{
-    expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
-    LoadedControl,
-};
 use crate::error::CoreError;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use bytes::Bytes;
-use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
-use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus,
-};
-use loonfs_types::{NamespaceId, UploadId};
 use std::future::Future;
 
 /// An attempt whose write may have landed reads it back before it answers.
@@ -47,7 +37,8 @@ where
 ///
 /// The id is the object's identity: an object under it is this creation's
 /// own put, whatever its bytes hold now, because another caller can change
-/// the record as soon as it lands. A precondition failure is read back like
+/// a mutable record (such as a user pin) as soon as it's written. A
+/// precondition failure is read back like
 /// a transport failure: an earlier attempt's put can land after its own
 /// read-back found nothing.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
@@ -70,147 +61,6 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
         }
     })
     .await?
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UploadSessionUpdate<T> {
-    Noop(T),
-    Replace {
-        next: Box<UploadSessionPayload>,
-        outcome: T,
-    },
-}
-
-pub(crate) async fn update_upload_session<S, T, F, Fut>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    update: F,
-) -> crate::error::Result<T>
-where
-    S: ObjectStore + ?Sized,
-    F: Fn(UploadSessionPayload) -> Fut,
-    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
-{
-    update_upload_session_from_initial(store, namespace_id, upload_id, None, update).await
-}
-
-/// Reuses a confirmed state/ETag pair for only the first conditional attempt.
-/// Contention reloads authoritative state through the usual retry loop.
-pub(crate) async fn update_upload_session_from_initial<S, T, F, Fut>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    mut initial: Option<LoadedControl<UploadSessionPayload>>,
-    update: F,
-) -> crate::error::Result<T>
-where
-    S: ObjectStore + ?Sized,
-    F: Fn(UploadSessionPayload) -> Fut,
-    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
-{
-    let update = &update;
-    retry_while_contended(|| {
-        let initial = initial.take();
-        async move {
-            match initial {
-                Some(loaded) => try_update_loaded_upload_session(store, loaded, update).await,
-                None => try_update_upload_session(store, namespace_id, upload_id, update).await,
-            }
-        }
-    })
-    .await?
-}
-
-/// Tries one upload-session update against the state and ETag loaded together.
-pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    update: F,
-) -> crate::error::Result<CasOutcome<T, CoreError>>
-where
-    S: ObjectStore + ?Sized,
-    F: FnOnce(UploadSessionPayload) -> Fut,
-    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
-{
-    let loaded = load_upload_session_object(store, namespace_id, upload_id).await?;
-    try_update_loaded_upload_session(store, loaded, update).await
-}
-
-async fn try_update_loaded_upload_session<S, T, F, Fut>(
-    store: &S,
-    loaded: LoadedControl<UploadSessionPayload>,
-    update: F,
-) -> crate::error::Result<CasOutcome<T, CoreError>>
-where
-    S: ObjectStore + ?Sized,
-    F: FnOnce(UploadSessionPayload) -> Fut,
-    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
-{
-    match update(loaded.state).await? {
-        UploadSessionUpdate::Noop(outcome) => Ok(CasOutcome::Settled(outcome)),
-        UploadSessionUpdate::Replace { mut next, outcome } => {
-            if !matches!(next.status, UploadSessionRecordStatus::Open { .. }) {
-                if let UploadSessionMode::ServiceProxied { staging } = &mut next.mode {
-                    *staging = ProxiedStaging::Idle {};
-                }
-            }
-            let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
-                .expect("an upload session record should encode");
-            match store
-                .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
-                .await
-            {
-                Ok(_) => Ok(CasOutcome::Settled(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
-                    CoreError::contention_exhausted(&loaded.object_key),
-                )),
-                // A generic upload update has no state predicate that proves an
-                // ambiguous write landed, so a transport failure is final.
-                Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
-            }
-        }
-    }
-}
-
-/// Reads an upload session without retaining its ETag. Use this for status
-/// checks and other operations that do not need to update the session.
-pub(crate) async fn load_upload_session_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-) -> crate::error::Result<UploadSessionPayload> {
-    Ok(load_upload_session_object(store, namespace_id, upload_id)
-        .await?
-        .state)
-}
-
-type LoadedUploadSessionObject = LoadedControl<UploadSessionPayload>;
-
-async fn load_upload_session_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-) -> crate::error::Result<LoadedUploadSessionObject> {
-    let object_key = upload_session(namespace_id, upload_id);
-    let loaded = load_control_object(
-        store,
-        object_key,
-        ControlObjectKind::UploadSession,
-        |state: &UploadSessionPayload| {
-            expect_namespace(namespace_id, &state.namespace_id)?;
-            expect_identity_field("upload id", upload_id.as_str(), state.upload_id.as_str())
-        },
-    )
-    .await;
-    match loaded {
-        Ok(loaded) => Ok(loaded),
-        Err(ControlObjectLoadError::MissingObject { .. }) => Err(CoreError::UploadNotFound {
-            upload_id: upload_id.clone(),
-        }),
-        Err(error) => Err(CoreError::ControlObjectLoad(error)),
-    }
 }
 
 #[cfg(test)]

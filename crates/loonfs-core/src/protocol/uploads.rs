@@ -2,8 +2,9 @@
 //! content uploads, including direct-to-provider transfers.
 //!
 //! A session starts open and ends as either completed or aborted. The
-//! compare-and-swap that records a terminal state determines the result.
-//! Provider cleanup runs only after that durable transition.
+//! put-if-absent that creates its outcome record determines the result (see
+//! [`crate::upload_records`]). Provider cleanup runs only after that durable
+//! transition.
 //!
 //! Every uploaded content object is created through a session. Before
 //! metadata references the object, the session record gives garbage
@@ -11,11 +12,7 @@
 
 use crate::authorize::{Authorizer, CommitAuthority};
 use crate::context::MutationContext;
-use crate::control_object::LoadedControl;
-use crate::control_update::{
-    create_control_object_under_generated_id, load_upload_session_state, update_upload_session,
-    update_upload_session_from_initial, UploadSessionUpdate,
-};
+use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, MAX_MULTIPART_PARTS,
@@ -26,23 +23,25 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_current_manifest;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, delete_unpublished_content_object,
-    identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
-    verify_durable_content_checksum, DurableContentValidationError, StreamedPayloadKind,
+    stage_bytes_under_content_id, stage_streamed_under_content_id, verify_durable_content_checksum,
+    DurableContentValidationError, StreamedPayloadKind,
 };
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
+use crate::upload_records::{
+    create_upload_outcome, load_upload_session_state, OutcomeCreation, UploadSessionState,
+};
 use bytes::Bytes;
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
-    ByteStream, MultipartPart, ObjectMetadata, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
+    ByteStream, MultipartPart, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
 };
 use loonfs_types::api::v0::{
     CompleteUploadBody, CompletedUploadPart, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, ProxiedStaging, UploadAbortOutcome,
-    UploadAlreadyCompletedError, UploadSessionMode, UploadSessionPayload,
-    UploadSessionRecordStatus,
+    encode_control_state, ControlObjectKind, UploadAlreadyCompletedError, UploadOutcome,
+    UploadSessionMode, UploadSessionPayload,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
@@ -219,10 +218,11 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
             "a part-signing request names at most {MAX_SIGNED_PARTS_PER_REQUEST} parts"
         )));
     }
-    let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&session, subject)?;
-    ensure_session_open(&session, now_ms)?;
-    let (provider_upload_id, checksum_algorithm) = multipart_session_upload(&session)?;
+    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
+    ensure_session_subject(&state.session, subject)?;
+    ensure_session_open(&state, now_ms)?;
+    let session = &state.session;
+    let (provider_upload_id, checksum_algorithm) = multipart_session_upload(session)?;
 
     let mut parts = Vec::with_capacity(requested.len());
     for claim in requested {
@@ -258,7 +258,7 @@ fn multipart_session_upload(session: &UploadSessionPayload) -> Result<(&str, Che
             checksum_algorithm,
             ..
         } => Ok((provider_upload_id, *checksum_algorithm)),
-        UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => {
+        UploadSessionMode::ServiceProxied {} | UploadSessionMode::DirectPut { .. } => {
             Err(CoreError::InvalidUploadContent(
                 "this upload session is not a direct_multipart upload".to_owned(),
             ))
@@ -350,9 +350,7 @@ impl NewUploadSession {
     fn service_proxied() -> Self {
         Self {
             content_id: ContentId::generate(),
-            mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle {},
-            },
+            mode: UploadSessionMode::ServiceProxied {},
         }
     }
 
@@ -389,35 +387,37 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     session: NewUploadSession,
     context: &MutationContext,
 ) -> Result<UploadSession> {
-    let (state, _) =
-        create_upload_session_with_state(store, catalog, subject_id, session, context).await?;
-    Ok(session_response(&state, store.checksum_algorithm()))
+    let session =
+        create_upload_session_record(store, catalog, subject_id, session, context).await?;
+    let state = UploadSessionState {
+        session,
+        outcome: None,
+    };
+    Ok(session_response(&state, None, store.checksum_algorithm()))
 }
 
-async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
+/// Writes the record that starts a new upload session, with put-if-absent.
+async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     subject_id: Option<SubjectId>,
     session: NewUploadSession,
     context: &MutationContext,
-) -> Result<(UploadSessionPayload, ObjectMetadata)> {
+) -> Result<UploadSessionPayload> {
     let upload_id = UploadId::generate();
-    let state = UploadSessionPayload {
+    let record = UploadSessionPayload {
         namespace_id: catalog.namespace_id().clone(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
         subject_id,
         mode: session.mode,
-        status: UploadSessionRecordStatus::Open {
-            expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
-        },
+        expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
     };
     let object_key = upload_session(catalog.namespace_id(), &upload_id);
-    let encoded = encode_control_state(ControlObjectKind::UploadSession, &state)
+    let encoded = encode_control_state(ControlObjectKind::UploadSession, &record)
         .expect("an upload session record should encode");
-    let metadata =
-        create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
-    Ok((state, metadata))
+    create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
+    Ok(record)
 }
 
 fn recorded_subject(
@@ -468,126 +468,14 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
 
 /// Refuses an operation that needs an open session when the session is
 /// completed, aborted, or open at or past its expiry.
-fn ensure_session_open(session: &UploadSessionPayload, now_ms: u64) -> Result<()> {
-    let upload_id = session.upload_id.clone();
-    match session.status {
-        UploadSessionRecordStatus::Open { expires_at_ms } if now_ms < expires_at_ms => Ok(()),
-        UploadSessionRecordStatus::Completed { .. } => {
+fn ensure_session_open(state: &UploadSessionState, now_ms: u64) -> Result<()> {
+    let upload_id = state.session.upload_id.clone();
+    match &state.outcome {
+        None if now_ms < state.session.expires_at_ms => Ok(()),
+        Some(UploadOutcome::Completed { .. }) => {
             Err(CoreError::UploadAlreadyCompleted { upload_id })
         }
-        UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => {
-            Err(CoreError::UploadNotFound { upload_id })
-        }
-    }
-}
-
-/// What a staging request found when it asked for the right to write.
-enum StagingSlot {
-    /// The request holds the claim and is the only one that may write.
-    Claimed,
-    /// The session already staged content, so nothing is written. The
-    /// caller decides from this staged state whether its bytes are the same
-    /// upload arriving twice or a conflicting one.
-    AlreadyStaged(ProxiedStaging),
-}
-
-/// Takes the exclusive right to write this session's content object.
-///
-/// A proxied session writes one object key, and past the store's multipart
-/// threshold the create-only condition on that write cannot be part of the
-/// write (see [`stage_streamed_under_content_id`]). Two requests that both
-/// found the key absent would therefore both assemble over it, and the one
-/// that lost the record compare-and-swap would leave its bytes behind under
-/// the winner's digest. This compare-and-swap is what stops that: exactly
-/// one request holds the claim, so only one ever writes.
-///
-/// A session that already staged content needs no claim, because nothing
-/// will be written — the caller answers from the reference instead.
-async fn claim_staging_slot<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    now_ms: u64,
-) -> Result<StagingSlot> {
-    update_upload_session(store, namespace_id, upload_id, |mut state| {
-        let upload_id = upload_id.to_owned();
-        async move {
-            ensure_session_open(&state, now_ms)?;
-            let staging = proxied_staging(&mut state.mode, &upload_id)?;
-            match staging {
-                ProxiedStaging::Idle {} => {
-                    *staging = ProxiedStaging::Claimed {};
-                    Ok(UploadSessionUpdate::Replace {
-                        next: Box::new(state),
-                        outcome: StagingSlot::Claimed,
-                    })
-                }
-                ProxiedStaging::Claimed {} => Err(CoreError::UploadContentConflict { upload_id }),
-                staged @ ProxiedStaging::Staged { .. } => Ok(UploadSessionUpdate::Noop(
-                    StagingSlot::AlreadyStaged(staged.clone()),
-                )),
-            }
-        }
-    })
-    .await
-}
-
-/// Gives the staging claim back after a write that failed before its final
-/// request was sent.
-///
-/// A write whose final request may have been sent can still land, so its
-/// claim stays until the session is aborted or its lease ends. The release is
-/// best effort: a lost release costs the session the rest of its lease.
-async fn release_staging_claim<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-) {
-    let released = update_upload_session(store, namespace_id, upload_id, |mut state| async move {
-        if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
-            return Ok(UploadSessionUpdate::Noop(()));
-        }
-        let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-            return Ok(UploadSessionUpdate::Noop(()));
-        };
-        if !matches!(staging, ProxiedStaging::Claimed {}) {
-            return Ok(UploadSessionUpdate::Noop(()));
-        }
-        *staging = ProxiedStaging::Idle {};
-        Ok(UploadSessionUpdate::Replace {
-            next: Box::new(state),
-            outcome: (),
-        })
-    })
-    .await;
-    if let Err(error) = released {
-        tracing::warn!(
-            namespace_id = %namespace_id,
-            upload_id = %upload_id,
-            error = %error,
-            "failed to release the staging claim of a failed upload; \
-             the session cannot stage again until its lease passes"
-        );
-    }
-}
-
-/// Returns the staging state of a service-proxied session.
-///
-/// A session's mode is set when it is created, and every staging step runs
-/// after `read_open_proxied_session` checked that the mode is service-proxied.
-/// Each compare-and-swap attempt reloads the session from the store, so a
-/// reloaded record in another mode is corrupt.
-fn proxied_staging<'a>(
-    mode: &'a mut UploadSessionMode,
-    upload_id: &UploadId,
-) -> Result<&'a mut ProxiedStaging> {
-    match mode {
-        UploadSessionMode::ServiceProxied { staging } => Ok(staging),
-        other => Err(CoreError::NamespaceCorrupt(format!(
-            "upload session `{upload_id}` was service-proxied when staging began, but its \
-             stored mode is now `{}`",
-            upload_mode(other).as_str()
-        ))),
+        None | Some(UploadOutcome::Aborted { .. }) => Err(CoreError::UploadNotFound { upload_id }),
     }
 }
 
@@ -597,40 +485,33 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     subject: Option<&Subject>,
     now_ms: u64,
-) -> Result<UploadSessionPayload> {
-    let session = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
-    ensure_session_subject(&session, subject)?;
-    ensure_session_open(&session, now_ms)?;
-    if !matches!(session.mode, UploadSessionMode::ServiceProxied { .. }) {
+) -> Result<UploadSessionState> {
+    let state = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
+    ensure_session_subject(&state.session, subject)?;
+    ensure_session_open(&state, now_ms)?;
+    if !matches!(state.session.mode, UploadSessionMode::ServiceProxied {}) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
-            upload_mode(&session.mode).as_str()
+            upload_mode(&state.session.mode).as_str()
         )));
     }
-    Ok(session)
+    Ok(state)
 }
 
-async fn ensure_staging_ownership<S: ObjectStore + ?Sized>(
+/// Checks, just before a streamed write sends its final request, that the
+/// session is still open.
+///
+/// A session aborted after this check keeps its records for a grace period
+/// longer than the final request can take, so a later cleanup removes any
+/// object the request writes.
+async fn ensure_session_still_open<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    content_id: &ContentId,
-    expected_staging: ProxiedStaging,
     now_ms: u64,
 ) -> Result<()> {
-    let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_open(&session, now_ms)?;
-    if session.content_id != *content_id
-        || session.mode
-            != (UploadSessionMode::ServiceProxied {
-                staging: expected_staging,
-            })
-    {
-        return Err(CoreError::UploadContentConflict {
-            upload_id: upload_id.clone(),
-        });
-    }
-    Ok(())
+    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
+    ensure_session_open(&state, now_ms)
 }
 
 pub(crate) enum ProxiedPayload<'a> {
@@ -681,6 +562,15 @@ pub(crate) async fn upload_content_stream<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Writes a service-proxied session's content object and returns the open
+/// session with the uploaded reference.
+///
+/// The write is create-only and writes no session record. The store makes
+/// the create conditional at every size, so when two requests upload to one
+/// session, only one of them writes the object. A request that finds the
+/// object already written succeeds if the stored size and checksum match its
+/// bytes (a retry of the same upload), and returns a content conflict if
+/// they don't.
 pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -691,160 +581,86 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
 ) -> Result<UploadSession> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let mut loaded = read_open_proxied_session(store, &catalog, upload_id, subject, now_ms).await?;
-
-    // The claim is what makes the write exclusive, so it is taken before any
-    // byte is written and released by the same swap that records the result.
-    match claim_staging_slot(store, namespace_id, upload_id, now_ms).await? {
-        StagingSlot::AlreadyStaged(staging) => {
-            let content_ref = match payload {
-                ProxiedPayload::Bytes(bytes) => ContentRef::blob_v1(
-                    loaded.namespace_id.clone(),
-                    loaded.content_id.clone(),
-                    bytes,
-                    store.checksum_algorithm(),
-                ),
-                ProxiedPayload::Stream(body) => {
-                    identify_streamed_payload(
-                        loaded.namespace_id.clone(),
-                        loaded.content_id.clone(),
-                        body,
-                        store.checksum_algorithm(),
-                    )
-                    .await?
-                }
-            };
-            if !matches!(&staging, ProxiedStaging::Staged { content_ref: staged, .. } if *staged == content_ref)
-            {
-                return Err(CoreError::UploadContentConflict {
-                    upload_id: upload_id.clone(),
-                });
+    let loaded = read_open_proxied_session(store, &catalog, upload_id, subject, now_ms).await?;
+    let session = &loaded.session;
+    let content_ref = match payload {
+        ProxiedPayload::Bytes(bytes) => write_proxied_bytes(store, session, bytes).await?,
+        ProxiedPayload::Stream(body) => {
+            let staged = stage_streamed_under_content_id(
+                store,
+                session.namespace_id.clone(),
+                session.content_id.clone(),
+                body,
+                StreamedPayloadKind::Request,
+                ensure_session_still_open(store, namespace_id, upload_id, now_ms),
+            )
+            .await?;
+            if staged.already_present {
+                ensure_stored_content_matches(store, upload_id, &staged.content_ref).await?;
             }
-            loaded.mode = UploadSessionMode::ServiceProxied { staging };
-            return Ok(session_response(&loaded, store.checksum_algorithm()));
-        }
-        StagingSlot::Claimed => {}
-    }
-
-    let mut final_request_may_be_sent = matches!(payload, ProxiedPayload::Bytes(_));
-    let staged = match payload {
-        ProxiedPayload::Bytes(bytes) => stage_bytes_under_content_id(
-            store,
-            loaded.namespace_id.clone(),
-            loaded.content_id.clone(),
-            bytes,
-        )
-        .await
-        .map(|stored| {
-            let staging = ProxiedStaging::Staged {
-                content_ref: stored.content_ref,
-            };
-            (staging, false)
-        }),
-        ProxiedPayload::Stream(body) => stage_streamed_under_content_id(
-            store,
-            loaded.namespace_id.clone(),
-            loaded.content_id.clone(),
-            body,
-            StreamedPayloadKind::Request,
-            async {
-                final_request_may_be_sent = true;
-                ensure_staging_ownership(
-                    store,
-                    namespace_id,
-                    upload_id,
-                    &loaded.content_id,
-                    ProxiedStaging::Claimed {},
-                    now_ms,
-                )
-                .await
-            },
-        )
-        .await
-        .map(|staged| {
-            let staging = ProxiedStaging::Staged {
-                content_ref: staged.content_ref,
-            };
-            (staging, staged.already_present)
-        }),
-    };
-    let (staging, already_present) = match staged {
-        Ok(staged) => staged,
-        Err(error) => {
-            if !final_request_may_be_sent {
-                release_staging_claim(store, namespace_id, upload_id).await;
-            }
-            return Err(error);
+            staged.content_ref
         }
     };
-
-    record_staged_content(
-        store,
-        namespace_id,
-        upload_id,
-        staging,
-        already_present,
-        now_ms,
-    )
-    .await
+    // An abort during the write deletes the object it was writing, so the
+    // bytes are reported as uploaded only if the session is still open.
+    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
+    ensure_session_open(&state, now_ms)?;
+    Ok(session_response(
+        &state,
+        Some(content_ref),
+        store.checksum_algorithm(),
+    ))
 }
 
-/// Records a staging result and releases its claim in the same
-/// compare-and-swap.
-///
-/// `already_present` means the create-only object write found an existing
-/// object. The claim stays after any write that may still land, so no earlier
-/// attempt on this session wrote that object. It is a conflict.
-///
-/// A session already staged with this reference is this request's own
-/// record: the provider can resend a compare-and-swap that landed and get a
-/// precondition failure, and the reload then finds the record written.
-async fn record_staged_content<S: ObjectStore + ?Sized>(
+/// Writes a proxied upload's buffered bytes to the session's content object.
+async fn write_proxied_bytes<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    session: &UploadSessionPayload,
+    bytes: &[u8],
+) -> Result<ContentRef> {
+    let content_ref = ContentRef::blob_v1(
+        session.namespace_id.clone(),
+        session.content_id.clone(),
+        bytes,
+        store.checksum_algorithm(),
+    );
+    let object_key = content_blob(&session.namespace_id, &session.content_id);
+    match store
+        .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
+        .await
+    {
+        Ok(_) => Ok(content_ref),
+        Err(ObjectStoreError::DifferentObject { .. }) => Err(CoreError::UploadContentConflict {
+            upload_id: session.upload_id.clone(),
+        }),
+        Err(error) => Err(CoreError::store(&object_key, &error)),
+    }
+}
+
+/// Accepts a content object that an earlier request already wrote only if
+/// its stored size and checksum match the bytes of this request.
+async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
+    store: &S,
     upload_id: &UploadId,
-    staged: ProxiedStaging,
-    already_present: bool,
-    now_ms: u64,
-) -> Result<UploadSession> {
-    update_upload_session(store, namespace_id, upload_id, |mut state| {
-        let upload_id = upload_id.to_owned();
-        let staged = staged.clone();
-        async move {
-            ensure_session_open(&state, now_ms)?;
-            let staging = proxied_staging(&mut state.mode, &upload_id)?;
-            if already_present {
-                return Err(CoreError::UploadContentConflict { upload_id });
-            }
-            match staging {
-                ProxiedStaging::Staged { .. } if *staging == staged => {
-                    return Ok(UploadSessionUpdate::Noop(session_response(
-                        &state,
-                        store.checksum_algorithm(),
-                    )));
-                }
-                ProxiedStaging::Staged { .. } => {
-                    return Err(CoreError::UploadContentConflict { upload_id });
-                }
-                ProxiedStaging::Idle {} | ProxiedStaging::Claimed {} => {}
-            }
-            *staging = staged;
-            let response = session_response(&state, store.checksum_algorithm());
-            Ok(UploadSessionUpdate::Replace {
-                next: Box::new(state),
-                outcome: response,
-            })
+    content_ref: &ContentRef,
+) -> Result<()> {
+    match verify_durable_content_checksum(store, content_ref).await {
+        Ok(()) => Ok(()),
+        Err(error @ DurableContentValidationError::Store { .. }) => {
+            Err(CoreError::DurableContent(error))
         }
-    })
-    .await
+        Err(_) => Err(CoreError::UploadContentConflict {
+            upload_id: upload_id.clone(),
+        }),
+    }
 }
 
 /// Completes an upload by verifying the content and then recording the
-/// terminal state.
+/// completed outcome.
 ///
-/// Verification happens before the compare-and-swap. Terminal session state
-/// is checked before provider access, so a completion cannot race an abort
-/// and read an object being cleaned up.
+/// Verification happens before the outcome record is created. Terminal
+/// session state is checked before provider access, so a completion cannot
+/// race an abort and read an object being cleaned up.
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -857,106 +673,62 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let now_ms = context.now_ms;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded, subject)?;
-    if !matches!(loaded.status, UploadSessionRecordStatus::Completed { .. }) {
+    ensure_session_subject(&loaded.session, subject)?;
+    if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
         ensure_session_open(&loaded, now_ms)?;
     }
-    let mode = upload_mode(&loaded.mode);
-    let plan = completion_plan(&loaded, &completion)?;
-    if let Some(completed) = replay_terminal_completion(
-        &loaded.status,
-        namespace_id,
-        upload_id,
-        plan.expected_completed_content(),
-        mode,
-        now_ms,
-    )? {
-        return Ok(completed);
+    let mode = upload_mode(&loaded.session.mode);
+    let plan = completion_plan(&loaded.session, &completion)?;
+    if let Some(outcome) = &loaded.outcome {
+        return replay_terminal_completion(
+            outcome,
+            namespace_id,
+            upload_id,
+            plan.expected_completed_content(),
+            mode,
+            now_ms,
+        );
     }
 
     let verified = verify_completion(store, plan).await?;
-    freeze_completed_session(store, &catalog, upload_id, &verified, now_ms).await
+    record_completion(store, &loaded.session, verified, now_ms).await
 }
 
-/// Stores a verified content reference as the session's completed state.
+/// Records a verified content reference as the session's completed outcome.
 ///
 /// All upload modes use this transition. Completion makes the content
 /// eligible for publication and later garbage collection.
-async fn freeze_completed_session<S: ObjectStore + ?Sized>(
+async fn record_completion<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    upload_id: &UploadId,
-    verified: &ContentRef,
+    session: &UploadSessionPayload,
+    verified: ContentRef,
     now_ms: u64,
 ) -> Result<CompletedUpload> {
-    freeze_completed_session_from_initial(store, catalog, upload_id, verified, now_ms, None).await
-}
-
-async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
-    store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    upload_id: &UploadId,
-    verified: &ContentRef,
-    now_ms: u64,
-    initial: Option<LoadedControl<UploadSessionPayload>>,
-) -> Result<CompletedUpload> {
-    update_upload_session_from_initial(
-        store,
-        catalog.namespace_id(),
-        upload_id,
-        initial,
-        |mut state| {
-            let namespace_id = catalog.namespace_id().clone();
-            let upload_id = upload_id.to_owned();
-            let verified = verified.clone();
-            async move {
-                if let Some(completed) = replay_terminal_completion(
-                    &state.status,
-                    &namespace_id,
-                    &upload_id,
-                    Some(&verified),
-                    upload_mode(&state.mode),
-                    now_ms,
-                )? {
-                    return Ok(UploadSessionUpdate::Noop(completed));
-                }
-
-                state.status = UploadSessionRecordStatus::Completed {
-                    completed_at_ms: now_ms,
-                    content_ref: verified.clone(),
-                };
-                let outcome = completed_upload(
-                    &namespace_id,
-                    &upload_id,
-                    &verified,
-                    upload_mode(&state.mode),
-                    now_ms,
-                    now_ms,
-                );
-                Ok(UploadSessionUpdate::Replace {
-                    next: Box::new(state),
-                    outcome,
-                })
-            }
-        },
+    let outcome = UploadOutcome::Completed {
+        completed_at_ms: now_ms,
+        content_ref: verified.clone(),
+    };
+    let standing = match create_upload_outcome(store, session, &outcome).await? {
+        OutcomeCreation::Created => outcome,
+        OutcomeCreation::Existing(existing) => existing,
+    };
+    replay_terminal_completion(
+        &standing,
+        &session.namespace_id,
+        &session.upload_id,
+        Some(&verified),
+        upload_mode(&session.mode),
+        now_ms,
     )
-    .await
-}
-
-/// The session one in-process staging write fills, from the identity it
-/// allocated to the record that will hold its outcome.
-struct OwnedStagingSession {
-    upload_id: UploadId,
-    content_id: ContentId,
-    initial: Option<LoadedControl<UploadSessionPayload>>,
 }
 
 /// Stores in-process bytes through an upload session and returns prepared
 /// content.
 ///
-/// The session is written before the content object so garbage collection
-/// always has a durable owner for the object. The operation performs one
-/// content write and two sequential control-object writes.
+/// The session record is written before the content object so garbage
+/// collection always has a durable owner for the object. The operation
+/// performs one content write and two control-object creates, on different
+/// keys.
 pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -968,19 +740,11 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     let stored = stage_bytes_under_content_id(
         store,
         catalog.namespace_id().clone(),
-        session.content_id,
+        session.content_id.clone(),
         bytes,
     )
     .await?;
-    complete_owned_staging(
-        store,
-        catalog,
-        &session.upload_id,
-        stored.content_ref,
-        context,
-        session.initial,
-    )
-    .await
+    complete_owned_staging(store, &session, stored.content_ref, context).await
 }
 
 /// Stages a payload this runtime forwards under a session that owns it.
@@ -1003,12 +767,10 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         session.content_id.clone(),
         body,
         payload_kind,
-        ensure_staging_ownership(
+        ensure_session_still_open(
             store,
             catalog.namespace_id(),
             &session.upload_id,
-            &session.content_id,
-            ProxiedStaging::Idle {},
             context.now_ms,
         ),
     )
@@ -1025,15 +787,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
             )
         )));
     }
-    complete_owned_staging(
-        store,
-        catalog,
-        &session.upload_id,
-        staged.content_ref,
-        context,
-        session.initial,
-    )
-    .await
+    complete_owned_staging(store, &session, staged.content_ref, context).await
 }
 
 /// Creates the internal upload session that owns an in-process content
@@ -1043,32 +797,19 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     catalog: &VerifiedNamespaceCatalogEntry,
     subject_id: Option<&SubjectId>,
     context: &MutationContext,
-) -> Result<OwnedStagingSession> {
+) -> Result<UploadSessionPayload> {
     // Do not recheck namespace availability here. The catalog came from the
     // namespace head, and publication performs the final admission check. If
     // the namespace is deleted first, garbage collection removes the
     // unreferenced completed session and content.
-    let session = NewUploadSession::service_proxied();
-    let (state, metadata) =
-        create_upload_session_with_state(store, catalog, subject_id.cloned(), session, context)
-            .await?;
-    let upload_id = state.upload_id.clone();
-    let content_id = state.content_id.clone();
-    // If a provider cannot return a usable compare token, retain the old load path.
-    // The creation helper also confirms ambiguous successes before returning it.
-    let initial = metadata
-        .etag
-        .filter(|etag| !etag.trim().is_empty())
-        .map(|etag| LoadedControl {
-            object_key: upload_session(catalog.namespace_id(), &upload_id),
-            etag,
-            state,
-        });
-    Ok(OwnedStagingSession {
-        upload_id,
-        content_id,
-        initial,
-    })
+    create_upload_session_record(
+        store,
+        catalog,
+        subject_id.cloned(),
+        NewUploadSession::service_proxied(),
+        context,
+    )
+    .await
 }
 
 /// Completes an in-process staging session using the content reference
@@ -1079,22 +820,13 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
 /// and garbage collection removes its object.
 async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    upload_id: &UploadId,
+    session: &UploadSessionPayload,
     written: ContentRef,
     context: &MutationContext,
-    initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<PreparedContent> {
-    Ok(freeze_completed_session_from_initial(
-        store,
-        catalog,
-        upload_id,
-        &written,
-        context.now_ms,
-        initial,
-    )
-    .await?
-    .prepared)
+    Ok(record_completion(store, session, written, context.now_ms)
+        .await?
+        .prepared)
 }
 
 /// Marks an upload session aborted, then cleans up its provider state and
@@ -1111,45 +843,46 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
 ) -> Result<UploadSession> {
     let namespace_id = catalog.namespace_id();
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let now_ms = context.now_ms;
-    let (response, abandoned) =
-        update_upload_session(store, namespace_id, upload_id, |mut state| {
-            let namespace_id = namespace_id.clone();
-            let upload_id = upload_id.to_owned();
-            async move {
-                ensure_session_subject(&state, subject)?;
-                let mode = upload_mode(&state.mode);
-                let abandoned = AbandonedUpload::of(&state);
-                let aborted = |aborted_at_ms| UploadSession {
-                    namespace_id: namespace_id.clone(),
-                    upload_id: upload_id.clone(),
-                    mode,
-                    status: UploadSessionStatus::Aborted { aborted_at_ms },
-                };
-                match state.status.abort(now_ms) {
-                    Ok(UploadAbortOutcome::AlreadyAborted { aborted_at_ms }) => Ok(
-                        UploadSessionUpdate::Noop((aborted(aborted_at_ms), abandoned)),
-                    ),
-                    Err(UploadAlreadyCompletedError) => {
-                        Err(CoreError::UploadAlreadyCompleted { upload_id })
-                    }
-                    Ok(UploadAbortOutcome::Aborted) => Ok(UploadSessionUpdate::Replace {
-                        next: Box::new(state),
-                        outcome: (aborted(now_ms), abandoned),
-                    }),
-                }
+    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
+    ensure_session_subject(&loaded.session, subject)?;
+    let aborted_at_ms = match &loaded.outcome {
+        Some(outcome) => repeated_abort(outcome, upload_id)?,
+        None => {
+            let outcome = UploadOutcome::Aborted {
+                aborted_at_ms: context.now_ms,
+            };
+            match create_upload_outcome(store, &loaded.session, &outcome).await? {
+                OutcomeCreation::Created => context.now_ms,
+                OutcomeCreation::Existing(existing) => repeated_abort(&existing, upload_id)?,
             }
-        })
-        .await?;
+        }
+    };
 
-    if !abandoned.release(store).await {
+    if !AbandonedUpload::of(&loaded.session).release(store).await {
         tracing::debug!(
             namespace_id = %namespace_id,
             upload_id = %upload_id,
             "upload cleanup remains for garbage collection"
         );
     }
-    Ok(response)
+    Ok(UploadSession {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.clone(),
+        mode: upload_mode(&loaded.session.mode),
+        status: UploadSessionStatus::Aborted { aborted_at_ms },
+    })
+}
+
+/// Returns the first abort's stamp for a session that already ended, or
+/// `UploadAlreadyCompleted` if it completed.
+fn repeated_abort(outcome: &UploadOutcome, upload_id: &UploadId) -> Result<u64> {
+    outcome
+        .repeated_abort()
+        .map_err(
+            |UploadAlreadyCompletedError| CoreError::UploadAlreadyCompleted {
+                upload_id: upload_id.clone(),
+            },
+        )
 }
 
 /// Provider resources owned by a terminated upload session.
@@ -1229,60 +962,100 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded, subject)?;
-    let evidence = match &loaded.status {
-        UploadSessionRecordStatus::Completed {
+    ensure_session_subject(&loaded.session, subject)?;
+    let evidence = match &loaded.outcome {
+        Some(UploadOutcome::Completed {
             completed_at_ms,
             content_ref,
-        } => evidence_within_window(content_ref, *completed_at_ms, now_ms),
-        UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
+        }) => evidence_within_window(content_ref, *completed_at_ms, now_ms),
+        Some(UploadOutcome::Aborted { .. }) | None => None,
     };
-    let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
-        && matches!(loaded.mode, UploadSessionMode::DirectPut { .. })
-    {
-        Some(content_blob(namespace_id, &loaded.content_id))
-    } else {
-        None
+    let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
+        (None, UploadSessionMode::ServiceProxied {}) => (
+            find_proxied_content_ref(store, &loaded.session).await?,
+            None,
+        ),
+        (None, UploadSessionMode::DirectPut { .. }) => (
+            None,
+            Some(content_blob(namespace_id, &loaded.session.content_id)),
+        ),
+        _ => (None, None),
     };
     Ok(UploadSessionView {
-        session: session_response(&loaded, store.checksum_algorithm()),
+        session: session_response(&loaded, uploaded, store.checksum_algorithm()),
         evidence,
         direct_put_object_key,
     })
 }
 
-fn session_response(state: &UploadSessionPayload, algorithm: ChecksumAlgorithm) -> UploadSession {
-    let status = match &state.status {
-        UploadSessionRecordStatus::Open { expires_at_ms } => UploadSessionStatus::Open {
-            expires_at_ms: *expires_at_ms,
+/// Builds the reference of a proxied session's content object from the
+/// object's stored size and checksum, or returns `None` if no upload has
+/// written it yet.
+///
+/// Only this session writes the object, with a create that the store makes
+/// conditional, so the stored object is the bytes a request uploaded.
+async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
+    store: &S,
+    session: &UploadSessionPayload,
+) -> Result<Option<ContentRef>> {
+    let object_key = content_blob(&session.namespace_id, &session.content_id);
+    let Some(stored) = store
+        .head(&object_key)
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?
+    else {
+        return Ok(None);
+    };
+    let checksum = stored.checksum.ok_or_else(|| {
+        CoreError::store(
+            &object_key,
+            &ObjectStoreError::StoredChecksumMissing {
+                object_key: object_key.clone(),
+            },
+        )
+    })?;
+    Ok(Some(ContentRef {
+        kind: ContentRefKind::BlobV1,
+        owner_namespace_id: session.namespace_id.clone(),
+        content_id: session.content_id.clone(),
+        size_bytes: stored.size_bytes,
+        checksum,
+    }))
+}
+
+/// Builds the wire view of a session. `uploaded` is the content reference
+/// an open proxied session reports once its bytes are written.
+fn session_response(
+    state: &UploadSessionState,
+    uploaded: Option<ContentRef>,
+    algorithm: ChecksumAlgorithm,
+) -> UploadSession {
+    let session = &state.session;
+    let status = match &state.outcome {
+        None => UploadSessionStatus::Open {
+            expires_at_ms: session.expires_at_ms,
             checksum_algorithm: algorithm,
-            part_size_bytes: match &state.mode {
+            part_size_bytes: match &session.mode {
                 UploadSessionMode::DirectMultipart {
                     part_size_bytes, ..
                 } => Some(part_size_bytes.get()),
                 _ => None,
             },
             access: None,
-            content_ref: match &state.mode {
-                UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Staged { content_ref, .. },
-                } => Some(content_ref.clone()),
-                _ => None,
-            },
+            content_ref: uploaded,
         },
-        UploadSessionRecordStatus::Completed {
+        Some(UploadOutcome::Completed {
             completed_at_ms,
             content_ref,
-            ..
-        } => completed_status(content_ref, *completed_at_ms),
-        UploadSessionRecordStatus::Aborted { aborted_at_ms } => UploadSessionStatus::Aborted {
+        }) => completed_status(content_ref, *completed_at_ms),
+        Some(UploadOutcome::Aborted { aborted_at_ms }) => UploadSessionStatus::Aborted {
             aborted_at_ms: *aborted_at_ms,
         },
     };
     UploadSession {
-        namespace_id: state.namespace_id.clone(),
-        upload_id: state.upload_id.clone(),
-        mode: upload_mode(&state.mode),
+        namespace_id: session.namespace_id.clone(),
+        upload_id: session.upload_id.clone(),
+        mode: upload_mode(&session.mode),
         status,
     }
 }
@@ -1349,23 +1122,22 @@ fn evidence_within_window(
         .then(|| CompletedUploadEvidence::for_completed_session(content.clone(), completed_at_ms))
 }
 
-/// Answers a completion against a session that has already reached a
-/// terminal status: a replay of the same content succeeds idempotently,
-/// anything else is the terminal error for that status.
+/// Answers a completion against a session that has already ended: a replay
+/// of the same content succeeds idempotently, and anything else is the
+/// terminal error for that outcome.
 fn replay_terminal_completion(
-    status: &UploadSessionRecordStatus,
+    outcome: &UploadOutcome,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     expected: Option<&ContentRef>,
     mode: UploadMode,
     now_ms: u64,
-) -> Result<Option<CompletedUpload>> {
-    match status {
-        UploadSessionRecordStatus::Open { .. } => Ok(None),
-        UploadSessionRecordStatus::Aborted { .. } => Err(CoreError::UploadNotFound {
+) -> Result<CompletedUpload> {
+    match outcome {
+        UploadOutcome::Aborted { .. } => Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         }),
-        UploadSessionRecordStatus::Completed {
+        UploadOutcome::Completed {
             completed_at_ms,
             content_ref,
         } => {
@@ -1374,22 +1146,22 @@ fn replay_terminal_completion(
                     upload_id: upload_id.clone(),
                 });
             }
-            Ok(Some(completed_upload(
+            Ok(completed_upload(
                 namespace_id,
                 upload_id,
                 content_ref,
                 mode,
                 *completed_at_ms,
                 now_ms,
-            )))
+            ))
         }
     }
 }
 
 /// Information needed to verify an upload before completion.
 enum CompletionPlan<'a> {
-    /// Content previously staged through the server.
-    Proxied { staging: &'a ProxiedStaging },
+    /// Content the server wrote for a service-proxied upload.
+    Proxied { session: &'a UploadSessionPayload },
     /// Directly uploaded content that must be checked at the provider.
     DirectPut { requested: ContentRef },
     /// Parts the provider must assemble and verify.
@@ -1402,7 +1174,7 @@ enum CompletionPlan<'a> {
 }
 
 impl CompletionPlan<'_> {
-    /// Content a repeated multipart completion must match.
+    /// Content a repeated direct completion must match.
     fn expected_completed_content(&self) -> Option<&ContentRef> {
         match self {
             Self::Proxied { .. } => None,
@@ -1415,7 +1187,7 @@ impl CompletionPlan<'_> {
 
 fn upload_mode(mode: &UploadSessionMode) -> UploadMode {
     match mode {
-        UploadSessionMode::ServiceProxied { .. } => UploadMode::ServiceProxied,
+        UploadSessionMode::ServiceProxied {} => UploadMode::ServiceProxied,
         UploadSessionMode::DirectPut { .. } => UploadMode::DirectPut,
         UploadSessionMode::DirectMultipart { .. } => UploadMode::DirectMultipart,
     }
@@ -1427,8 +1199,8 @@ fn completion_plan<'a>(
     completion: &'a CompleteUploadBody,
 ) -> Result<CompletionPlan<'a>> {
     match (&session.mode, completion) {
-        (UploadSessionMode::ServiceProxied { staging }, CompleteUploadBody::ServiceProxied {}) => {
-            Ok(CompletionPlan::Proxied { staging })
+        (UploadSessionMode::ServiceProxied {}, CompleteUploadBody::ServiceProxied {}) => {
+            Ok(CompletionPlan::Proxied { session })
         }
         (
             UploadSessionMode::DirectPut { checksum_algorithm },
@@ -1470,21 +1242,20 @@ fn completion_plan<'a>(
 /// Verifies the uploaded object and returns the content reference that may
 /// be recorded as completed.
 ///
-/// Proxied uploads use the reference computed while staging. Direct uploads
-/// verify the provider-stored object because the bytes bypassed this server.
-/// A checksum-bearing metadata request verifies size and checksum without
-/// downloading the object.
+/// A proxied upload's reference comes from the stored size and checksum of
+/// the object the server wrote. Direct uploads verify the provider-stored
+/// object against the client's claim, because the bytes bypassed this
+/// server. Both use one metadata request, without downloading the object.
 async fn verify_completion<S: ObjectStore + ?Sized>(
     store: &S,
     plan: CompletionPlan<'_>,
 ) -> Result<ContentRef> {
     match plan {
-        CompletionPlan::Proxied {
-            staging: ProxiedStaging::Staged { content_ref },
-        } => Ok(content_ref.clone()),
-        CompletionPlan::Proxied { .. } => Err(CoreError::InvalidUploadContent(
-            "upload content has not been staged".to_owned(),
-        )),
+        CompletionPlan::Proxied { session } => find_proxied_content_ref(store, session)
+            .await?
+            .ok_or_else(|| {
+                CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
+            }),
         CompletionPlan::DirectPut { requested } => {
             verify_durable_content_checksum(store, &requested)
                 .await
@@ -1551,20 +1322,21 @@ fn content_failure(error: DurableContentValidationError) -> CoreError {
 mod tests {
     use super::*;
     use crate::test_support::ops::create;
+    use crate::upload_records::load_upload_session_state;
+    use loonfs_objectstore::keys::{upload_outcome, upload_session_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext, OperationKind,
-        OperationSelector, RecordingStore,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
+        RecordedOperation, RecordingStore,
     };
-    use loonfs_types::format::control::decode_control_object;
     use std::assert_matches;
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
 
     #[tokio::test]
-    async fn a_failed_final_session_read_keeps_the_claim_without_publishing_content() {
+    async fn a_failed_final_session_read_publishes_no_content() {
         use futures::StreamExt;
         use std::sync::Arc;
 
@@ -1590,7 +1362,7 @@ mod tests {
         ));
         let recording = Arc::new(RecordingStore::new(
             Arc::clone(&failing),
-            KeyPredicate::exact(session_key),
+            KeyPredicate::prefix(upload_session_prefix(&namespace_id)),
         ));
         let body = {
             let failing = Arc::clone(&failing);
@@ -1615,35 +1387,33 @@ mod tests {
         .expect_err("the final session read must succeed");
 
         assert_matches!(error, CoreError::ControlObjectLoad(_));
-        assert_eq!(recording.count(OperationSelector::Read), 1);
+        assert_eq!(recording.count(OperationSelector::Read), 2);
         assert_eq!(recording.counts().puts, 0);
         assert!(recording
-            .get(&content_blob(&namespace_id, &loaded.content_id), None)
+            .get(
+                &content_blob(&namespace_id, &loaded.session.content_id),
+                None
+            )
             .await
             .expect("get content")
             .is_none());
         let loaded = load_upload_session_state(&recording, &namespace_id, &session.upload_id)
             .await
-            .expect("load retained claim");
-        assert_matches!(
-            loaded.mode,
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed {}
-            }
-        );
+            .expect("load the open session");
+        assert_eq!(loaded.outcome, None);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_buffered_write_that_may_have_landed_keeps_the_claim() {
+    async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
             OperationSelector::Put,
             InjectedError::Transport("content write timed out".to_owned()),
-        );
-        store.fail_all();
-        let namespace_id = NamespaceId::parse("failed-buffered-write").expect("namespace id");
+        )
+        .apply_then_fail();
+        let namespace_id = NamespaceId::parse("retried-buffered-write").expect("namespace id");
         let context = context(1_000);
         create(&store, &namespace_id, &context)
             .await
@@ -1652,6 +1422,8 @@ mod tests {
             .await
             .expect("begin upload");
 
+        // The write is applied, but its response is lost.
+        store.fail_next(1);
         upload_content(
             &store,
             &namespace_id,
@@ -1671,18 +1443,36 @@ mod tests {
             1_000,
         )
         .await
-        .expect_err("the failed write still holds the claim");
+        .expect("a retry of the same bytes finds its own object");
+        let other = upload_content(
+            &store,
+            &namespace_id,
+            &session.upload_id,
+            None,
+            b"other bytes\n",
+            1_000,
+        )
+        .await
+        .expect_err("other bytes conflict with the stored object");
 
-        assert_matches!(retry, CoreError::UploadContentConflict { .. });
-        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
-            .await
-            .expect("load session");
-        assert_matches!(
-            loaded.mode,
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Claimed {}
-            }
+        assert_eq!(
+            retry.content_ref(),
+            Some(&ContentRef::blob_v1(
+                namespace_id.clone(),
+                load_upload_session_state(&store, &namespace_id, &session.upload_id)
+                    .await
+                    .expect("load session")
+                    .session
+                    .content_id,
+                BYTES,
+                store.checksum_algorithm(),
+            ))
         );
+        assert_matches!(other, CoreError::UploadContentConflict { .. });
+        let completed = complete(&store, &namespace_id, &session.upload_id, &context)
+            .await
+            .expect("complete the upload");
+        assert_eq!(completed.response.content_ref(), retry.content_ref());
     }
 
     #[tokio::test]
@@ -1724,13 +1514,7 @@ mod tests {
         let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
             .await
             .expect("load session");
-        assert_matches!(loaded.status, UploadSessionRecordStatus::Aborted { .. });
-        assert!(!matches!(
-            loaded.mode,
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged { .. }
-            }
-        ));
+        assert_matches!(loaded.outcome, Some(UploadOutcome::Aborted { .. }));
     }
 
     fn context(now_ms: u64) -> MutationContext {
@@ -1803,106 +1587,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_staging_record_that_lands_and_answers_a_precondition_failure_is_this_requests_own() {
+    async fn an_outcome_put_that_lands_and_answers_a_precondition_failure_is_this_requests_own() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let context = context(1_000);
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        create(&inner, &namespace_id, &context)
-            .await
-            .expect("bootstrap");
-        let begin = begin_service_proxied_upload(&inner, &namespace_id, None, &context)
-            .await
-            .expect("begin upload");
-        let key = upload_session(&namespace_id, &begin.upload_id);
-        // The provider resends the compare-and-swap that recorded the staged
-        // reference and gets a precondition failure for its own write.
-        let store = FailStore::matching(
+        let (namespace_id, upload_id, content_ref, _) =
+            staged_session(&inner, &context(1_000)).await;
+        // The provider resends the put that created the outcome record and
+        // gets a precondition failure for its own write.
+        let store = FailStore::new(
             inner,
-            move |operation: &OperationContext<'_>| {
-                operation.key() == key
-                    && matches!(
-                        operation.kind(),
-                        OperationKind::CompareAndSwap { bytes, .. }
-                            if bytes.windows(8).any(|window| window == b"\"staged\"")
-                    )
-            },
+            KeyPredicate::exact(upload_outcome(&namespace_id, &upload_id)),
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         )
         .apply_then_fail();
         store.fail_next(1);
 
-        let staged = upload_content(
-            &store,
-            &namespace_id,
-            &begin.upload_id,
-            None,
-            BYTES,
-            context.now_ms,
-        )
-        .await
-        .expect("the record under the session is this request's own");
+        let completed = complete(&store, &namespace_id, &upload_id, &context(2_000))
+            .await
+            .expect("the outcome under the session is this request's own");
 
-        assert!(staged.content_ref().is_some());
-        let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
+        assert_eq!(completed.response.content_ref(), Some(&content_ref));
+        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
             .await
             .expect("session");
-        assert_matches!(
-            state.mode,
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged { .. }
-            }
+        assert_eq!(
+            state.outcome,
+            Some(UploadOutcome::Completed {
+                completed_at_ms: 2_000,
+                content_ref,
+            })
         );
     }
 
     #[tokio::test]
-    async fn completion_retry_after_a_lost_acknowledgement_preserves_the_terminal_record() {
+    async fn a_completion_whose_outcome_acknowledgement_is_lost_reads_its_record_back() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         let (namespace_id, upload_id, content_ref, _) =
             staged_session(&inner, &context(1_000)).await;
-        let key = upload_session(&namespace_id, &upload_id);
+        let key = upload_outcome(&namespace_id, &upload_id);
         let failing = FailStore::new(
             inner,
             KeyPredicate::exact(&key),
-            OperationSelector::CompareAndSwap,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost completion acknowledgement".to_owned()),
         )
         .apply_then_fail();
         failing.fail_next(1);
-        let store = RecordingStore::new(failing, KeyPredicate::any());
+        let store = RecordingStore::new(failing, KeyPredicate::exact(&key));
 
-        let error = complete(&store, &namespace_id, &upload_id, &context(2_000))
+        let first = complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
-            .expect_err("completion acknowledgement is lost");
-        assert_matches!(error, CoreError::Store { .. });
-        assert_eq!(store.counts().compare_and_swaps, 1);
+            .expect("the read-back finds this completion's own record");
+        assert_eq!(store.counts().create_if_absent_puts, 1);
         let stored = store
             .get_with_metadata(&key)
             .await
-            .expect("read session")
-            .expect("session");
-        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
-            .await
-            .expect("valid terminal record");
-        assert_eq!(
-            state.mode,
-            UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Idle {},
-            }
-        );
-        assert_eq!(
-            state.status,
-            UploadSessionRecordStatus::Completed {
-                completed_at_ms: 2_000,
-                content_ref: content_ref.clone(),
-            }
-        );
+            .expect("read outcome")
+            .expect("outcome");
 
         store.reset();
         let replay = complete(&store, &namespace_id, &upload_id, &context(3_000))
             .await
             .expect("replay completion");
+        assert_eq!(replay.response, first.response);
         assert_eq!(replay.response.content_ref(), Some(&content_ref));
         assert_matches!(
             replay.response.status,
@@ -1917,76 +1666,104 @@ mod tests {
             store
                 .get_with_metadata(&key)
                 .await
-                .expect("read replayed session")
-                .expect("session"),
+                .expect("read replayed outcome")
+                .expect("outcome"),
             stored
         );
     }
 
-    #[tokio::test]
-    async fn confirmed_completion_skips_the_session_read_and_reloads_after_contention() {
-        for contended in [false, true] {
-            let temp_dir = tempdir().expect("tempdir");
-            let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-            let (namespace_id, upload_id, content_ref, _) =
-                staged_session(&inner, &context(1_000)).await;
-            let key = upload_session(&namespace_id, &upload_id);
-            let stored = inner
-                .get_with_metadata(&key)
-                .await
-                .expect("read session")
-                .expect("session");
-            let state = decode_control_object::<UploadSessionPayload>(
-                &stored.bytes,
-                ControlObjectKind::UploadSession,
-            )
-            .expect("staged session")
-            .into_payload();
-            let initial = LoadedControl {
-                object_key: key.clone(),
-                state,
-                etag: stored.metadata.etag.expect("session etag"),
-            };
-            if contended {
-                abort(&inner, &namespace_id, &upload_id, &context(2_000))
-                    .await
-                    .expect("competing abort");
+    /// Returns how many times each key under the uploads prefix was written.
+    fn writes_per_key(store: &RecordingStore<LocalFsStore>) -> Vec<(String, usize)> {
+        let mut writes = std::collections::BTreeMap::new();
+        for operation in store.snapshot() {
+            if matches!(
+                operation,
+                RecordedOperation::Put { .. } | RecordedOperation::CompareAndSwap { .. }
+            ) {
+                *writes.entry(operation.key().to_owned()).or_insert(0) += 1;
             }
-            let catalog =
-                crate::namespace::catalog::load_namespace_catalog_entry(&inner, &namespace_id)
-                    .await
-                    .expect("catalog");
-            let store = RecordingStore::new(inner, KeyPredicate::exact(&key));
-            let completed = freeze_completed_session_from_initial(
-                &store,
-                &catalog,
-                &upload_id,
-                &content_ref,
-                3_000,
-                Some(initial),
-            )
-            .await;
-
-            assert_eq!(store.counts().compare_and_swaps, 1);
-            assert_eq!(store.count(OperationSelector::Read), usize::from(contended));
-            if contended {
-                assert_matches!(completed, Err(CoreError::UploadNotFound { .. }));
-            } else {
-                assert_eq!(
-                    completed.expect("complete").response.content_ref(),
-                    Some(&content_ref)
-                );
-            }
-            let state = load_upload_session_state(&store, &namespace_id, &upload_id)
-                .await
-                .expect("valid terminal session");
-            assert_eq!(
-                state.mode,
-                UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Idle {}
-                }
-            );
         }
+        writes.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        create(
+            &LocalFsStore::new(temp_dir.path()).expect("store"),
+            &namespace_id,
+            &setup,
+        )
+        .await
+        .expect("bootstrap");
+        let store = RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::prefix(upload_session_prefix(&namespace_id)),
+        );
+        let catalog =
+            crate::namespace::catalog::load_namespace_catalog_entry(&store, &namespace_id)
+                .await
+                .expect("catalog");
+
+        let proxied = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin proxied upload");
+        upload_content(
+            &store,
+            &namespace_id,
+            &proxied.upload_id,
+            None,
+            BYTES,
+            1_000,
+        )
+        .await
+        .expect("upload proxied bytes");
+        complete(&store, &namespace_id, &proxied.upload_id, &setup)
+            .await
+            .expect("complete proxied upload");
+
+        let direct = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin direct put");
+        store
+            .put(
+                &direct.object_key,
+                Bytes::from_static(BYTES),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write direct-put bytes");
+        complete_upload(
+            &store,
+            &namespace_id,
+            &direct.session.upload_id,
+            None,
+            CompleteUploadBody::DirectPut {
+                content: UploadContentClaim {
+                    size_bytes: BYTES.len() as u64,
+                    checksum: Checksum::crc64nvme(BYTES),
+                },
+            },
+            &setup,
+        )
+        .await
+        .expect("complete direct put");
+
+        let prepared = stage_owned_bytes(&store, &catalog, None, BYTES, &setup)
+            .await
+            .expect("stage owned bytes");
+        let owned = prepared.upload_id().expect("owned staging session").clone();
+
+        let mut expected = Vec::new();
+        for upload_id in [&proxied.upload_id, &direct.session.upload_id, &owned] {
+            expected.push((upload_session(&namespace_id, upload_id), 1));
+            expected.push((upload_outcome(&namespace_id, upload_id), 1));
+        }
+        expected.sort();
+        assert_eq!(writes_per_key(&store), expected);
+        assert_eq!(store.counts().compare_and_swaps, 0);
     }
 
     #[test]
@@ -2004,7 +1781,7 @@ mod tests {
                 // session reopened after that default changed.
                 checksum_algorithm: ChecksumAlgorithm::Crc32c,
             },
-            status: UploadSessionRecordStatus::Open { expires_at_ms: 2 },
+            expires_at_ms: 2,
         };
         let (_, required_algorithm) =
             multipart_session_upload(&session).expect("multipart session");
@@ -2103,7 +1880,7 @@ mod tests {
         let open = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
-        assert_matches!(open.status, UploadSessionRecordStatus::Open { .. });
+        assert_eq!(open.outcome, None);
 
         store
             .put(
@@ -2201,11 +1978,11 @@ mod tests {
         let state = load_upload_session_state(&store, &namespace_id, &upload_id)
             .await
             .expect("session still readable");
-        assert_matches!(
-            state.status,
-            UploadSessionRecordStatus::Aborted {
+        assert_eq!(
+            state.outcome,
+            Some(UploadOutcome::Aborted {
                 aborted_at_ms: 2_000
-            }
+            })
         );
         assert!(store.head(&content_key).await.expect("head").is_none());
     }
@@ -2251,7 +2028,7 @@ mod tests {
         let state = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
-        assert_matches!(state.status, UploadSessionRecordStatus::Open { .. });
+        assert_eq!(state.outcome, None);
         assert!(store
             .head(&begin.object_key)
             .await

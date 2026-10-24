@@ -17,7 +17,7 @@ use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::MutationContext;
-use loonfs_objectstore::layout::DurableObjectFamily;
+use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
@@ -309,7 +309,11 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         "the conflict identifies the original commit"
     );
     assert_eq!(
-        session_keys(&store, &namespace_id).await.len(),
+        session_keys(&store, &namespace_id)
+            .await
+            .iter()
+            .filter(|key| upload_id_of(key).is_some())
+            .count(),
         2,
         "one session per staging write, published or not"
     );
@@ -395,7 +399,14 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     let temp_dir = tempdir().expect("tempdir");
     let sessions = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::family(DurableObjectFamily::UploadSession),
+        KeyPredicate::new(|key| {
+            loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
+                matches!(
+                    parsed.family(),
+                    DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome
+                )
+            })
+        }),
     ));
     let store: SharedObjectStore = sessions.clone();
     let runtime = open_staged_runtime(store, "counted-writer").await;
@@ -417,17 +428,20 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
 
     let counts = sessions.counts();
     assert_eq!(
-        counts.create_if_absent_puts, 1,
-        "one record opens, claiming the content id before the bytes exist"
+        counts.create_if_absent_puts, 2,
+        "the session record claims the content id before the bytes exist, and the outcome \
+         record freezes the reference the write produced"
     );
-    assert_eq!(
-        counts.compare_and_swaps, 1,
-        "one swap freezes the reference the write produced"
-    );
+    assert_eq!(counts.compare_and_swaps, 0, "neither record is rewritten");
     assert_eq!(
         sessions.count(OperationSelector::Read),
         0,
-        "the completion swap reuses the confirmed creation etag without rereading the session"
+        "the completion reads no record back"
+    );
+    assert_eq!(
+        sessions.count(OperationSelector::Head),
+        1,
+        "the completion checks that the session record still exists"
     );
     assert_eq!(
         counts.deletes, 0,
