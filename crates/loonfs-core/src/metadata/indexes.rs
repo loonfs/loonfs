@@ -109,9 +109,16 @@ impl MetadataIndexes {
         parent_inode_id: InodeId,
         name_key: &NameKey,
     ) -> Option<DirentryBindingRecord> {
-        self.latest_bind_by_parent_name
-            .get(&(parent_inode_id, name_key.clone()))
-            .cloned()
+        self.latest_bind_in_slot(&(parent_inode_id, name_key.clone()))
+    }
+
+    /// [`Self::latest_bind`] for a caller that builds the slot key once and
+    /// probes several states with it.
+    pub(super) fn latest_bind_in_slot(
+        &self,
+        slot: &(InodeId, NameKey),
+    ) -> Option<DirentryBindingRecord> {
+        self.latest_bind_by_parent_name.get(slot).cloned()
     }
 
     pub(super) fn active_parent_for_child(
@@ -122,6 +129,22 @@ impl MetadataIndexes {
             .get(&child_inode_id)
             .filter(|row| row.is_bound())
             .cloned()
+    }
+
+    /// The child's newest binding, bound or unbound.
+    pub(super) fn latest_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+    ) -> Option<DirentryBindingRecord> {
+        self.latest_binding_by_child.get(&child_inode_id).cloned()
+    }
+
+    /// The root's newest tombstone event, whatever its action.
+    pub(super) fn latest_tombstone(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Option<SubtreeTombstoneRecord> {
+        self.tombstone_by_root.get(&root_inode_id).cloned()
     }
 
     pub(super) fn hiding_tombstone(

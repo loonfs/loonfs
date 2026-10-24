@@ -13,12 +13,14 @@ use std::sync::{Arc, Mutex};
 /// durable key once; the overlay — the only layer that changes between
 /// candidates — is composed per lookup on top.
 ///
-/// Callers apply their own seq filters to the cached vectors. The binding
-/// vectors take the manifest's rows from the newest run that has any for
-/// the key, which is the whole answer for every view at or after the
-/// manifest's head, and every view that shares a cache is at or after the
-/// sequence its durable layers were loaded at (see
-/// [`super::MetadataView::with_durable_cache`]).
+/// Callers apply their own seq filters to the cached vectors and keep the
+/// newest row. The binding vectors take the manifest's rows from the newest
+/// run that has any for the key, which is the whole answer for every view at
+/// or after the manifest's head. The binding and tombstone vectors take each
+/// WAL tail chunk's newest row of the key, which is the only row of the chunk
+/// that a view at or after the chunk's last commit keeps. Every view that
+/// shares a cache is at or after the sequence its durable layers were loaded
+/// at (see [`super::MetadataView::with_durable_cache`]).
 #[derive(Debug, Default)]
 pub(crate) struct DurableVisibilityCache {
     inner: Mutex<DurableVisibilityCacheInner>,
