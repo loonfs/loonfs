@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// The write interval, the shortest time between two compare-and-swap writes
-/// to one object.
+/// The write interval, the shortest time between the starts of two
+/// compare-and-swap writes to one object.
 ///
 /// Some providers limit writes to the same object to one per second (see
 /// `docs/specs/object-storage-providers.md`). The namespace hint is the object
@@ -24,22 +24,21 @@ use std::time::Duration;
 pub const MIN_CAS_WRITE_INTERVAL_MS: u64 = 1_000;
 
 /// A store wrapper that forwards every call to the store it wraps, and starts
-/// each compare-and-swap write to an object at least
-/// [`MIN_CAS_WRITE_INTERVAL_MS`] after the previous one to that object
-/// completed.
+/// compare-and-swap writes to one object at least one write interval
+/// ([`MIN_CAS_WRITE_INTERVAL_MS`]) apart.
 ///
-/// A write that comes sooner waits out the rest of the write interval and then
-/// proceeds. Create-only puts and every other operation pass through
-/// unchanged.
+/// A write that comes sooner waits until one write interval after the
+/// previous write's start, and then proceeds. Create-only puts and every other
+/// operation pass through unchanged.
 #[derive(Debug)]
 pub(crate) struct CasPacedObjectStore {
     inner: SharedObjectStore,
     timer: Arc<dyn MonotonicTimer>,
     /// For each key written by compare-and-swap within the last write
-    /// interval, the later of when its latest write started (or is scheduled
-    /// to start) and when that write completed. Each compare-and-swap write
-    /// first drops the keys whose write interval has passed, so the map lists
-    /// only the keys written within the last write interval.
+    /// interval, when its latest write started or is scheduled to start. Each
+    /// compare-and-swap write first drops the keys whose write interval has
+    /// passed, so the map lists only the keys written within the last write
+    /// interval.
     written_at_ms: Mutex<HashMap<String, u64>>,
 }
 
@@ -63,8 +62,7 @@ impl CasPacedObjectStore {
     }
 
     /// Reserves the earliest start time that the write interval allows for
-    /// `key`, waits until then, runs `write`, and records when `write`
-    /// completed.
+    /// `key`, waits until then, and runs `write`.
     async fn paced<T>(&self, key: &str, write: impl std::future::Future<Output = T>) -> T {
         let now_ms = self.timer.monotonic_now_ms();
         let start_at_ms = {
@@ -79,14 +77,7 @@ impl CasPacedObjectStore {
         if start_at_ms > now_ms {
             pause_before_write(Duration::from_millis(start_at_ms - now_ms)).await;
         }
-        let written = write.await;
-        let completed_at_ms = self.timer.monotonic_now_ms();
-        let mut written_at_ms = self.lock();
-        let at_ms = written_at_ms
-            .entry(key.to_owned())
-            .or_insert(completed_at_ms);
-        *at_ms = (*at_ms).max(completed_at_ms);
-        written
+        write.await
     }
 }
 
@@ -255,10 +246,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cas_writes_to_one_key_complete_at_least_a_write_interval_apart() {
+    async fn cas_writes_to_one_key_start_at_least_a_write_interval_apart() {
         let (_directory, store, timer) = paced_store();
         let mut etag = created(&store, "hint.json").await;
-        let mut completed_at_ms = Vec::new();
+        // A local write takes no time on the paused clock, so the time after
+        // each write is also when that write started.
+        let mut started_at_ms = Vec::new();
         for body in [b"1", b"2", b"3"] {
             etag = store
                 .compare_and_swap("hint.json", &etag, Bytes::from_static(body))
@@ -266,10 +259,10 @@ mod tests {
                 .expect("swap")
                 .etag
                 .expect("etag");
-            completed_at_ms.push(timer.monotonic_now_ms());
+            started_at_ms.push(timer.monotonic_now_ms());
         }
-        assert_eq!(completed_at_ms[0], 0, "the first write doesn't wait");
-        for pair in completed_at_ms.windows(2) {
+        assert_eq!(started_at_ms[0], 0, "the first write doesn't wait");
+        for pair in started_at_ms.windows(2) {
             assert!(pair[1] - pair[0] >= MIN_CAS_WRITE_INTERVAL_MS, "{pair:?}");
         }
     }

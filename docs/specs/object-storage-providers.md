@@ -8,7 +8,7 @@ The key word MUST in this document is to be interpreted as described in BCP 14 (
 
 This section lists the provider data points that come up most often in LoonFS design work.
 
-- Don't assume that any CAS object can be updated more often than once per second. GCS documents a limit of one write per second to the same object name, and R2 documents a limit of one concurrent write per second to the same object key.[^1][^2] To stay within these limits, every store that LoonFS builds from configuration paces compare-and-swap writes. A compare-and-swap write to an object waits until `MIN_CAS_WRITE_INTERVAL_MS` (1 second) after the previous compare-and-swap write to that object completed.
+- Don't assume that any CAS object can be updated more often than once per second. GCS documents a limit of one write per second to the same object name, and R2 documents a limit of one concurrent write per second to the same object key.[^1][^2] To stay within these limits, every store that LoonFS builds from configuration paces compare-and-swap writes. Compare-and-swap writes to one object start at least one write interval (`MIN_CAS_WRITE_INTERVAL_MS`, 1 second) apart, and a write that comes sooner waits until the interval has passed.
 - Don't assume that an `ETag` is a portable content hash. ETags aren't consistent across providers, especially for multipart uploads.
 - A HEAD request usually takes around 30 ms, and a full GET of a small object (with content) should be assumed to take about 200 ms. A HEAD request (or a GET with if-none-match) is a useful way to check control objects faster.
 
