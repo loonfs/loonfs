@@ -194,7 +194,7 @@ The sequence number below which a namespace's history is no longer guaranteed. A
 
 ### Control object
 
-A small object used for discovery, retained views, or upload state: the hint, pins, and upload session and outcome records. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 

@@ -184,7 +184,7 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
 /// session record gone and refuses, so it returns no token, and the next
 /// pass deletes the outcome it left.
 #[tokio::test]
-async fn a_completion_stalled_across_a_pass_that_ended_the_session_is_refused() {
+async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_refused() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);

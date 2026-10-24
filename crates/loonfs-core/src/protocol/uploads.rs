@@ -567,7 +567,7 @@ pub(crate) async fn upload_content_stream<S: ObjectStore + ?Sized>(
 ///
 /// The write is create-only and writes no session record. The store makes
 /// the create conditional at every size, so when two requests upload to one
-/// session, only one of them writes the object. A request that finds the
+/// session, only one of them creates the object. A request that finds the
 /// object already written succeeds if the stored size and checksum match its
 /// bytes (a retry of the same upload), and returns a content conflict if
 /// they don't.
@@ -993,7 +993,8 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
 /// written it yet.
 ///
 /// Only this session writes the object, with a create that the store makes
-/// conditional, so the stored object is the bytes a request uploaded.
+/// conditional, so the stored object contains the bytes that one request
+/// uploaded.
 async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     session: &UploadSessionPayload,
@@ -1122,9 +1123,9 @@ fn evidence_within_window(
         .then(|| CompletedUploadEvidence::for_completed_session(content.clone(), completed_at_ms))
 }
 
-/// Answers a completion against a session that has already ended: a replay
-/// of the same content succeeds idempotently, and anything else is the
-/// terminal error for that outcome.
+/// Resolves a completion against a session that has already ended: a replay
+/// of the same content succeeds idempotently, and anything else returns the
+/// error for that outcome.
 fn replay_terminal_completion(
     outcome: &UploadOutcome,
     namespace_id: &NamespaceId,
@@ -1587,13 +1588,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_outcome_put_that_lands_and_answers_a_precondition_failure_is_this_requests_own() {
+    async fn an_applied_outcome_put_that_fails_its_precondition_is_this_requests_own() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         let (namespace_id, upload_id, content_ref, _) =
             staged_session(&inner, &context(1_000)).await;
-        // The provider resends the put that created the outcome record and
-        // gets a precondition failure for its own write.
+        // The provider client resends the put that created the outcome
+        // record, and the resent put fails its precondition because of the
+        // first one.
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(upload_outcome(&namespace_id, &upload_id)),

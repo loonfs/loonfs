@@ -984,7 +984,7 @@ This section describes the three upload modes.
 
 The server streams the body to object storage without buffering the whole file. While it streams, it counts the bytes and computes the store's checksum. A body larger than `upload.service_proxied.max_content_bytes` fails with `content_too_large`. The resulting content reference stores that checksum in its `checksum` field.
 
-A client can retry the `PUT` with the same bytes, for example after a response is lost. The retry succeeds and returns the same `content_ref`, even if the first request's write took effect, or if the two requests run at the same time. A `PUT` with different bytes into a session whose content is already written fails with `upload_content_conflict`.
+A client can retry the `PUT` with the same bytes, for example after a response is lost. The retry succeeds and returns the same `content_ref`, even if the first request's write took effect, or if the two requests run at the same time. A `PUT` with different bytes to a session whose content is already written fails with `upload_content_conflict`.
 
 #### Direct single-PUT upload
 

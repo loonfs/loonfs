@@ -19,8 +19,8 @@ use loonfs_types::format::control::{UploadOutcome, UploadSessionPayload};
 use loonfs_types::{ContentId, NamespaceId, UploadId};
 use std::pin::pin;
 
-/// One upload session's records, as a listing of the uploads prefix found
-/// them.
+/// One upload session's records, as a listing of the uploads prefix
+/// returned them.
 pub(super) enum ListedUpload {
     /// A session record, followed in the listing by its outcome record when
     /// `outcome_listed` is true.
@@ -30,7 +30,7 @@ pub(super) enum ListedUpload {
     },
     /// An outcome record listed without its session record. It's left over
     /// from a deletion that stopped between the two records, or from a
-    /// completion or abort that found the session gone, and nothing reads it.
+    /// completion or abort that found the session gone. No request acts on it.
     OrphanOutcome { upload_id: UploadId },
     /// A key under the uploads prefix that isn't an upload record.
     Unrecognized,
@@ -212,14 +212,14 @@ pub(super) async fn load_swept_session<S: ObjectStore + ?Sized>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UploadSessionSweep {
-    /// The session's records survive this pass. It may have advanced a state.
+    /// The pass keeps the session's records. It might have aborted the session.
     Retain {
         /// Earliest time this session may be reconsidered when retention is
         /// time-based. `None` means the pass must retry later for a non-time-based
         /// reason, such as a lost race or failed cleanup.
         reclaimable_at_ms: Option<u64>,
     },
-    /// The session has nothing left to say and its records may be deleted.
+    /// No later pass needs the session, so its records can be deleted.
     Delete,
 }
 
@@ -294,9 +294,10 @@ fn retain_undated() -> UploadSessionSweep {
 /// Aborts a session after its lease and grace period expire, then cleans up
 /// its unpublished content.
 ///
-/// The put-if-absent of the outcome record provides safety. A completion
-/// that arrives after the lease is refused, so the grace only covers a
-/// completing host whose clock runs behind the collector's.
+/// The outcome record is created with put-if-absent, so this abort can't
+/// replace a completion that was recorded first. A completion that arrives
+/// after the lease is refused, so the grace only covers a completing host
+/// whose clock runs behind the collector's.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
     store: &S,
     grace_window_ms: u64,

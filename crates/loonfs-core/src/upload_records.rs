@@ -145,10 +145,10 @@ pub(crate) enum OutcomeCreation {
 ///
 /// The outcome record is created with put-if-absent, so a completion, a
 /// client's abort, and garbage collection's abort of an expired session race
-/// on one create, and the session ends exactly once. A put whose result is
-/// unknown, or that fails its precondition, reads the record back: an equal
-/// outcome is this call's own write, and a different one is returned as
-/// [`OutcomeCreation::Existing`].
+/// on one create, and the session ends exactly once. After a put whose result
+/// is unknown, or that fails its precondition, this function reads the record
+/// back. An equal outcome is this call's own write, and a different one is
+/// returned as [`OutcomeCreation::Existing`].
 ///
 /// An outcome record counts only while its session record exists, so after
 /// the put this function sends a HEAD request for the session record, and
