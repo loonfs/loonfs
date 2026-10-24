@@ -15,7 +15,7 @@ use super::runs::MetadataRunManifest;
 use super::segment_block_cache::{MemorySegmentBlocks, SegmentBlockCache};
 use crate::block_cache::{
     CheckStart, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
-    DecodedBlockKey, DecodedSegmentBlock, SegmentCacheKey,
+    DecodedBlockKey, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
 };
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
@@ -79,8 +79,10 @@ impl DecodedBlockKey for ObjectStoreScope {
 /// Counters and occupancy of the shared segment blocks.
 ///
 /// The first fields are the counters that every cache reports (see
-/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats)),
-/// and the rest count what the segment filters did.
+/// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats))
+/// for the data, index, and filter blocks, and the rest count what the
+/// segment filters did. [`SharedSegmentBlocks::manifest_stats`] reports the
+/// manifests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataSegmentCacheStats {
     pub hits: usize,
@@ -127,11 +129,17 @@ pub(super) fn read_ahead_window_bytes(segment_cache: Option<&MetadataSegmentCach
     })
 }
 
-/// Decoded segment blocks and manifests for every object store, under one
-/// byte budget.
+/// Decoded segment entries of one kind, under one byte budget.
+pub(super) type SegmentEntries =
+    DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>;
+
+/// Decoded segment blocks and manifests for every object store, each kind
+/// under its own byte budget and recency order, so a burst of blocks can't
+/// evict a manifest.
 pub struct SharedSegmentBlocks {
-    pub(super) blocks:
-        DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
+    /// The data, index, and filter blocks.
+    blocks: SegmentEntries,
+    manifests: SegmentEntries,
     filter_stats: MetadataSegmentFilterStatsInner,
 }
 
@@ -151,13 +159,33 @@ struct MetadataSegmentFilterStatsInner {
 }
 
 impl SharedSegmentBlocks {
-    pub fn new(max_decoded_bytes: usize) -> Self {
+    /// Returns a cache that keeps up to `max_segment_bytes` of data, index,
+    /// and filter blocks and up to `max_manifest_bytes` of manifests.
+    pub fn new(max_segment_bytes: usize, max_manifest_bytes: usize) -> Self {
         Self {
-            blocks: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes)),
+            blocks: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_segment_bytes)),
+            manifests: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_manifest_bytes)),
             filter_stats: MetadataSegmentFilterStatsInner::default(),
         }
     }
 
+    /// Returns the cache that keeps entries of `kind`.
+    pub(super) fn entries(&self, kind: SegmentBlockKind) -> &SegmentEntries {
+        match kind {
+            SegmentBlockKind::Data | SegmentBlockKind::Index | SegmentBlockKind::Filter => {
+                &self.blocks
+            }
+            SegmentBlockKind::Manifest => &self.manifests,
+        }
+    }
+
+    /// Returns the counters and occupancy of the manifests.
+    pub fn manifest_stats(&self) -> DecodedBlockCacheStats {
+        self.manifests.stats()
+    }
+
+    /// Returns the counters and occupancy of the data, index, and filter
+    /// blocks, and the counters of the segment filters.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
         let blocks = self.blocks.stats();
         MetadataSegmentCacheStats {
@@ -243,12 +271,16 @@ impl MetadataSegmentCache {
         }
     }
 
-    /// A view over blocks no other view reads, with the default block memo
-    /// budget and read-ahead window.
+    /// A view over blocks no other view reads, with a budget of
+    /// `max_decoded_bytes` for blocks and another for manifests, and the
+    /// default block memo budget and read-ahead window.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
-            Arc::new(SharedSegmentBlocks::new(max_decoded_bytes)),
+            Arc::new(SharedSegmentBlocks::new(
+                max_decoded_bytes,
+                max_decoded_bytes,
+            )),
             ObjectStoreScope::new(0),
             Arc::default(),
             READAHEAD_WINDOW_BYTES,
@@ -274,14 +306,21 @@ impl MetadataSegmentCache {
         Fut: std::future::Future<Output = Result<DecodedMetadataSegmentBlock, E>>,
     {
         self.shared
-            .blocks
+            .entries(cache_key.block_kind)
             .get_or_load(&(self.scope, cache_key.clone()), load)
             .await
     }
 
-    /// Counters for the whole shared cache, across every scope.
+    /// Counters of the blocks and the segment filters in the whole shared
+    /// cache, across every scope.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
         self.shared.stats()
+    }
+
+    /// Counters of the manifests in the whole shared cache, across every
+    /// scope.
+    pub fn manifest_stats(&self) -> DecodedBlockCacheStats {
+        self.shared.manifest_stats()
     }
 
     pub(super) fn record_filter_skip(&self) {
@@ -300,13 +339,17 @@ impl MetadataSegmentCache {
 
     #[cfg(test)]
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
-        self.shared.blocks.get(&(self.scope, key.clone()))
+        self.shared
+            .entries(key.block_kind)
+            .get(&(self.scope, key.clone()))
     }
 
     /// Inserts an entry into the shared segment blocks. Manifests are
     /// inserted this way, and blocks are inserted through [`Self::blocks`].
     pub(super) fn insert(&self, key: MetadataSegmentCacheKey, block: DecodedMetadataSegmentBlock) {
-        self.shared.blocks.insert((self.scope, key), block);
+        self.shared
+            .entries(key.block_kind)
+            .insert((self.scope, key), block);
     }
 }
 
@@ -711,7 +754,7 @@ mod tests {
     /// blocks.
     #[tokio::test]
     async fn views_read_only_the_blocks_of_their_own_object_store() {
-        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX));
+        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX));
         let view = |scope| {
             MetadataSegmentCache::new(
                 Arc::clone(&shared),

@@ -21,8 +21,11 @@ pub use ssd_segment_blocks::{
     SSD_INDEX_ENTRY_BYTES,
 };
 
-/// Default limit for decoded segment blocks and manifests: 256 MiB.
+/// Default limit for decoded segment blocks: 256 MiB.
 pub const DEFAULT_MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
+/// Default limit for decoded manifests: 32 MiB (enough for about 600
+/// namespaces of 10,000 files).
+pub const DEFAULT_MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
 /// Default limit for namespace heads: 16 MiB (enough for about 18,000
 /// namespaces).
 pub const DEFAULT_MAX_HEAD_BYTES: usize = 16 * 1024 * 1024;
@@ -105,6 +108,7 @@ impl MetadataCache {
     pub fn builder() -> MetadataCacheBuilder {
         MetadataCacheBuilder {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+            max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES,
             max_head_bytes: DEFAULT_MAX_HEAD_BYTES,
             max_wal_tail_bytes: DEFAULT_MAX_WAL_TAIL_BYTES,
             max_completed_upload_session_bytes: DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
@@ -119,6 +123,7 @@ impl MetadataCache {
     /// runtime that reads through it.
     pub fn stats(&self) -> MetadataCacheStats {
         let segments = self.inner.segment_blocks.stats();
+        let manifests = self.inner.segment_blocks.manifest_stats();
         let heads = self.inner.heads_and_wal_tails.head_stats();
         let tails = self.inner.heads_and_wal_tails.tail_stats();
         let content_objects = self.inner.objects.content_object_stats();
@@ -137,6 +142,12 @@ impl MetadataCache {
                 .ssd_segment_blocks
                 .as_ref()
                 .map(|ssd| ssd.stats()),
+            manifest_hits: manifests.hits,
+            manifest_misses: manifests.misses,
+            manifest_inserts: manifests.inserts,
+            manifest_evictions: manifests.evictions,
+            manifest_rejections: manifests.rejections,
+            manifest_bytes: manifests.cached_decoded_bytes,
             head_hits: self.inner.head_hits.load(Ordering::Relaxed),
             head_misses: self.inner.head_misses.load(Ordering::Relaxed),
             head_evictions: heads.evictions,
@@ -291,6 +302,7 @@ impl ObjectStoreScopes {
 #[must_use]
 pub struct MetadataCacheBuilder {
     max_segment_bytes: usize,
+    max_manifest_bytes: usize,
     max_head_bytes: usize,
     max_wal_tail_bytes: usize,
     max_completed_upload_session_bytes: usize,
@@ -301,10 +313,25 @@ pub struct MetadataCacheBuilder {
 }
 
 impl MetadataCacheBuilder {
-    /// Sets the decoded bytes of segment blocks and manifests the cache
-    /// holds. Defaults to [`DEFAULT_MAX_SEGMENT_BYTES`]; zero keeps none.
+    /// Sets the decoded bytes of segment blocks (data, index, and filter
+    /// blocks) that the cache keeps in memory. Defaults to
+    /// [`DEFAULT_MAX_SEGMENT_BYTES`]. Zero keeps none.
     pub fn max_segment_bytes(mut self, max_segment_bytes: usize) -> Self {
         self.max_segment_bytes = max_segment_bytes;
+        self
+    }
+
+    /// Sets the decoded bytes of manifests that the cache keeps. Defaults to
+    /// [`DEFAULT_MAX_MANIFEST_BYTES`]. Zero keeps none, so every read loads
+    /// its manifest from the store. A manifest heavier than the whole limit
+    /// isn't kept.
+    ///
+    /// Manifests have a limit of their own, so reads that load many segment
+    /// blocks can't evict them. A manifest is charged about 10 to 60 KB for
+    /// a namespace of 10,000 files, and about 240 KB for a namespace of
+    /// 1,000,000 files.
+    pub fn max_manifest_bytes(mut self, max_manifest_bytes: usize) -> Self {
+        self.max_manifest_bytes = max_manifest_bytes;
         self
     }
 
@@ -401,7 +428,10 @@ impl MetadataCacheBuilder {
     pub fn build(self) -> MetadataCache {
         MetadataCache {
             inner: Arc::new(MetadataCacheInner {
-                segment_blocks: Arc::new(SharedSegmentBlocks::new(self.max_segment_bytes)),
+                segment_blocks: Arc::new(SharedSegmentBlocks::new(
+                    self.max_segment_bytes,
+                    self.max_manifest_bytes,
+                )),
                 ssd_segment_blocks: self.ssd_segment_blocks.map(Arc::new),
                 heads_and_wal_tails: Arc::new(SharedHeadsAndWalTails::new(
                     self.max_head_bytes,
@@ -428,30 +458,42 @@ impl MetadataCacheBuilder {
 /// that reads through it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataCacheStats {
-    /// Segment block and manifest lookups that found their entry in memory.
+    /// Segment block lookups that found their block in memory.
     pub segment_hits: usize,
-    /// Segment block and manifest lookups that didn't find their entry in
-    /// memory.
+    /// Segment block lookups that didn't find their block in memory.
     pub segment_misses: usize,
-    /// Segment blocks and manifests inserted into memory.
+    /// Segment blocks inserted into memory.
     pub segment_inserts: usize,
-    /// Segment blocks and manifests evicted from memory to stay within the
-    /// segment limit.
+    /// Segment blocks evicted from memory to stay within the segment limit.
     pub segment_evictions: usize,
-    /// Segment blocks and manifests heavier than the whole segment limit,
-    /// which are never kept in memory.
+    /// Segment blocks heavier than the whole segment limit, which are never
+    /// kept in memory.
     pub segment_rejections: usize,
     /// Segments skipped because their bloom filter ruled out a lookup before
     /// any index or data read.
     pub segment_filter_skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.
     pub segment_filter_false_positives: usize,
-    /// Bytes charged to segment blocks and manifests in memory now,
-    /// including their keys and the cache's own allocation for each entry.
+    /// Bytes charged to segment blocks in memory now, including their keys
+    /// and the cache's own allocation for each entry.
     pub segment_bytes: usize,
     /// The counters and occupancy of the SSD tier of the segment blocks, or
     /// `None` if the cache has no SSD tier.
     pub segment_ssd: Option<SsdSegmentBlocksStats>,
+    /// Manifest lookups that found their manifest in the cache.
+    pub manifest_hits: usize,
+    /// Manifest lookups that went to the store.
+    pub manifest_misses: usize,
+    /// Manifests inserted.
+    pub manifest_inserts: usize,
+    /// Manifests evicted to stay within the manifest limit.
+    pub manifest_evictions: usize,
+    /// Manifests heavier than the whole manifest limit, which are never
+    /// kept.
+    pub manifest_rejections: usize,
+    /// Bytes charged to manifests now, including their keys and the cache's
+    /// own allocation for each entry.
+    pub manifest_bytes: usize,
     /// Namespace head lookups a read could start from.
     pub head_hits: usize,
     /// Namespace head lookups that sent a read to the store.

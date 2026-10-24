@@ -96,6 +96,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
         "loonfs_segment_cache_rejections_total",
         "loonfs_segment_cache_filter_skips_total",
         "loonfs_segment_cache_filter_false_positives_total",
+        "loonfs_manifest_cache_gets_total",
+        "loonfs_manifest_cache_inserts_total",
+        "loonfs_manifest_cache_evictions_total",
+        "loonfs_manifest_cache_rejections_total",
         "loonfs_wal_tail_cache_gets_total",
         "loonfs_wal_tail_cache_inserts_total",
         "loonfs_wal_tail_cache_evictions_total",
@@ -119,6 +123,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     }
     for name in [
         "loonfs_segment_cache_retained_decoded_bytes",
+        "loonfs_manifest_cache_retained_decoded_bytes",
         "loonfs_head_cache_retained_decoded_bytes",
         "loonfs_wal_tail_cache_retained_decoded_bytes",
         "loonfs_content_object_cache_retained_decoded_bytes",

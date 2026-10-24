@@ -104,7 +104,7 @@ impl MemorySegmentBlocks {
         Fut: Future<Output = Result<DecodedMetadataSegmentBlock, ManifestLoadError>>,
     {
         self.shared
-            .blocks
+            .entries(key.block_kind)
             .get_or_load_with_hit(&(self.scope, key.clone()), hit, load)
             .await
     }
@@ -117,7 +117,9 @@ impl SegmentBlockCache for MemorySegmentBlocks {
         key: &MetadataSegmentCacheKey,
         _handle: &BlockHandle,
     ) -> Option<DecodedMetadataSegmentBlock> {
-        self.shared.blocks.get(&(self.scope, key.clone()))
+        self.shared
+            .entries(key.block_kind)
+            .get(&(self.scope, key.clone()))
     }
 
     fn insert_block(
@@ -126,7 +128,9 @@ impl SegmentBlockCache for MemorySegmentBlocks {
         block: DecodedMetadataSegmentBlock,
         _stored: &[u8],
     ) {
-        self.shared.blocks.insert((self.scope, key), block);
+        self.shared
+            .entries(key.block_kind)
+            .insert((self.scope, key), block);
     }
 
     async fn get_or_load_block(

@@ -73,7 +73,10 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
 /// so that a test's windows can be smaller than its segment.
 fn cache_with_window(max_decoded_bytes: usize, window_bytes: usize) -> MetadataSegmentCache {
     MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(max_decoded_bytes)),
+        Arc::new(SharedSegmentBlocks::new(
+            max_decoded_bytes,
+            max_decoded_bytes,
+        )),
         ObjectStoreScope::new(0),
         Arc::default(),
         window_bytes,
@@ -515,6 +518,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     .expect("one block");
     let shared = Arc::new(SharedSegmentBlocks::new(
         4 * probe.stats().cached_decoded_bytes,
+        usize::MAX,
     ));
     let blocks = Arc::new(DecodeCountingBlocks {
         memory: MemorySegmentBlocks::new(Arc::clone(&shared), ObjectStoreScope::new(0)),
