@@ -2,7 +2,7 @@
 //! segments a manifest references.
 
 use super::cache::MetadataSegmentCache;
-use super::index_block_load::insert_written_segment;
+use super::index_block_load::{insert_written_segment, SegmentWriter};
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
@@ -114,7 +114,7 @@ where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(MetadataRowFamily) -> Vec<MetadataRow>,
 {
-    let mut puts = MetadataSegmentPuts::new(store, segment_cache);
+    let mut puts = MetadataSegmentPuts::new(store, segment_cache, SegmentWriter::Fold);
     let mut segments_by_family = Vec::with_capacity(MANIFEST_ROW_FAMILIES.len());
     for family in MANIFEST_ROW_FAMILIES {
         let mut writer = MetadataSegmentWriter::new(family, namespace_id);
@@ -172,19 +172,26 @@ fn prepare_manifest_segment(
 
 /// The segment puts in flight for one fold or compaction, bounded by
 /// `STORE_WRITES_IN_FLIGHT` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
-/// When a put succeeds, LoonFS inserts that segment into `segment_cache`.
+/// When a put succeeds, LoonFS inserts the segment's blocks into
+/// `segment_cache`, as [`insert_written_segment`] describes for `writer`.
 pub(super) struct MetadataSegmentPuts<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
+    writer: SegmentWriter,
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
     pending_bytes: usize,
 }
 
 impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
-    pub(super) fn new(store: &'a S, segment_cache: Option<&'a MetadataSegmentCache>) -> Self {
+    pub(super) fn new(
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        writer: SegmentWriter,
+    ) -> Self {
         Self {
             store,
             segment_cache,
+            writer,
             pending: FuturesUnordered::new(),
             pending_bytes: 0,
         }
@@ -225,7 +232,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
     async fn put(&mut self, descriptor: &MetadataSegmentRef, bytes: Bytes) -> Result<()> {
         let byte_count = bytes.len();
         self.wait_for_capacity(byte_count).await?;
-        let store = self.store;
+        let (store, writer) = (self.store, self.writer);
         let object_key = metadata_segment_object_key(descriptor);
         let written = self
             .segment_cache
@@ -237,7 +244,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
                 .map_err(|error| CoreError::store(&object_key, &error))?;
             if let Some((cache, descriptor, bytes)) = written {
                 // A segment this process can't decode must not be published in a manifest.
-                insert_written_segment(cache, &descriptor, &bytes)?;
+                insert_written_segment(cache, &descriptor, &bytes, writer)?;
             }
             Ok(byte_count)
         }
@@ -335,10 +342,15 @@ impl<'a> MetadataSegmentWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache::SegmentBlockKind;
+    use crate::manifest::index_block_load::{segment_block_cache_key, segment_object_bytes};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{
         BlockingStore, BufferWatchStore, ConcurrencyWatchStore, KeyPredicate, OperationSelector,
     };
+    use loonfs_types::format::manifest::InodeRecord;
+    use loonfs_types::format::segment_blocks::decode_index_block;
+    use loonfs_types::{ActorId, CommitId, InodeId, InodeKind};
     use tempfile::tempdir;
 
     fn descriptor(namespace_id: &NamespaceId) -> MetadataSegmentRef {
@@ -372,7 +384,7 @@ mod tests {
             let concurrency =
                 ConcurrencyWatchStore::new(&blocked, KeyPredicate::metadata_segment());
             let store = BufferWatchStore::new(&concurrency, KeyPredicate::metadata_segment());
-            let mut puts = MetadataSegmentPuts::new(&store, None);
+            let mut puts = MetadataSegmentPuts::new(&store, None, SegmentWriter::Fold);
             blocked.arm();
             for size in &initial_sizes {
                 puts.put(&descriptor(&namespace_id), Bytes::from(vec![0; *size]))
@@ -412,5 +424,111 @@ mod tests {
                 (initial_sizes.iter().sum::<usize>() + next_size) as u64
             );
         }
+    }
+
+    /// Returns a segment of 20,000 inode rows, each with a commit ID of its
+    /// own, so the rows compress poorly and the segment is larger than a
+    /// segment that LoonFS fetches whole.
+    fn large_inode_segment(namespace_id: &NamespaceId) -> (MetadataSegmentRef, Bytes) {
+        let family = MetadataRowFamily::Inodes;
+        let mut builder = SegmentBlocksBuilder::default();
+        for inode in 0..20_000 {
+            let row = MetadataRow::Inode(InodeRecord {
+                inode_id: InodeId(inode + 2),
+                inode_kind: InodeKind::File,
+                committed_seq: ChangeSeq(inode + 1),
+                commit_id: CommitId::generate(),
+                committed_by: ActorId::loonfs(),
+                committed_at_ms: 1_000 + inode,
+            });
+            builder
+                .push(
+                    &row.row_key_for_family(family),
+                    &row.filter_key_for_family(family),
+                    &row,
+                )
+                .expect("inode rows in key order");
+        }
+        let (descriptor, bytes) =
+            prepare_manifest_segment(namespace_id, family, builder.build().expect("segment"));
+        assert!(segment_object_bytes(&descriptor) > 256 * 1024);
+        (descriptor, bytes)
+    }
+
+    /// Writes the segment to a new store through `MetadataSegmentPuts` for
+    /// `writer`, which inserts the segment's blocks into `cache`.
+    async fn put_segment(
+        cache: &MetadataSegmentCache,
+        writer: SegmentWriter,
+        descriptor: &MetadataSegmentRef,
+        bytes: &Bytes,
+    ) {
+        let directory = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let mut puts = MetadataSegmentPuts::new(&store, Some(cache), writer);
+        puts.put(descriptor, bytes.clone()).await.expect("put");
+        puts.finish().await.expect("finish the puts");
+    }
+
+    /// Checks that a fold inserts every block of a segment larger than a
+    /// segment that LoonFS fetches whole, that a compaction inserts only the
+    /// segment's index and filter blocks, and that a fold's data blocks are
+    /// charged to the cache's budget and evicted like any other block.
+    #[tokio::test]
+    async fn a_fold_inserts_every_block_of_a_large_segment_and_a_compaction_none_of_its_data() {
+        let namespace_id = NamespaceId::parse("written-blocks").expect("namespace id");
+        let (descriptor, bytes) = large_inode_segment(&namespace_id);
+        let index_handle = descriptor.index_block;
+        let index_start = loonfs_types::usize_from_u64(index_handle.offset);
+        let index = decode_index_block(
+            &bytes[index_start..index_start + index_handle.stored_bytes as usize],
+            &index_handle,
+        )
+        .expect("index");
+        assert!(
+            index.len() >= 4,
+            "the segment has {} data blocks",
+            index.len()
+        );
+        let data_key = |position: usize| {
+            segment_block_cache_key(
+                &descriptor,
+                SegmentBlockKind::Data,
+                index[position].block.offset,
+            )
+        };
+        let mut fold_bytes = 0;
+        for (writer, data_blocks) in [
+            (SegmentWriter::Fold, index.len()),
+            (SegmentWriter::Compaction, 0),
+        ] {
+            let cache = MetadataSegmentCache::unshared(usize::MAX);
+            put_segment(&cache, writer, &descriptor, &bytes).await;
+            let stats = cache.stats();
+            assert_eq!(stats.inserts, 2 + data_blocks, "{writer:?}");
+            assert_eq!(
+                cache.get(&data_key(0)).is_some(),
+                writer == SegmentWriter::Fold,
+                "{writer:?}"
+            );
+            if writer == SegmentWriter::Fold {
+                fold_bytes = stats.cached_decoded_bytes;
+            }
+        }
+
+        let budget = fold_bytes / 2;
+        let cache = MetadataSegmentCache::unshared(budget);
+        put_segment(&cache, SegmentWriter::Fold, &descriptor, &bytes).await;
+        let stats = cache.stats();
+        assert!(stats.evictions > 0, "{stats:?}");
+        assert!(stats.cached_decoded_bytes <= budget, "{stats:?}");
+        assert!(
+            cache.get(&data_key(0)).is_none(),
+            "the oldest data block is evicted"
+        );
+        assert!(
+            cache.get(&data_key(index.len() - 1)).is_some(),
+            "the newest data block stays"
+        );
     }
 }

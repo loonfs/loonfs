@@ -1401,9 +1401,75 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that the first read after an explicit fold, and again after bounded
-/// compaction units, finds the segments that maintenance wrote in the
-/// runtime's segment cache and sends no segment GET.
+/// The file under `/large` that the read-after-fold tests read.
+const LARGE_FOLD_FILE: &str = "/large/f-02048.txt";
+
+/// Commits 8,192 new files under `/large`, whose bytes are their paths, in
+/// two commits, and folds them with one explicit fold. Checks that the fold's
+/// revisions segment, which a read of one of the files looks in, is larger
+/// than 256 KiB stored, the largest segment that LoonFS fetches whole.
+async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace: &crate::Namespace<Writable>,
+    maintenance: &Maintenance,
+    namespace_id: &NamespaceId,
+) {
+    use crate::publish::{CommitIntent, FilesystemOperation};
+
+    for commit in 0..2 {
+        let mut operations = Vec::new();
+        let mut prepared = Vec::new();
+        for index in commit * 4096..(commit + 1) * 4096 {
+            let path = format!("/large/f-{index:05}.txt");
+            let content = namespace
+                .prepare_content(path.as_bytes())
+                .await
+                .expect("prepare the content");
+            operations.push(FilesystemOperation::PutFile {
+                path: loonfs_types::AbsolutePath::parse(path).expect("path"),
+                content_ref: Some(content.content_ref().clone()),
+                inline_content: None,
+                behavior: crate::DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            });
+            prepared.push(content);
+        }
+        let intent = CommitIntent {
+            commit_id: loonfs_types::CommitId::generate(),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            operations,
+            preconditions: Vec::new(),
+        };
+        namespace
+            .commit_prepared(intent, prepared)
+            .await
+            .expect("commit the batch");
+    }
+    maintenance
+        .fold_wal(namespace_id)
+        .await
+        .expect("fold the batch");
+    let manifest = current_manifest_payload(store, namespace_id).await;
+    let folded = manifest.runs.last().expect("the fold's run");
+    let revisions = folded
+        .segments
+        .iter()
+        .find(|segment| segment.family == MetadataRowFamily::Revisions)
+        .expect("the fold writes revisions");
+    let stored = revisions.index_block.offset + u64::from(revisions.index_block.stored_bytes);
+    assert!(
+        stored > 256 * 1024,
+        "the fold's revisions segment is {stored} bytes"
+    );
+}
+
+/// Checks that the first read after an explicit fold, again after bounded
+/// compaction units, and again after a fold whose segments are larger than a
+/// segment that LoonFS fetches whole, finds the segments that maintenance
+/// wrote in the runtime's segment cache and sends no segment GET.
 #[tokio::test]
 async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
     use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -1470,7 +1536,84 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
     assert!(manifest.runs.iter().all(|run| run.tier == RunTier::Base));
     let gets = read_gets_by_key_class("/docs/second.txt").await;
     assert_eq!(gets.get(&segment), None, "GETs after compaction: {gets:?}");
+
+    write_a_large_batch_and_fold(store.as_ref(), &namespace, &maintenance, &namespace_id).await;
+    let gets = read_gets_by_key_class(LARGE_FOLD_FILE).await;
+    assert_eq!(
+        gets.get(&segment),
+        None,
+        "GETs after a large fold: {gets:?}"
+    );
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a fold on a runtime whose cache has an SSD tier writes every
+/// block of its segments to disk, so a runtime started over the same SSD
+/// directory reads the folded file from disk and sends no segment GET.
+#[tokio::test]
+async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
+    use crate::{MetadataCache, SsdSegmentBlocks};
+    use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    let store_directory = tempdir().expect("tempdir");
+    let ssd_directory = tempdir().expect("tempdir");
+    let ssd_cache = || async {
+        let budget = NonZeroUsize::new(1 << 30).expect("a nonzero budget");
+        let ssd = SsdSegmentBlocks::open(ssd_directory.path(), budget)
+            .await
+            .expect("open the SSD tier");
+        MetadataCache::builder().ssd_segment_blocks(ssd).build()
+    };
+    let namespace_id = namespace_id("ssd-after-fold");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(store_directory.path()).expect("store"));
+    let cache = ssd_cache().await;
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .metadata_cache(cache.clone())
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    write_a_large_batch_and_fold(store.as_ref(), &namespace, &maintenance, &namespace_id).await;
+    writer.shutdown().await.expect("shutdown");
+    cache.close().await;
+
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(store_directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let cache = ssd_cache().await;
+    let reader = LoonFs::builder_with_store(recording.clone())
+        .metadata_cache(cache.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("reader");
+    let file = reader
+        .namespace(&namespace_id)
+        .read_file(LARGE_FOLD_FILE)
+        .await
+        .expect("read the file");
+    assert_eq!(file.bytes, LARGE_FOLD_FILE.as_bytes());
+    let segment_gets = recording
+        .take_get_keys()
+        .iter()
+        .filter(|key| {
+            parse_object_key(key)
+                .is_some_and(|parsed| parsed.family() == DurableObjectFamily::MetadataSegment)
+        })
+        .count();
+    assert_eq!(segment_gets, 0, "{:?}", cache.stats());
+    assert!(cache.stats().segment_ssd.expect("the SSD tier").hits > 0);
 }
 
 /// Forwards every call to a local store, and holds the answer to one read of
