@@ -174,6 +174,15 @@ pub enum CoreError {
         bytes: usize,
         limit: usize,
     },
+    #[error(
+        "the next manifest of namespace `{namespace_id}` is a {document_bytes}-byte document, \
+         above the {max_bytes}-byte manifest limit"
+    )]
+    ManifestTooLarge {
+        namespace_id: NamespaceId,
+        document_bytes: usize,
+        max_bytes: usize,
+    },
     #[error("invalid gc configuration: {0}")]
     InvalidGcOptions(String),
     #[error("upload session `{upload_id}` was not found")]
@@ -437,6 +446,9 @@ impl CoreError {
             // The deployment's read memory cannot hold this namespace's
             // collection live set; an operator raises the limit.
             CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
+            // The namespace's segment descriptors don't fit in one manifest
+            // document, and a retry doesn't change that.
+            CoreError::ManifestTooLarge { .. } => ErrorCode::ServerError,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -541,6 +553,7 @@ impl CoreError {
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
             | CoreError::LiveSetExceedsReadMemory { .. }
+            | CoreError::ManifestTooLarge { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
         }
     }

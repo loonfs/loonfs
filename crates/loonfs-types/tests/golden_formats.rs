@@ -619,22 +619,43 @@ fn wal_object_inline_content_golden_decodes_to_sample() {
     assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
 }
 
-/// Stores `payload` through the real codec and returns why decoding refused
-/// it.
+// The golden is the decompressed document. The stored object is that document
+// compressed at the writer's zstd level, 3, and comparing it with this build's
+// compression of the golden pins the stored bytes without a binary golden that
+// a zstd upgrade could change.
+fn assert_manifest_matches_golden(name: &str, payload: NamespaceManifestPayload) {
+    let stored = encode_namespace_manifest_json(payload.clone())
+        .expect("encode")
+        .into_bytes();
+    assert_matches_golden(name, &unzstd(&stored));
+    let golden = read_golden(name);
+    assert_eq!(
+        stored,
+        zstd::stream::encode_all(golden.as_slice(), 3).expect("compress golden")
+    );
+    assert_eq!(
+        decode_namespace_manifest_json(&stored)
+            .expect("decode stored manifest")
+            .into_payload(),
+        payload
+    );
+}
 
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
-    let encoded = encode_namespace_manifest_json(sample_manifest_payload())
-        .expect("encode")
-        .into_bytes();
-    assert_matches_golden("manifest.v1.json", &encoded);
+    assert_manifest_matches_golden("manifest.v1.json", sample_manifest_payload());
 }
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("manifest.v1.json"))
-        .expect("decode golden manifest");
+    let golden = read_golden("manifest.v1.json");
+    let decoded = decode_namespace_manifest_json(&rezstd(&golden)).expect("decode golden manifest");
     assert_eq!(decoded.into_payload(), sample_manifest_payload());
+    // Every manifest object is compressed, so the bare document doesn't decode.
+    assert_matches!(
+        decode_namespace_manifest_json(&golden),
+        Err(EnvelopeCodecError::Decompress(_))
+    );
 }
 
 fn check_control_golden<T>(fixture: &str, kind: ControlObjectKind, state: T)
@@ -1624,7 +1645,7 @@ fn namespace_manifest_requires_every_activity_counter() {
             }
         });
         assert_matches!(
-            decode_namespace_manifest_json(&encoded),
+            decode_namespace_manifest_json(&rezstd(&encoded)),
             Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("missing field")
         );
     }
@@ -1636,11 +1657,11 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
         .expect("manifest")
         .into_bytes();
     let mut document: serde_json::Value =
-        serde_json::from_slice(&encoded).expect("decode document");
+        serde_json::from_slice(&unzstd(&encoded)).expect("decode document");
     for version in [0, 2, 3, 7] {
         document["format_version"] = serde_json::Value::from(version);
         let wrong_version = serde_json::to_vec(&document).expect("encode document");
-        let err = decode_namespace_manifest_json(&wrong_version)
+        let err = decode_namespace_manifest_json(&rezstd(&wrong_version))
             .expect_err("wrong version must be rejected");
         assert_matches!(
             err,
@@ -1660,12 +1681,12 @@ fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
         .expect("manifest")
         .into_bytes();
     let mut document: serde_json::Value =
-        serde_json::from_slice(&encoded).expect("decode document");
+        serde_json::from_slice(&unzstd(&encoded)).expect("decode document");
     document["payload"]["head_seq"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
-    let err =
-        decode_namespace_manifest_json(&tampered).expect_err("tampered payload must be rejected");
+    let err = decode_namespace_manifest_json(&rezstd(&tampered))
+        .expect_err("tampered payload must be rejected");
     assert_matches!(
         err,
         EnvelopeCodecError::ChecksumMismatch { .. },
@@ -1688,7 +1709,8 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
         "/runs/0/segments/0/index_block",
         "/runs/0/segments/0/filter_block",
     ] {
-        let mut document: serde_json::Value = serde_json::from_slice(&encoded).expect("document");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&unzstd(&encoded)).expect("document");
         document["payload"]
             .pointer_mut(path)
             .expect("fixture object")["field_from_the_future"] = serde_json::Value::from(true);
@@ -1698,7 +1720,7 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
             "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
             document["kind"], document["format_version"], checksum, payload,
         );
-        let error = decode_namespace_manifest_json(future_document.as_bytes())
+        let error = decode_namespace_manifest_json(&rezstd(future_document.as_bytes()))
             .expect_err("unknown durable fields must be rejected");
         assert_matches!(
             error,
@@ -1711,13 +1733,15 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
 
 #[test]
 fn immutable_envelopes_reject_unknown_fields() {
-    let mut manifest = encode_namespace_manifest_json(sample_manifest_payload())
-        .expect("manifest")
-        .into_bytes();
+    let mut manifest = unzstd(
+        &encode_namespace_manifest_json(sample_manifest_payload())
+            .expect("manifest")
+            .into_bytes(),
+    );
     assert_eq!(manifest.pop(), Some(b'}'));
     manifest.extend_from_slice(br#", "field_from_the_future": true}"#);
     assert_matches!(
-        decode_namespace_manifest_json(&manifest),
+        decode_namespace_manifest_json(&rezstd(&manifest)),
         Err(EnvelopeCodecError::EnvelopeDecode(message))
             if message.contains("field_from_the_future")
     );
@@ -3039,16 +3063,7 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
             sample_case_sensitive_manifest(),
         ),
     ] {
-        let encoded = encode_namespace_manifest_json(payload.clone())
-            .expect("manifest")
-            .into_bytes();
-        assert_matches_golden(name, &encoded);
-        assert_eq!(
-            decode_namespace_manifest_json(&encoded)
-                .expect("decode manifest")
-                .into_payload(),
-            payload
-        );
+        assert_manifest_matches_golden(name, payload);
     }
 }
 

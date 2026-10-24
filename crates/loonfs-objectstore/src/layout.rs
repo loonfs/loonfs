@@ -96,7 +96,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             Some(parsed(DurableObjectFamily::Hint, namespace, None))
         }
         ["namespaces", namespace, "manifests", manifest] => {
-            manifest.strip_suffix(".json").map(|identifier| {
+            manifest.strip_suffix(".json.zst").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
                     namespace,
@@ -387,6 +387,7 @@ mod tests {
             "namespaces/ns-1/wal/00000000000000000001.tmp",
             "namespaces/ns-1/segments/seg_1.tmp",
             "namespaces/ns-1/manifests/00000000000000000001.tmp",
+            "namespaces/ns-1/manifests/00000000000000000001.json",
             "namespaces/ns-1/pins/pin_1.tmp",
             "namespaces/ns-1/uploads/upl_1.tmp",
             "private/random.json",

@@ -1,6 +1,6 @@
 //! The LSM run model: ordered manifest runs, row families, and layout policy.
 
-use crate::heap_bytes::{arc_bytes, HeapBytes};
+use crate::heap_bytes::{arc_bytes, manifest_heap_bytes, HeapBytes};
 use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier,
@@ -122,10 +122,7 @@ pub(super) fn manifest_cache_heap_bytes(
     envelope: &NamespaceManifestEnvelope,
     scan_runs: &Vec<MetadataRunManifest>,
 ) -> usize {
-    arc_bytes::<NamespaceManifestEnvelope>()
-        + envelope.heap_bytes()
-        + arc_bytes::<Vec<MetadataRunManifest>>()
-        + scan_runs.heap_bytes()
+    manifest_heap_bytes(envelope) + arc_bytes::<Vec<MetadataRunManifest>>() + scan_runs.heap_bytes()
 }
 
 pub(super) fn runs_newest_first(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {

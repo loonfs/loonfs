@@ -9,6 +9,7 @@ use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use super::uploads::{load_upload_sessions, ListedUploadSession};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::heap_bytes::manifest_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::cache::read_working_memory;
@@ -257,7 +258,7 @@ impl LiveSet {
         }
         if self.current_tombstone.is_none() {
             self.manifest_charge
-                .add(loonfs_types::usize_from_u64(manifest.manifest_bytes))?;
+                .add(manifest_heap_bytes(&manifest.state.envelope))?;
             self.manifests.push(manifest.clone());
         }
         Ok(())

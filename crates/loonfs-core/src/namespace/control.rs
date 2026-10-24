@@ -42,6 +42,7 @@ impl CurrentManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
+    /// Stored length of the manifest object, which is the compressed document.
     pub(crate) manifest_bytes: u64,
     pub state: CurrentManifest,
 }

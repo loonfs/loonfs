@@ -5,10 +5,10 @@ use loonfs_test_support::stores::replace_object;
 
 #[tokio::test]
 async fn overflowing_section_handles_are_rejected_before_segment_reads() {
-    let manifest = loonfs_types::format::manifest::decode_namespace_manifest_json(include_bytes!(
-        "../../../../loonfs-types/tests/golden/manifest.v1.json"
-    ))
-    .expect("manifest fixture");
+    let document = include_bytes!("../../../../loonfs-types/tests/golden/manifest.v1.json");
+    let stored = zstd::stream::encode_all(&document[..], 0).expect("compress fixture");
+    let manifest = loonfs_types::format::manifest::decode_namespace_manifest_json(&stored)
+        .expect("manifest fixture");
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),

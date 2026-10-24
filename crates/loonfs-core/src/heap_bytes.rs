@@ -14,8 +14,8 @@ use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
     CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload,
-    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
+    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
@@ -42,6 +42,11 @@ pub(crate) const fn arc_bytes<T>() -> usize {
 /// A decoded data block behind the `Arc` the caches share.
 pub(crate) fn data_block_heap_bytes(block: &DecodedDataBlock) -> usize {
     arc_bytes::<DecodedDataBlock>() + block.row_keys.heap_bytes() + block.rows.heap_bytes()
+}
+
+/// A decoded manifest behind the `Arc` that its loaders share.
+pub(crate) fn manifest_heap_bytes(envelope: &NamespaceManifestEnvelope) -> usize {
+    arc_bytes::<NamespaceManifestEnvelope>() + envelope.heap_bytes()
 }
 
 /// A decoded index block behind the `Arc` the caches share.

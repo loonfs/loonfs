@@ -21,7 +21,8 @@ use std::collections::BTreeMap;
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.
     pub manifest: ManifestRef,
-    /// Stored length of the manifest document read by the loader.
+    /// Stored length of the manifest object read by the loader, which is the
+    /// compressed document.
     pub manifest_bytes: u64,
     /// Segment descriptor counts across all runs, including families with none.
     pub segments_by_family: BTreeMap<MetadataRowFamily, u64>,

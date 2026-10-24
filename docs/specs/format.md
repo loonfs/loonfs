@@ -273,7 +273,7 @@ Each namespace's objects are stored under its own prefix ([Object keys](#a8-obje
 ```text
 namespaces/{namespace_id}/
 ├── hint.json
-├── manifests/{manifest_no:020}.json
+├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
@@ -1039,11 +1039,11 @@ Two footprint values are calculated from the manifest's segment descriptors:
 | `inode_record_count` | The sum of `row_count` for `inodes` segments. |
 | `metadata_stored_bytes` | The sum of `index_block.offset + index_block.stored_bytes` for every referenced segment. |
 
-The inode count includes retained deleted records, and an implicit root counts as zero until it's stored as an inode record. Metadata bytes don't include content, WAL objects, manifest or pin JSON, unreferenced outputs, or segments that only other manifests reference. A shared segment counts in every manifest that references it, so these totals don't measure unique physical storage.
+The inode count includes retained deleted records, and an implicit root counts as zero until it's stored as an inode record. Metadata bytes don't include content, WAL objects, manifests, pins, unreferenced outputs, or segments that only other manifests reference. A shared segment counts in every manifest that references it, so these totals don't measure unique physical storage.
 
 A statistics read uses one validated manifest, without reading segments or replaying newer WAL objects. An observation includes the namespace's identity, lifecycle status, manifest number, head sequence, and folded WAL number. Pin statistics read the pinned manifest. Compaction can change the footprint without changing the head, which is why the manifest number is included too.
 
-An observation also includes `manifest_bytes`, the stored length of the manifest document as read, and `segments_by_family`, which counts each family's segment descriptors across every run (every family is listed, with zero for a family that has none). Both values come from the same validated manifest, so they don't add any requests.
+An observation also includes `manifest_bytes`, the stored length of the manifest object as read (the length of the compressed document, so it counts stored bytes like `metadata_stored_bytes` does), and `segments_by_family`, which counts each family's segment descriptors across every run (every family is listed, with zero for a family that has none). Both values come from the same validated manifest, so they don't add any requests.
 
 A fork inherits the source manifest's segment descriptors, so its footprint values start out the same as the source's, but its counters start at zero. Activity committed in the source stays in the source's manifests.
 
@@ -1579,7 +1579,7 @@ Durable inode IDs are integers. Public API inode strings, such as `ino_42`, don'
 
 Structured control records, manifests, and WAL objects use an envelope with `kind`, `format_version`, `payload_checksum`, and `payload`. Content objects are raw file bytes. Block segments use the sectioned encoding in [Block-segment encoding](#a7-block-segment-encoding) instead of an envelope.
 
-A JSON envelope keeps its payload as an inline raw JSON fragment. A WAL envelope contains its encoded CBOR payload as a CBOR byte string, and the whole document is compressed with zstd. The checksum covers the payload bytes as they were stored, not a decoded object that the reader serialized again.
+A JSON envelope keeps its payload as an inline raw JSON fragment. A WAL envelope contains its encoded CBOR payload as a CBOR byte string. A manifest or a WAL object stores its whole document compressed with zstd, and a control record stores its document uncompressed. The checksum covers the payload bytes exactly as they appear in the document, not a decoded object that the reader serialized again.
 
 Decoders identify the kind and the supported version before they interpret the payload, and they verify the exact payload checksum before they decode its fields. Unknown kinds, unsupported versions, malformed payloads, and checksum failures are errors, and none of them is a reason to use another object instead.
 
@@ -1652,7 +1652,7 @@ There are three kinds of control object: `hint`, `pin`, and `upload_session`.
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
 | WAL object | `wal_object` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
-| Namespace manifest | `manifest` | Uncompressed JSON | 1 |
+| Namespace manifest | `manifest` | zstd-compressed JSON envelope with an inline JSON payload | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections (see [A.7](#a7-block-segment-encoding)), containing the rows in [A.6](#a6-metadata-rows-and-row-keys) | 1, given by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
@@ -1673,11 +1673,20 @@ An envelope contains these fields:
 | `payload_checksum` | `sha256:` followed by 64 lowercase hexadecimal characters. |
 | `payload` | A raw JSON sub-document for JSON families, or a CBOR byte string containing the encoded payload for the WAL. |
 
-For JSON, the checksum is the SHA-256 of the UTF-8 bytes of the stored payload fragment, including its internal whitespace and spelling. Don't parse and re-serialize the payload to calculate its checksum. The enclosing envelope's whitespace isn't part of the payload checksum.
+To encode an object, a writer:
 
-For the WAL, serialize the payload to CBOR, hash those bytes, store them as the envelope's CBOR byte string, and zstd-compress the envelope. The digest doesn't cover the compressed representation, or a second encoding of the decoded payload.
+1. Serializes the payload, to JSON for a JSON family or to CBOR for the WAL.
+2. Calculates `payload_checksum`, the SHA-256 of those payload bytes.
+3. Builds the envelope document around the payload bytes. A JSON document includes them as an inline fragment, and a CBOR document includes them as a byte string.
+4. Compresses the whole document with zstd, if the object is a manifest or a WAL object. A [control object](glossary.md#control-object) is stored as the document itself.
 
-A reader first identifies the declared kind and version, then validates the envelope and checksum, and then interprets the payload under the supported schema. Field and protocol validation still apply after the checksum matches, because a matching checksum doesn't make an inconsistent record valid.
+The checksum covers the payload bytes exactly as they appear in the document, including a JSON fragment's internal whitespace and spelling. It doesn't cover the rest of the envelope (so a JSON envelope's own whitespace isn't part of it), the compressed representation, or a second encoding of the decoded payload. Neither a writer nor a reader parses and serializes the payload again to calculate its checksum.
+
+Every manifest and every WAL object is compressed, so a reader doesn't check whether an object of those families is compressed. (The reference writer uses zstd level 3, and a reader accepts any level.) A reader decompresses the object first, and it refuses a document longer than the family's limit: `MAX_NAMESPACE_MANIFEST_BYTES` for a manifest (see [Control and manifest payloads](#a4-control-and-manifest-payloads)) or `MAX_WAL_OBJECT_BYTES` for a WAL object (see [WAL records](#a5-wal-records)).
+
+A reader then identifies the declared kind and version, validates the envelope and checksum, and interprets the payload under the supported schema. Field and protocol validation still apply after the checksum matches, because a matching checksum doesn't make an inconsistent record valid.
+
+Why are manifests and WAL objects compressed, but control objects aren't? A manifest grows with the namespace and a WAL object grows with its commits, and a reader with an empty cache loads both. For example, a manifest of 193 KiB of JSON is 36 KiB compressed. A control object is under 1 KiB, so compressing it would save almost nothing.
 
 ### A.3 Content references and checksums
 
@@ -1777,6 +1786,8 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 | `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
 
 `base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
+
+`MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. A manifest lists every segment of its namespace, so this limit also caps how much metadata a namespace can have. (A namespace of one million files has a manifest document of about 193 KiB, so the limit is reached at about 2.7 billion files.) This is a format constraint, because every published manifest MUST stay readable with bounded decompression.
 
 ### A.5 WAL records
 
@@ -2007,7 +2018,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Family | Object key pattern |
 | --- | --- |
 | WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
-| Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
+| Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
 | Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | Upload sessions | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
@@ -2239,7 +2250,7 @@ These are defaults for the reference producer and runtime. A target size can be 
 
 A decoder can't use the target block or segment sizes as hard allocation limits. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB, and further allocation follows the bytes actually decompressed. Output stops at the declared length plus one byte (see [Block-segment encoding](#a7-block-segment-encoding)), and vector capacity can be larger than that output length. This doesn't impose a smaller maximum block size. The [API specification][api-spec] specifies request admission limits.
 
-[WAL records](#a5-wal-records) specifies the hard limit on the size of a WAL document.
+[Control and manifest payloads](#a4-control-and-manifest-payloads) and [WAL records](#a5-wal-records) specify the hard limits on the sizes of a manifest document and a WAL document.
 
 ## Appendix D. Grep extension format
 

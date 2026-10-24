@@ -252,17 +252,21 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .await
         .expect("manifest");
     assert_eq!(current.state.envelope.payload().runs.len(), 2);
-    let mut manifest_bytes = store
+    let written = store
         .get(&current.object_key, None)
         .await
         .expect("manifest bytes")
-        .expect("manifest exists")
-        .to_vec();
-    manifest_bytes.extend_from_slice(b" \n\t");
+        .expect("manifest exists");
+    // The same document at another compression level is a valid manifest of
+    // another stored length, so the statistics report the bytes as read.
+    let document = zstd::stream::decode_all(written.as_ref()).expect("decompress manifest");
+    let manifest_bytes = zstd::stream::encode_all(document.as_slice(), 19).expect("compress");
+    assert_ne!(manifest_bytes.len(), written.len());
+    assert!(manifest_bytes.len() < document.len());
     let stored_length = manifest_bytes.len() as u64;
     replace_object(&store, &current.object_key, manifest_bytes.into())
         .await
-        .expect("manifest with trailing whitespace");
+        .expect("manifest at another compression level");
     let layout = load_namespace_statistics(&store, &parent)
         .await
         .expect("layout statistics");

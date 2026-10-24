@@ -16,11 +16,25 @@ use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Version 1 is an uncompressed JSON envelope document carrying the payload as
-/// a raw JSON fragment.
+/// Version 1 is a zstd-compressed JSON envelope document that contains the
+/// payload as a raw JSON fragment.
 ///
 /// `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
+
+/// Largest decompressed manifest document allowed by [Control and manifest
+/// payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
+///
+/// A manifest lists every segment of its namespace, and no other format limit
+/// bounds how many segments that is, so this limit also bounds how much
+/// metadata a namespace can have. A namespace of one million files has a
+/// manifest document of about 193 KiB, so the limit is reached at about 2.7
+/// billion files. The value is the same as
+/// [`MAX_WAL_OBJECT_BYTES`](crate::wal::MAX_WAL_OBJECT_BYTES), so a reader
+/// needs at most the same memory to decompress either object. It's a separate
+/// constant, so a change to one limit doesn't change which objects of the
+/// other family a reader accepts.
+pub const MAX_NAMESPACE_MANIFEST_BYTES: usize = 512 * 1024 * 1024;
 
 /// Version 1 uses the [block layout](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
 pub const METADATA_SEGMENT_ENCODING: u32 = 1;
@@ -1394,39 +1408,54 @@ impl NamespaceManifestPayload {
 /// A manifest decoded through its checked durable codec.
 pub type NamespaceManifestEnvelope = crate::envelope::VerifiedEnvelope<NamespaceManifestPayload>;
 
-/// Encodes a manifest once and returns its immutable framing and durable bytes.
+/// Encodes a manifest once into a JSON envelope document, with the payload's
+/// checksum, and compresses the document.
+///
+/// [`EncodedEnvelope::document_bytes`](crate::envelope::EncodedEnvelope::document_bytes)
+/// is the JSON document's length, which [`MAX_NAMESPACE_MANIFEST_BYTES`] limits.
 pub fn encode_namespace_manifest_json(
     payload: NamespaceManifestPayload,
 ) -> Result<crate::envelope::EncodedEnvelope<NamespaceManifestPayload>, EnvelopeCodecError> {
-    crate::envelope::encode_json_envelope(
+    let encoded = crate::envelope::encode_json_envelope(
         NamespaceManifestKind::Manifest.as_str(),
         NAMESPACE_MANIFEST_FORMAT_VERSION,
         payload,
-    )
+    )?;
+    let bytes = crate::envelope::compress_document(&encoded.bytes)?;
+    Ok(crate::envelope::EncodedEnvelope { bytes, ..encoded })
 }
 
-/// Decodes and verifies a durable namespace-manifest JSON envelope.
+/// Decodes and verifies a durable zstd-compressed namespace-manifest envelope.
 ///
-/// Decoding fails for invalid JSON, the wrong kind or version, a checksum
+/// Decoding fails for invalid compression or JSON, a document longer than
+/// [`MAX_NAMESPACE_MANIFEST_BYTES`], the wrong kind or version, a checksum
 /// mismatch, or an invalid payload. See
 /// [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
-    let expected_kind = NamespaceManifestKind::Manifest;
-    let decoded =
-        crate::envelope::decode_json_envelope(bytes, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
-            crate::envelope::verify_kind(expected_kind.as_str(), found)
-        })?;
+    decode_namespace_manifest_json_with_limit(bytes, MAX_NAMESPACE_MANIFEST_BYTES)
+}
 
-    Ok(decoded)
+fn decode_namespace_manifest_json_with_limit(
+    bytes: &[u8],
+    limit: usize,
+) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
+    let Some(document) = crate::envelope::decompress_document(bytes, limit)? else {
+        return Err(EnvelopeCodecError::ManifestTooLarge { max_bytes: limit });
+    };
+    let expected_kind = NamespaceManifestKind::Manifest;
+    crate::envelope::decode_json_envelope(&document, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
+        crate::envelope::verify_kind(expected_kind.as_str(), found)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
+        decode_namespace_manifest_json, decode_namespace_manifest_json_with_limit,
+        encode_namespace_manifest_json, BlockHandle, MetadataRowFamily, MetadataRunRef,
+        MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::CompactorEpoch;
     use crate::{
@@ -1514,8 +1543,9 @@ mod tests {
             )
             .expect("encode invalid payload")
             .into_parts();
+            let stored = crate::envelope::compress_document(&encoded).expect("compress");
             assert_matches!(
-                decode_namespace_manifest_json(&encoded),
+                decode_namespace_manifest_json(&stored),
                 Err(crate::envelope::EnvelopeCodecError::PayloadDecode(message))
                     if message.contains(&crate::PublicOrdinalRangeError.to_string())
             );
@@ -1654,7 +1684,8 @@ mod tests {
         .expect("manifest")
         .into_parts();
         let document: serde_json::Value =
-            serde_json::from_slice(&encoded).expect("decode manifest document");
+            serde_json::from_slice(&zstd::stream::decode_all(encoded.as_slice()).expect("unzstd"))
+                .expect("decode manifest document");
         assert!(document["payload"]
             .get("frozen_base_delta_merges")
             .is_none());
@@ -1715,6 +1746,34 @@ mod tests {
         assert_eq!(
             decoded.payload.runs[0].segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
+        );
+    }
+
+    #[test]
+    fn decoder_accepts_the_manifest_limit_and_rejects_the_next_byte_before_decoding() {
+        let encoded = encode_namespace_manifest_json(NamespaceManifestPayload::initial(
+            NamespaceId::parse("bounded").expect("namespace"),
+            0,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::unrestricted(),
+            crate::NamespaceNaming::CaseInsensitive,
+        ))
+        .expect("encode");
+        let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
+        assert_eq!(document.len(), encoded.document_bytes());
+        assert_eq!(
+            &decode_namespace_manifest_json_with_limit(encoded.as_bytes(), document.len())
+                .expect("at limit"),
+            encoded.envelope(),
+        );
+        assert_matches!(
+            decode_namespace_manifest_json_with_limit(encoded.as_bytes(), document.len() - 1),
+            Err(crate::envelope::EnvelopeCodecError::ManifestTooLarge { max_bytes })
+                if max_bytes == document.len() - 1
+        );
+        assert_matches!(
+            decode_namespace_manifest_json(&document),
+            Err(crate::envelope::EnvelopeCodecError::Decompress(_))
         );
     }
 
