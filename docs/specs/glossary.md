@@ -156,7 +156,7 @@ An object that an assembly writes for intermediate results (for example, when GC
 
 ### Upload session
 
-A stored record for one upload. It has a content ID that's assigned when the session is created, a transfer mode, and a status (`open`, `completed`, or `aborted`). Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
 
 ### Admission evidence
 
@@ -194,7 +194,7 @@ The sequence number below which a namespace's history is no longer guaranteed. A
 
 ### Control object
 
-A small, mutable object used for discovery, retained views, or upload state: the hint, pins, and upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap).
+A small object used for discovery, retained views, or upload state: the hint, pins, and upload session and outcome records. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 
@@ -267,7 +267,7 @@ The role that folds a namespace's WAL, compacts its metadata, advances its reten
 
 ### Compare-and-swap (CAS)
 
-A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap for its control objects.
+A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint and to extend a user pin's expiry.
 
 ### Publication budget
 

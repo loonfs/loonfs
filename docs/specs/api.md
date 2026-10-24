@@ -242,7 +242,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit ID was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't select other content and can't be aborted. |
-| `upload_content_conflict` | 409 | Different bytes were staged under this upload ID, or another staging request has the session's staging claim (one still in flight, one that was cancelled, or one whose write might still take effect). Open a new session. |
+| `upload_content_conflict` | 409 | Different bytes were already staged under this upload ID. Open a new session. (Staging the same bytes again succeeds.) |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index can't narrow the candidates. Rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
 | `rebootstrap_required` | 409 | A change feed's `after_seq` is below the retention floor, so the feed no longer contains the changes after it. Rebuild state from a fresh listing or snapshot. |
 | `not_supported` | 501 | The deployment doesn't implement the requested operation or feature. |
@@ -983,6 +983,8 @@ This section describes the three upload modes.
 `service_proxied` is the default mode, and it doesn't need any capability from the provider. The client sends its bytes with a `PUT` to `/uploads/{upload_id}/content`, and the server writes them to object storage.
 
 The server streams the body to object storage without buffering the whole file. While it streams, it counts the bytes and computes the store's checksum. A body larger than `upload.service_proxied.max_content_bytes` fails with `content_too_large`. The resulting content reference stores that checksum in its `checksum` field.
+
+A client can retry the `PUT` with the same bytes, for example after a response is lost. The retry succeeds and returns the same `content_ref`, even if the first request's write took effect, or if the two requests run at the same time. A `PUT` with different bytes into a session whose content is already written fails with `upload_content_conflict`.
 
 #### Direct single-PUT upload
 

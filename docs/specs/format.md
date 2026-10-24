@@ -278,6 +278,7 @@ namespaces/{namespace_id}/
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
 ├── uploads/{upload_id}.json
+├── uploads/{upload_id}.outcome.json
 ├── content/
 ├── temporary/{temporary_id}
 └── extensions/{extension_name}/...
@@ -298,7 +299,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
 | Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
-| Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | Conditional status changes. |
+| Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | A session record and an outcome record, each created once with put-if-absent. |
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
@@ -415,7 +416,7 @@ This section describes what LoonFS requires from an object store, and how it wri
 
 The object-store layer MUST provide:
 
-- create-if-absent (put-if-absent), for publishing immutable objects,
+- create-if-absent (put-if-absent), for publishing immutable objects, at every size (so a large create sent in parts MUST complete conditionally),
 - compare-and-swap, for mutable control objects,
 - full and ranged reads,
 - deletion, and
@@ -435,7 +436,7 @@ Readers determine committed state from verified manifests and numbered WAL objec
 
 ### 3.2 Immutable writes and retries
 
-An immutable object MUST NOT be replaced with different bytes. A collision at a newly generated content or segment key is an error, while contention for the next manifest or WAL number follows that object's publication protocol. When an operation retries the same object, it can resolve an ambiguous earlier write only with evidence that the stored object has the expected immutable contents. A mutable record created under a generated ID (a pin or an upload session) is identified by its ID alone. After a put with an unknown outcome, a record under that ID is the creator's own, whatever its bytes are now, because another caller can change the record as soon as it's written.
+An immutable object MUST NOT be replaced with different bytes. A collision at a newly generated content or segment key is an error, while contention for the next manifest or WAL number follows that object's publication protocol. When an operation retries the same object, it can resolve an ambiguous earlier write only with evidence that the stored object has the expected immutable contents. A record created under a generated ID (a pin or an upload session record) is identified by its ID alone. After a put with an unknown outcome, a record under that ID is the creator's own, whatever its bytes are now. (Another caller can change a pin as soon as it's written, so a pin's bytes can't show whose put created it.)
 
 An immutable object is identified by the full-object checksum that its provider stores, including the checksum algorithm. Each store uses one algorithm:
 
@@ -470,11 +471,13 @@ On S3 and R2, the adapter completes with `If-None-Match: *` and the expected ful
 
 Small control objects use conditional single-object writes. Multipart upload is an optimization for larger payloads, and it doesn't replace compare-and-swap for control objects.
 
-A large create completes conditionally where the provider accepts a precondition on completion. Where it doesn't, completion MUST still preserve immutable content identity. The adapter prevents concurrent writes through exclusive ownership of the upload session, and it checks for an existing object before completion. An absence check alone isn't enough, because another request could write the key before completion. In either case, the session protocol in [Uploading content](#5-uploading-content) applies. The [provider documentation][provider-spec] describes each provider's path.
+A large create MUST complete conditionally, so that the provider refuses the completion if the key is already occupied. An absence check before completion isn't enough, because another request could write the key between the check and the completion. A provider that can't complete a create conditionally isn't supported. The [provider documentation][provider-spec] describes each provider's path.
 
 The incremental-write adapter reads the whole payload before it evaluates its existence precondition. So a digest computed while forwarding the stream covers the complete payload, even when the write is refused.
 
 A failed or cancelled multipart transfer MUST attempt a provider-side abort. An abort can fail and leave incomplete parts behind, so deployments also need the provider cleanup policy that their adapter assumes. An abort doesn't delete a content object that has already completed. Cleanup of that object follows the upload's durable lifecycle.
+
+Why must a large create complete conditionally? Two requests that upload to one service-proxied session write the same content key (see [Service-proxied staging](#53-service-proxied-staging)). The conditional completion is what stops the second request from replacing the bytes that the first request wrote, after a session has already reported them.
 
 ### 3.3 Timing assumptions
 
@@ -624,13 +627,18 @@ This section describes upload sessions, the ways bytes can be transferred, and t
 
 Every uploaded content object is tied to an upload session before a commit can reference it. The content ID is allocated when the session is created, before any file bytes are read, and new content belongs to the session's namespace (see [File contents and ownership](#15-file-contents-and-ownership)).
 
-An upload session contains `namespace_id`, `upload_id`, `content_id`, an optional `subject_id`, a tagged `mode`, and a tagged `status`:
+An upload session is stored as two records. LoonFS creates each record once, with put-if-absent, and never changes it:
 
-| Status | Stored fields | Meaning |
+- The session record is written when the session starts. It contains `namespace_id`, `upload_id`, `content_id`, an optional `subject_id`, a tagged `mode`, and `expires_at_ms`.
+- The outcome record is written when the session ends. It records whether the session completed or was aborted, and when.
+
+A session's status follows from which records exist:
+
+| Status | Records | Meaning |
 | --- | --- | --- |
-| `open` | `expires_at_ms` | Upload work is allowed while the clock reads before `expires_at_ms`. |
-| `completed` | `completed_at_ms`, `content_ref` | The object was verified, and a commit can admit its reference. |
-| `aborted` | `aborted_at_ms` | The upload can't complete or reopen. |
+| `open` | The session record, without an outcome record | Upload work is allowed while the clock reads before `expires_at_ms`. |
+| `completed` | An outcome record with `completed_at_ms` and `content_ref` | The object was verified, and a commit can admit its reference. |
+| `aborted` | An outcome record with `aborted_at_ms` | The upload can't complete or reopen. |
 
 ```text
 +------+   complete (content verified)   +-----------+
@@ -644,11 +652,17 @@ An upload session contains `namespace_id`, `upload_id`, `content_id`, an optiona
 +---------+
 ```
 
-A session starts open and makes at most one terminal transition. Completion and abort race on the same CAS-protected record. Completion verifies the content before it records `completed`, and abort records `aborted` before it cleans up the object or the provider transfer.
+A session starts open and ends at most once. Completion and abort both create the outcome record with put-if-absent, so the first create to succeed ends the session, and the other request finds that outcome. Completion verifies the content before it creates the outcome record, and abort creates the outcome record before it cleans up the object or the provider transfer. A request resolves a put with an unknown result by reading the outcome record back, and an equal record is its own.
+
+An outcome record counts only while its session record exists. After a request creates an outcome record, it MUST check that the session record still exists, and it MUST NOT return admission evidence or delete content if the session record is gone. Garbage collection deletes the session record before the outcome record (see [Upload-session cleanup](#116-upload-session-cleanup)).
 
 At or after `expires_at_ms`, staging, part signing, and completion refuse an open session, the same way they refuse an aborted one. An expired session can never provide content for a commit, and garbage collection aborts it (see [Upload-session cleanup](#116-upload-session-cleanup)). Status reads and aborts don't check the expiry.
 
 Upload records don't advance the namespace's sequence, and they aren't change-feed events. Completing an upload doesn't automatically update a file in a LoonFS namespace, and a completed upload might never be referenced by any file.
+
+Why does a session have two records instead of one record whose status changes? Some providers allow about one write per second to one object (see the [provider documentation][provider-spec]). With one record, an upload would write it when the session starts and again when the session ends, often less than a second later. With two records, no upload writes the same object twice.
+
+Why does a request check the session record after it creates an outcome? After garbage collection deletes an ended session's records, the outcome key is free again. A completion or abort that found the session open before that deletion, and then paused, could create a new outcome for a session that no longer exists. A completion would then issue evidence for content that the earlier abort deleted, and an abort would delete content that a commit might reference. Because garbage collection deletes the session record first, the check finds it missing in exactly those cases.
 
 ### 5.2 Transfer modes
 
@@ -656,27 +670,25 @@ Each session uses one transfer mode, which is set when the session is created an
 
 | Mode | How the bytes are transferred | Stored mode data |
 | --- | --- | --- |
-| `service_proxied` | The client sends the bytes to the LoonFS server, which writes the content object. | Tagged staging state: `idle`, `claimed`, or `staged` with a `content_ref` |
+| `service_proxied` | The client sends the bytes to the LoonFS server, which writes the content object. | Nothing |
 | `direct_put` | The client writes the whole object directly to the provider, with one presigned PUT. | The selected whole-object `checksum_algorithm` |
 | `direct_multipart` | The client uploads parts directly to the provider. | `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm` |
 
 For a direct multipart upload, the client tracks part progress. The session stores the part size and checksum algorithm so that resumed work uses the same settings, and it stores provider upload identifiers where they're needed to recover completion or to clean up.
 
-Every staged or completed reference MUST match the session's content ID and owning namespace, and a completed direct-upload reference MUST use the algorithm recorded in the mode. Missing required fields, inconsistent references, and invalid combinations of mode and status are corrupt.
+A completed reference MUST match the session's content ID and owning namespace, and a completed direct-upload reference MUST use the algorithm recorded in the mode. A record with missing required fields is corrupt, and so is an outcome record that contradicts its session record.
 
 ### 5.3 Service-proxied staging
 
-With a service-proxied upload, the LoonFS server writes the content object, and a claim in the session record makes sure only one staging request writes it at a time.
+With a service-proxied upload, the client sends the bytes to the LoonFS server, which writes the session's content object. Staging (uploading the bytes through the server) writes no record. The content object itself shows what was uploaded, because only this session writes its content ID, and the provider stores the object's size and full-object checksum.
 
-A staging request changes the session's staging state from `idle` to `claimed`, with a conditional update, before it writes any content. A concurrent staging request that finds the claim can't write the same object. When staging succeeds, the request stores the verified reference and releases its claim in the same record update.
+The server writes the content object with put-if-absent, and a large write completes conditionally (see [Immutable writes and retries](#32-immutable-writes-and-retries)). So if two requests upload to one session at the same time, only one of them creates the object. A request that finds the object already written compares the stored size and checksum with its own bytes. The same bytes are accepted as a retry, and different bytes conflict.
 
-A retry against content that's already staged compares the incoming content with the staged reference, instead of overwriting the object. The same bytes are accepted as a retry, and different bytes conflict.
+Service-proxied staging computes the store's checksum while it streams the bytes. When the body ends, the request reads the session's records again, and it lets the object store finish the write only if the session is still open. After the write, the request reads the records once more, and it reports the uploaded reference only if the session is still open, because an abort during the write deletes the object.
 
-The claim has no expiry of its own. A failed write releases the claim only if it failed before its final request was sent. Once that request might have been sent, the write could still succeed, so the claim stays until the session is aborted or its lease ends. After a request is cancelled, the claim can stay active for the rest of the session lease.
+Completion reads the content object's stored size and checksum with one HEAD request, and it records them as the completed reference. If the object doesn't exist yet, completion fails, and the session stays open.
 
-Completion resets staging to `idle` in the same CAS that records the completed reference, and abort also resets staging to `idle`. A terminal record MUST NOT keep a second staged content reference, even if the two references would agree.
-
-Service-proxied staging computes the store's checksum while it streams the bytes, and it records the checksum in the session's content reference (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). When the body ends, the request reads the session record again, and it lets the object store finish the write only if the session is still open and this request still has the staging claim. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+Why doesn't the server record the reference when the upload finishes? A record would be a second write to the session's records within one upload, and the stored object already has the size and checksum that the record would contain. The provider verified that checksum when the object was written, and a direct PUT completion relies on the same stored values.
 
 ### 5.4 Direct uploads
 
@@ -1450,17 +1462,22 @@ Uploads are collected through their session records. Retirement (see [Retirement
 
 | Session and namespace | Action |
 | --- | --- |
-| Open session | Keep it until its expiry plus `T`, then CAS it to `aborted` and clean up its content and provider transfer state. If the CAS loses, keep it. |
-| Aborted session | Retry content and provider cleanup, and remove the record after its abort time plus `T`. |
-| Completed session in an active namespace | Keep it until the content grace passes, then remove the record. Its content follows [Content roots](#119-content-roots). |
+| Open session | Keep it until its expiry plus `T`, then create its aborted outcome record, and clean up its content and provider transfer state. If the session already has an outcome record, keep it. |
+| Aborted session | Retry content and provider cleanup, and delete its records after its abort time plus `T`. |
+| Completed session in an active namespace | Keep it until the content grace passes, then delete its records. Its content follows [Content roots](#119-content-roots). |
 | Session in a deleted namespace that isn't eligible for retirement | Keep it, and report a future retirement deadline, if there is one. |
-| Completed session in an eligible deleted namespace | Remove the record (no extra completion grace is required). The retirement sweep removes its content. |
+| Completed session in an eligible deleted namespace | Delete its records (no extra completion grace is required). The retirement sweep removes its content. |
+| An outcome record without its session record | Delete it. |
 
-Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active namespaces and eligible tombstones, cleanup first wins the terminal transition, and then it removes the content and any provider transfer. Cleanup keeps the aborted record until its abort time plus `T`, so a streamed write that passed its final ownership check before the abort still has a record when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the record for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
+Garbage collection deletes a session's records in order: the session record first, and then the outcome record. If a pass stops between the two deletes, the outcome record is left without its session record, and a later pass deletes it without acting on the session's content. A completion or abort that creates an outcome record after the session's records were deleted also leaves an outcome record without its session record (see [Upload sessions](#51-upload-sessions)).
+
+An outcome key sorts directly after its session key (see [Object keys](#a8-object-keys)), so one listing of the uploads prefix shows which sessions have ended, without a read for each session.
+
+Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active namespaces and eligible tombstones, cleanup first creates the aborted outcome record, and then it removes the content and any provider transfer. Cleanup keeps an aborted session's records until its abort time plus `T`, so a streamed write that passed its final check before the abort still has records when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the records for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
 
 Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened.
 
-A completed session's record is a content root (see [Content roots](#119-content-roots)). Once the record is removed, its content stays only while another root refers to it.
+A completed session's records are a content root (see [Content roots](#119-content-roots)). Once they're deleted, its content stays only while another root refers to it.
 
 The completed-content grace covers every possible piece of admission evidence:
 
@@ -1482,6 +1499,8 @@ CONTENT_RECLAMATION_GRACE_WINDOW_MS
 ```
 
 Every token issue checks the original completion time, so a retained receipt can't extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload can't be committed for the first time. Published content stays while a content root refers to it.
+
+Why is the session record deleted first? A session record left without its outcome record reads as an open session. Once its lease had passed, garbage collection would abort it and delete its content, which a commit might reference. An outcome record left without its session record can't issue evidence or protect content, so a later pass can delete it safely.
 
 ### 11.7 Pin cleanup
 
@@ -1639,6 +1658,7 @@ The naming mode `labels` is reserved. In a namespace with that mode, names would
 This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), and [directory bindings](../design/directory-bindings.md#costs-and-alternatives).
 
 - **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
+- **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. Two records, each created once, keep completion and abort racing on one put-if-absent, at the cost of a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
 
 ## Appendix A. Durable records and byte encodings
@@ -1647,7 +1667,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are three kinds of control object: `hint`, `pin`, and `upload_session`.
+There are four kinds of control object: `hint`, `pin`, `upload_session`, and `upload_outcome`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1657,6 +1677,7 @@ There are three kinds of control object: `hint`, `pin`, and `upload_session`.
 | Metadata segment | No envelope | Block sections (see [A.7](#a7-block-segment-encoding)), containing the rows in [A.6](#a6-metadata-rows-and-row-keys) | 1, given by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
+| Upload outcome | `upload_outcome` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep hint | `grep_hint` | Uncompressed JSON | 1 |
 | Grep manifest | `grep_manifest` | Uncompressed JSON | 1 |
@@ -1739,15 +1760,15 @@ These tables list the durable payload fields. The protocol sections define how t
 | Fork basis | `manifest`, `source_pin_id` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
-| Upload session | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `status` |
+| Upload session | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
+| Upload outcome | `namespace_id`, `upload_id`, `outcome` |
 
 Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
-Pin owners have the fields in [Records and owners](#81-records-and-owners), and a pin has no status field. Upload sessions use these tagged variants, and all of them use `kind` tags:
+Pin owners have the fields in [Records and owners](#81-records-and-owners), and a pin has no status field. Upload records use these tagged variants, and both use `kind` tags:
 
-- Status: `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
-- Mode, which is present in every status: `service_proxied` contains `staging`, `direct_put` contains `checksum_algorithm`, and `direct_multipart` contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`.
-- Staging: `idle`, `claimed`, or `staged` with `content_ref`.
+- Mode, in the session record: `service_proxied` has no other fields, `direct_put` contains `checksum_algorithm`, and `direct_multipart` contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`.
+- Outcome, in the outcome record: `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
 
 A namespace manifest contains:
 
@@ -2022,6 +2043,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | Upload sessions | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| Upload outcomes | `namespaces/{namespace_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |
 | Content objects | `namespaces/{owner_namespace_id}/content/{content_id}` |
 | Content span objects | `namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}` |
