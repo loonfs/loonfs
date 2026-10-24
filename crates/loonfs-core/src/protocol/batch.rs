@@ -16,7 +16,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::{Deadline, Observation};
 use crate::wal::WalPublishError;
-use crate::wal::{prepare_wal_object, publish_wal_object};
+use crate::wal::{prepare_wal_object_from_payloads, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{
@@ -112,7 +112,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         .expect("the admission time should fit in `u64` milliseconds");
     let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(&view.head, view.wal_tail());
-    let mut accepted_commits = Vec::new();
+    let mut accepted_payloads = Vec::new();
+    let mut next_inode_id = view.head.next_inode_id;
     let mut wal_bytes = WAL_OBJECT_OVERHEAD_BYTES;
     let mut wal_inline_bytes = 0_usize;
     let mut dedup = BatchDedup::default();
@@ -147,7 +148,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
                 CandidateAdmission::Settled(slot) => {
-                    slots.push(settle_admission(slot, !accepted_commits.is_empty()));
+                    slots.push(settle_admission(slot, !accepted_payloads.is_empty()));
                     continue;
                 }
             };
@@ -175,9 +176,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                             estimated_bytes,
                             max_bytes,
                         }),
-                        depends_on_batch: !accepted_commits.is_empty(),
+                        depends_on_batch: !accepted_payloads.is_empty(),
                     },
-                    !accepted_commits.is_empty(),
+                    !accepted_payloads.is_empty(),
                 ));
                 continue;
             }
@@ -188,6 +189,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
                 validated.finish(resulting_next_inode_id)
             };
+            assert_eq!(
+                plan.namespace_id, *namespace_id,
+                "every record in a WAL object should belong to namespace `{namespace_id}`"
+            );
             let prepared = PreparedCommit {
                 commit: plan,
                 committed_at_ms: context.now_ms,
@@ -207,25 +212,27 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             slots.push(BatchOutcomeSlot::Accepted);
             wal_bytes = estimated_bytes;
             wal_inline_bytes = inline_bytes;
-            accepted_commits.push(prepared);
+            next_inode_id = resulting_next_inode_id;
+            accepted_payloads.push(preview);
         }
     }
     .instrument(prepare_span.clone())
     .await;
     prepare_span.record(
         "accepted_count",
-        u64::try_from(accepted_commits.len()).unwrap_or(u64::MAX),
+        u64::try_from(accepted_payloads.len()).unwrap_or(u64::MAX),
     );
     drop(prepare_span);
 
-    if accepted_commits.is_empty() {
+    if accepted_payloads.is_empty() {
         return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = match prepare_wal_object(
+    let wal = match prepare_wal_object_from_payloads(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
         &view.head,
-        &accepted_commits,
+        next_inode_id,
+        accepted_payloads,
     ) {
         Ok(wal) => wal,
         Err(error) => return abort_batch(slots, &error),
@@ -253,7 +260,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         return abort_batch(slots, &error);
     }
 
-    let wal_records = wal.envelope().payload().records.clone();
+    let wal_records = wal.into_envelope().into_payload().records;
     assert_eq!(
         slots
             .iter()
