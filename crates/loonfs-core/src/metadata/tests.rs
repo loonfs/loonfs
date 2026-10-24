@@ -1032,6 +1032,67 @@ fn queries_above_indexed_seq_match_at_head_results() {
     );
 }
 
+/// A view reads a row state's newest binding from the state's index when
+/// every row of the state is visible, and scans the state's rows otherwise.
+/// Either way, the view has to return the same binding as a scan of all the
+/// rows at every sequence.
+#[tokio::test]
+async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
+    let tail = churned_binding_state();
+    let mut overlay = MetadataState::default();
+    overlay.apply_committed_wal_deltas_mut(
+        ChangeSeq(4),
+        &commit_id(4),
+        &actor(),
+        4_200,
+        &[
+            WalDelta::CreateInode {
+                delta_index: 0,
+                inode_id: InodeId(5),
+                inode_kind: InodeKind::Directory,
+            },
+            WalDelta::BindDirentry {
+                delta_index: 1,
+                parent_inode_id: InodeId(1),
+                name_key: name_key("deleted"),
+                display_name: loonfs_types::DisplayName::parse("deleted")
+                    .expect("valid display name"),
+                child_inode_id: InodeId(5),
+                child_kind: InodeKind::Directory,
+                child_created_by: actor(),
+                child_created_at_ms: 4_200,
+            },
+        ],
+    );
+    let mut all_rows = tail.clone();
+    for binding in overlay.direntry_binds() {
+        all_rows.push_direntry_binding_record(binding.clone());
+    }
+    let base = crate::wal::ProjectedWalTail::from_rows(tail);
+
+    for seq in (0..=4).map(ChangeSeq) {
+        let view = InMemoryMetadataView::in_memory(&base, Some(&overlay), seq);
+        for name in ["contested", "renamed-away", "deleted", "never-bound"] {
+            assert_eq!(
+                view.bound_child(InodeId(1), &name_key(name))
+                    .await
+                    .expect("bound child"),
+                all_rows.bound_child_at_seq_scan(InodeId(1), &name_key(name), seq),
+                "`{name}` at {seq:?}"
+            );
+        }
+        for child in (2..=5).map(InodeId) {
+            assert_eq!(
+                view.latest_parent_binding_for_child(child)
+                    .await
+                    .expect("parent binding"),
+                all_rows.latest_parent_binding_for_child_at_seq(child, seq),
+                "{child:?} at {seq:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn has_visible_children_sees_through_unbinds() {
     let dir = InodeId(1);

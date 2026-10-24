@@ -265,6 +265,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.sources.manifest
     }
 
+    /// Returns the rows of one key that a caller needs to find the key's
+    /// newest row at the view's visible sequence.
+    ///
+    /// The manifest contributes every row that `fetch` reads. A row state (the
+    /// rows of one WAL tail chunk, of the batch's earlier commits, or of the
+    /// commit being validated) contributes only its newest row of the key when
+    /// all of its rows are at or below the visible sequence, and `newest_in`
+    /// reads that row from the state's index. Any other row state contributes
+    /// each row that `matches` selects.
+    ///
+    /// Without the index, every lookup would read every row of the WAL tail
+    /// and of the batch's earlier commits. Both sets of rows grow with the
+    /// batch size, and commit validation makes several lookups per commit, so
+    /// a batch's validation cost would grow with the square of its size.
     async fn shared_rows<T, K>(
         &self,
         select_map: fn(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, Arc<Vec<T>>>,
@@ -272,11 +286,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         fetch: Pin<Box<dyn Future<Output = Result<Vec<T>>> + Send + '_>>,
         rows_of: fn(&MetadataState) -> &[T],
         matches: impl Fn(&T) -> bool,
+        newest_in: impl Fn(&MetadataState) -> Option<T>,
     ) -> Result<SharedRows<T>>
     where
         T: Clone,
         K: Clone + Eq + std::hash::Hash,
     {
+        let visible_seq = self.visible_seq;
+        let state_rows = |state: &MetadataState, rows: &mut Vec<T>| {
+            if state.indexed_seq() <= visible_seq {
+                rows.extend(newest_in(state));
+            } else {
+                rows.extend(rows_of(state).iter().filter(|row| matches(row)).cloned());
+            }
+        };
         let durable = if let Some(cached) = self
             .sources
             .durable_cache
@@ -285,20 +308,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             cached
         } else {
             let mut durable = fetch.await?;
-            durable.extend(
-                self.durable_row_states()
-                    .flat_map(|state| rows_of(state).iter().filter(|row| matches(row)).cloned()),
-            );
+            for state in self.durable_row_states() {
+                state_rows(state, &mut durable);
+            }
             let durable = Arc::new(durable);
             if let Some(cache) = self.sources.durable_cache {
                 cache.insert(select_map, key, Arc::clone(&durable));
             }
             durable
         };
-        let overlay = self
-            .overlay_states()
-            .flat_map(|state| rows_of(state).iter().filter(|row| matches(row)).cloned())
-            .collect();
+        let mut overlay = Vec::new();
+        for state in self.overlay_states() {
+            state_rows(state, &mut overlay);
+        }
         Ok(SharedRows { durable, overlay })
     }
 }
@@ -773,6 +795,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             parent_inode_id,
             name_key: name_key.clone(),
         };
+        let slot = (parent_inode_id, name_key.clone());
         self.shared_rows(
             |inner| &mut inner.binds_for_parent_name,
             cache_key,
@@ -793,6 +816,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             |direntry| {
                 direntry.parent_inode_id == parent_inode_id && direntry.name_key == *name_key
             },
+            |state| state.indexes.latest_bind_in_slot(&slot),
         )
         .await
     }
@@ -818,6 +842,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }),
             MetadataState::direntry_binds,
             |direntry| direntry.child_inode_id == child_inode_id,
+            |state| state.indexes.latest_binding_for_child(child_inode_id),
         )
         .await
     }
@@ -982,6 +1007,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }),
             MetadataState::subtree_tombstones,
             |tombstone| tombstone.root_inode_id == root_inode_id,
+            |state| state.indexes.latest_tombstone(root_inode_id),
         )
         .await
     }
