@@ -2117,6 +2117,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_manifest_bytes(0)
                 .max_head_bytes(0)
                 .max_wal_tail_bytes(0)
                 .build(),
@@ -3206,6 +3207,7 @@ async fn zero_head_and_wal_tail_limits_cache_nothing_and_sessions_keep_their_tai
         store,
         MetadataCache::builder()
             .max_segment_bytes(0)
+            .max_manifest_bytes(0)
             .max_head_bytes(0)
             .max_wal_tail_bytes(0)
             .build(),

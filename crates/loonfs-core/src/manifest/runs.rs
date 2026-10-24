@@ -38,8 +38,8 @@ pub(super) struct MetadataFamilySegments {
 
 /// One run of a cached manifest, in the order that reads scan the runs.
 ///
-/// The segment block cache keeps these with each decoded manifest, so the
-/// type is public, but its fields aren't.
+/// The manifest cache keeps these with each decoded manifest, so the type
+/// is public, but its fields aren't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataRunManifest {
     pub(super) run_no: RunNo,

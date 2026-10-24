@@ -84,14 +84,15 @@ fixed = 128 MiB
       + 32 MiB
       + 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B, with a [metadata_cache.ssd] table
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
-managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_head_bytes
+managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_manifest_bytes
+        - metadata_cache.max_head_bytes
 ```
 
 `fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between passes, and the SSD tier of the metadata segment cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).)
 
 The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
 
-The head cache's budget, `metadata_cache.max_head_bytes`, isn't a share of managed memory, because the memory that namespace heads need depends on the namespaces that the server reads, not on the host. It's 16 MiB unless you set it, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
+The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the head cache (`metadata_cache.max_head_bytes`) aren't shares of managed memory, because the memory that manifests and namespace heads need depends on the namespaces that the server reads, not on the host. They're 32 MiB and 16 MiB unless you set them, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
 
 | Pool | Share of managed memory | Setting |
 | --- | ---: | --- |
@@ -309,17 +310,20 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs_server_in_flight_requests` | Gauge | Requests that have a slot, until their responses complete. |
 | `loonfs_server_connection_accept_waiting` | Gauge | 1 while TCP accept waits for a free connection slot, and 0 otherwise. This isn't a count of the OS backlog, because that count isn't available to the server. |
 | `loonfs_server_busy_rejections_total` | Counter, `kind` label | A concurrency refusal: `request`, `upload`, or `download`. Connections wait instead, so they don't increment this counter. |
+| `loonfs_manifest_cache_gets_total` | Counter, `result` label | A read looks up its namespace's decoded manifest: `hit` or `miss`. After a miss, the read loads the manifest from the store. |
+| `loonfs_manifest_cache_evictions_total` | Counter | A manifest is evicted at the `metadata_cache.max_manifest_bytes` budget. Metadata blocks don't evict manifests, because manifests have a budget of their own. |
+| `loonfs_manifest_cache_retained_decoded_bytes` | Gauge | Bytes charged to the manifests in the manifest cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_head_cache_gets_total` | Counter, `result` label | A read that starts from the read cache looks up its namespace head: `hit` or `miss`. |
 | `loonfs.read_head.source` | Counter, `source` label | A read takes the namespace head it starts from: `position` when the server has the namespace's writer session, so the read sends no request to confirm the head except the session's check for a newer manifest, `anchor` when the head comes from the read cache and the read confirms it, or `eventual` when an `eventual` read takes the read cache's head within its maximum staleness, without a request. |
 | `loonfs_head_cache_evictions_total` | Counter | A namespace head is evicted at the `metadata_cache.max_head_bytes` limit. A namespace head larger than the limit isn't cached, and each read of it loads it on its own. |
 | `loonfs_head_cache_retained_decoded_bytes` | Gauge | Bytes charged to the namespace heads in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_wal_tail_cache_evictions_total` | Counter | A WAL-tail projection is evicted at the `metadata_cache.max_wal_tail_bytes` limit. A WAL-tail projection never evicts a namespace head, because heads have a limit of their own. |
 | `loonfs_wal_tail_cache_retained_decoded_bytes` | Gauge | Bytes charged to the WAL-tail projections in the cache now. Each entry's charge includes its key and the cache's own allocation for the entry. |
-| `loonfs_segment_cache_gets_total` | Counter, `tier` and `result` labels | A read looks up a metadata block (or, in memory, a manifest) in a tier of the segment cache. `tier` is `memory`, or `ssd` for the [SSD tier](#keeping-metadata-blocks-on-local-ssd), and `result` is `hit` or `miss`. A read that misses memory reads the block from disk, and a read that misses the SSD tier goes to the store, so `{tier="ssd",result="hit"}` records the GETs that the SSD tier saved. A damaged file that the server deletes is recorded as a miss. A server without the SSD tier reports no `ssd` series. |
+| `loonfs_segment_cache_gets_total` | Counter, `tier` and `result` labels | A read looks up a metadata block in a tier of the segment cache. `tier` is `memory`, or `ssd` for the [SSD tier](#keeping-metadata-blocks-on-local-ssd), and `result` is `hit` or `miss`. A read that misses memory reads the block from disk, and a read that misses the SSD tier goes to the store, so `{tier="ssd",result="hit"}` records the GETs that the SSD tier saved. A damaged file that the server deletes is recorded as a miss. A server without the SSD tier reports no `ssd` series. |
 | `loonfs_segment_cache_inserts_total` | Counter, `tier` label | A tier keeps a new block. The SSD tier also records each block that it finds in its directory when the server starts. |
 | `loonfs_segment_cache_evictions_total` | Counter, `tier` label | A tier deletes its least recently used block at its budget, `metadata_cache.max_segment_bytes` in memory or `metadata_cache.ssd.max_segment_bytes` on disk. |
 | `loonfs_segment_cache_rejections_total` | Counter, `tier` label | A tier doesn't keep a block. In memory, the block is larger than the whole budget. On disk, the block is larger than the whole budget, the write queue is full, or the write failed, and the block stays in memory. |
-| `loonfs_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the entries in the metadata segment cache in memory, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
+| `loonfs_segment_cache_retained_decoded_bytes` | Gauge | Bytes charged to the blocks in the metadata segment cache in memory, up to `metadata_cache.max_segment_bytes`. Each entry's charge includes its key and the cache's own allocation for the entry. |
 | `loonfs_segment_cache_retained_stored_bytes` | Gauge | Bytes charged to the blocks on the SSD tier, up to `metadata_cache.ssd.max_segment_bytes`. Each block's charge is its stored length (4 KiB for a smaller block) and its index entry's allocation in memory, so the gauge is larger than the bytes on disk when blocks are small. |
 | `loonfs_content_object_cache_evictions_total` | Counter | A content object is evicted at the `metadata_cache.max_content_object_bytes` limit. |
 | `loonfs_grep_cache_gets_total` | Counter, `result` label | A grep query looks up a decoded manifest or block of the grep index in the grep cache: `hit` or `miss`. A server that doesn't serve grep has no grep cache, so it reports no `loonfs_grep_cache_*` series. |
@@ -381,7 +385,8 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
-| Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 30%, or 40% without grep. 256 MiB without a memory limit | Decoded metadata blocks and manifests | Steady |
+| Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 30%, or 40% without grep. 256 MiB without a memory limit | Decoded metadata blocks | Steady |
+| Manifest cache | `metadata_cache.max_manifest_bytes` | 32 MiB, with or without a memory limit | Decoded manifests for reads, about 600 namespaces of 10,000 files at 56 KB each | Steady |
 | SSD tier of the segment cache | `metadata_cache.ssd.max_segment_bytes` | None, because the tier is off without `[metadata_cache.ssd]` | The tier's 64 MiB write queue, and an index of 168 bytes for each block on disk | Steady |
 | Grep cache | `grep.max_cache_bytes` | Derived: 10%. 256 MiB without a memory limit | Decoded grep blocks and manifests when serving queries | Steady |
 | Head cache | `metadata_cache.max_head_bytes` | 16 MiB, with or without a memory limit | Cached namespace heads for reads, about 18,000 namespaces at 0.9 KB each | Steady |
@@ -418,12 +423,16 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, an SSD tier, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
+Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 1,776 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 256 MiB |
+| Manifest cache | 32 MiB |
+| Head cache | 16 MiB |
 | WAL tail cache | 64 MiB |
+| Content object cache | 96 MiB |
+| Completed upload sessions | 32 MiB |
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
@@ -431,7 +440,7 @@ Without a memory limit, grep, an SSD tier, or overrides, the budgets that have a
 | Read working memory | 256 MiB |
 | 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 1,600 MiB |
+| Total | 1,776 MiB |
 
 The total leaves out:
 
@@ -452,7 +461,7 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 291 MiB of managed memory, and the smallest limit that passes is 2,004 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,796 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 259 MiB of managed memory, and the smallest limit that passes is 2,044 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,836 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 

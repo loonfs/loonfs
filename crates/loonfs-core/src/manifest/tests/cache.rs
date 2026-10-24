@@ -3,6 +3,7 @@
 use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
 use super::super::segment_block_cache::{SegmentBlockCache, SegmentBlockLoad};
 use super::*;
+use crate::block_cache::DecodedBlockCacheStats;
 use loonfs_test_support::stores::replace_object;
 use std::assert_matches;
 use std::sync::Mutex;
@@ -288,6 +289,101 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     );
 }
 
+/// Loads the namespace's manifest through `cache`, scans every revision
+/// row, and loads the manifest again. Returns the number of GETs for the
+/// manifest that the second load sent.
+async fn scan_between_manifest_loads(
+    store: &RecordingStore<LocalFsStore>,
+    cache: &MetadataSegmentCache,
+    namespace_id: &NamespaceId,
+    manifest_no: &ManifestNo,
+) -> usize {
+    let segments =
+        super::load_manifest_segments_for_inspection(store, Some(cache), namespace_id, manifest_no)
+            .await
+            .expect("load segments");
+    segments
+        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
+        .await
+        .expect("scan revisions");
+    store.reset();
+    super::load_manifest_segments_for_inspection(store, Some(cache), namespace_id, manifest_no)
+        .await
+        .expect("load segments again");
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
+    store
+        .take_get_keys()
+        .iter()
+        .filter(|key| **key == manifest_key)
+        .count()
+}
+
+/// Checks that manifests and segment blocks are charged to budgets of their
+/// own. A scan whose blocks are four times the blocks' budget evicts blocks
+/// but not the manifest, so the next load of the manifest sends no GET, and
+/// the manifest budget is charged the manifest alone. With a zero manifest
+/// budget, the cache keeps no manifest, and the blocks' budget is charged
+/// the same blocks as before.
+#[tokio::test]
+async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    eight_files_one_row_per_segment(&store, &namespace_id, &test_context()).await;
+    let manifest_no = current_manifest_number(&store, &namespace_id).await;
+    let cache = |max_segment_bytes, max_manifest_bytes| {
+        MetadataSegmentCache::new(
+            Arc::new(SharedSegmentBlocks::new(
+                max_segment_bytes,
+                max_manifest_bytes,
+            )),
+            ObjectStoreScope::new(0),
+            Arc::default(),
+            crate::limits::READAHEAD_WINDOW_BYTES,
+        )
+    };
+    let unbounded = cache(usize::MAX, usize::MAX);
+    scan_between_manifest_loads(&store, &unbounded, &namespace_id, &manifest_no).await;
+    let (blocks_bytes, manifest) = (
+        unbounded.stats().cached_decoded_bytes,
+        unbounded.manifest_stats(),
+    );
+    assert_eq!(manifest.inserts, 1, "{manifest:?}");
+
+    let mut blocks = Vec::new();
+    for max_manifest_bytes in [manifest.cached_decoded_bytes, 0] {
+        let cache = cache(blocks_bytes / 4, max_manifest_bytes);
+        let manifest_gets =
+            scan_between_manifest_loads(&store, &cache, &namespace_id, &manifest_no).await;
+        let (stats, manifests) = (cache.stats(), cache.manifest_stats());
+        assert!(stats.evictions > 0, "the scan outgrows the blocks' budget");
+        if max_manifest_bytes == 0 {
+            assert_eq!(manifest_gets, 1, "a zero budget keeps no manifest");
+            assert_eq!(manifests, DecodedBlockCacheStats::default());
+        } else {
+            assert_eq!(manifest_gets, 0, "the manifest stays through the scan");
+            assert_eq!(
+                (
+                    manifests.inserts,
+                    manifests.hits,
+                    manifests.evictions,
+                    manifests.cached_decoded_bytes
+                ),
+                (1, 1, 0, max_manifest_bytes),
+                "the manifest budget is charged the manifest alone"
+            );
+        }
+        blocks.push((stats.inserts, stats.evictions, stats.cached_decoded_bytes));
+    }
+    assert_eq!(
+        blocks[0], blocks[1],
+        "the blocks' budget is charged no manifest"
+    );
+}
+
 #[tokio::test]
 async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let temp_dir = tempdir().expect("tempdir");
@@ -544,7 +640,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
     let cache = MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(0)),
+        Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
         crate::limits::READAHEAD_WINDOW_BYTES,
@@ -1166,7 +1262,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
     let blocks = Arc::new(CountingBlockCache::default());
     let cache = MetadataSegmentCache::with_blocks(
         blocks.clone(),
-        Arc::new(SharedSegmentBlocks::new(usize::MAX)),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
         Arc::default(),
         crate::limits::READAHEAD_WINDOW_BYTES,
@@ -1297,7 +1393,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     let manifest_number = current_manifest_number(&store, namespace_id).await;
     let cache = |pool| {
         MetadataSegmentCache::new(
-            Arc::new(SharedSegmentBlocks::new(0)),
+            Arc::new(SharedSegmentBlocks::new(0, 0)),
             ObjectStoreScope::new(0),
             pool,
             crate::limits::READAHEAD_WINDOW_BYTES,

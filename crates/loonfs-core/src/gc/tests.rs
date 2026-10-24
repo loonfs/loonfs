@@ -3980,7 +3980,7 @@ fn root_scan_cache(
     memory: Arc<crate::cache::ReadWorkingMemory>,
 ) -> crate::cache::MetadataSegmentCache {
     crate::cache::MetadataSegmentCache::new(
-        Arc::new(crate::cache::SharedSegmentBlocks::new(0)),
+        Arc::new(crate::cache::SharedSegmentBlocks::new(0, 0)),
         crate::cache::ObjectStoreScope::new(0),
         memory,
         crate::limits::READAHEAD_WINDOW_BYTES,

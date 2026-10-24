@@ -300,8 +300,144 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
     );
     assert!(warm.segment_hits > cold.segment_hits, "{warm:?}");
     assert_eq!(
-        warm.segment_misses, cold.segment_misses,
-        "the second runtime reads the blocks the first runtime decoded: {warm:?}"
+        (warm.segment_misses, warm.manifest_misses),
+        (cold.segment_misses, cold.manifest_misses),
+        "the second runtime reads the blocks and the manifest the first runtime decoded: {warm:?}"
+    );
+}
+
+/// Checks that the builder's manifest limit bounds the manifests that the cache
+/// keeps. A second pass of the same reads loads no manifest from the store when
+/// the limit fits the namespace's manifest, and the cache doesn't keep a
+/// manifest heavier than the limit. With a zero limit, the cache keeps no
+/// manifest, so every read of the second pass loads the manifest again, and the
+/// segment limit is charged the same blocks as with the default.
+#[tokio::test]
+async fn the_manifest_limit_bounds_the_cached_manifests() {
+    let root = tempdir().expect("tempdir");
+    same_shape_store(
+        &local_store(root.path()),
+        &MetadataCache::default(),
+        b"file",
+    )
+    .await;
+    let read_twice = |cache: MetadataCache| {
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(root.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ));
+        async move {
+            let store: SharedObjectStore = recording.clone();
+            let runtime = reader(&store, &cache).await;
+            assert_reads(&runtime, b"file").await;
+            recording.reset();
+            assert_reads(&runtime, b"file").await;
+            let manifest_gets =
+                object_gets(&recording.take(), DurableObjectFamily::MetadataManifest);
+            (cache.stats(), manifest_gets)
+        }
+    };
+
+    let (kept, kept_gets) = read_twice(MetadataCache::default()).await;
+    assert_eq!(
+        (kept.manifest_inserts, kept.manifest_evictions, kept_gets),
+        (1, 0, 0),
+        "the second pass reads the manifest from the cache: {kept:?}"
+    );
+    let (exact, exact_gets) = read_twice(
+        MetadataCache::builder()
+            .max_manifest_bytes(kept.manifest_bytes)
+            .build(),
+    )
+    .await;
+    assert_eq!(
+        (exact.manifest_bytes, exact_gets),
+        (kept.manifest_bytes, 0),
+        "{exact:?}"
+    );
+    let (short, _) = read_twice(
+        MetadataCache::builder()
+            .max_manifest_bytes(kept.manifest_bytes - 1)
+            .build(),
+    )
+    .await;
+    assert_eq!(
+        (short.manifest_inserts, short.manifest_bytes),
+        (0, 0),
+        "{short:?}"
+    );
+    assert!(short.manifest_rejections > 0, "{short:?}");
+
+    let (none, none_gets) =
+        read_twice(MetadataCache::builder().max_manifest_bytes(0).build()).await;
+    assert_eq!(
+        (none.manifest_inserts, none.manifest_bytes, none_gets),
+        (0, 0, 2),
+        "each of the second pass's two reads loads the manifest: {none:?}"
+    );
+    assert_eq!(
+        (none.segment_inserts, none.segment_bytes),
+        (kept.segment_inserts, kept.segment_bytes),
+        "the segment limit is charged no manifest"
+    );
+}
+
+/// Checks that a namespace's manifest stays cached while reads of another
+/// namespace load more segment blocks than fit within the segment limit. The
+/// other namespace is in another store, so its reads don't use the first
+/// namespace's manifest, and the next read of the first namespace loads no
+/// manifest from the store.
+#[tokio::test]
+async fn a_manifest_stays_cached_while_another_namespace_reads_many_blocks() {
+    let (small_root, large_root) = (tempdir().expect("tempdir"), tempdir().expect("tempdir"));
+    same_shape_store(
+        &local_store(small_root.path()),
+        &MetadataCache::default(),
+        b"file",
+    )
+    .await;
+    write_long_named_entries(large_root.path()).await;
+    let cache = MetadataCache::builder()
+        .max_segment_bytes(256 * 1024)
+        .build();
+    let small_store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(small_root.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let shared_small_store: SharedObjectStore = small_store.clone();
+    let small = reader(&shared_small_store, &cache).await;
+    assert_reads(&small, b"file").await;
+
+    let large = reader(&local_store(large_root.path()), &cache).await;
+    let mut cursor = None;
+    loop {
+        let page = large
+            .namespace(&demo())
+            .list("/dirs")
+            .cursor(cursor)
+            .page()
+            .await
+            .expect("list a page");
+        match page.next_cursor {
+            Some(next_cursor) => cursor = Some(next_cursor),
+            None => break,
+        }
+    }
+    let before = cache.stats();
+    assert!(before.segment_evictions > 0, "{before:?}");
+
+    small_store.reset();
+    assert_reads(&small, b"file").await;
+    let after = cache.stats();
+    assert_eq!(
+        object_gets(&small_store.take(), DurableObjectFamily::MetadataManifest),
+        0,
+        "the read finds its manifest in the cache: {after:?}"
+    );
+    assert_eq!(
+        (after.manifest_misses, after.manifest_evictions),
+        (before.manifest_misses, 0),
+        "{after:?}"
     );
 }
 
@@ -344,6 +480,7 @@ async fn bindings_share_one_capacity() {
     let one_binding = measured.stats();
     let cache = MetadataCache::builder()
         .max_segment_bytes(one_binding.segment_bytes)
+        .max_manifest_bytes(one_binding.manifest_bytes)
         .max_head_bytes(one_binding.head_bytes)
         .max_wal_tail_bytes(one_binding.wal_tail_bytes)
         .build();
@@ -357,12 +494,17 @@ async fn bindings_share_one_capacity() {
         stats.segment_bytes <= one_binding.segment_bytes,
         "{stats:?}"
     );
+    assert!(
+        stats.manifest_bytes <= one_binding.manifest_bytes,
+        "{stats:?}"
+    );
     assert!(stats.head_bytes <= one_binding.head_bytes, "{stats:?}");
     assert!(
         stats.wal_tail_bytes <= one_binding.wal_tail_bytes,
         "{stats:?}"
     );
     assert!(stats.segment_evictions > 0, "{stats:?}");
+    assert!(stats.manifest_evictions > 0, "{stats:?}");
     assert!(stats.head_evictions > 0, "{stats:?}");
     assert!(stats.wal_tail_evictions > 0, "{stats:?}");
 }
@@ -800,17 +942,15 @@ async fn reads_of_empty_files_keep_no_content_objects() {
     }
 }
 
-/// Checks that reads use the read-ahead window that their runtime's cache
-/// was built with. A cold listing of a directory whose entries fill several
-/// data blocks fetches them in one GET with the default window, and in a GET
-/// for each block with no window.
-#[tokio::test]
-async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
+/// Creates namespace `demo` with 3,000 entries in `/dirs`, folded into
+/// segments. Long names that don't compress well make the directory's
+/// entries fill several data blocks, and a segment too large to be read
+/// whole.
+async fn write_long_named_entries(root: &Path) {
     use crate::publish::{CommitIntent, FilesystemOperation};
     use crate::{AbsolutePath, CommitId};
 
-    let root = tempdir().expect("tempdir");
-    let writer = LoonFs::builder_with_store(local_store(root.path()))
+    let writer = LoonFs::builder_with_store(local_store(root))
         .writer_id(writer_id("window-writer"))
         .build()
         .await
@@ -824,8 +964,6 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
         .create_directory("/dirs", &test_actor())
         .await
         .expect("create the listed directory");
-    // Long names that don't compress well make the directory's entries fill
-    // several data blocks, and a segment too large to be read whole.
     let mut state = 1_u64;
     let operations = (0..3_000)
         .map(|index| {
@@ -860,6 +998,16 @@ async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
         .await
         .expect("fold the entries into segments");
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that reads use the read-ahead window that their runtime's cache
+/// was built with. A cold listing of a directory whose entries fill several
+/// data blocks fetches them in one GET with the default window, and in a GET
+/// for each block with no window.
+#[tokio::test]
+async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
+    let root = tempdir().expect("tempdir");
+    write_long_named_entries(root.path()).await;
 
     let mut segment_reads = Vec::new();
     for window_bytes in [crate::READAHEAD_WINDOW_BYTES, 0] {

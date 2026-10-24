@@ -291,7 +291,7 @@ fn render_segment_cache(
     write_gauge(
         rendered,
         "loonfs_segment_cache_retained_decoded_bytes",
-        "Bytes currently charged to metadata-segment cache entries in memory, including keys and per-entry bookkeeping",
+        "Bytes currently charged to metadata segment blocks in memory, including keys and per-entry bookkeeping",
         retained_decoded_bytes,
     );
     if let Some(ssd) = ssd {
@@ -323,6 +323,12 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         segment_filter_false_positives,
         segment_bytes,
         segment_ssd,
+        manifest_hits,
+        manifest_misses,
+        manifest_inserts,
+        manifest_evictions,
+        manifest_rejections,
+        manifest_bytes,
         head_hits,
         head_misses,
         head_evictions,
@@ -362,6 +368,12 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     );
     for (name, description, hits, misses) in [
         (
+            "loonfs_manifest_cache_gets",
+            "Manifest cache lookups, by outcome",
+            manifest_hits,
+            manifest_misses,
+        ),
+        (
             "loonfs_head_cache_gets",
             "Namespace head cache lookups, by outcome",
             head_hits,
@@ -392,6 +404,21 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
             "loonfs_segment_cache_filter_false_positives",
             "Filter admissions that matched no metadata rows",
             segment_filter_false_positives,
+        ),
+        (
+            "loonfs_manifest_cache_inserts",
+            "Manifests inserted into the manifest cache",
+            manifest_inserts,
+        ),
+        (
+            "loonfs_manifest_cache_evictions",
+            "Manifests evicted to stay within the manifest budget",
+            manifest_evictions,
+        ),
+        (
+            "loonfs_manifest_cache_rejections",
+            "Manifests heavier than the whole manifest budget",
+            manifest_rejections,
         ),
         (
             "loonfs_head_cache_evictions",
@@ -452,6 +479,11 @@ fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
         write_counter(rendered, name, description, &[(NO_LABELS, value)]);
     }
     for (name, description, value) in [
+        (
+            "loonfs_manifest_cache_retained_decoded_bytes",
+            "Bytes currently charged to manifests, including keys and per-entry bookkeeping",
+            manifest_bytes,
+        ),
         (
             "loonfs_head_cache_retained_decoded_bytes",
             "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",

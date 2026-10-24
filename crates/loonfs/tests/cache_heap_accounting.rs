@@ -1,7 +1,8 @@
-//! Checks that the metadata segment cache, the head cache, and the WAL-tail
-//! cache charge their budgets with the heap that their contents use, and that
-//! the index of the segment cache's SSD tier allocates no more for each
-//! block than the server's sizing formula estimates.
+//! Checks that the metadata segment cache, the manifest cache, the head
+//! cache, and the WAL-tail cache charge their budgets with the heap that
+//! their contents use, and that the index of the segment cache's SSD tier
+//! allocates no more for each block than the server's sizing formula
+//! estimates.
 //!
 //! This binary counts every allocation, so it keeps a process of its own.
 //! Heap here means the bytes the program asks the allocator for; allocator
@@ -20,7 +21,7 @@ use loonfs::publish::{
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
     MaintainMetadataOptions, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore, StatOptions,
-    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
+    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::StoreIdentity;
@@ -666,6 +667,7 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
     let heads = |max_head_bytes| {
         MetadataCache::builder()
             .max_segment_bytes(0)
+            .max_manifest_bytes(0)
             .max_head_bytes(max_head_bytes)
             .max_wal_tail_bytes(0)
             .max_content_object_bytes(0)
@@ -735,7 +737,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         },
     ];
     let mut failures = Vec::new();
-    println!("shape | segment budget | segment heap | ratio | heads and tails accounted | heads and tails heap | ratio");
+    println!("shape | segment budget | segment heap | ratio | manifests accounted | manifests heap | ratio | heads and tails accounted | heads and tails heap | ratio");
     for shape in &shapes {
         let root = tempfile::tempdir().expect("tempdir");
         let store: SharedObjectStore =
@@ -750,6 +752,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             root.path(),
             MetadataCache::builder()
                 .max_segment_bytes(SEGMENT_BUDGET_BYTES)
+                .max_manifest_bytes(0)
                 .max_head_bytes(0)
                 .max_wal_tail_bytes(0)
                 .max_content_object_bytes(0)
@@ -764,10 +767,14 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         );
         drop(reader);
 
-        // The heads and the WAL tails each have a budget of their own.
-        let heads_and_tails = |max_head_bytes, max_wal_tail_bytes| {
+        // The manifests, the heads, and the WAL tails each have a budget of
+        // their own. The test measures the heap of reads that keep manifests,
+        // and of reads that keep heads and WAL tails, against the heap of the
+        // same reads that keep none of them.
+        let kept = |max_manifest_bytes, max_head_bytes, max_wal_tail_bytes| {
             MetadataCache::builder()
                 .max_segment_bytes(0)
+                .max_manifest_bytes(max_manifest_bytes)
                 .max_head_bytes(max_head_bytes)
                 .max_wal_tail_bytes(max_wal_tail_bytes)
                 .max_content_object_bytes(0)
@@ -775,29 +782,39 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         };
         let (with_heads_and_tails, reader) = retained_heap(
             root.path(),
-            heads_and_tails(DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES),
+            kept(0, DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES),
             |reader| stat_one_path_per_namespace(shape, reader),
         )
         .await;
         let stats = reader.metadata_cache().stats();
         let accounted = stats.head_bytes + stats.wal_tail_bytes;
         drop(reader);
-        let (without_heads_and_tails, reader) =
-            retained_heap(root.path(), heads_and_tails(0, 0), |reader| {
-                stat_one_path_per_namespace(shape, reader)
-            })
-            .await;
+        let (with_manifests, reader) = retained_heap(
+            root.path(),
+            kept(DEFAULT_MAX_MANIFEST_BYTES, 0, 0),
+            |reader| stat_one_path_per_namespace(shape, reader),
+        )
+        .await;
+        let manifests_accounted = reader.metadata_cache().stats().manifest_bytes;
         drop(reader);
-        let heads_and_tails_heap = with_heads_and_tails.saturating_sub(without_heads_and_tails);
+        let (without_entries, reader) = retained_heap(root.path(), kept(0, 0, 0), |reader| {
+            stat_one_path_per_namespace(shape, reader)
+        })
+        .await;
+        drop(reader);
+        let manifests_heap = with_manifests.saturating_sub(without_entries);
+        let heads_and_tails_heap = with_heads_and_tails.saturating_sub(without_entries);
 
         let segment_ratio = ratio(segment_heap, SEGMENT_BUDGET_BYTES);
+        let manifests_ratio = ratio(manifests_heap, manifests_accounted);
         let heads_and_tails_ratio = ratio(heads_and_tails_heap, accounted);
         println!(
-            "{} | {SEGMENT_BUDGET_BYTES} | {segment_heap} | {segment_ratio:.2} | {accounted} | {heads_and_tails_heap} | {heads_and_tails_ratio:.2}",
+            "{} | {SEGMENT_BUDGET_BYTES} | {segment_heap} | {segment_ratio:.2} | {manifests_accounted} | {manifests_heap} | {manifests_ratio:.2} | {accounted} | {heads_and_tails_heap} | {heads_and_tails_ratio:.2}",
             shape.label
         );
         for (what, value) in [
             ("segment", segment_ratio),
+            ("manifests", manifests_ratio),
             ("heads and tails", heads_and_tails_ratio),
         ] {
             if (value - 1.0).abs() > TOLERANCE {
