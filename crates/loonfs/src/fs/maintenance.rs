@@ -348,11 +348,20 @@ impl Maintenance {
             // position shows folded is folded into that manifest.
             let position = self.publisher.wal_fold_input(namespace_id).await;
             let manifest = self.load_live_manifest(namespace_id).await?;
-            if let Some(position) = &position {
-                assert!(
-                    manifest.manifest().manifest_no >= position.basis.manifest_no(),
-                    "the current manifest should be at least as new as the writer position's, \
-                     which was published before the position moved onto it"
+            let manifest_no = manifest.manifest().manifest_no;
+            let behind = position
+                .as_ref()
+                .map(|position| position.basis.manifest_no())
+                .filter(|position_manifest_no| manifest_no < *position_manifest_no);
+            // The publish order rules this out, so a manifest behind the
+            // position is a bug, and metadata stays due instead of the step
+            // stopping the maintenance loop.
+            if let Some(position_manifest_no) = behind {
+                tracing::warn!(
+                    namespace_id = namespace_id.as_str(),
+                    %manifest_no,
+                    %position_manifest_no,
+                    "the current manifest is older than the writer position's manifest"
                 );
             }
             let objects = position.map(|position| position.wal_tail_objects);
@@ -360,7 +369,7 @@ impl Maintenance {
                 Some(manifest),
                 objects,
                 WalFoldStepOutcome::NotNeeded,
-                objects == Some(0),
+                objects == Some(0) && behind.is_none(),
             ));
         };
         let anchor = self.load_live_anchor(namespace_id).await?;

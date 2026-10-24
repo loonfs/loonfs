@@ -1624,3 +1624,151 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     );
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Forwards every call to a local store. While it has a view set, it answers
+/// reads of a namespace's hint with an earlier copy of the hint, and hides
+/// the manifests above the newest manifest of the view, so discovery finds
+/// that older manifest current.
+#[derive(Debug)]
+struct EarlierManifestView {
+    inner: LocalFsStore,
+    hint_key: String,
+    /// The earlier hint, and the newest manifest number that stays visible.
+    view: std::sync::Mutex<Option<(loonfs_objectstore::ObjectBody, loonfs_types::ManifestNo)>>,
+}
+
+impl EarlierManifestView {
+    /// The view's answer for `key`: `Some(None)` hides the object, and `None`
+    /// forwards the read.
+    fn answer(&self, key: &str) -> Option<Option<loonfs_objectstore::ObjectBody>> {
+        let view = self.view.lock().expect("view lock");
+        let (hint, newest) = view.as_ref()?;
+        if key == self.hint_key {
+            return Some(Some(hint.clone()));
+        }
+        loonfs_objectstore::layout::manifest_no_of(key)
+            .filter(|manifest_no| manifest_no > newest)
+            .map(|_| None)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for EarlierManifestView {
+    loonfs_test_support::delegate_object_store!(self => self.inner;
+        head,
+        checksum_algorithm,
+        identity,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        put,
+        put_streamed,
+        put_if_absent,
+        put_immutable_verified,
+        assemble,
+        compare_and_swap,
+        delete,
+        list_prefix_stream,
+        list_entries_from_stream,
+        list_prefix,
+        list_child_prefixes,
+    );
+
+    async fn get_with_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<loonfs_objectstore::ObjectBody>, loonfs_objectstore::ObjectStoreError> {
+        match self.answer(key) {
+            Some(answer) => Ok(answer),
+            None => self.inner.get_with_metadata(key).await,
+        }
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<loonfs_objectstore::ByteRange>,
+    ) -> Result<Option<bytes::Bytes>, loonfs_objectstore::ObjectStoreError> {
+        match self.answer(key) {
+            Some(answer) => Ok(answer.map(|body| bytes::Bytes::from(body.bytes))),
+            None => self.inner.get(key, range).await,
+        }
+    }
+}
+
+/// Checks that a session's compaction step that finds a current manifest
+/// older than the writer position's manifest reports metadata due. The
+/// publish order rules that out, so the store fakes it: it answers with the
+/// hint from before the session's last fold, and hides the fold's manifest.
+#[tokio::test]
+async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("manifest-behind-position");
+    let hint_key = loonfs_objectstore::keys::hint(&namespace_id);
+    let store = Arc::new(EarlierManifestView {
+        inner: LocalFsStore::new(directory.path()).expect("store"),
+        hint_key: hint_key.clone(),
+        view: std::sync::Mutex::new(None),
+    });
+    // Each write leaves inline bytes in the tail, so the session folds each
+    // write.
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .inline_content(crate::InlineContentPolicy {
+            inline_content_fold_at_bytes: 1,
+            ..crate::InlineContentPolicy::default()
+        })
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create the namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    namespace
+        .put_file("/first", b"body", &actor)
+        .await
+        .expect("put a file");
+    namespace.wait_for_fold().await.expect("the fold settles");
+    writer.drain().await.expect("nothing else runs");
+    let earlier_hint = store
+        .inner
+        .get_with_metadata(&hint_key)
+        .await
+        .expect("read the hint")
+        .expect("the hint exists");
+    let earlier = current_manifest_payload(store.as_ref(), &namespace_id)
+        .await
+        .manifest_no;
+    namespace
+        .put_file("/second", b"body", &actor)
+        .await
+        .expect("put a file");
+    namespace.wait_for_fold().await.expect("the fold settles");
+    writer.drain().await.expect("nothing else runs");
+
+    *store.view.lock().expect("view lock") = Some((earlier_hint, earlier));
+    let step = maintenance
+        .metadata_step(
+            &namespace_id,
+            super::TailFold::Never,
+            MetadataCompactionPolicy::SizeTiered,
+            &crate::MaintenanceCancellation::new(),
+        )
+        .await;
+    *store.view.lock().expect("view lock") = None;
+    let step = step
+        .expect("the step runs")
+        .expect("the step isn't cancelled");
+    assert_eq!(
+        step.wal_fold,
+        crate::MetadataMaintenanceOutcome::Due,
+        "a manifest behind the position leaves metadata due"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
