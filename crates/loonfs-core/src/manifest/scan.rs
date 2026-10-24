@@ -16,6 +16,7 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::ChangeSeq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -48,9 +49,10 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) manifest_object_key: String,
     pub(super) manifest: Option<Arc<NamespaceManifestEnvelope>>,
     pub(super) manifest_bytes: u64,
-    /// The manifest's runs, grouped once during load validation and shared
-    /// through the manifest cache entry. Scans merge globally unique row keys
-    /// and do not depend on this order.
+    /// The manifest's runs, newest first, grouped once during load
+    /// validation and shared through the manifest cache entry. A merge
+    /// doesn't depend on this order, because row keys are unique across
+    /// runs, but [`Self::scan_prefix_in_newest_run_for_lookup`] does.
     pub(super) scan_runs: Arc<Vec<MetadataRunManifest>>,
     /// Retains fetched blocks within the operation's data budget.
     pub(super) block_memo: SessionBlockMemo,
@@ -158,6 +160,89 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             self.scan_prefix_rows(family, prefix, Some(filter_probe), readahead)
                 .await?,
         ))
+    }
+
+    /// Returns up to `limit` rows of `prefix` from the newest run that has a
+    /// row for that prefix.
+    ///
+    /// A lookup for the newest fact about one key prefix (the latest revision
+    /// of an inode, the newest version of a directory slot, or the newest
+    /// attribute or access revision) finds the same fact here as in the merge
+    /// of every run, for two reasons:
+    ///
+    /// - Each run covers its own range of commit sequences, and `scan_runs`
+    ///   lists the runs newest first, so every row of a run is newer than
+    ///   every row of the runs after it. A fold writes the commits after the
+    ///   manifest's folded WAL object into one new run. A compaction merges
+    ///   a contiguous window of a family group's runs into one run at the
+    ///   window's position, and the group's base run is older than every
+    ///   delta run, whatever its sequence stamp. (Run numbers don't follow
+    ///   this order, because a compaction's output is assigned a new number.)
+    ///   See
+    ///   [Manifests, runs, and segments](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#71-manifests-runs-and-segments),
+    ///   [Compaction windows](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#102-compaction-windows),
+    ///   and "Runs cover separate sequence ranges" in [Row retention during
+    ///   a base compaction](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction).
+    /// - A later commit assigns an inode a higher revision, attribute
+    ///   revision, or access revision number, and a later version of a
+    ///   directory slot has a higher position. See [Metadata rows and row
+    ///   keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
+    ///
+    /// So the newest run with a row for the prefix has the newest fact, and
+    /// the older runs can only add older facts.
+    ///
+    /// The lookup checks the candidate segments' filters in every run at
+    /// once, as the merge does, and then reads the admitted runs one at a
+    /// time, newest first. The newest admitted run has the rows unless its
+    /// filter admitted the prefix by a false positive, and then the lookup
+    /// reads the next admitted run. A lookup that needs every fact for a
+    /// prefix (a revision listing or a tombstone check) uses
+    /// [`Self::scan_prefix_for_lookup`] instead, and so does a read below a
+    /// run's sequence ([`Self::every_row_is_visible_at`]), because the newest
+    /// run's rows could all be above the read.
+    pub(crate) async fn scan_prefix_in_newest_run_for_lookup(
+        &self,
+        family: MetadataRowFamily,
+        prefix: &str,
+        filter_probe: &str,
+        limit: usize,
+        readahead: Readahead,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        let upper_bound = string_prefix_upper_bound(prefix);
+        let upper_bound = upper_bound.as_deref();
+        let mut candidates = Vec::new();
+        let mut run_ends = Vec::with_capacity(self.scan_runs.len());
+        for run in self.scan_runs.iter() {
+            self.push_run_candidates(&mut candidates, run, family, prefix, upper_bound)?;
+            run_ends.push(candidates.len());
+        }
+        let admissions = self.filter_admissions(&candidates, filter_probe).await?;
+        let mut run_start = 0;
+        for run_end in run_ends {
+            let admitted: Vec<_> = candidates[run_start..run_end]
+                .iter()
+                .zip(&admissions[run_start..run_end])
+                .filter_map(|(candidate, admits)| admits.then_some(*candidate))
+                .collect();
+            run_start = run_end;
+            if admitted.is_empty() {
+                continue;
+            }
+            let page = self
+                .merge_segment_rows(admitted, prefix, upper_bound, limit, readahead, true)
+                .await?;
+            if !page.is_empty() {
+                return Ok(strip_row_keys(page));
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Whether a read at `visible_seq` sees every row of these runs. Every
+    /// row of a run is at or below the run's sequence, which each block load
+    /// checks.
+    pub(crate) fn every_row_is_visible_at(&self, visible_seq: ChangeSeq) -> bool {
+        self.scan_runs.iter().all(|run| run.run_seq <= visible_seq)
     }
 
     pub(crate) async fn scan_range_page(
@@ -306,31 +391,69 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
-            let family_segments =
-                manifest_segment_for_family(&self.manifest_object_key, &run.segments, family)?;
-            candidates.extend(
-                family_segments
-                    .segments
-                    .iter()
-                    .filter(|descriptor| {
-                        key_range_may_intersect(
-                            &descriptor.min_row_key,
-                            &descriptor.max_row_key,
-                            descriptor.row_count,
-                            lower_bound,
-                            upper_bound,
-                        )
-                    })
-                    .map(|descriptor| ScanDescriptor {
-                        descriptor,
-                        max_seq: run.run_seq,
-                    }),
-            );
+            self.push_run_candidates(&mut candidates, run, family, lower_bound, upper_bound)?;
         }
-        let mut matching_descriptors = self
+        let admitted = self
             .filter_admitted_descriptors(candidates, filter_probe)
             .await?;
-        matching_descriptors.sort_by(|left, right| {
+        self.merge_segment_rows(
+            admitted,
+            lower_bound,
+            upper_bound,
+            limit,
+            readahead,
+            filter_probe.is_some(),
+        )
+        .await
+    }
+
+    /// Adds the segments of `run` in `family` whose key range meets
+    /// `[lower_bound, upper_bound)` to `candidates`.
+    fn push_run_candidates<'r>(
+        &self,
+        candidates: &mut Vec<ScanDescriptor<'r>>,
+        run: &'r MetadataRunManifest,
+        family: MetadataRowFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+    ) -> Result<(), ManifestLoadError> {
+        let family_segments =
+            manifest_segment_for_family(&self.manifest_object_key, &run.segments, family)?;
+        candidates.extend(
+            family_segments
+                .segments
+                .iter()
+                .filter(|descriptor| {
+                    key_range_may_intersect(
+                        &descriptor.min_row_key,
+                        &descriptor.max_row_key,
+                        descriptor.row_count,
+                        lower_bound,
+                        upper_bound,
+                    )
+                })
+                .map(|descriptor| ScanDescriptor {
+                    descriptor,
+                    max_seq: run.run_seq,
+                }),
+        );
+        Ok(())
+    }
+
+    /// Merges the rows of `descriptors` in `[lower_bound, upper_bound)` into
+    /// one page of at most `limit` rows in row-key order. When a filter
+    /// admitted the descriptors, a descriptor with no row in the range is
+    /// recorded as a false positive.
+    async fn merge_segment_rows(
+        &self,
+        mut descriptors: Vec<ScanDescriptor<'_>>,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+        readahead: Readahead,
+        filter_admitted: bool,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        descriptors.sort_by(|left, right| {
             left.descriptor
                 .min_row_key
                 .cmp(&right.descriptor.min_row_key)
@@ -354,7 +477,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             windows_stop_at_upper_bound: false,
         };
         let mut iterators = Vec::new();
-        let mut descriptors = matching_descriptors.into_iter();
+        let mut descriptors = descriptors.into_iter();
         let mut rows: BTreeMap<String, MetadataRow> = BTreeMap::new();
         loop {
             let mut open_through = rows
@@ -386,7 +509,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 break;
             }
             refill_iterators(&loader, &mut iterators, 1).await?;
-            if filter_probe.is_some() {
+            if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator
                         .head()
@@ -444,22 +567,34 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         let Some(filter_probe) = filter_probe else {
             return Ok(descriptors);
         };
-        let mut admitted = Vec::with_capacity(descriptors.len());
+        let admissions = self.filter_admissions(&descriptors, filter_probe).await?;
+        Ok(descriptors
+            .into_iter()
+            .zip(admissions)
+            .filter_map(|(descriptor, admits)| admits.then_some(descriptor))
+            .collect())
+    }
+
+    /// Whether each descriptor's bloom filter admits the probe, in order.
+    async fn filter_admissions(
+        &self,
+        descriptors: &[ScanDescriptor<'_>],
+        filter_probe: &str,
+    ) -> Result<Vec<bool>, ManifestLoadError> {
+        let mut admissions = Vec::with_capacity(descriptors.len());
         let mut checks = stream::iter(0..descriptors.len())
             .map(|index| {
                 let descriptor = descriptors[index];
                 async move {
-                    let admits = self
-                        .segment_filter_admits(descriptor.descriptor, filter_probe)
-                        .await?;
-                    Ok::<_, ManifestLoadError>(admits.then_some(descriptor))
+                    self.segment_filter_admits(descriptor.descriptor, filter_probe)
+                        .await
                 }
             })
             .buffered(STORE_READS_IN_FLIGHT);
-        while let Some(descriptor) = checks.try_next().await? {
-            admitted.extend(descriptor);
+        while let Some(admits) = checks.try_next().await? {
+            admissions.push(admits);
         }
-        Ok(admitted)
+        Ok(admissions)
     }
 }
 
