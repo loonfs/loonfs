@@ -67,7 +67,7 @@ The SSD tier keeps each block in its stored form, the compressed bytes of the bl
 
 The SSD tier keeps blocks from every [namespace](../specs/glossary.md#namespace) that the server serves, and it evicts the least recently used block across all of them. For example, if a server serves 500 namespaces and 20 of them are busy, the disk fills with the blocks of those 20, and the blocks of an idle namespace leave the disk as the busy namespaces read.
 
-The SSD tier keeps blocks and no other entries. The segment block cache also keeps decoded manifests, and manifests stay in memory alone, because a manifest is small and a read loads one once per revalidation.
+The SSD tier keeps blocks and no other entries. Decoded manifests stay in memory alone, under a budget of their own (see [Budgets and counters](#budgets-and-counters)), because a manifest is small and a read loads one once per revalidation.
 
 In memory, the cache identifies a block's object store by the store's scope, a number that the process assigns to each object store that it opens. On disk, the SSD tier identifies the object store by the store's identity, which is its provider, its location, and its key prefix. The location is the bucket, with the endpoint when the provider has one, or a local store's absolute root directory. A disk key is a hash of that identity, the segment's object key, the block's kind, and the block's offset. A store without an identity, such as a store in memory, has no objects outside the process, so the cache keeps that store's blocks in memory alone.
 
@@ -109,7 +109,11 @@ Why doesn't LoonFS decode a window when it fetches the window, and insert all of
 
 This section describes the budget of each tier, the memory that the SSD tier adds to the server's sizing, and the counters that each tier reports.
 
-LoonFS keeps each kind of cache entry under a budget of its own, so that one kind can't evict another, and every cache reports the same family of counters (hits, misses, inserts, evictions, and rejections), as [Cache ownership](cache-ownership.md) describes. The memory tier is the segment block cache, with its budget (`metadata_cache.max_segment_bytes`) and its counters. That budget is separate from the budgets for namespace [heads](../specs/glossary.md#head), [WAL tails](../specs/glossary.md#wal-tail), and content objects, so a burst of block reads doesn't evict a reader's WAL tail.
+LoonFS keeps each kind of cache entry under a budget of its own, so that one kind can't evict another, and every cache reports the same family of counters (hits, misses, inserts, evictions, and rejections), as [Cache ownership](cache-ownership.md) describes. The memory tier is the segment block cache, with its budget (`metadata_cache.max_segment_bytes`) and its counters. That budget is separate from the budgets for [manifests](../specs/glossary.md#manifest), namespace [heads](../specs/glossary.md#head), [WAL tails](../specs/glossary.md#wal-tail), and content objects, so a burst of block reads doesn't evict a namespace's manifest or a reader's WAL tail.
+
+Decoded manifests are kept under `metadata_cache.max_manifest_bytes`, which is 32 MiB with or without a memory limit. A read of a namespace starts from that namespace's manifest, so a manifest that isn't in memory costs a GET before any block of the read. A manifest is charged about 10 to 60 KB for a namespace of 10,000 files (more when the namespace's writes leave more runs), and about 240 KB for a namespace of 1,000,000 files written in large commits. So the default budget keeps the manifests of about 600 to 3,000 namespaces of 10,000 files, or about 140 namespaces of 1,000,000 files.
+
+For example, a server read 64 namespaces of 10,000 files in rotation. With manifests under the same budget as blocks, each namespace's turn sent a GET to load its manifest again, at every segment budget from 64 MiB to 160 MiB. With a budget for manifests, those GETs stopped. The stats that had waited for them were among the slowest 2%, so a stat's 99th percentile latency fell by about 25 ms.
 
 The SSD tier has two settings, in a `[metadata_cache.ssd]` table under the server's `[metadata_cache]` table ([`config.rs`](../../crates/loonfs-server/src/config.rs)). Both settings are required, and without the table, the server has no SSD tier.
 
@@ -128,7 +132,11 @@ Because the SSD tier charges each block at least 4 KiB, it keeps at most one blo
 
 Why does the SSD tier have one budget for every namespace, and not one per namespace? Tenants' working sets differ by orders of magnitude, and they change over the day. For example, one tenant might read 2 GB of metadata all morning and nothing in the evening, while another reads 5 MB once an hour. A shared least-recently-used budget follows those working sets as they change, and a budget per namespace would need an operator to set and adjust a number for each tenant.
 
-Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Namespace heads, WAL tails, and content objects stay in memory under their own budgets.
+Why does the SSD tier have one budget when memory has one for each kind of entry? The SSD tier extends one cache, the segment block cache, so it keeps one kind of entry. Manifests, namespace heads, WAL tails, and content objects stay in memory under their own budgets.
+
+Why isn't the manifest budget a share of managed memory? The memory that manifests need depends on the namespaces that a server reads and on their sizes, not on the host, so the budget is a setting of its own, like the head budget. The sizing formula takes it out of managed memory before it divides the rest among the pools.
+
+Why is the default 32 MiB? It keeps the manifests of hundreds of namespaces, and a larger default would shrink every pool on a sized server. For example, with a 64 MiB default, a server with a 2 GiB memory limit would have less than the 256 MiB of managed memory that the sizing check requires.
 
 Why does the SSD tier charge each block at least 4 KiB? The index keeps an entry in memory for each block on disk, and its term in `fixed` covers one entry for each 4 KiB of the budget. If the SSD tier charged each block only its stored length, a tier of small blocks could keep many more entries than the term covers (a tier of 1 KiB blocks would keep more than three times as many), and the server could use more memory than its limit. The 4 KiB minimum costs disk instead, because a tier of blocks smaller than 4 KiB keeps fewer bytes on disk than its budget.
 
@@ -156,7 +164,7 @@ An operator chooses whether a server keeps blocks on local disk, and how much di
 
 A client gets the same results with or without the tier, because the tier changes what a read costs and not what it returns. A read that misses memory and finds its block on disk waits for a read from local disk instead of a GET.
 
-The block cache's metrics keep one cache name, `segment`, in the grammar of the other cache metrics (`loonfs_<cache>_cache_*`), and they report each tier under a `tier` label with the value `memory` or `ssd`. The object cache's metrics use a `key_class` label in the same way (see [Probes and metrics](../../crates/loonfs-server/docs/self-hosting.md#probes-and-metrics)). For example, `loonfs_segment_cache_gets_total{tier="ssd",result="hit"}` records the gets that the SSD tier served from disk, and `loonfs_segment_cache_gets_total{tier="ssd",result="miss"}` records the gets that went to the store.
+The block cache's metrics keep one cache name, `segment`, in the grammar of the other cache metrics (`loonfs_<cache>_cache_*`), and they report each tier under a `tier` label with the value `memory` or `ssd`. The object cache's metrics use a `key_class` label in the same way (see [Probes and metrics](../../crates/loonfs-server/docs/self-hosting.md#probes-and-metrics)). For example, `loonfs_segment_cache_gets_total{tier="ssd",result="hit"}` records the gets that the SSD tier served from disk, and `loonfs_segment_cache_gets_total{tier="ssd",result="miss"}` records the gets that went to the store. Manifests have a budget of their own, so they report a family of their own, `loonfs_manifest_cache_*`.
 
 The SSD tier records each block that it finds in its directory at startup as an insert, in `loonfs_segment_cache_inserts_total{tier="ssd"}`. The rejections family, `loonfs_segment_cache_rejections_total`, has the same `tier` label and records the blocks that a tier didn't keep. The SSD tier records a rejection when the write queue is full, when the write fails, when the tier is already closed, or when the block is larger than the whole budget, and in each case the block stays in memory. The SSD tier's gauge, `loonfs_segment_cache_retained_stored_bytes`, reports the bytes charged to the blocks on disk. Each block's charge is the larger of its stored length and 4 KiB, plus the index's own allocation for the block, and `metadata_cache.ssd.max_segment_bytes` limits that same charge. So the gauge can report more bytes than the disk keeps, for example on a tier of blocks smaller than 4 KiB. The SSD tier has a gauge of its own because the disk keeps stored bytes, and the memory gauge, `loonfs_segment_cache_retained_decoded_bytes`, reports decoded bytes.
 
@@ -196,6 +204,12 @@ Each case compares the two servers' store requests per call and their latency di
 - The [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md) describes the SSD tier's settings, its term in the sizing formula, and its metrics.
 
 ## Alternatives considered
+
+Keep manifests under the blocks' budget. Blocks that other namespaces load can then evict a manifest while its namespace goes unread, and the next read of the namespace sends a GET for the manifest before it reads any block.
+
+Keep each namespace's current manifest with its cached head, outside any budget. The default head budget keeps about 18,000 heads, and their manifests could take about 1 GB for namespaces of 10,000 files, or about 4 GB for namespaces of 1,000,000 files. Charging the manifests to the head budget instead would let the manifest of one large namespace evict hundreds of heads.
+
+Give index and filter blocks a budget of their own as well. On the server that read 64 namespaces in rotation, such a budget saved no GET of an index or filter block at any segment budget from 64 MiB to 160 MiB, so it would add a setting and a family of counters without saving requests.
 
 Put a disk tier under the decoded cache, with its own budget and its own rules, that keeps the stored bytes of some block kinds and not others (for example, index and filter blocks but not the data blocks that scans read). The server then has two caches that keep different sets of blocks under different rules. A block that one cache evicts can stay in the other, a block that a read uses can be one that the disk tier skips, and each cache needs its own counters and its own term in the sizing formula.
 
