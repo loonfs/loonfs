@@ -27,8 +27,10 @@ pub enum DurableObjectFamily {
     MetadataSegment,
     /// Classifies a pin to a numbered manifest.
     Pin,
-    /// Classifies a mutable upload-session lifecycle record.
+    /// Classifies the record that starts an upload session.
     UploadSession,
+    /// Classifies the record of how an upload session ended.
+    UploadOutcome,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
     /// Classifies a temporary object that an assembly writes and deletes.
@@ -117,13 +119,20 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             .strip_suffix(".json")
             .map(|identifier| parsed(DurableObjectFamily::Pin, namespace, Some(identifier))),
         ["namespaces", namespace, "uploads", upload] => {
-            upload.strip_suffix(".json").map(|identifier| {
-                parsed(
-                    DurableObjectFamily::UploadSession,
+            match upload.strip_suffix(".outcome.json") {
+                Some(identifier) => Some(parsed(
+                    DurableObjectFamily::UploadOutcome,
                     namespace,
                     Some(identifier),
-                )
-            })
+                )),
+                None => upload.strip_suffix(".json").map(|identifier| {
+                    parsed(
+                        DurableObjectFamily::UploadSession,
+                        namespace,
+                        Some(identifier),
+                    )
+                }),
+            }
         }
         ["namespaces", namespace, "temporary", temporary] => Some(parsed(
             DurableObjectFamily::TemporaryObject,
@@ -164,10 +173,21 @@ pub fn manifest_no_of(key: &str) -> Option<ManifestNo> {
     ManifestNo::parse(number.parse().ok()?).ok()
 }
 
-/// Extracts and validates an upload identity from its durable key.
+/// Extracts and validates an upload identity from the key of its session
+/// record.
 pub fn upload_id_of(key: &str) -> Option<UploadId> {
+    upload_id_in(key, DurableObjectFamily::UploadSession)
+}
+
+/// Extracts and validates an upload identity from the key of its outcome
+/// record.
+pub fn upload_outcome_id_of(key: &str) -> Option<UploadId> {
+    upload_id_in(key, DurableObjectFamily::UploadOutcome)
+}
+
+fn upload_id_in(key: &str, family: DurableObjectFamily) -> Option<UploadId> {
     parse_object_key(key)
-        .filter(|parsed| parsed.family() == DurableObjectFamily::UploadSession)
+        .filter(|parsed| parsed.family() == family)
         .and_then(|parsed| parsed.identifier())
         .and_then(|identifier| UploadId::parse(identifier).ok())
 }
@@ -261,7 +281,7 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
         content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
-        pin, temporary_object, upload_session, wal_object, wal_prefix,
+        pin, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
@@ -335,6 +355,11 @@ mod tests {
                 Some(upload_id.as_str()),
             ),
             (
+                upload_outcome(&namespace_id, &upload_id),
+                DurableObjectFamily::UploadOutcome,
+                Some(upload_id.as_str()),
+            ),
+            (
                 content_blob(&namespace_id, &content_id),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
@@ -363,6 +388,33 @@ mod tests {
                 owner.as_str()
             );
         }
+    }
+
+    #[test]
+    fn an_upload_outcome_key_sorts_directly_after_its_session_key() {
+        // Garbage collection pairs a session's two records by listing order.
+        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let first = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let second = UploadId::parse("upl_00000000000000000000000000000010").expect("upload id");
+        let mut keys = [
+            upload_outcome(&namespace_id, &second),
+            upload_session(&namespace_id, &second),
+            upload_outcome(&namespace_id, &first),
+            upload_session(&namespace_id, &first),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                upload_session(&namespace_id, &first),
+                upload_outcome(&namespace_id, &first),
+                upload_session(&namespace_id, &second),
+                upload_outcome(&namespace_id, &second),
+            ]
+        );
+        assert_eq!(super::upload_id_of(&keys[0]), Some(first.clone()));
+        assert_eq!(super::upload_outcome_id_of(&keys[1]), Some(first));
+        assert_eq!(super::upload_id_of(&keys[1]), None);
     }
 
     #[test]
