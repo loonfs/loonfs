@@ -10,16 +10,16 @@ use loonfs_types::{ContentId, UploadId};
 use std::sync::Arc;
 
 /// The two facts that garbage collection uses from a completed upload
-/// session's record.
+/// session's outcome record.
 ///
-/// LoonFS refuses every update to a completed upload session record, so both
-/// facts stay true for as long as the record exists.
+/// LoonFS never changes an outcome record, so both facts stay true for as
+/// long as the session's records exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompletedUploadSession {
     /// The content that the session uploaded, which a pass protects.
     pub(crate) content_id: ContentId,
-    /// When the session was completed. The sweep deletes the record once the
-    /// content reclamation grace has passed since this time.
+    /// When the session was completed. The sweep deletes the session's
+    /// records once the content reclamation grace has passed since this time.
     pub(crate) completed_at_ms: u64,
 }
 

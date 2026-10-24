@@ -44,8 +44,8 @@ pub(super) struct LiveSet {
     pub(super) objects: ChargedSet<String>,
     pub(super) content_ids: ChargedSet<ContentId>,
     /// Each upload session that was completed when the pass listed the
-    /// sessions, keyed by upload ID. A completed record can't change, so the
-    /// session sweep uses these facts instead of reading the record again.
+    /// sessions, keyed by upload ID. An outcome record can't change, so the
+    /// session sweep uses these facts instead of reading the records again.
     pub(super) completed_sessions: ChargedMap<UploadId, CompletedUploadSession>,
     pub(super) manifests: Vec<LoadedManifest>,
     manifest_charge: Charge,
