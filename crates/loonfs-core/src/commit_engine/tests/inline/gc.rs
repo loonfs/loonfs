@@ -96,6 +96,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         &deadline,
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     );
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
@@ -160,6 +161,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         &deadline,
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     );
     let winner = async {
         blocked.wait_until_blocked().await;
@@ -171,6 +173,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await
         .expect("winning fold");

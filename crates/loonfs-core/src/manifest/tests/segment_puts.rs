@@ -181,6 +181,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                     ..MetadataRunPolicy::default()
                 },
                 &content_writes,
+                None,
             ),
             async {
                 store.wait_until_blocked().await;
@@ -263,6 +264,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
             ..MetadataRunPolicy::default()
         },
         &content_writes,
+        None,
     )
     .await;
     assert!(matches!(

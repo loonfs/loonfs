@@ -52,6 +52,7 @@ impl Fixture {
             None,
             &content_writes,
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("snapshot")
@@ -73,6 +74,7 @@ impl Fixture {
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("replace old runs");
@@ -177,6 +179,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
             Default::default(),
             None,
             &content_writes,
+            None,
         )
         .await
         .expect("install historical fork")
@@ -242,6 +245,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             Default::default(),
             None,
             &content_writes,
+            None,
         ),
         async {
             gate.wait_until_blocked().await;
@@ -323,6 +327,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
             Default::default(),
             None,
             &content_writes,
+            None,
         ),
         async {
             gate.wait_until_blocked().await;
@@ -336,6 +341,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
                 MetadataRunPolicy::default(),
                 None,
                 &content_writes,
+                None,
             )
             .await
             .expect("delete source before the fork pin lands");
@@ -385,6 +391,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         None,
         &content_writes,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("snapshot")
@@ -409,6 +416,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             Default::default(),
             None,
             &content_writes,
+            None,
         ),
         async {
             store.wait_until_blocked().await;

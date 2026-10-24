@@ -52,6 +52,7 @@ async fn compact_and_check_pair(
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compact a family group");
@@ -103,6 +104,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("pin the original history")
@@ -113,6 +115,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("floor exactly at original commit")
@@ -174,7 +177,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             None,
             &namespace_id,
             RetentionTarget::Head,
-            crate::test_support::std_timer()
+            crate::test_support::std_timer(),
+            None
         )
         .await
         .expect("advance floor")

@@ -134,6 +134,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect("fork");
@@ -203,6 +204,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect("fork source pin proves authorship from matching bytes");
@@ -241,6 +243,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect("fork");
@@ -276,6 +279,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect("nested fork");
@@ -367,7 +371,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
-        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline),
+        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline, None),
         async {
             store.wait_until_blocked().await;
             crate::manifest::fold_wal(store.inner(), &namespace_id)
@@ -379,6 +383,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 &namespace_id,
                 crate::manifest::RetentionTarget::Head,
                 crate::test_support::std_timer(),
+                None,
             )
             .await
             .expect("advance floor");
@@ -411,7 +416,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let known = super::control::load_hint(&store, &namespace_id)
         .await
         .expect("hint");
-    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), known, &deadline)
+    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), known, &deadline, None)
         .await
         .expect("refresh hint");
     let aged = MutationContext {
@@ -476,6 +481,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect_err("deleted target");
@@ -518,6 +524,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             Default::default(),
             None,
             &content_writes,
+            None,
         );
         let competing_create = async {
             store.wait_until_blocked().await;

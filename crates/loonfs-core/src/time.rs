@@ -31,7 +31,7 @@ impl Deadline {
         self.now_ms().saturating_sub(self.started_at_ms)
     }
 
-    fn now_ms(&self) -> u64 {
+    pub(crate) fn now_ms(&self) -> u64 {
         self.timer.monotonic_now_ms()
     }
 

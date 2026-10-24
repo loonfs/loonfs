@@ -28,6 +28,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("snapshot")
@@ -106,6 +107,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("snapshot")
@@ -173,6 +175,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("snapshot")

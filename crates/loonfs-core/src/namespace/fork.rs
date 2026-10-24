@@ -1,7 +1,7 @@
 //! Fork installation pins a source manifest and lists its run references in
 //! a new namespace's first manifest; no segment or content object is copied.
 
-use super::control::{ensure_namespace_absent, load_current_manifest_if_present};
+use super::control::{ensure_namespace_absent, load_current_manifest_if_present, LastHintRaise};
 use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "fork inputs include the caller's fold policy and cache"
+    reason = "fork inputs include the caller's fold policy, cache, and last hint raise"
 )]
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -31,6 +31,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(Arc::clone(&timer));
     ensure_namespace_absent(store, new_namespace_id).await?;
@@ -57,6 +58,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             segment_cache,
             content_writes,
             Arc::clone(&timer),
+            last_raise,
         )
         .await?
         .response

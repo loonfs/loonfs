@@ -124,6 +124,7 @@ async fn an_undelete_before_the_expiry_step_revokes_its_deletion_and_one_after_r
         &deadline(),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold");
@@ -134,6 +135,7 @@ async fn an_undelete_before_the_expiry_step_revokes_its_deletion_and_one_after_r
         &namespace_id,
         RetentionTarget::Head,
         Arc::new(StdMonotonicTimer::default()),
+        None,
     )
     .await
     .expect("advance the floor");
@@ -278,6 +280,7 @@ async fn advance_the_floor<S: ObjectStore + ?Sized>(
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold");
@@ -288,6 +291,7 @@ async fn advance_the_floor<S: ObjectStore + ?Sized>(
         namespace_id,
         RetentionTarget::Head,
         Arc::new(StdMonotonicTimer::default()),
+        None,
     )
     .await
     .expect("advance the floor");

@@ -7,6 +7,7 @@ use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::manifest::{fold_wal_tail, MetadataRunPolicy, PublicationReport};
+use crate::namespace::control::LastHintRaise;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
@@ -19,7 +20,7 @@ const MAX_SNAPSHOT_NAME_CHARS: usize = 128;
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "pin creation folds first, so it takes the caller's fold policy, cache, write permits, and timer"
+    reason = "pin creation folds first, so it takes the caller's fold policy, cache, write permits, timer, and last hint raise"
 )]
 pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     store: &S,
@@ -30,6 +31,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
     timer: Arc<dyn MonotonicTimer>,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<PublicationReport<PinPayload>> {
     validate_pin_owner(&owner)?;
     let deadline = Deadline::start(timer);
@@ -48,6 +50,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
             deadline,
             policy,
             content_writes,
+            last_raise,
         )
         .await?;
         if let Some(manifest) = folded.published() {

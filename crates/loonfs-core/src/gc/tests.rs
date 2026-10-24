@@ -251,6 +251,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -529,6 +530,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");
@@ -1241,6 +1243,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -1255,6 +1258,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compact a family group");
@@ -1504,6 +1508,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("move the floor past the deletion");
@@ -1646,6 +1651,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");
@@ -1793,6 +1799,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -2030,6 +2037,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -2199,6 +2207,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compact step");
@@ -2267,6 +2276,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -2283,6 +2293,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -2442,6 +2453,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");
@@ -2630,6 +2642,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");
@@ -2692,6 +2705,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");
@@ -2770,6 +2784,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -2786,6 +2801,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork retry after abandonment");
@@ -3034,6 +3050,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -3681,6 +3698,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
                 None,
                 &crate::test_support::content_writes(),
                 crate::test_support::std_timer(),
+                None,
             )
             .await
             .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -3809,6 +3827,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -3869,6 +3888,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             Default::default(),
             None,
             &crate::test_support::content_writes(),
+            None,
         )
         .await
         .expect("fork");

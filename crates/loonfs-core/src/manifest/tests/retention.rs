@@ -146,6 +146,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("initial manifest already covers floor zero")
@@ -197,6 +198,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance retention")
@@ -289,6 +291,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             &namespace_id,
             target,
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("advance the floor")
@@ -353,6 +356,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             cutoff_at_ms: u64::MAX,
         },
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance to the newest commit")
@@ -420,6 +424,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect_err("missing basis segment blocks floor advancement");
@@ -500,6 +505,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect_err("failed basis probe blocks floor advancement");
@@ -645,6 +651,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -664,6 +671,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -727,6 +735,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -858,6 +867,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor");
@@ -929,6 +939,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         MetadataRunPolicy::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("delete");
@@ -1216,6 +1227,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compaction step");
@@ -1306,6 +1318,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         crate::manifest::CompactionAdmission::WithinRowBudget,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("budgeted unit");
@@ -1364,6 +1377,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         crate::manifest::CompactionAdmission::WithinRowBudget,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("admitted unit");
@@ -1439,6 +1453,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("first compaction unit");
@@ -1526,6 +1541,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("below-trigger step");
@@ -1771,6 +1787,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("first unit");
@@ -1798,6 +1815,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("resumed unit");
@@ -1880,6 +1898,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         &overrun,
         MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     else {
@@ -1982,6 +2001,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         Arc::new(ManualClock::stepping(20 * 60 * 1000)),
+        None,
     )
     .await
     .expect_err("over-budget compaction must abort");
@@ -2007,6 +2027,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("in-budget retry merges the unit");
@@ -2063,6 +2084,7 @@ async fn compact_with<S: ObjectStore + ?Sized>(
         admission,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("run a compaction unit")
@@ -2280,6 +2302,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor");
@@ -2435,6 +2458,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             &namespace_id,
             RetentionTarget::Head,
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("advance the floor past the deletions");
@@ -2553,6 +2577,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor")

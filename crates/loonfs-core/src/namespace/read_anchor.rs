@@ -40,6 +40,11 @@ impl NamespaceReadAnchor {
     pub fn current_manifest(&self) -> &CurrentManifest {
         &self.manifest.state
     }
+
+    /// Returns the hint that the anchor's discovery started from.
+    pub fn hint(&self) -> &LoadedHint {
+        &self.hint
+    }
 }
 
 pub async fn load_read_anchor<S: ObjectStore + ?Sized>(

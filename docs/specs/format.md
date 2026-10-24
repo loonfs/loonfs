@@ -295,7 +295,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | --- | --- | --- |
 | Manifest | The namespace's identity, lifecycle status, writer authority, materialized file set, and retention floor | A new manifest is published at the next number. |
 | WAL object | Commits, or a writer fence, after the materialized boundary | A new WAL object is created at the next number. |
-| Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
+| Hint | A recent manifest number, where discovery starts | Compare-and-swap, at most once per second by each writer session. The number never decreases. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
 | Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
 | Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | Conditional status changes. |
@@ -303,6 +303,8 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
 Manifests and WAL objects are immutable once they're written. A manifest publication can change the physical layout or the namespace's control state without creating a commit, and a WAL publication can add commits without creating a manifest. The hint doesn't determine history or visibility. It's a best-effort pointer, so its number can lag behind successful manifest publications.
+
+A writer session raises the hint at most once per `MIN_HINT_RAISE_INTERVAL_MS` (1 second). A manifest that the session publishes within that interval of its last raise leaves the hint where it is, and the session raises the hint at its next publication, or at its next metadata maintenance pass after the interval. For example, if a session raises the hint to 7 and then publishes manifests 8 and 9 within the next half second, the hint stays at 7 until the session raises it to 9 or later.
 
 ### 2.3 Numbered objects and generated IDs
 
@@ -339,6 +341,8 @@ For example, manifest 5 might cover WAL objects through 8 and sequences through 
 
 Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
+Why does a writer session raise the hint at most once per second? The hint is the one object that a namespace updates repeatedly by compare-and-swap, and some providers allow about one write per second to the same object name (see the [provider reference](object-storage-providers.md#1-frequently-used-data-points)). A busy namespace can publish more than one manifest per second (each fold and each compaction unit publishes one), so if a session raised the hint at every publication, the provider would throttle those updates. Readers stay correct while the hint lags, because discovery probes forward from it.
+
 ### 2.5 Manifest references
 
 A durable reference to a manifest contains:
@@ -373,7 +377,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
 - A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it. A fence contains no commits.
-- The hint is mutable. It records a manifest number, manifest publications raise it by compare-and-swap, and it never decreases.
+- The hint is mutable. It records a manifest number, manifest publications raise it by compare-and-swap (at most once per second by each writer session), and it never decreases.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Pins are retained manifests (see [Pins](#8-pins)).
 
@@ -802,7 +806,7 @@ acknowledge
 
 A confirmed precondition failure creates no object. The writer discovers the winning publication, checks whether it has been fenced, and plans again before it tries another number. It never creates a parallel branch of history.
 
-Commits don't raise the hint. Manifest publications raise it (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)), and readers stay correct while it lags, because discovery probes forward.
+Commits don't raise the hint. Manifest publications raise it, at most once per second by each writer session (see [Object roles and mutability](#22-object-roles-and-mutability)), and readers stay correct while it lags, because discovery probes forward.
 
 Every put is planned against an observed state, and that observation has to be recent. A writer tracks two kinds of observation:
 
@@ -956,7 +960,7 @@ A fold works in these steps:
 3. Write each chain's new extent to a content object (see below).
 4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence is folded even when the sequence doesn't change, and an ordinary fold writes a run at the head when it materializes new state.
 5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`.
-6. Raise the hint.
+6. Raise the hint, unless the writer session that runs the fold raised it less than `MIN_HINT_RAISE_INTERVAL_MS` ago.
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
@@ -993,7 +997,7 @@ A namespace tombstone has no successor.
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
-After the publication, the fold raises the hint within the publication budget. If raising the hint fails, the manifest is still published. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
+After the publication, the fold raises the hint within the publication budget. If raising the hint fails, the manifest is still published. A fold within `MIN_HINT_RAISE_INTERVAL_MS` of its writer session's last raise leaves the hint for the session to raise later (see [Object roles and mutability](#22-object-roles-and-mutability)). Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
 
 Forks follow the same path from manifest 1. A manifest owned by the fork doesn't mean the inherited segments were copied into the fork's prefix, and each segment keeps its owner.
 
@@ -2160,6 +2164,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | --- | ---: | --- |
 | `WAL_PUBLISH_BUDGET_MS` | 300,000 | From observing the planning tip to starting the next numbered put. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | From the start of a bounded manifest publication (including an epoch claim) to starting its put. |
+| `MIN_HINT_RAISE_INTERVAL_MS` | 1,000 | The shortest time between two raises of a namespace's hint by one writer session. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | The shared retry budget for a client operation. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |

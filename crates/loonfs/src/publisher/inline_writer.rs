@@ -1458,6 +1458,7 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
         OperationSelector::CompareAndSwap,
     ));
+    let clock = Arc::new(ManualClock::new(0));
     // The session folds only a full tail, so nothing but the explicit fold
     // runs until the last commit fills it.
     let writer = crate::LoonFs::builder_with_store(store.clone())
@@ -1469,7 +1470,7 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
             ..Default::default()
         })
         .min_publish_interval_ms(0)
-        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .monotonic_timer(clock.clone())
         .build()
         .await
         .expect("writer");
@@ -1489,6 +1490,9 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         .await
         .expect("first inline commit");
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    // The first commit's claim raised the hint, so the fold raises it only
+    // once the raise interval has passed.
+    clock.advance_ms(loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS);
     store.block_next();
     let fold = maintenance.fold_wal(&namespace);
     let publish_after_fold = async {

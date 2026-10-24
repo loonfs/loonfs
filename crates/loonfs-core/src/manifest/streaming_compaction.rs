@@ -29,7 +29,7 @@ use crate::bloom_filter::BloomFilter;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LastHintRaise, LoadedManifest};
 use crate::time::Deadline;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -245,13 +245,14 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     merge.run(&MergeControl { cancellation }).await
 }
 
-pub(super) struct CompactionPublication {
+pub(super) struct CompactionPublication<'a> {
     pub(super) compactor_epoch: CompactorEpoch,
     pub(super) compaction: Deadline,
     pub(super) publication: Deadline,
+    pub(super) last_raise: Option<&'a LastHintRaise>,
 }
 
-impl CompactionPublication {
+impl CompactionPublication<'_> {
     fn expired(&self) -> bool {
         self.compaction.elapsed_ms() > METADATA_COMPACTION_BUDGET_MS
     }
@@ -274,7 +275,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     input_keys: &BTreeSet<String>,
     result: MetadataMergeReport,
     cancellation: &MetadataCompactionCancellation,
-    publication: &CompactionPublication,
+    publication: &CompactionPublication<'_>,
 ) -> Result<CompactionUnitOutcome> {
     let output_segments = &result.output_segments;
     // `None` stands for the publication, and `Some` for every other outcome.
@@ -283,6 +284,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         namespace_id,
         &publication.publication,
         MAX_FINALIZATION_ATTEMPTS,
+        publication.last_raise,
         |current: LoadedManifest| async move {
             let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
             if publication.expired() {

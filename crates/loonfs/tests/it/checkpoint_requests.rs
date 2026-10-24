@@ -2,8 +2,8 @@
 //! creating a snapshot, reading at it, and deleting it.
 
 use loonfs::{
-    CreateSnapshotOptions, FoldWalOutcome, InlineContentPolicy, LoonFs, Namespace,
-    SharedObjectStore, Writable,
+    CreateSnapshotOptions, FoldWalOutcome, InlineContentPolicy, LoonFs, MaintenanceCancellation,
+    MetadataMaintenanceOutcome, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -29,8 +29,8 @@ struct Fixture {
 }
 
 /// Creates a writer runtime and a namespace with four committed files, folds
-/// the WAL tail with `fold`, and waits until no fold or compaction is
-/// running.
+/// the WAL tail with `fold`, waits until no fold or compaction is running,
+/// and lets the hint catch up with the current manifest.
 async fn fixture(fold: Fold) -> Fixture {
     let name = format!("snapshot-calls-{fold:?}").to_lowercase();
     let namespace_id = namespace_id(&name);
@@ -46,11 +46,12 @@ async fn fixture(fold: Fold) -> Fixture {
         },
         Fold::Explicit => InlineContentPolicy::default(),
     };
+    let clock = Arc::new(ManualClock::new(1_000_000));
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(&name))
         .min_publish_interval_ms(0)
         .inline_content(inline_content)
-        .monotonic_timer(Arc::new(ManualClock::new(1_000_000)))
+        .monotonic_timer(clock.clone())
         .build()
         .await
         .expect("writer");
@@ -65,12 +66,20 @@ async fn fixture(fold: Fold) -> Fixture {
         let put = namespace.put_file(&path, b"doc", &actor);
         put.await.expect("put");
     }
+    let maintenance = writer.maintenance(writer_id(&name));
     if let Fold::Explicit = fold {
-        let maintenance = writer.maintenance(writer_id(&name));
         let folded = maintenance.fold_wal(&namespace_id).await.expect("fold");
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
     }
     writer.drain().await.expect("the fold settles");
+    // The setup publishes several manifests within one hint raise interval,
+    // so the hint lags. A metadata step after the interval raises it.
+    clock.advance_ms(loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS);
+    let caught_up = maintenance
+        .maintain_metadata_while_due(&namespace_id, &MaintenanceCancellation::new())
+        .await
+        .expect("metadata step");
+    assert_eq!(caught_up.outcome, MetadataMaintenanceOutcome::CaughtUp);
     Fixture {
         recording,
         writer,

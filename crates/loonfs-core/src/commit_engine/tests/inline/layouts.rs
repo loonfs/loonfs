@@ -831,6 +831,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("floor");
@@ -846,6 +847,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
                 crate::manifest::CompactionAdmission::AnySize,
                 &crate::manifest::MetadataCompactionCancellation::default(),
                 crate::test_support::std_timer(),
+                None,
             )
             .await
             .expect("compact"),
@@ -1132,6 +1134,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         &deadline,
         crate::manifest::MetadataRunPolicy::default(),
         &pool,
+        None,
     ));
     tokio::select! {
         () = blocked.inner().wait_until_blocked() => {}
@@ -1472,6 +1475,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await
         .expect("fold captured source");

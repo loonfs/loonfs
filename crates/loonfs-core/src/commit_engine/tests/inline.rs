@@ -516,6 +516,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
             &crate::test_support::content_writes(),
+            None,
         )
         .await
         .expect("fold inline content");

@@ -5,6 +5,7 @@ use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -122,9 +123,11 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         ),
         KeyPredicate::any(),
     ));
+    let clock = Arc::new(ManualClock::new(0));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .min_publish_interval_ms(0)
+        .monotonic_timer(clock.clone())
         .build()
         .await
         .expect("writer");
@@ -175,6 +178,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         )
         .await
         .expect("drop projection during fold");
+    // The first publish's claim raised the hint, so the fold raises it only
+    // once the raise interval has passed.
+    clock.advance_ms(loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS);
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");

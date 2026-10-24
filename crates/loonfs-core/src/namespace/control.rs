@@ -4,7 +4,7 @@ use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
-use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
+use crate::limits::{METADATA_PUBLICATION_BUDGET_MS, MIN_HINT_RAISE_INTERVAL_MS};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::hint;
@@ -12,6 +12,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef};
 use loonfs_types::CompactorEpoch;
 use loonfs_types::NamespaceId;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
@@ -100,18 +101,58 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// When a writer last started to raise one namespace's hint, on the writer's
+/// monotonic timer.
+///
+/// A writer raises a namespace's hint at most once per
+/// [`MIN_HINT_RAISE_INTERVAL_MS`], so a publication within that interval of
+/// the last raise leaves the hint lagging (format spec, "Object roles and
+/// mutability"). A runtime keeps one for each namespace that its writer
+/// session publishes, and passes it to every publication of that namespace.
+/// A publication without one raises the hint every time.
+#[derive(Debug, Default)]
+pub struct LastHintRaise {
+    raised_at_ms: Mutex<Option<u64>>,
+}
+
+impl LastHintRaise {
+    /// Records a raise that starts at `now_ms` and returns true, unless the
+    /// last raise started less than [`MIN_HINT_RAISE_INTERVAL_MS`] earlier.
+    fn try_start(&self, now_ms: u64) -> bool {
+        let mut raised_at_ms = self
+            .raised_at_ms
+            .lock()
+            .expect("the last hint raise lock should not be poisoned");
+        if raised_at_ms
+            .is_some_and(|at_ms| now_ms.saturating_sub(at_ms) < MIN_HINT_RAISE_INTERVAL_MS)
+        {
+            return false;
+        }
+        *raised_at_ms = Some(now_ms);
+        true
+    }
+}
+
 /// Raises the hint to at least the given manifest number and returns the hint as
 /// written. `known` is the hint as the caller last saw it; a raise from a
 /// current token needs no read. The number only ever increases, so a
 /// stale actor cannot regress what a newer one wrote. The raise ends with its
-/// publication's budget and then returns the hint as last seen.
+/// publication's budget and then returns the hint as last seen. With
+/// `last_raise`, a raise less than [`MIN_HINT_RAISE_INTERVAL_MS`] after the
+/// writer's last one sends nothing and returns `known`.
 pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_types::ManifestNo,
     known: LoadedHint,
     deadline: &Deadline,
+    last_raise: Option<&LastHintRaise>,
 ) -> crate::error::Result<LoadedHint> {
+    if known.state.manifest_no >= manifest_no
+        || last_raise.is_some_and(|last_raise| !last_raise.try_start(deadline.now_ms()))
+    {
+        return Ok(known);
+    }
     let object_key = hint(namespace_id);
     let mut current = known;
     while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
@@ -169,7 +210,9 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
         .map(|(manifest, _)| manifest))
 }
 
-pub(crate) async fn load_current_manifest_with_hint<S: ObjectStore + ?Sized>(
+/// Loads the current manifest by discovery, with the hint that discovery
+/// started from.
+pub async fn load_current_manifest_with_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(LoadedManifest, LoadedHint), ControlObjectLoadError> {
@@ -338,7 +381,7 @@ mod tests {
             KeyPredicate::any(),
         );
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let error = raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline)
+        let error = raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline, None)
             .await
             .expect_err("etag required");
         assert_matches!(error, CoreError::Store { .. });
@@ -376,6 +419,7 @@ mod tests {
             ManifestNo(2),
             known.clone(),
             &Deadline::start(clock),
+            None,
         )
         .await
         .expect("an unraised hint leaves the publication standing");

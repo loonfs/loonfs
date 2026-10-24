@@ -228,6 +228,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance floor")

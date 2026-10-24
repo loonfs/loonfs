@@ -840,6 +840,7 @@ impl Interceptor for RivalFold {
                 )),
                 loonfs_core::MetadataRunPolicy::default(),
                 &loonfs_core::test_support::content_writes(),
+                None,
             )
             .await
             .expect("the rival folds");
@@ -1043,8 +1044,11 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     let actor = loonfs_test_support::test_actor();
     let [idle, claimed, retired, missing] =
         ["idle", "claimed", "retired", "missing"].map(namespace_id);
+    // A stopped clock keeps each session's publications within one hint
+    // raise interval, however slowly the test runs.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
         .await
         .expect("writer");
@@ -1060,6 +1064,10 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .await
             .expect("put a file");
     }
+    // The deletion's session claims the writer epoch and raises the hint,
+    // and its fold and tombstone follow within the raise interval. So the
+    // hint stays on the claim's manifest, and discovery of the deleted
+    // namespace reads the fold's manifest and the tombstone after it.
     writer
         .open_namespace(&retired)
         .expect("open the namespace")
@@ -1113,9 +1121,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         (&claimed, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
         (
             &retired,
-            [2, 0, 0, 0],
+            [4, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 9, 0],
+            [4, 0, 9, 0],
             None,
         ),
         (
@@ -1854,13 +1862,15 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         view: std::sync::Mutex::new(None),
     });
     // Each write leaves inline bytes in the tail, so the session folds each
-    // write.
+    // write. A stopped clock keeps the step within the session's hint raise
+    // interval, so the step sends no raise from the view's earlier hint.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .inline_content(crate::InlineContentPolicy {
             inline_content_fold_at_bytes: 1,
             ..crate::InlineContentPolicy::default()
         })
+        .monotonic_timer(Arc::new(loonfs_test_support::clock::ManualClock::new(0)))
         .build()
         .await
         .expect("writer");
@@ -1913,5 +1923,65 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         crate::MetadataMaintenanceOutcome::Due,
         "a manifest behind the position leaves metadata due"
     );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Returns the manifest number that the namespace's hint points to.
+async fn hinted_manifest_no(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> loonfs_types::ManifestNo {
+    loonfs_core::control::load_current_manifest_with_hint(store, namespace_id)
+        .await
+        .expect("discovery")
+        .1
+        .state
+        .manifest_no
+}
+
+/// Checks that a publication within `MIN_HINT_RAISE_INTERVAL_MS` of the
+/// session's last hint raise leaves the hint lagging, that a metadata step
+/// inside the interval leaves it, and that a step after the interval raises
+/// it. A lagging hint doesn't leave metadata due.
+#[tokio::test]
+async fn a_metadata_step_after_the_raise_interval_raises_a_lagging_hint() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("lagging-hint");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let writer = LoonFs::builder_with_store(Arc::clone(&store))
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(clock.clone())
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create the namespace");
+    // The session's claim raises the hint, and the fold right after it
+    // doesn't. The session lives while its handle does.
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    namespace
+        .put_file("/file", b"body", &actor)
+        .await
+        .expect("put a file");
+    let folded = maintenance.fold_wal(&namespace_id).await.expect("fold");
+    let lagging = hinted_manifest_no(&store, &namespace_id).await;
+    assert!(lagging < folded.manifest_no);
+    let interval_ms = loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS;
+    for (advance_ms, hinted) in [(interval_ms - 1, lagging), (1, folded.manifest_no)] {
+        clock.advance_ms(advance_ms);
+        let step = maintenance
+            .maintain_metadata_while_due(&namespace_id, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("metadata step");
+        assert_eq!(step.outcome, crate::MetadataMaintenanceOutcome::CaughtUp);
+        assert_eq!(hinted_manifest_no(&store, &namespace_id).await, hinted);
+    }
     writer.shutdown().await.expect("shutdown");
 }

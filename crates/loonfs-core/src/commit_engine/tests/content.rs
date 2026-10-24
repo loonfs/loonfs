@@ -622,6 +622,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compact metadata");

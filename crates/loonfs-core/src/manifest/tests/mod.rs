@@ -145,6 +145,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -335,6 +336,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compaction step");
@@ -413,6 +415,7 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
             compactor_epoch: loonfs_types::CompactorEpoch(0),
             compaction: Deadline::start(Arc::clone(&timer)),
             publication: Deadline::start(timer),
+            last_raise: None,
         },
     )
     .await
@@ -950,11 +953,16 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
         crate::namespace::control::load_current_manifest_with_hint(store, &namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?;
-    Ok(
-        super::publish::publish_manifest_from(store, manifest, deadline, Some(current), Some(hint))
-            .await?
-            .0,
+    Ok(super::publish::publish_manifest_from(
+        store,
+        manifest,
+        deadline,
+        Some(current),
+        Some(hint),
+        None,
     )
+    .await?
+    .0)
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

@@ -169,6 +169,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor past the deletions");
@@ -266,6 +267,7 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor past the renames");
@@ -473,6 +475,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
         compactor_epoch: loonfs_types::CompactorEpoch(0),
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
+        last_raise: None,
     };
     finalize_metadata_compaction(
         store,
@@ -593,6 +596,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("merge the group whole");
@@ -733,6 +737,7 @@ async fn compact_unit_with<S: ObjectStore + ?Sized>(
         admission,
         &MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("run a compaction unit")
@@ -1009,6 +1014,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor past the deletion");
@@ -1355,6 +1361,7 @@ async fn seed_binding_history(
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor past the deletions");
@@ -2617,6 +2624,7 @@ impl Interceptor for RivalDuringPublication {
                     namespace_id,
                     RetentionTarget::Head,
                     crate::test_support::std_timer(),
+                    None,
                 )
                 .await
                 .expect("the rival advances the floor");
@@ -2719,6 +2727,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             CompactionAdmission::AnySize,
             &MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("run the unit");
@@ -2848,6 +2857,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             CompactionAdmission::AnySize,
             &MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("run a unit")
@@ -3090,6 +3100,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         &store,
         &namespace,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("claim")
@@ -3111,11 +3122,13 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         compactor_epoch: epoch,
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
+        last_raise: None,
     };
     let next_epoch = super::super::compactor::claim_compactor(
         &store,
         &namespace,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("another claim")
@@ -3159,6 +3172,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             admission,
             &cancellation,
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("unit fence");
@@ -3239,6 +3253,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
         &store,
         &namespace,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("claim")
@@ -3255,6 +3270,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
         compactor_epoch: epoch,
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
+        last_raise: None,
     };
     let first_output = run_compaction(
         &store,
@@ -3525,6 +3541,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         &store,
         &namespace,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("claim")
@@ -3541,6 +3558,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         CompactionAdmission::AnySize,
         &MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("publish");
@@ -3609,6 +3627,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         CompactionAdmission::AnySize,
         &MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect_err("a stopped publication should fail the compaction unit");

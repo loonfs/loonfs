@@ -27,6 +27,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Default::default(),
             None,
             &crate::test_support::content_writes(),
+            None,
         )
         .await
         .expect("fork");

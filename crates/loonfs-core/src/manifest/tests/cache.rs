@@ -1455,6 +1455,7 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("run a compaction unit");

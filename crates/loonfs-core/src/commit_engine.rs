@@ -10,6 +10,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::LastHintRaise;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
@@ -770,6 +771,9 @@ pub struct NamespaceCommitEngine {
     /// How far this session has expired the deletions that the retention
     /// floor reaches. It stays with the session when the position drops.
     deletion_expiry: DeletionExpiryState,
+    /// When the writer last raised this namespace's hint, shared with the
+    /// writer's other publications of the namespace.
+    last_hint_raise: Option<Arc<LastHintRaise>>,
 }
 
 impl NamespaceCommitEngine {
@@ -785,6 +789,7 @@ impl NamespaceCommitEngine {
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
             deletion_expiry: DeletionExpiryState::new(),
+            last_hint_raise: None,
         }
     }
 
@@ -811,6 +816,14 @@ impl NamespaceCommitEngine {
 
     pub fn segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
+        self
+    }
+
+    /// Paces the hint raises of this session's writer claim and deletion with
+    /// the writer's other publications of the namespace (see
+    /// [`LastHintRaise`]).
+    pub fn last_hint_raise(mut self, last_hint_raise: Arc<LastHintRaise>) -> Self {
+        self.last_hint_raise = Some(last_hint_raise);
         self
     }
 
@@ -948,8 +961,14 @@ impl NamespaceCommitEngine {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let (acquired_writer, anchor) =
-            acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
+        let (acquired_writer, anchor) = acquire_writer(
+            store,
+            &self.namespace_id,
+            context,
+            Arc::clone(&self.timer),
+            self.last_hint_raise.as_deref(),
+        )
+        .await?;
         self.deletion_expiry.open_session(&anchor.read_state);
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
@@ -988,6 +1007,7 @@ impl NamespaceCommitEngine {
             fold_policy,
             self.segment_cache.as_deref(),
             &self.content_writes,
+            self.last_hint_raise.as_deref(),
         )
         .await;
         self.invalidate_projection();

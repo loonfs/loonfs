@@ -135,7 +135,8 @@ impl Namespace<Writable> {
         self.ensure_administrator().await?;
         let engine = self
             .core
-            .writer_engine(&self.mode.bits.identity, &self.namespace_id);
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id)
+            .with_last_hint_raise(self.mode.publisher.last_hint_raise(&self.namespace_id));
         let result = {
             let _permit = self.mode.bits.execution_budget.fold_permit().await;
             engine.create_snapshot(name.to_owned(), expires_at_ms).await

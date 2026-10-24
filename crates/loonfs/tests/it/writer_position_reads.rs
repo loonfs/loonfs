@@ -8,7 +8,7 @@ use loonfs::{
     Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadAt, ReadFileOptions,
     ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
-use loonfs_core::limits::MAX_POSITION_MOVES;
+use loonfs_core::limits::{MAX_POSITION_MOVES, MIN_HINT_RAISE_INTERVAL_MS};
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -540,6 +540,9 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     .manifest_no;
     let fold_manifest = before.successor().expect("next manifest number");
     let after_fold = fold_manifest.successor().expect("next manifest number");
+    // The session's claim raised the hint, so the fold raises it only once
+    // the raise interval has passed.
+    fixture.clock.advance_ms(MIN_HINT_RAISE_INTERVAL_MS);
     let gate = fixture.recording.inner();
     gate.block_next();
     fixture.recording.reset();

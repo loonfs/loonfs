@@ -76,6 +76,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork target");
@@ -363,6 +364,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         Default::default(),
         None,
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fork");

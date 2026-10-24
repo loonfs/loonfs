@@ -15,7 +15,7 @@ use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LastHintRaise, LoadedManifest};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
@@ -72,6 +72,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         &deadline,
         MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .map(|folded| folded.response)
@@ -177,7 +178,12 @@ impl FoldedWalTail {
 /// it. The rebuild keeps the tail it read when the manifest is at the same
 /// head (see `same_head`), and loads the tail again otherwise, which
 /// folds a new writer's log after the writer's claim. A namespace tombstone
-/// stops the fold.
+/// stops the fold. `last_raise` paces the fold's hint raise with the writer's
+/// other publications (see [`LastHintRaise`]).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a fold's inputs, listed instead of grouped into a second struct"
+)]
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -186,6 +192,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataRunPolicy,
     content_writes: &crate::PermitPool,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<FoldedWalTail> {
     let projection = match held {
         Some(held) => ManifestProjection {
@@ -228,6 +235,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         namespace_id,
         deadline,
         MAX_CONTENTION_ATTEMPTS,
+        last_raise,
         |current: LoadedManifest| {
             let fold = &fold;
             async move { fold.lock().await.attempt(current).await }

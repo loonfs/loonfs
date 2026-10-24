@@ -136,6 +136,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
             loonfs_core::MetadataRunPolicy::default(),
             &loonfs_core::test_support::content_writes(),
+            None,
         )
         .await
         .expect("fold");
@@ -159,6 +160,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
             loonfs_core::MetadataRunPolicy::default(),
             &loonfs_core::test_support::content_writes(),
+            None,
         )
         .await
         .expect("repeat fold");

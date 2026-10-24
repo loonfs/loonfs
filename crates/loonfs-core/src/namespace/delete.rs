@@ -4,7 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::{update_manifest, ManifestChange};
 use crate::manifest::MetadataRunPolicy;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LastHintRaise, LoadedManifest};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -16,7 +16,7 @@ use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "deletion passes the fold policy, the segment cache, and the content write permits to its fold"
+    reason = "deletion passes the fold policy, the segment cache, the content write permits, and the writer's last hint raise to its fold"
 )]
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -28,12 +28,14 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&crate::cache::MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(
         store,
         namespace_id,
         deadline,
         MAX_CONTENTION_ATTEMPTS,
+        last_raise,
         |current: LoadedManifest| {
             let acquired_writer = &acquired_writer;
             async move {
@@ -61,6 +63,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                         deadline,
                         fold_policy,
                         content_writes,
+                        last_raise,
                     )
                     .await?;
                     return Ok(ManifestChange::Again);

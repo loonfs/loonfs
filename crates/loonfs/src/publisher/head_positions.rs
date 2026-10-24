@@ -33,15 +33,17 @@ async fn current_manifest_no(
         .manifest_no
 }
 
-/// Creates a writer that reports to `recorder`.
+/// Creates a writer that reports to `recorder` and measures time on `clock`.
 async fn test_writer_with_recorder(
     store: SharedStore,
     recorder: Arc<DefaultMetricsRecorder>,
+    clock: Arc<ManualClock>,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .min_publish_interval_ms(0)
         .metrics_recorder(recorder)
+        .monotonic_timer(clock)
         .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
@@ -310,12 +312,20 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
+    let clock = Arc::new(ManualClock::new(0));
+    let writer = test_writer_with_recorder(
+        store.clone() as SharedStore,
+        Arc::clone(&recorder),
+        Arc::clone(&clock),
+    )
+    .await;
     let namespace = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id))
         .await
         .pop()
         .expect("one namespace");
+    // The session's claim raised the hint, so the fold raises it only once
+    // the raise interval has passed.
+    clock.advance_ms(loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS);
     let before = writer
         .core
         .writer_position(&namespace_id)
@@ -356,8 +366,13 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
+    let clock = Arc::new(ManualClock::new(0));
+    let writer = test_writer_with_recorder(
+        store.clone() as SharedStore,
+        Arc::clone(&recorder),
+        Arc::clone(&clock),
+    )
+    .await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -387,6 +402,9 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
         .await
         .expect("publish across the fold threshold");
     wait_for_fold_waiters(&writer, 1).await;
+    // The commit's claim raised the hint, so the fold raises it only once the
+    // raise interval has passed.
+    clock.advance_ms(loonfs_core::limits::MIN_HINT_RAISE_INTERVAL_MS);
     store.block_next();
     drop(permits);
     store.wait_until_blocked().await;

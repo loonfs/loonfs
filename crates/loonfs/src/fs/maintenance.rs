@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
-use loonfs_core::control::{CurrentManifest, NamespaceReadAnchor};
+use loonfs_core::control::{CurrentManifest, LoadedHint, NamespaceReadAnchor};
 use loonfs_core::CheckpointPageCursor;
 use loonfs_core::CoreError;
 use loonfs_types::CompactorEpoch;
@@ -104,7 +104,10 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs_core::NamespaceWriterEngine<SharedObjectStore> {
-        let engine = self.core.writer_engine(&self.actor, namespace_id);
+        let engine = self
+            .core
+            .writer_engine(&self.actor, namespace_id)
+            .with_last_hint_raise(self.publisher.last_hint_raise(namespace_id));
         #[cfg(test)]
         let engine = match self.compaction_row_budget {
             Some(rows) => engine.with_metadata_run_policy(loonfs_core::MetadataRunPolicy {
@@ -200,20 +203,45 @@ impl Maintenance {
     }
 
     /// Loads the current manifest of a namespace that isn't deleted, without
-    /// the WAL tail above it.
-    async fn load_live_manifest(&self, namespace_id: &NamespaceId) -> Result<CurrentManifest> {
-        let manifest =
-            loonfs_core::control::load_namespace_current_manifest(self.core.store(), namespace_id)
+    /// the WAL tail above it, and the hint that discovery started from.
+    async fn load_live_manifest(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(CurrentManifest, LoadedHint)> {
+        let (manifest, hint) =
+            loonfs_core::control::load_current_manifest_with_hint(self.core.store(), namespace_id)
                 .await
-                .map_err(CoreError::from)?
-                .state;
-        if manifest.envelope.payload().status.is_deleted() {
+                .map_err(CoreError::from)?;
+        if manifest.state.envelope.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             }
             .into());
         }
-        Ok(manifest)
+        Ok((manifest.state, hint))
+    }
+
+    /// Raises the namespace's hint to `manifest_no` when the hint lags, unless
+    /// this runtime raised it less than `MIN_HINT_RAISE_INTERVAL_MS` ago. A
+    /// hint that stays behind doesn't leave metadata due, because discovery
+    /// probes forward from it.
+    async fn catch_up_hint(
+        &self,
+        namespace_id: &NamespaceId,
+        hint: LoadedHint,
+        manifest_no: loonfs_types::ManifestNo,
+    ) {
+        let raised = self
+            .engine(namespace_id)
+            .raise_hint(hint, manifest_no)
+            .await;
+        if let Err(error) = raised {
+            tracing::warn!(
+                namespace_id = namespace_id.as_str(),
+                error = %error,
+                "manifest discovery hint update failed"
+            );
+        }
     }
 
     /// Runs [`Self::maintain_metadata_with_options`] with the default
@@ -322,7 +350,10 @@ impl Maintenance {
     /// A fold attempt can move the manifest, so after a fold attempt this
     /// returns `None` for the manifest, and the compaction unit loads the
     /// current manifest itself. A tail that waits for its idle fold age leaves
-    /// metadata due. A session's own compaction (`TailFold::Never`) doesn't
+    /// metadata due. Without a fold, the pass raises a hint that lags the
+    /// current manifest, from the hint that its discovery loaded, unless this
+    /// runtime raised the hint less than `MIN_HINT_RAISE_INTERVAL_MS` ago. A
+    /// session's own compaction (`TailFold::Never`) doesn't
     /// fold, so it takes the unfolded WAL objects from the session's position
     /// (`None` when the runtime has no position for the namespace), and then
     /// reads only the current manifest. A tail that the position shows
@@ -347,7 +378,7 @@ impl Maintenance {
             // is the position's manifest or a newer one, and a tail that the
             // position shows folded is folded into that manifest.
             let position = self.publisher.wal_fold_input(namespace_id).await;
-            let manifest = self.load_live_manifest(namespace_id).await?;
+            let (manifest, hint) = self.load_live_manifest(namespace_id).await?;
             let manifest_no = manifest.manifest().manifest_no;
             let behind = position
                 .as_ref()
@@ -365,6 +396,7 @@ impl Maintenance {
                 );
             }
             let objects = position.map(|position| position.wal_tail_objects);
+            self.catch_up_hint(namespace_id, hint, manifest_no).await;
             return Ok((
                 Some(manifest),
                 objects,
@@ -389,8 +421,15 @@ impl Maintenance {
         let fold = trigger.fold_is_due(max_wal_tail_objects, status.wal_tail_objects, inline_bytes)
             || idle_fold_due_at_ms.is_some_and(|due_at_ms| self.core.now_ms() >= due_at_ms);
         if !fold {
+            let manifest = anchor.current_manifest();
+            self.catch_up_hint(
+                namespace_id,
+                anchor.hint().clone(),
+                manifest.manifest().manifest_no,
+            )
+            .await;
             return Ok((
-                Some(anchor.current_manifest().clone()),
+                Some(manifest.clone()),
                 Some(status.wal_tail_objects),
                 WalFoldStepOutcome::NotNeeded,
                 idle_fold_due_at_ms.is_none(),
@@ -647,7 +686,7 @@ impl Maintenance {
             Some(manifest) => due(manifest),
             // A claimed unit reads less than loading the manifest to check
             // first.
-            None => claimed.is_some() || due(&self.load_live_manifest(namespace_id).await?),
+            None => claimed.is_some() || due(&self.load_live_manifest(namespace_id).await?.0),
         };
         if !unit_due {
             return Ok(MetadataCompactionOutcome::NotNeeded);

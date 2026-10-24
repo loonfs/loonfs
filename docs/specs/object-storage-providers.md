@@ -8,7 +8,7 @@ The key word MUST in this document is to be interpreted as described in BCP 14 (
 
 This section lists the provider data points that come up most often in LoonFS design work.
 
-- Don't assume that any CAS object can be updated more often than once per second. GCS documents a limit of one write per second to the same object name, and R2 documents a limit of one concurrent write per second to the same object key.[^1][^2]
+- Don't assume that any CAS object can be updated more often than once per second. GCS documents a limit of one write per second to the same object name, and R2 documents a limit of one concurrent write per second to the same object key.[^1][^2] A namespace's hint is the CAS object that LoonFS updates most often, so a writer session raises it at most once per `MIN_HINT_RAISE_INTERVAL_MS` (1 second), and discovery probes forward from a hint that lags (see [Object roles and mutability](format.md#22-object-roles-and-mutability)).
 - Don't assume that an `ETag` is a portable content hash. ETags aren't consistent across providers, especially for multipart uploads.
 - A HEAD request usually takes around 30 ms, and a full GET of a small object (with content) should be assumed to take about 200 ms. A HEAD request (or a GET with if-none-match) is a useful way to check control objects faster.
 

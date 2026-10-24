@@ -119,6 +119,7 @@ impl LoonFs<Writable> {
                 None => Some(self.mode.bits.execution_budget.fold_permit().await),
             };
             self.engine(source_namespace_id)
+                .with_last_hint_raise(self.mode.publisher.last_hint_raise(source_namespace_id))
                 .fork_namespace(new_namespace_id, actor, options.snapshot_id.as_ref())
                 .await
         }

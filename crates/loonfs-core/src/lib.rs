@@ -159,8 +159,8 @@ pub mod control {
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
-        load_namespace_current_manifest, load_namespace_read_state, CurrentManifest, LoadedHint,
-        LoadedManifest,
+        load_current_manifest_with_hint, load_namespace_current_manifest,
+        load_namespace_read_state, CurrentManifest, LastHintRaise, LoadedHint, LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
         load_live_read_anchor, load_read_anchor, manifest_has_successor, project_anchor_tail,

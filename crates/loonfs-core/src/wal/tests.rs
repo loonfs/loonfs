@@ -259,7 +259,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     let timer = Arc::new(ManualClock::new(0));
     store.block_next();
     let (acquired, ()) = futures::join!(
-        acquire_writer(&store, &namespace_id, &setup, timer.clone()),
+        acquire_writer(&store, &namespace_id, &setup, timer.clone(), None),
         async {
             // The claim has landed and its hint raise is held. Meanwhile a fold
             // folds the first fence, a compactor claim supersedes the fold, and
@@ -278,6 +278,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
                 store.inner(),
                 &namespace_id,
                 crate::test_support::std_timer(),
+                None,
             )
             .await
             .expect("compactor claim");
@@ -326,7 +327,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
     store.fail_next(1);
-    let error = acquire_writer(&store, &namespace_id, &setup, timer)
+    let error = acquire_writer(&store, &namespace_id, &setup, timer, None)
         .await
         .expect_err("the acquisition runs out of budget");
     assert_matches!(
@@ -678,6 +679,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             &namespace_id,
             crate::manifest::RetentionTarget::Head,
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("advance floor");
@@ -1073,6 +1075,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 &Deadline::start(timer_b.clone()),
                 crate::manifest::MetadataRunPolicy::default(),
                 &crate::test_support::content_writes(),
+                None,
             )
             .await
             .expect("fold takeover and commit");

@@ -2370,6 +2370,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
         )),
         loonfs_core::MetadataRunPolicy::default(),
         &loonfs_core::test_support::content_writes(),
+        None,
     )
     .await
     .expect("another process folds the tail");

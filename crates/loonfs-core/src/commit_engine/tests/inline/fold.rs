@@ -59,6 +59,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("fold");
@@ -129,6 +130,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             &Deadline::start(timer.clone()),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await
         .expect("fold");
@@ -230,6 +232,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("fold");
@@ -317,6 +320,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await,
         Err(CoreError::Store {
@@ -357,6 +361,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &crate::time::Deadline::start(timer.clone()),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
@@ -381,6 +386,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("retry");
@@ -433,6 +439,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         &deadline,
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     );
     let second_fold = async {
         blocked.wait_until_blocked().await;
@@ -444,6 +451,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await;
         blocked.release();
@@ -637,6 +645,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("fold");
@@ -705,6 +714,7 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("a maintenance fold");

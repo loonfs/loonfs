@@ -260,6 +260,7 @@ async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
         namespace_id,
         RetentionTarget::Seq(deletion_seq),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("move the floor to the deletion");
@@ -612,6 +613,7 @@ async fn a_recoverable_deletion_inside_an_expired_one_keeps_the_boundary_above_i
         &namespace_id,
         RetentionTarget::Seq(deletion_seq),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("move the floor to the deletion of /team");
@@ -695,6 +697,7 @@ async fn expire_old<S: ObjectStore>(
         namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("move the floor past the deletion");
@@ -990,6 +993,7 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
             compactor_epoch: loonfs_types::CompactorEpoch(0),
             compaction: Deadline::start(Arc::clone(&timer)),
             publication: Deadline::start(timer),
+            last_raise: None,
         },
     )
     .await

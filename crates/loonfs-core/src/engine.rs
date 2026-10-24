@@ -10,6 +10,7 @@ use crate::manifest::{FoldWalResponse, PublicationReport};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::control::{LastHintRaise, LoadedHint};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::{bootstrap, fork};
 use crate::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
@@ -89,6 +90,9 @@ pub struct ReadOnly;
 #[derive(Debug)]
 pub struct Writable {
     writer_id: WriterId,
+    /// When the writer last raised this namespace's hint, shared with the
+    /// writer's other publications of the namespace.
+    last_hint_raise: Option<Arc<LastHintRaise>>,
 }
 
 /// A namespace engine that exposes read operations only.
@@ -393,7 +397,23 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         writer_id: WriterId,
         content_writes: Arc<crate::PermitPool>,
     ) -> Self {
-        Self::new(store, namespace_id, content_writes, Writable { writer_id })
+        Self::new(
+            store,
+            namespace_id,
+            content_writes,
+            Writable {
+                writer_id,
+                last_hint_raise: None,
+            },
+        )
+    }
+
+    /// Paces this engine's hint raises with the writer's other publications
+    /// of the namespace (see [`LastHintRaise`]). With `None`, every
+    /// publication raises the hint.
+    pub fn with_last_hint_raise(mut self, last_hint_raise: Option<Arc<LastHintRaise>>) -> Self {
+        self.mode.last_hint_raise = last_hint_raise;
+        self
     }
 
     /// Returns the writer id used for epoch acquisition and commit publication.
@@ -484,6 +504,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
+            self.mode.last_hint_raise.as_deref(),
         )
         .await
     }
@@ -1231,6 +1252,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.segment_cache.as_deref(),
             &self.content_writes,
             Arc::clone(&self.timer),
+            self.mode.last_hint_raise.as_deref(),
         )
         .await
         .map(|report| report.map(crate::pin::snapshot_summary))
@@ -1313,6 +1335,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &crate::time::Deadline::start(Arc::clone(&self.timer)),
             self.effective_run_policy(),
             &self.content_writes,
+            self.mode.last_hint_raise.as_deref(),
         )
         .await?;
         Ok(PublicationReport {
@@ -1321,11 +1344,36 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         })
     }
 
+    /// Raises the namespace's hint to `manifest_no` when `hint` points below
+    /// it, unless this engine's writer raised the hint less than
+    /// `MIN_HINT_RAISE_INTERVAL_MS` ago (see [`LastHintRaise`]). Returns the
+    /// hint as written, or `hint` when the call sent nothing.
+    pub async fn raise_hint(
+        &self,
+        hint: LoadedHint,
+        manifest_no: loonfs_types::ManifestNo,
+    ) -> Result<LoadedHint> {
+        crate::namespace::control::raise_hint(
+            &self.store,
+            &self.namespace_id,
+            manifest_no,
+            hint,
+            &crate::time::Deadline::start(Arc::clone(&self.timer)),
+            self.mode.last_hint_raise.as_deref(),
+        )
+        .await
+    }
+
     /// Claims the namespace compactor epoch for a maintenance runtime. The
     /// report includes the manifest that records the claim.
     pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
-        crate::manifest::claim_compactor(&self.store, &self.namespace_id, Arc::clone(&self.timer))
-            .await
+        crate::manifest::claim_compactor(
+            &self.store,
+            &self.namespace_id,
+            Arc::clone(&self.timer),
+            self.mode.last_hint_raise.as_deref(),
+        )
+        .await
     }
 
     /// Runs one metadata compaction unit under the claimed compactor epoch.
@@ -1349,6 +1397,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             admission,
             cancellation,
             Arc::clone(&self.timer),
+            self.mode.last_hint_raise.as_deref(),
         )
         .await
     }
@@ -1366,6 +1415,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             target,
             Arc::clone(&self.timer),
+            self.mode.last_hint_raise.as_deref(),
         )
         .await
     }

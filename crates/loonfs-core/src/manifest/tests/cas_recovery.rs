@@ -457,6 +457,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance")
@@ -486,6 +487,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("already advanced");
@@ -556,6 +558,7 @@ async fn a_manifest_update_returns_the_hint_it_raised() {
         &namespace_id,
         &deadline,
         crate::limits::MAX_CONTENTION_ATTEMPTS,
+        None,
         |current: crate::namespace::control::LoadedManifest| async move {
             Ok(crate::manifest::publish::ManifestChange::Next(
                 Box::new(current.state.envelope.payload().clone()),
@@ -577,6 +580,72 @@ async fn a_manifest_update_returns_the_hint_it_raised() {
     );
 }
 
+/// Checks that a writer raises a namespace's hint at most once per
+/// `MIN_HINT_RAISE_INTERVAL_MS`: a publication within the interval of the
+/// last raise leaves the hint lagging, and the first publication after it
+/// raises the hint past every manifest published in between.
+#[tokio::test]
+async fn publications_within_the_raise_interval_raise_the_hint_once() {
+    use crate::limits::MIN_HINT_RAISE_INTERVAL_MS;
+    use crate::manifest::publish::{update_manifest, ManifestChange};
+    use crate::namespace::control::{LastHintRaise, LoadedManifest};
+    use loonfs_test_support::stores::RecordedOperation;
+
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::hint(&namespace_id),
+    );
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    store.reset();
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let last_raise = LastHintRaise::default();
+    let mut published = Vec::new();
+    for advance_ms in [0, MIN_HINT_RAISE_INTERVAL_MS - 1, 1] {
+        clock.advance_ms(advance_ms);
+        let ((), manifest, hint) = update_manifest(
+            &store,
+            &namespace_id,
+            &Deadline::start(clock.clone()),
+            crate::limits::MAX_CONTENTION_ATTEMPTS,
+            Some(&last_raise),
+            |current: LoadedManifest| async move {
+                Ok(ManifestChange::Next(
+                    Box::new(current.state.envelope.payload().clone()),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish");
+        let stored = crate::namespace::control::load_hint(&store, &namespace_id)
+            .await
+            .expect("stored hint");
+        assert_eq!(hint, stored);
+        published.push((
+            manifest.state.manifest().manifest_no,
+            hint.state.manifest_no,
+        ));
+    }
+    assert_eq!(
+        published,
+        [
+            (ManifestNo(2), ManifestNo(2)),
+            (ManifestNo(3), ManifestNo(2)),
+            (ManifestNo(4), ManifestNo(4)),
+        ]
+    );
+    let raises = store
+        .take()
+        .into_iter()
+        .filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. }))
+        .count();
+    assert_eq!(raises, 2, "the second publication sends no raise");
+}
+
 #[tokio::test]
 async fn a_manifest_update_stops_after_the_contention_limit() {
     use crate::manifest::publish::{update_manifest, ManifestChange};
@@ -595,6 +664,7 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
             &namespace_id,
             &deadline,
             crate::limits::MAX_CONTENTION_ATTEMPTS,
+            None,
             |current: crate::namespace::control::LoadedManifest| {
                 attempts += 1;
                 let store = &store;
@@ -817,6 +887,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance retention");
@@ -879,6 +950,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         &store,
         &namespace_id,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("claim")

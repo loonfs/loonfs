@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
     load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
-    raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
+    raise_hint, CurrentManifest, LastHintRaise, LoadedHint, LoadedManifest,
 };
 use crate::time::Deadline;
 use bytes::Bytes;
@@ -50,16 +50,19 @@ pub(crate) enum ManifestChange<T> {
 /// Each attempt loads the current manifest and the hint, and passes the
 /// manifest to `change`. A `Next` payload is published at the next manifest
 /// number with put-if-absent, and the hint is raised from the hint that the
-/// attempt loaded. After a lost put, the next attempt loads the manifest that
-/// won. The call returns `store_contention` once `attempts` attempts have
-/// each lost their put or returned `Again`. The caller starts `deadline`
-/// before the call, so `METADATA_PUBLICATION_BUDGET_MS` covers every attempt,
-/// from the first load to the last put.
+/// attempt loaded, unless `last_raise` shows that the writer raised it less
+/// than `MIN_HINT_RAISE_INTERVAL_MS` ago. After a lost put, the next attempt
+/// loads the manifest that won. The call returns `store_contention` once
+/// `attempts` attempts have each lost their put or returned `Again`. The
+/// caller starts `deadline` before the call, so
+/// `METADATA_PUBLICATION_BUDGET_MS` covers every attempt, from the first load
+/// to the last put.
 pub(crate) async fn update_manifest<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     attempts: usize,
+    last_raise: Option<&LastHintRaise>,
     mut change: F,
 ) -> Result<(T, LoadedManifest, LoadedHint)>
 where
@@ -85,6 +88,7 @@ where
                     deadline,
                     Some(current),
                     Some(hint.clone()),
+                    last_raise,
                 )
                 .await?;
                 let lost_to = match outcome {
@@ -144,7 +148,7 @@ pub(crate) async fn create_manifest<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     }
     let (outcome, _) =
-        publish_manifest_from(store, encode_manifest(payload), deadline, None, None).await?;
+        publish_manifest_from(store, encode_manifest(payload), deadline, None, None, None).await?;
     match outcome {
         ManifestPublicationOutcome::Published(_) => Ok(()),
         ManifestPublicationOutcome::CoveredByCurrent(current)
@@ -171,6 +175,7 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     current: Option<LoadedManifest>,
     hint: Option<LoadedHint>,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<(ManifestPublicationOutcome, Option<LoadedHint>)> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
@@ -329,6 +334,7 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                 candidate.manifest().manifest_no,
                 known,
                 deadline,
+                last_raise,
             )
             .await
             {

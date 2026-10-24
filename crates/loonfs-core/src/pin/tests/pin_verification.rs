@@ -105,6 +105,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("compact");
@@ -222,6 +223,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 MetadataRunPolicy::default(),
                 None,
                 &crate::test_support::content_writes(),
+                None,
             )
             .await
             .expect("delete namespace during verification");
@@ -350,6 +352,7 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("pin")

@@ -22,7 +22,9 @@ use super::streaming_compaction::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::{ensure_namespace_live, load_current_manifest, CurrentManifest};
+use crate::namespace::control::{
+    ensure_namespace_live, load_current_manifest, CurrentManifest, LastHintRaise,
+};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
@@ -127,6 +129,7 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
     admission: CompactionAdmission,
     cancellation: &MetadataCompactionCancellation,
     timer: Arc<dyn MonotonicTimer>,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<CompactionUnitOutcome> {
     let compaction = Deadline::start(Arc::clone(&timer));
     let current = load_current_manifest(store, namespace_id)
@@ -188,6 +191,7 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
                     compactor_epoch,
                     compaction,
                     publication: Deadline::start(timer),
+                    last_raise,
                 },
             )
             .await?

@@ -38,6 +38,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("compact bindings");
@@ -181,6 +182,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 current.state.manifest().manifest_no,
                 known,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                None,
             )
             .await
             .expect("advance hint");

@@ -40,6 +40,7 @@ pub(crate) use fold_trigger::FoldTrigger;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
+use loonfs_core::control::LastHintRaise;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
@@ -462,6 +463,14 @@ impl PublisherRegistry {
         self.shared.live_publisher(namespace_id)
     }
 
+    /// Returns when this runtime last raised the namespace's hint, or `None`
+    /// when the runtime has no writer session for the namespace.
+    pub(crate) fn last_hint_raise(&self, namespace_id: &NamespaceId) -> Option<Arc<LastHintRaise>> {
+        Some(Arc::clone(
+            &self.live_publisher(namespace_id)?.last_hint_raise,
+        ))
+    }
+
     /// Returns the writer sessions that this runtime's reads start from.
     pub(crate) fn head_positions(&self) -> Weak<dyn HeadPositions> {
         Arc::downgrade(&self.shared) as Weak<dyn HeadPositions>
@@ -633,6 +642,9 @@ struct NamespacePublisher {
     /// at the write stop wakes once that fold frees room, even when the fold
     /// task goes on to fold again.
     fold_published: watch::Sender<()>,
+    /// When this runtime last raised the namespace's hint. Every publication
+    /// of the namespace in this runtime shares it while the session lives.
+    last_hint_raise: Arc<LastHintRaise>,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -931,6 +943,7 @@ impl NamespacePublisher {
             fold_trigger,
             compaction_cancellation: MaintenanceCancellation::new(),
             fold_published: watch::Sender::new(()),
+            last_hint_raise: Arc::default(),
         }
     }
 
@@ -1783,6 +1796,7 @@ impl NamespacePublisher {
             .monotonic_timer(Arc::clone(&self.timer))
             .segment_cache(self.runtime_core.metadata_segment_cache())
             .writer_session(Arc::clone(&slot.session))
+            .last_hint_raise(Arc::clone(&self.last_hint_raise))
         })
     }
 
@@ -2005,6 +2019,7 @@ impl NamespacePublisher {
             &Deadline::start(Arc::clone(&self.timer)),
             config.metadata_run_policy,
             &config.execution_budget.content_writes(),
+            Some(&self.last_hint_raise),
         )
         .instrument(phase_span!(
             self.runtime_core,

@@ -46,6 +46,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 Default::default(),
                 None,
                 &crate::test_support::content_writes(),
+                None,
             )
             .await
             .expect("fork");

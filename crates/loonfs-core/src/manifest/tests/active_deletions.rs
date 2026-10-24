@@ -333,6 +333,7 @@ pub(super) async fn expire<S: ObjectStore + ?Sized>(
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold the deletion");
@@ -342,6 +343,7 @@ pub(super) async fn expire<S: ObjectStore + ?Sized>(
         namespace_id,
         RetentionTarget::Seq(deletion_seq),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance the floor to the deletion");
@@ -826,6 +828,7 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("advance retention floor");

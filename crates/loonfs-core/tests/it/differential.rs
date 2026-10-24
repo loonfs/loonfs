@@ -1411,6 +1411,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             &deadline(),
             loonfs_core::MetadataRunPolicy::default(),
             &loonfs_core::test_support::content_writes(),
+            None,
         )
         .await
         .expect("fold");

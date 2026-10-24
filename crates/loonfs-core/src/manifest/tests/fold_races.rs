@@ -30,7 +30,7 @@ impl Rival {
         let content_writes = crate::test_support::content_writes();
         match self {
             Self::CompactorClaim => {
-                claim_compactor(store, namespace_id, crate::test_support::std_timer())
+                claim_compactor(store, namespace_id, crate::test_support::std_timer(), None)
                     .await
                     .expect("claim the compactor");
             }
@@ -47,6 +47,7 @@ impl Rival {
                         crate::manifest::CompactionAdmission::AnySize,
                         &crate::manifest::MetadataCompactionCancellation::default(),
                         crate::test_support::std_timer(),
+                        None,
                     )
                     .await
                     .expect("merge")
@@ -65,6 +66,7 @@ impl Rival {
                     namespace_id,
                     RetentionTarget::Head,
                     crate::test_support::std_timer(),
+                    None,
                 )
                 .await
                 .expect("advance the floor");
@@ -78,6 +80,7 @@ impl Rival {
                     &deadline(),
                     crate::manifest::MetadataRunPolicy::default(),
                     &content_writes,
+                    None,
                 )
                 .await
                 .expect("rival fold");
@@ -216,6 +219,7 @@ impl Writer {
                 &deadline,
                 crate::manifest::MetadataRunPolicy::default(),
                 &content_writes,
+                None,
             ),
             async {
                 for (gate, rival) in gates.iter().zip(rivals) {
@@ -352,6 +356,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
             &deadline(),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await
         .expect("cold fold");
@@ -646,6 +651,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
             &fold_deadline,
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         ),
         async {
             gate.wait_until_blocked().await;
@@ -732,6 +738,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
             &deadline(),
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
         .await
         .expect("fold");
@@ -787,6 +794,7 @@ async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold
         &deadline(),
         crate::manifest::MetadataRunPolicy::default(),
         &content_writes,
+        None,
     )
     .await
     .expect("fold");

@@ -285,6 +285,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("floor at move");
@@ -403,6 +404,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("floor at the move");
@@ -522,6 +524,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         &namespace_id,
         RetentionTarget::Head,
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("floor at the last move");

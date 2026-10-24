@@ -9,7 +9,9 @@ use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::manifest_index::commits_after_page;
-use crate::namespace::control::{ensure_namespace_live, load_current_manifest, LoadedManifest};
+use crate::namespace::control::{
+    ensure_namespace_live, load_current_manifest, LastHintRaise, LoadedManifest,
+};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use futures::{stream, StreamExt, TryStreamExt};
@@ -84,6 +86,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     target: RetentionTarget,
     timer: Arc<dyn MonotonicTimer>,
+    last_raise: Option<&LastHintRaise>,
 ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
     let current = load_current_manifest(store, namespace_id)
         .await
@@ -112,6 +115,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         namespace_id,
         &deadline,
         MAX_CONTENTION_ATTEMPTS,
+        last_raise,
         |current: LoadedManifest| async move {
             let mut payload = current.state.envelope.payload().clone();
             ensure_namespace_live(&NamespaceReadState::from(&payload))?;

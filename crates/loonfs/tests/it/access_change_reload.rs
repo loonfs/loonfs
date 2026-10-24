@@ -8,7 +8,7 @@ use loonfs::{
     LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt,
     ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
-use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
+use loonfs_core::limits::{MIN_HINT_RAISE_INTERVAL_MS, WAL_PUBLISH_BUDGET_MS};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
@@ -492,6 +492,9 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
     let fixture = fixture("snapshot-during-publish", false).await;
     fixture.commit("put_file", 0).await;
+    // The first commit's claim raised the hint, so the snapshot's fold raises
+    // it only once the raise interval has passed.
+    fixture.clock.advance_ms(MIN_HINT_RAISE_INTERVAL_MS);
     let gate = fixture.recording.inner();
     let options = CreateSnapshotOptions::default();
     gate.block_next();

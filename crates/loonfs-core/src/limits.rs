@@ -193,6 +193,17 @@ pub const WAL_PUBLISH_BUDGET_MS: u64 = 5 * 60 * 1000;
 /// remain unreachable garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
+/// Shortest time between two raises of one namespace's hint by one writer.
+///
+/// The hint is the one object that a namespace updates repeatedly by
+/// compare-and-swap, and some providers allow about one write per second to
+/// the same object name (see `docs/specs/object-storage-providers.md`). A
+/// manifest publication within this interval of the writer's last raise
+/// leaves the hint lagging, and discovery probes forward from it. The writer
+/// raises the hint at its next publication, or at the next metadata
+/// maintenance step after the interval.
+pub const MIN_HINT_RAISE_INTERVAL_MS: u64 = 1_000;
+
 /// Combined allowance for age overstatement from host-to-provider or
 /// host-to-host clock error, timestamp precision, and scheduling delay around
 /// publication checks.

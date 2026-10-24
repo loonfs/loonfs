@@ -54,6 +54,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -508,6 +509,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("create fork pin");
@@ -576,6 +578,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
             None,
             &crate::test_support::content_writes(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -615,6 +618,7 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("create fork pin")
@@ -692,6 +696,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("create fork pin")

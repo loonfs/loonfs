@@ -62,6 +62,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         Default::default(),
         None,
         &content_writes,
+        None,
     )
     .await
     .expect("fork");
@@ -196,6 +197,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                     crate::manifest::CompactionAdmission::AnySize,
                     &crate::manifest::MetadataCompactionCancellation::default(),
                     crate::test_support::std_timer(),
+                    None,
                 )
                 .await
                 .expect("compact");
@@ -330,6 +332,7 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
             crate::manifest::CompactionAdmission::AnySize,
             &crate::manifest::MetadataCompactionCancellation::default(),
             crate::test_support::std_timer(),
+            None,
         )
         .await
         .expect("compact"),

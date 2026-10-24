@@ -220,6 +220,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             crate::manifest::MetadataRunPolicy::default(),
             None,
             &crate::test_support::content_writes(),
+            None,
         )
         .await
         .expect_err("deletion rejected before folding");

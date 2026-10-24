@@ -564,6 +564,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold");
@@ -955,6 +956,7 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("another process folds");
@@ -1015,6 +1017,7 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
             &deadline,
             crate::manifest::MetadataRunPolicy::default(),
             &content_writes,
+            None,
         )
     };
     let input = engine.wal_fold_input().expect("tail");
@@ -1063,6 +1066,7 @@ async fn writer_after_own_compaction(
             &Deadline::start(timer.clone()),
             crate::manifest::MetadataRunPolicy::default(),
             &crate::test_support::content_writes(),
+            None,
         )
         .await
         .expect("own fold");
@@ -1082,6 +1086,7 @@ async fn writer_after_own_compaction(
         crate::manifest::CompactionAdmission::AnySize,
         &crate::manifest::MetadataCompactionCancellation::default(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .expect("own compaction");
@@ -1218,6 +1223,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         &Deadline::start(timer.clone()),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold");
@@ -1280,13 +1286,14 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         &Deadline::start(timer.clone()),
         crate::manifest::MetadataRunPolicy::default(),
         &crate::test_support::content_writes(),
+        None,
     )
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
     publish_one(&mut engine, &store, &writer, "gamma").await;
     timer.advance_ms(10);
-    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone())
+    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone(), None)
         .await
         .expect("claim the compactor")
         .published
@@ -1314,7 +1321,7 @@ async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     let before = engine.wal_fold_input().expect("position");
-    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone())
+    let claimed = crate::manifest::claim_compactor(&store, &namespace_id, timer.clone(), None)
         .await
         .expect("claim the compactor")
         .published
@@ -1536,6 +1543,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         None,
         &crate::test_support::content_writes(),
         crate::test_support::std_timer(),
+        None,
     )
     .await
     .map(|report| crate::pin::checkpoint_summary(report.response))
