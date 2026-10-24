@@ -1,8 +1,8 @@
 //! Checks that the metadata segment cache, the manifest cache, the head
 //! cache, and the WAL-tail cache charge their budgets with the heap that
-//! their contents use, and that
-//! the index of the segment cache's SSD tier allocates no more for each
-//! block than the server's sizing formula estimates.
+//! their contents use, and that the index of the segment cache's SSD tier
+//! allocates no more for each block than the server's sizing formula
+//! estimates.
 //!
 //! This binary counts every allocation, so it keeps a process of its own.
 //! Heap here means the bytes the program asks the allocator for; allocator
@@ -768,8 +768,9 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         drop(reader);
 
         // The manifests, the heads, and the WAL tails each have a budget of
-        // their own. Each of these compares the heap of reads that keep one
-        // kind of entry with the heap of the same reads that keep none.
+        // their own. The test measures the heap of reads that keep manifests,
+        // and of reads that keep heads and WAL tails, against the heap of the
+        // same reads that keep none of them.
         let kept = |max_manifest_bytes, max_head_bytes, max_wal_tail_bytes| {
             MetadataCache::builder()
                 .max_segment_bytes(0)

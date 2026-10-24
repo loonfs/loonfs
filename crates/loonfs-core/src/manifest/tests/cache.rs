@@ -290,8 +290,8 @@ async fn cached_manifest_carries_its_scan_order_runs() {
 }
 
 /// Loads the namespace's manifest through `cache`, scans every revision
-/// row, and loads the manifest again. Returns the GETs of the manifest that
-/// the second load sent.
+/// row, and loads the manifest again. Returns the number of GETs for the
+/// manifest that the second load sent.
 async fn scan_between_manifest_loads(
     store: &RecordingStore<LocalFsStore>,
     cache: &MetadataSegmentCache,

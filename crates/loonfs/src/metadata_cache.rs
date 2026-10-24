@@ -484,7 +484,7 @@ pub struct MetadataCacheStats {
     pub manifest_hits: usize,
     /// Manifest lookups that went to the store.
     pub manifest_misses: usize,
-    /// Manifests inserted.
+    /// Manifests inserted into the cache.
     pub manifest_inserts: usize,
     /// Manifests evicted to stay within the manifest limit.
     pub manifest_evictions: usize,

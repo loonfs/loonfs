@@ -306,14 +306,14 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
     );
 }
 
-/// Checks that the builder's manifest limit is the budget of manifests. A
-/// second pass of the same reads loads no manifest from the store when the
-/// limit fits the namespace's manifest, and the cache doesn't keep a
+/// Checks that the builder's manifest limit bounds the manifests that the cache
+/// keeps. A second pass of the same reads loads no manifest from the store when
+/// the limit fits the namespace's manifest, and the cache doesn't keep a
 /// manifest heavier than the limit. With a zero limit, the cache keeps no
-/// manifest, so every read of the second pass loads the manifest again, and
-/// the segment limit is charged the same blocks as with the default.
+/// manifest, so every read of the second pass loads the manifest again, and the
+/// segment limit is charged the same blocks as with the default.
 #[tokio::test]
-async fn the_manifest_limit_is_the_budget_of_manifests() {
+async fn the_manifest_limit_bounds_the_cached_manifests() {
     let root = tempdir().expect("tempdir");
     same_shape_store(
         &local_store(root.path()),
@@ -383,8 +383,8 @@ async fn the_manifest_limit_is_the_budget_of_manifests() {
 }
 
 /// Checks that a namespace's manifest stays cached while reads of another
-/// namespace load more segment blocks than the segment limit. The other
-/// namespace is in another store, so its reads don't use the first
+/// namespace load more segment blocks than fit within the segment limit. The
+/// other namespace is in another store, so its reads don't use the first
 /// namespace's manifest, and the next read of the first namespace loads no
 /// manifest from the store.
 #[tokio::test]

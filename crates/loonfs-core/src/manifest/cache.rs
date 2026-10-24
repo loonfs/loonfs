@@ -81,8 +81,8 @@ impl DecodedBlockKey for ObjectStoreScope {
 /// The first fields are the counters that every cache reports (see
 /// [`DecodedBlockCacheStats`](crate::block_cache::DecodedBlockCacheStats))
 /// for the data, index, and filter blocks, and the rest count what the
-/// segment filters did. [`SharedSegmentBlocks::manifest_stats`] reports the
-/// manifests.
+/// segment filters did. [`SharedSegmentBlocks::manifest_stats`] returns the
+/// counters of the manifests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataSegmentCacheStats {
     pub hits: usize,
@@ -129,13 +129,14 @@ pub(super) fn read_ahead_window_bytes(segment_cache: Option<&MetadataSegmentCach
     })
 }
 
-/// Decoded segment entries of one kind, under one byte budget.
+/// A cache of decoded segment entries (blocks or manifests) under one byte
+/// budget.
 pub(super) type SegmentEntries =
     DecodedBlockCache<(ObjectStoreScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>;
 
-/// Decoded segment blocks and manifests for every object store, each kind
-/// under its own byte budget and recency order, so a burst of blocks can't
-/// evict a manifest.
+/// Decoded segment blocks and manifests for every object store, with the
+/// blocks and the manifests under separate byte budgets and recency orders,
+/// so a burst of blocks can't evict a manifest.
 pub struct SharedSegmentBlocks {
     /// The data, index, and filter blocks.
     blocks: SegmentEntries,
@@ -271,9 +272,9 @@ impl MetadataSegmentCache {
         }
     }
 
-    /// A view over blocks no other view reads, with a budget of
-    /// `max_decoded_bytes` for blocks and another for manifests, and the
-    /// default block memo budget and read-ahead window.
+    /// Returns a view over blocks that no other view reads, with a budget of
+    /// `max_decoded_bytes` for blocks, a second budget of the same size for
+    /// manifests, and the default block memo budget and read-ahead window.
     #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
@@ -311,14 +312,14 @@ impl MetadataSegmentCache {
             .await
     }
 
-    /// Counters of the blocks and the segment filters in the whole shared
-    /// cache, across every scope.
+    /// Returns the counters of the blocks and the segment filters in the
+    /// whole shared cache, across every scope.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
         self.shared.stats()
     }
 
-    /// Counters of the manifests in the whole shared cache, across every
-    /// scope.
+    /// Returns the counters of the manifests in the whole shared cache,
+    /// across every scope.
     pub fn manifest_stats(&self) -> DecodedBlockCacheStats {
         self.shared.manifest_stats()
     }
