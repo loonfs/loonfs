@@ -11,7 +11,6 @@ use super::uploads::{
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
-use loonfs_objectstore::keys::upload_outcome;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{NamespaceId, RetainedReason, UploadId};
 
@@ -125,10 +124,20 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 upload_id,
                 outcome_listed,
             } => self.process_upload_session(upload_id, outcome_listed).await,
-            ListedUpload::OrphanOutcome { upload_id } => Ok(Decision::Delete {
-                key: upload_outcome(self.namespace_id, &upload_id),
-                counter: |report| &mut report.deleted.upload_sessions,
-            }),
+            // An outcome record without its session record is deleted only
+            // once it's at least the grace window old by the listing's
+            // modification time, the age rule of the other unreferenced
+            // families. A listing isn't a snapshot, so it can miss the
+            // session record of a session that was created and ended while
+            // the listing ran. Deleting that session's new outcome would make
+            // the session read as open, and a later pass would abort it and
+            // delete content that a commit might reference. That outcome was
+            // created after the pass started, so it's younger than the window.
+            ListedUpload::OrphanOutcome { entry } => {
+                Ok(self.sweep_aged(entry, self.grace_window_ms, |report| {
+                    &mut report.deleted.upload_sessions
+                }))
+            }
             ListedUpload::Unrecognized => Ok(self.retain(RetainedReason::UnrecognizedKey, None)),
         }
     }

@@ -14,7 +14,7 @@ use crate::upload_records::{
 use futures::{future, Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::{upload_id_of, upload_outcome_id_of};
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::format::control::{UploadOutcome, UploadSessionPayload};
 use loonfs_types::{ContentId, NamespaceId, UploadId};
 use std::pin::pin;
@@ -28,10 +28,13 @@ pub(super) enum ListedUpload {
         upload_id: UploadId,
         outcome_listed: bool,
     },
-    /// An outcome record listed without its session record. It's left over
-    /// from a deletion that stopped between the two records, or from a
-    /// completion or abort that found the session gone. No request acts on it.
-    OrphanOutcome { upload_id: UploadId },
+    /// An outcome record listed without its session record, with the
+    /// listing's modification time. It's usually left over from a deletion
+    /// that stopped between the two records, or from a completion or abort
+    /// that found the session gone. But a listing isn't a snapshot, so it can
+    /// also belong to a session that was created and ended while the listing
+    /// ran, whose session record the listing missed.
+    OrphanOutcome { entry: ListedObject },
     /// A key under the uploads prefix that isn't an upload record.
     Unrecognized,
 }
@@ -46,20 +49,20 @@ pub(super) fn list_uploads<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> impl Stream<Item = Result<ListedUpload>> + Send + 'static {
     let prefix = upload_session_prefix(namespace_id);
-    let keys = store
-        .list_prefix_stream(&prefix)
+    let entries = store
+        .list_entries_from_stream(&prefix, None)
         .map_err(move |error| CoreError::store(&prefix, &error))
         .boxed()
         .peekable();
-    futures::stream::try_unfold(Box::pin(keys), |mut keys| async move {
-        let Some(key) = keys.next().await.transpose()? else {
+    futures::stream::try_unfold(Box::pin(entries), |mut entries| async move {
+        let Some(entry) = entries.next().await.transpose()? else {
             return Ok(None);
         };
-        let listed = if let Some(upload_id) = upload_id_of(&key) {
-            let outcome_listed = keys
+        let listed = if let Some(upload_id) = upload_id_of(&entry.key) {
+            let outcome_listed = entries
                 .as_mut()
                 .next_if(|next| {
-                    matches!(next, Ok(next) if upload_outcome_id_of(next).as_ref() == Some(&upload_id))
+                    matches!(next, Ok(next) if upload_outcome_id_of(&next.key).as_ref() == Some(&upload_id))
                 })
                 .await
                 .is_some();
@@ -67,12 +70,12 @@ pub(super) fn list_uploads<S: ObjectStore + ?Sized>(
                 upload_id,
                 outcome_listed,
             }
-        } else if let Some(upload_id) = upload_outcome_id_of(&key) {
-            ListedUpload::OrphanOutcome { upload_id }
+        } else if upload_outcome_id_of(&entry.key).is_some() {
+            ListedUpload::OrphanOutcome { entry }
         } else {
             ListedUpload::Unrecognized
         };
-        Ok(Some((listed, keys)))
+        Ok(Some((listed, entries)))
     })
 }
 

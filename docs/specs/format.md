@@ -1467,9 +1467,11 @@ Uploads are collected through their session records. Retirement (see [Retirement
 | Completed session in an active namespace | Keep it until the content grace passes, then delete its records. Its content follows [Content roots](#119-content-roots). |
 | Session in a deleted namespace that isn't eligible for retirement | Keep it, and report a future retirement deadline, if there is one. |
 | Completed session in an eligible deleted namespace | Delete its records (no extra completion grace is required). The retirement sweep removes its content. |
-| An outcome record without its session record | Delete it. |
+| An outcome record without its session record | Delete it once its provider age is at least `T`. |
 
 Garbage collection deletes a session's records in order: the session record first, and then the outcome record. If a pass stops between the two deletes, the outcome record is left without its session record, and a later pass deletes it without acting on the session's content. A completion or abort that creates an outcome record after the session's records were deleted also leaves an outcome record without its session record (see [Upload sessions](#51-upload-sessions)).
+
+An outcome record without its session record is deleted only once its provider age is at least `T`, the age rule of the other unreferenced objects, because a listing isn't a snapshot. A listing can miss the session record of a session that was created and ended while the listing ran, and then show that session's new outcome record on its own. Deleting that outcome record would make the session read as open, and a later pass would abort it and delete content that a commit might reference. The outcome record was created after the pass started, so its age is below `T`.
 
 An outcome key sorts directly after its session key (see [Object keys](#a8-object-keys)), so one listing of the uploads prefix shows which sessions have ended, without a read for each session.
 

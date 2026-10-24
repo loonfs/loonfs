@@ -232,12 +232,61 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
     ] {
         assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
     }
-    let report = pass(&store, &namespace_id, past_abort_grace)
+    // The leftover outcome is deleted once it's older than the grace window.
+    let outcome_aged = now_after_newest_object(&store, &namespace_id, GRACE_MS).await;
+    let report = pass(&store, &namespace_id, outcome_aged)
         .await
         .expect("the next pass");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert!(upload_keys(&store, &namespace_id).await.is_empty());
     assert!(store.head(&content_key).await.expect("head").is_none());
+}
+
+/// An outcome record without its session record is deleted only once it's
+/// at least the grace window old by its listing time. A pass can't tell a
+/// leftover outcome from the new outcome of a session whose session record
+/// its listing missed, so a young one survives.
+#[tokio::test]
+async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_the_grace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("bootstrap");
+    let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
+    let session_key = crate::test_support::write_upload_records(
+        &store,
+        &session,
+        Some(UploadOutcome::Aborted {
+            aborted_at_ms: 1_000,
+        }),
+    )
+    .await;
+    store
+        .delete(&session_key)
+        .await
+        .expect("delete session record");
+    let outcome_key = upload_outcome(&namespace_id, &session.upload_id);
+    let written_at_ms = store
+        .head(&outcome_key)
+        .await
+        .expect("head")
+        .expect("outcome")
+        .last_modified_at_ms
+        .expect("the local store reports modification times");
+
+    let young = pass(&store, &namespace_id, written_at_ms + GRACE_MS - 1)
+        .await
+        .expect("a pass inside the grace window");
+    assert_eq!(young.deleted.upload_sessions, 0);
+    assert_eq!(upload_keys(&store, &namespace_id).await, [outcome_key]);
+
+    let aged = pass(&store, &namespace_id, written_at_ms + GRACE_MS)
+        .await
+        .expect("a pass at the grace window");
+    assert_eq!(aged.deleted.upload_sessions, 1);
+    assert!(upload_keys(&store, &namespace_id).await.is_empty());
 }
 
 /// An abort that read the session as open, and then stalled while the

@@ -658,9 +658,11 @@ async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
 /// Completes an upload by verifying the content and then recording the
 /// completed outcome.
 ///
-/// Verification happens before the outcome record is created. Terminal
-/// session state is checked before provider access, so a completion cannot
-/// race an abort and read an object being cleaned up.
+/// Verification happens before the outcome record is created. An abort can
+/// still end the session between this completion's read of the session and
+/// its check of the content object, and the put-if-absent of the outcome
+/// record settles that race: if the abort's outcome is created first, the
+/// completion finds it and fails.
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -887,8 +889,8 @@ fn repeated_abort(outcome: &UploadOutcome, upload_id: &UploadId) -> Result<u64> 
 
 /// Provider resources owned by a terminated upload session.
 ///
-/// The compare-and-swap returns this value so cleanup runs only after the
-/// terminal state is durable.
+/// The caller builds this value from the session record, and runs its
+/// cleanup only after the aborted outcome record exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
     owner_namespace_id: NamespaceId,
