@@ -423,12 +423,16 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, an SSD tier, or overrides, the budgets that have a process-wide limit add up to 1,600 MiB:
+Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 1,776 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 256 MiB |
+| Manifest cache | 32 MiB |
+| Head cache | 16 MiB |
 | WAL tail cache | 64 MiB |
+| Content object cache | 96 MiB |
+| Completed upload sessions | 32 MiB |
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
@@ -436,7 +440,7 @@ Without a memory limit, grep, an SSD tier, or overrides, the budgets that have a
 | Read working memory | 256 MiB |
 | 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 1,600 MiB |
+| Total | 1,776 MiB |
 
 The total leaves out:
 
