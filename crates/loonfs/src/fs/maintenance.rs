@@ -18,8 +18,9 @@ use crate::{
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
-use loonfs_core::control::NamespaceReadAnchor;
+use loonfs_core::control::{CurrentManifest, NamespaceReadAnchor};
 use loonfs_core::CheckpointPageCursor;
+use loonfs_core::CoreError;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
 use std::sync::Arc;
@@ -46,7 +47,8 @@ enum TailFold {
     /// `max_wal_tail_objects` as the WAL object count.
     WhenDue { max_wal_tail_objects: u64 },
     /// Leaves the tail to the writer session's fold task and the host's idle
-    /// fold.
+    /// fold. The session's position stores the tail, so a step reads only the
+    /// current manifest.
     Never,
 }
 
@@ -197,6 +199,23 @@ impl Maintenance {
         )
     }
 
+    /// Loads the current manifest of a namespace that isn't deleted, without
+    /// the WAL tail above it.
+    async fn load_live_manifest(&self, namespace_id: &NamespaceId) -> Result<CurrentManifest> {
+        let manifest =
+            loonfs_core::control::load_namespace_current_manifest(self.core.store(), namespace_id)
+                .await
+                .map_err(CoreError::from)?
+                .state;
+        if manifest.envelope.payload().status.is_deleted() {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: namespace_id.clone(),
+            }
+            .into());
+        }
+        Ok(manifest)
+    }
+
     /// Runs [`Self::maintain_metadata_with_options`] with the default
     /// thresholds.
     pub async fn maintain_metadata(
@@ -251,8 +270,8 @@ impl Maintenance {
     /// Runs one metadata pass, or returns `None` when `cancellation` stops
     /// the pass before its compaction unit starts.
     ///
-    /// Cancellation drops the anchor load and the fold at once, and the
-    /// compaction unit stops at its next block.
+    /// Cancellation drops the manifest or anchor load and the fold at once,
+    /// and the compaction unit stops at its next block.
     async fn metadata_step(
         &self,
         namespace_id: &NamespaceId,
@@ -260,19 +279,17 @@ impl Maintenance {
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
         cancellation: &MaintenanceCancellation,
     ) -> Result<Option<MetadataStepReport>> {
-        let (anchor, status, idle_fold_due_at_ms, fold, wal_fold) = tokio::select! {
+        let (observed, wal_tail_objects, wal_fold, wal_caught_up) = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(None),
             folded = self.fold_if_due(namespace_id, tail_fold) => folded?,
         };
-        // A fold attempt can move the manifest, so the unit observes it again.
-        let observed = (!fold).then_some(&anchor);
         let compaction = self
             .compact_once(
                 namespace_id,
                 compaction_policy,
                 loonfs_core::CompactionAdmission::WithinRowBudget,
-                observed,
+                observed.as_ref(),
                 cancellation,
             )
             .await?;
@@ -282,25 +299,11 @@ impl Maintenance {
             compaction,
         };
         tracing::debug!(
-            wal_tail_objects_before = status.wal_tail_objects,
+            wal_tail_objects_before = wal_tail_objects,
             wal_fold = ?response.wal_fold,
             compaction = ?response.compaction,
             "metadata maintenance pass concluded"
         );
-        let wal_caught_up = match response.wal_fold {
-            WalFoldStepOutcome::Folded { .. } => true,
-            // A tail that waits for its idle fold age leaves metadata due. A
-            // session's own compaction doesn't fold, so a tail with a commit
-            // in it leaves metadata due for the session's fold task or the
-            // host's idle fold.
-            WalFoldStepOutcome::NotNeeded => match tail_fold {
-                TailFold::WhenDue { .. } => idle_fold_due_at_ms.is_none(),
-                TailFold::Never => status.wal_tail_newest_commit_at_ms.is_none(),
-            },
-            WalFoldStepOutcome::AlreadyPublished { .. }
-            | WalFoldStepOutcome::RetriesExhausted { .. }
-            | WalFoldStepOutcome::Unknown => false,
-        };
         Ok(Some(MetadataStepReport {
             response,
             wal_fold: if wal_caught_up {
@@ -311,68 +314,109 @@ impl Maintenance {
         }))
     }
 
-    /// Loads the anchor a pass decides on and folds the WAL tail when a fold
-    /// is due, and returns when the tail reaches its idle fold age, whether
-    /// it folded, and what the fold did.
+    /// Reads the state that a pass plans from, and folds the WAL tail when a
+    /// fold is due. Returns the current manifest for the pass's compaction
+    /// unit to plan from, the unfolded WAL objects that the pass found, what
+    /// the fold did, and whether the WAL tail leaves metadata caught up.
+    ///
+    /// A fold attempt can move the manifest, so after a fold attempt this
+    /// returns `None` for the manifest, and the compaction unit loads the
+    /// current manifest itself. A tail that waits for its idle fold age leaves
+    /// metadata due. A session's own compaction (`TailFold::Never`) doesn't
+    /// fold, so it takes the unfolded WAL objects from the session's position
+    /// (`None` when the runtime has no position for the namespace), and then
+    /// reads only the current manifest. A tail that the position shows
+    /// unfolded leaves metadata due for the session's fold task or the host's
+    /// idle fold.
     async fn fold_if_due(
         &self,
         namespace_id: &NamespaceId,
         tail_fold: TailFold,
     ) -> Result<(
-        NamespaceReadAnchor,
-        NamespaceStorageDiagnostics,
+        Option<CurrentManifest>,
         Option<u64>,
-        bool,
         WalFoldStepOutcome,
+        bool,
     )> {
+        let TailFold::WhenDue {
+            max_wal_tail_objects,
+        } = tail_fold
+        else {
+            // The position comes first. A fold publishes its manifest before
+            // it moves the position, so the manifest loaded after the position
+            // is the position's manifest or a newer one, and a tail that the
+            // position shows folded is folded into that manifest.
+            let position = self.publisher.wal_fold_input(namespace_id).await;
+            let manifest = self.load_live_manifest(namespace_id).await?;
+            let manifest_no = manifest.manifest().manifest_no;
+            let behind = position
+                .as_ref()
+                .map(|position| position.basis.manifest_no())
+                .filter(|position_manifest_no| manifest_no < *position_manifest_no);
+            // The publish order rules this out, so a manifest behind the
+            // position is a bug, and metadata stays due instead of the step
+            // stopping the maintenance loop.
+            if let Some(position_manifest_no) = behind {
+                tracing::warn!(
+                    namespace_id = namespace_id.as_str(),
+                    %manifest_no,
+                    %position_manifest_no,
+                    "the current manifest is older than the writer position's manifest"
+                );
+            }
+            let objects = position.map(|position| position.wal_tail_objects);
+            return Ok((
+                Some(manifest),
+                objects,
+                WalFoldStepOutcome::NotNeeded,
+                objects == Some(0) && behind.is_none(),
+            ));
+        };
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
         let trigger = self.writer.fold_trigger;
         let idle_fold_due_at_ms = status
             .wal_tail_newest_commit_at_ms
             .and_then(|committed_at_ms| trigger.idle_fold_due_at_ms(committed_at_ms));
-        let fold = match tail_fold {
-            TailFold::WhenDue {
-                max_wal_tail_objects,
-            } => {
-                let inline_bytes = if status.wal_tail_objects > 0 {
-                    self.publisher
-                        .wal_tail_inline_bytes(namespace_id)
-                        .await
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                trigger.fold_is_due(max_wal_tail_objects, status.wal_tail_objects, inline_bytes)
-                    || idle_fold_due_at_ms.is_some_and(|due_at_ms| self.core.now_ms() >= due_at_ms)
-            }
-            TailFold::Never => false,
-        };
-        let wal_fold = if fold {
-            match self.run_wal_fold(namespace_id).await {
-                Ok(folded) => match folded.outcome {
-                    FoldWalOutcome::Published => WalFoldStepOutcome::Folded {
-                        manifest_head_seq: folded.manifest_head_seq,
-                    },
-                    FoldWalOutcome::AlreadyCurrent => WalFoldStepOutcome::AlreadyPublished {
-                        attempted_seq: folded.target_head_seq,
-                        current_manifest_no: folded.manifest_no,
-                    },
-                },
-                // The head seq of the anchor the pass decided on is reported
-                // when concurrent updates prevent every fold attempt from
-                // publishing.
-                Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFoldStepOutcome::RetriesExhausted {
-                        observed_head_seq: anchor.read_state.seq,
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+        let inline_bytes = if status.wal_tail_objects > 0 {
+            self.publisher
+                .wal_tail_inline_bytes(namespace_id)
+                .await
+                .unwrap_or(0)
         } else {
-            WalFoldStepOutcome::NotNeeded
+            0
         };
-        Ok((anchor, status, idle_fold_due_at_ms, fold, wal_fold))
+        let fold = trigger.fold_is_due(max_wal_tail_objects, status.wal_tail_objects, inline_bytes)
+            || idle_fold_due_at_ms.is_some_and(|due_at_ms| self.core.now_ms() >= due_at_ms);
+        if !fold {
+            return Ok((
+                Some(anchor.current_manifest().clone()),
+                Some(status.wal_tail_objects),
+                WalFoldStepOutcome::NotNeeded,
+                idle_fold_due_at_ms.is_none(),
+            ));
+        }
+        let wal_fold = match self.run_wal_fold(namespace_id).await {
+            Ok(folded) => match folded.outcome {
+                FoldWalOutcome::Published => WalFoldStepOutcome::Folded {
+                    manifest_head_seq: folded.manifest_head_seq,
+                },
+                FoldWalOutcome::AlreadyCurrent => WalFoldStepOutcome::AlreadyPublished {
+                    attempted_seq: folded.target_head_seq,
+                    current_manifest_no: folded.manifest_no,
+                },
+            },
+            // The head seq of the anchor the pass decided on is reported when
+            // concurrent updates prevent every fold attempt from publishing.
+            Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                WalFoldStepOutcome::RetriesExhausted {
+                    observed_head_seq: anchor.read_state.seq,
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let folded = matches!(wal_fold, WalFoldStepOutcome::Folded { .. });
+        Ok((None, Some(status.wal_tail_objects), wal_fold, folded))
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -434,9 +478,10 @@ impl Maintenance {
     /// Repeats metadata steps without a fold while compaction is due, for a
     /// writer session whose fold task folds its own tail.
     ///
-    /// Stops and returns like
+    /// Each step reads the current manifest and no WAL objects, because the
+    /// session's position stores the tail. Stops and returns like
     /// [`Self::maintain_metadata_while_due_with_options`], except that a tail
-    /// with a commit in it leaves metadata due.
+    /// that the position shows unfolded leaves metadata due.
     pub(crate) async fn compact_metadata_while_due(
         &self,
         namespace_id: &NamespaceId,
@@ -575,7 +620,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
         admission: loonfs_core::CompactionAdmission,
-        observed: Option<&NamespaceReadAnchor>,
+        observed: Option<&CurrentManifest>,
         cancellation: &MaintenanceCancellation,
     ) -> Result<MetadataCompactionOutcome> {
         if cancellation.is_cancelled() {
@@ -589,19 +634,20 @@ impl Maintenance {
             .get(namespace_id)
             .copied();
         if let Some(epoch) = claimed {
-            if observed.is_some_and(|anchor| epoch != anchor.compactor_epoch()) {
+            if observed.is_some_and(|manifest| epoch != manifest.compactor_epoch()) {
                 self.forget_fenced_compactor_epoch(namespace_id, epoch)
                     .await;
                 return Ok(MetadataCompactionOutcome::Fenced);
             }
         }
-        let due = |anchor: &NamespaceReadAnchor| {
-            loonfs_core::cache::metadata_compaction_due(anchor, compaction_policy)
+        let due = |manifest: &CurrentManifest| {
+            loonfs_core::cache::metadata_compaction_due(manifest, compaction_policy)
         };
         let unit_due = match observed {
-            Some(anchor) => due(anchor),
-            // A claimed unit reads less than loading an anchor to check first.
-            None => claimed.is_some() || due(&self.load_live_anchor(namespace_id).await?),
+            Some(manifest) => due(manifest),
+            // A claimed unit reads less than loading the manifest to check
+            // first.
+            None => claimed.is_some() || due(&self.load_live_manifest(namespace_id).await?),
         };
         if !unit_due {
             return Ok(MetadataCompactionOutcome::NotNeeded);

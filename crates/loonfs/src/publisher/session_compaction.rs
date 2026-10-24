@@ -273,6 +273,95 @@ async fn a_session_streaming_compaction_survives_its_own_next_fold() {
     parked.writer.shutdown().await.expect("shut down writer");
 }
 
+/// The session's compaction plans each unit from the current manifest and
+/// takes the tail from the session's position. So while two of the session's
+/// writes wait unfolded above the manifest, and the loop's own unit and the
+/// next fold publish manifests under it, the loop reads none of the WAL
+/// objects that the session wrote.
+#[tokio::test]
+async fn a_session_compaction_reads_no_wal_objects() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("compaction-reads").expect("namespace id");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+    ));
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .inline_content(fold_every_write())
+        .build()
+        .await
+        .expect("build writer");
+    let namespace = session_one_fold_short(&writer, store.inner(), namespace_id.as_str()).await;
+    let actor = loonfs_test_support::test_actor();
+
+    // The session's compaction finds a unit due after this fold, and waits
+    // for a permit while two more writes wait for their fold.
+    let mut compaction_permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
+        compaction_permits.push(writer.execution_budget().compaction_permit().await);
+    }
+    namespace
+        .put_file("/file-due", b"body", &actor)
+        .await
+        .expect("put the file whose fold makes compaction due");
+    namespace.wait_for_fold().await.expect("the fold settles");
+    let mut fold_permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+        fold_permits.push(writer.execution_budget().fold_permit().await);
+    }
+    for path in ["/unfolded-1", "/unfolded-2"] {
+        namespace
+            .put_file(path, b"body", &actor)
+            .await
+            .expect("put a file whose fold waits for a permit");
+    }
+    let budget = writer.execution_budget();
+    bounded(Duration::from_secs(10), async {
+        while budget.stats().compactions_waiting == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the session's compaction waits for a permit");
+    let before = current_manifest(store.inner(), &namespace_id)
+        .await
+        .manifest()
+        .manifest_no;
+    store.reset();
+
+    drop(compaction_permits);
+    bounded(Duration::from_secs(10), async {
+        loop {
+            let stats = budget.stats();
+            if stats.compactions_running + stats.compactions_waiting == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the compaction unit finishes while the folds wait");
+    drop(fold_permits);
+    bounded(Duration::from_secs(10), writer.drain())
+        .await
+        .expect("the fold and the compactions settle")
+        .expect("drain");
+
+    let after = current_manifest(store.inner(), &namespace_id).await;
+    assert!(
+        after.manifest().manifest_no.0 >= before.0 + 2,
+        "the unit and the fold both published"
+    );
+    assert!(delta_runs(&after) < DEFAULT_MIN_COMPACTION_RUNS);
+    assert_eq!(
+        store.take_get_keys(),
+        Vec::<String>::new(),
+        "the compaction loop reads no WAL objects"
+    );
+    writer.shutdown().await.expect("shut down writer");
+}
+
 #[tokio::test]
 async fn closing_a_session_cancels_its_compaction_and_returns() {
     let parked = park_a_session_compaction().await;
