@@ -2078,6 +2078,20 @@ impl NamespacePublisher {
             // delete's callers hear the outcome, so an open after that
             // starts a fresh session whose publish fails on the durable
             // tombstone. Handles to this session fail fast on `Deleted`.
+            // The table keeps a session until its compaction exits (the
+            // drain finds the compaction through the table), so the delete
+            // waits for the cancelled compaction before it forgets the
+            // session.
+            if let Err(error) = self.wait_for_compaction().await {
+                phase_event!(
+                    self.runtime_core,
+                    "metadata_compaction",
+                    self.namespace_id,
+                    tracing::Level::WARN,
+                    error = %error.public_message(),
+                    "metadata compaction failed while the namespace was deleted"
+                );
+            }
             self.forget_if_ended();
             for waiter in queued.commits {
                 let _ = waiter.send(Err(self.namespace_deleted().into()));
