@@ -143,7 +143,9 @@ impl ConfiguredObjectStore {
     }
 
     /// Hands out the provider client every handle and helper reads through.
-    /// The client starts each compare-and-swap write to an object at least
+    ///
+    /// The client paces compare-and-swap writes, so each compare-and-swap
+    /// write to an object starts at least
     /// [`MIN_CAS_WRITE_INTERVAL_MS`](crate::MIN_CAS_WRITE_INTERVAL_MS) after
     /// the previous one to that object completed.
     ///

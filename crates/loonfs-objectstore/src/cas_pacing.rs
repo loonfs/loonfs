@@ -1,5 +1,5 @@
 //! [`CasPacedObjectStore`]: a store wrapper that paces compare-and-swap
-//! writes to one object.
+//! writes to each object.
 
 use crate::object_store::{Result, SharedObjectStore};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -15,28 +15,31 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Shortest time between two compare-and-swap writes to one object.
+/// The write interval, the shortest time between two compare-and-swap writes
+/// to one object.
 ///
-/// Some providers allow about one write per second to the same object name
-/// (see `docs/specs/object-storage-providers.md`). The namespace hint is the
-/// object that LoonFS updates most often by compare-and-swap.
+/// Some providers limit writes to the same object to one per second (see
+/// `docs/specs/object-storage-providers.md`). The namespace hint is the object
+/// that LoonFS updates most often by compare-and-swap.
 pub const MIN_CAS_WRITE_INTERVAL_MS: u64 = 1_000;
 
-/// Forwards every call to another store, and starts each compare-and-swap
-/// write at least [`MIN_CAS_WRITE_INTERVAL_MS`] after the previous one to the
-/// same key completed.
+/// A store wrapper that forwards every call to the store it wraps, and starts
+/// each compare-and-swap write to an object at least
+/// [`MIN_CAS_WRITE_INTERVAL_MS`] after the previous one to that object
+/// completed.
 ///
-/// A write that comes sooner waits for the rest of the interval and then
+/// A write that comes sooner waits out the rest of the write interval and then
 /// proceeds. Create-only puts and every other operation pass through
 /// unchanged.
 #[derive(Debug)]
 pub(crate) struct CasPacedObjectStore {
     inner: SharedObjectStore,
     timer: Arc<dyn MonotonicTimer>,
-    /// For each key written by compare-and-swap within the last interval, the
-    /// later of when its latest write started and when that write completed.
-    /// Each reservation drops the keys whose interval has passed, so the map
-    /// lists only the keys written in the last second.
+    /// For each key written by compare-and-swap within the last write
+    /// interval, the later of when its latest write started (or is scheduled
+    /// to start) and when that write completed. Each compare-and-swap write
+    /// first drops the keys whose write interval has passed, so the map lists
+    /// only the keys written within the last write interval.
     written_at_ms: Mutex<HashMap<String, u64>>,
 }
 
@@ -56,11 +59,12 @@ impl CasPacedObjectStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
         self.written_at_ms
             .lock()
-            .expect("the CAS write times should not be poisoned")
+            .expect("the write times lock should not be poisoned")
     }
 
-    /// Reserves the next write slot for `key`, waits for it, and records the
-    /// write's completion once `write` returns.
+    /// Reserves the earliest start time that the write interval allows for
+    /// `key`, waits until then, runs `write`, and records when `write`
+    /// completed.
     async fn paced<T>(&self, key: &str, write: impl std::future::Future<Output = T>) -> T {
         let now_ms = self.timer.monotonic_now_ms();
         let start_at_ms = {
@@ -86,7 +90,8 @@ impl CasPacedObjectStore {
     }
 }
 
-// The pause is local scheduling, so it can't affect replayed state.
+// The pause changes when a write is sent, not what it writes, so no durable
+// state depends on the clock.
 #[allow(
     clippy::disallowed_methods,
     reason = "a compare-and-swap write waits out its object's write interval"
@@ -250,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cas_writes_to_one_key_complete_at_least_an_interval_apart() {
+    async fn cas_writes_to_one_key_complete_at_least_a_write_interval_apart() {
         let (_directory, store, timer) = paced_store();
         let mut etag = created(&store, "hint.json").await;
         let mut completed_at_ms = Vec::new();
@@ -270,7 +275,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cas_writes_to_other_keys_and_create_only_puts_do_not_wait() {
+    async fn cas_writes_to_different_keys_and_create_only_puts_do_not_wait() {
         let (_directory, store, timer) = paced_store();
         let first = created(&store, "first.json").await;
         let second = created(&store, "second.json").await;
