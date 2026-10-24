@@ -43,7 +43,7 @@ To publish a commit, LoonFS prepares the next WAL object from the namespace's cu
 
 Several parts of the storage protocol involve both the log and other namespace state:
 
-- **Manifest and hint management.** A hint contains a manifest number, which manifest publications raise. The code that updates the hint is in the control module. WAL discovery starts at the manifest's folded position and reads forward in windows.
+- **Manifest and hint management.** A hint contains a manifest number, which manifest publications raise. The code that updates the hint is in the control module, and the object store paces its compare-and-swap writes to one per second, so a publication that follows another one within a second waits before it raises the hint. WAL discovery starts at the manifest's folded position and reads forward in windows.
 - **Garbage collection.** Listing objects, checking their ages, and deleting them are handled in `gc/`. For a live namespace, a WAL object is required if its number is above the folded position. An object at or below that position goes through the remaining collection checks.
 - **Position tracking.** WAL numbers appear in the namespace head and in the durable manifest. The differences between them count the unfolded WAL objects, and LoonFS uses those counts to enforce maintenance and write limits.
 

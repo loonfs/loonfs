@@ -17,6 +17,7 @@ mod assembly;
 mod attempts;
 mod aws_credentials;
 pub mod buffered;
+mod cas_pacing;
 mod checksum_header;
 mod configured;
 pub mod crypto;
@@ -42,6 +43,7 @@ mod test_support;
 pub mod timing;
 mod transfer_timeouts;
 
+pub use cas_pacing::MIN_CAS_WRITE_INTERVAL_MS;
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,

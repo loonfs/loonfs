@@ -2,6 +2,7 @@
 //! paired with the direct transfers that provider can authorize.
 
 use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_source};
+use crate::cas_pacing::CasPacedObjectStore;
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
 use crate::object_store::{Result, SharedObjectStore};
@@ -142,11 +143,14 @@ impl ConfiguredObjectStore {
     }
 
     /// Hands out the provider client every handle and helper reads through.
+    /// The client starts each compare-and-swap write to an object at least
+    /// [`MIN_CAS_WRITE_INTERVAL_MS`](crate::MIN_CAS_WRITE_INTERVAL_MS) after
+    /// the previous one to that object completed.
     ///
     /// Take [`direct_transfers`](Self::direct_transfers) first: this consumes
     /// the configured store.
     pub fn into_shared(self) -> SharedObjectStore {
-        self.inner
+        Arc::new(CasPacedObjectStore::new(self.inner))
     }
 }
 
