@@ -191,11 +191,25 @@ pub struct ServerConfig {
     /// sweep, both, or neither.
     #[serde(default = "default_maintenance")]
     pub maintenance: JobMode,
-    /// Minimum interval between publication starts per namespace, in
-    /// milliseconds. A request to an idle namespace publishes immediately;
-    /// the interval paces requests that queued behind a publish, so hot
-    /// namespaces amortize into fewer, larger WAL objects. The server default favors batch economy over
-    /// the embedded default's latency bias.
+    /// Minimum time between publication starts in one namespace, in
+    /// milliseconds.
+    ///
+    /// A request to an idle namespace publishes immediately. A request that
+    /// arrives less than the interval after the last publication started
+    /// waits until the interval has passed, and the next WAL object includes
+    /// the commits queued in that time. A longer interval writes fewer,
+    /// larger WAL objects and keeps the namespace's fold rate low. (A low
+    /// fold rate matters because every manifest publication raises the
+    /// namespace's hint with a compare-and-swap, and some providers limit
+    /// writes to one object to about one per second.) A shorter interval
+    /// lowers commit latency and raises throughput. Measured on S3 with 256
+    /// clients that each wait for their commits, one namespace published 244
+    /// commits per second with a median commit latency of 1,049 ms at an
+    /// interval of 1,000 ms. At 100 ms, it published 1,330 commits per second
+    /// with a median latency of 183 ms, and at 15 ms (the embedded default),
+    /// 1,930 per second with a median latency of 127 ms. The default of
+    /// 200 ms writes at most five WAL objects a second per namespace and
+    /// avoids most of the latency and throughput cost of a 1,000 ms interval.
     #[serde(default = "default_min_publish_interval_ms")]
     pub min_publish_interval_ms: u64,
     /// Maximum time a metadata or query request may run, in milliseconds.
@@ -332,7 +346,7 @@ fn default_maintenance() -> JobMode {
 }
 
 fn default_min_publish_interval_ms() -> u64 {
-    1_000
+    200
 }
 
 fn default_request_deadline_ms() -> u64 {
