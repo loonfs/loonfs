@@ -2078,10 +2078,10 @@ impl NamespacePublisher {
             // delete's callers hear the outcome, so an open after that
             // starts a fresh session whose publish fails on the durable
             // tombstone. Handles to this session fail fast on `Deleted`.
-            // The table keeps a session until its compaction exits (the
-            // drain finds the compaction through the table), so the delete
-            // waits for the cancelled compaction before it forgets the
-            // session.
+            // A session stays in the table while its compaction runs (the
+            // drain finds running compactions through the table), so the
+            // delete waits for the cancelled compaction before it forgets
+            // the session.
             if let Err(error) = self.wait_for_compaction().await {
                 phase_event!(
                     self.runtime_core,
