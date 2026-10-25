@@ -268,6 +268,7 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
             inode_id,
             revision_no,
             content_ref,
+            ..
         } => Some(PublishedRevision {
             inode_id: *inode_id,
             revision_no: *revision_no,

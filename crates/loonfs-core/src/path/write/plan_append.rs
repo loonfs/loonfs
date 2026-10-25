@@ -143,6 +143,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
             inode_id: revision.inode_id,
             base_revision_no: revision.revision_no,
             content_ref: appended.content_ref.clone(),
+            append_offset: Some(revision.content_ref.size_bytes),
         }],
         appended: Some(appended),
     })

@@ -51,6 +51,11 @@ pub(crate) enum CommitOperation {
         /// valid preparation proof before publication, or the reference an
         /// append builds from the bytes this commit carries.
         content_ref: ContentRef,
+        /// The offset where an append's bytes begin, which is the base
+        /// revision's size.
+        ///
+        /// It's `None` for a put or a copy.
+        append_offset: Option<u64>,
     },
     /// Restore a prior revision as a new current revision.
     RestoreRevision {

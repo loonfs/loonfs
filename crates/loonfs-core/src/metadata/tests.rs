@@ -91,6 +91,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
             ),
             layout: None,
+            append_offset: None,
         },
         WalDelta::TombstoneSubtree {
             delta_index: 2,

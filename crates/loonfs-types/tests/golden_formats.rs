@@ -291,6 +291,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                         length: sample_content_ref().size_bytes,
                     }],
                 }),
+                append_offset: None,
             },
         },
         WalCommitDelta {
@@ -341,6 +342,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                         length: sample_content_ref().size_bytes,
                     }],
                 }),
+                append_offset: None,
             },
         },
         WalCommitDelta {
@@ -420,6 +422,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             revision_no: RevisionNo(1),
             content_ref: empty_content_ref,
             layout: None,
+            append_offset: None,
         },
     });
     payload.records[0].deltas.push(WalCommitDelta {
@@ -443,6 +446,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
                     length: 6,
                 }],
             }),
+            append_offset: Some(6),
         },
     });
     payload.head_seq = ChangeSeq(3);
@@ -1769,6 +1773,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
                 layout: None,
+                append_offset: None,
             }),
             "append_file_revision",
         ),

@@ -1,7 +1,8 @@
 //! Change-feed behavior for operations that create or replace file content.
 
 use crate::common::commit_split_support::*;
-use loonfs_core::publish::FilesystemOperation;
+use crate::common::namespace_engine;
+use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
@@ -33,16 +34,36 @@ fn event_kind(event: &FilesystemChange) -> &'static str {
     }
 }
 
-fn event_kinds(changes: &ListChangesResponse, id: &str) -> Vec<&'static str> {
-    changes
+fn commit_events<'a>(changes: &'a ListChangesResponse, id: &str) -> &'a [FilesystemChange] {
+    &changes
         .changes
         .iter()
         .find(|change| change.commit_id.as_str() == id)
         .unwrap_or_else(|| panic!("missing change for commit `{id}`"))
         .events
+}
+
+fn event_kinds(changes: &ListChangesResponse, id: &str) -> Vec<&'static str> {
+    commit_events(changes, id).iter().map(event_kind).collect()
+}
+
+fn append_offsets(changes: &ListChangesResponse, id: &str) -> Vec<Option<u64>> {
+    commit_events(changes, id)
         .iter()
-        .map(event_kind)
+        .map(|event| match event {
+            FilesystemChange::ContentChanged { append_offset, .. } => *append_offset,
+            other => panic!("expected `content_changed` in commit `{id}`, got {other:?}"),
+        })
         .collect()
+}
+
+fn append(target: &str, bytes: &[u8]) -> FilesystemOperation {
+    FilesystemOperation::AppendFile {
+        path: path(target),
+        inline_content: bytes.to_vec(),
+        expected_inode_id: None,
+        expected_revision_no: None,
+    }
 }
 
 #[tokio::test]
@@ -179,4 +200,159 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         event_kinds(&changes, "restore-file"),
         vec!["content_changed"]
     );
+}
+
+#[tokio::test]
+async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_fold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("feed-appends").expect("namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    for (target, bytes) in [("/log.txt", b"hello".as_slice()), ("/empty.txt", b"")] {
+        put_file(
+            &store,
+            &namespace_id,
+            target,
+            bytes,
+            DestinationBehavior::NoReplace,
+            &context,
+            None,
+        )
+        .await
+        .expect("create file");
+    }
+    for (id, operations) in [
+        ("append", vec![append("/log.txt", b" world")]),
+        (
+            "append-twice",
+            vec![append("/log.txt", b"!"), append("/log.txt", b"?")],
+        ),
+        ("append-to-empty", vec![append("/empty.txt", b"x")]),
+        (
+            "restore",
+            vec![FilesystemOperation::RestoreRevision {
+                path: path("/log.txt"),
+                source_revision_no: RevisionNo(2),
+            }],
+        ),
+        // Revision 4 extended the chain past the restored revision 2, so
+        // this append starts a new content ID.
+        ("append-to-restored", vec![append("/log.txt", b" again")]),
+    ] {
+        let request = CommitIntent {
+            commit_id: commit_id(id),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations,
+        };
+        submit_commit(&store, &namespace_id, request, &context)
+            .await
+            .expect("publish commit");
+    }
+    put_file(
+        &store,
+        &namespace_id,
+        "/log.txt",
+        b"replaced",
+        DestinationBehavior::Replace,
+        &context,
+        Some("replace"),
+    )
+    .await
+    .expect("replace file");
+
+    let expected = [
+        ("append", vec![Some(5)]),
+        ("append-twice", vec![Some(11), Some(12)]),
+        ("append-to-empty", vec![Some(0)]),
+        ("restore", vec![None]),
+        ("append-to-restored", vec![Some(11)]),
+        ("replace", vec![None]),
+    ];
+    for folded in [false, true] {
+        if folded {
+            namespace_engine(&store, &namespace_id, &context)
+                .fold_wal()
+                .await
+                .expect("fold the WAL tail into commit rows");
+        }
+        let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+            .await
+            .expect("read change feed");
+        for (id, offsets) in &expected {
+            assert_eq!(
+                &append_offsets(&changes, id),
+                offsets,
+                "{id}, folded: {folded}"
+            );
+        }
+        let content_id = |id| match commit_events(&changes, id) {
+            [FilesystemChange::ContentChanged { content_ref, .. }] => &content_ref.content_id,
+            other => panic!("expected one `content_changed` event, got {other:?}"),
+        };
+        assert_ne!(content_id("append-to-restored"), content_id("restore"));
+    }
+}
+
+#[tokio::test]
+async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("feed-source").expect("namespace id");
+    let fork = NamespaceId::parse("feed-fork").expect("namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &source, &context)
+        .await
+        .expect("bootstrap namespace");
+    put_file(
+        &store,
+        &source,
+        "/log.txt",
+        b"hello",
+        DestinationBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .await
+    .expect("create file");
+    let forked = namespace_engine(&store, &source, &context)
+        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .await
+        .expect("fork");
+    submit_operation(
+        &store,
+        &fork,
+        commit_id("append-in-fork"),
+        append("/log.txt", b" world"),
+        &context,
+    )
+    .await
+    .expect("append in the fork");
+
+    for folded in [false, true] {
+        if folded {
+            namespace_engine(&store, &fork, &context)
+                .fold_wal()
+                .await
+                .expect("fold the fork's WAL tail into commit rows");
+        }
+        let changes = list_changes_after(&store, &fork, forked.head_seq)
+            .await
+            .expect("read the fork's change feed");
+        let [FilesystemChange::ContentChanged {
+            content_ref,
+            append_offset,
+            ..
+        }] = commit_events(&changes, "append-in-fork")
+        else {
+            panic!("expected one `content_changed` event, folded: {folded}");
+        };
+        assert_eq!(content_ref.owner_namespace_id, fork);
+        assert_eq!(*append_offset, Some(5), "folded: {folded}");
+    }
 }

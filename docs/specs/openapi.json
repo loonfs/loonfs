@@ -1621,8 +1621,14 @@
         "type": "object"
       },
       "FilesystemChangeContentChanged": {
-        "description": "A file received a new current revision from a put or revision restore.",
+        "description": "A file received a new current revision from a put, a copy, an append, or a revision\nrestore.",
         "properties": {
+          "append_offset": {
+            "description": "The offset where the appended bytes begin, present when an append published the\nrevision.\n\nIt equals the base revision's `size_bytes`, so the new revision's bytes are the base\nrevision's bytes followed by the bytes from this offset to `size_bytes`. It's\npresent for every append, including one that starts a new content ID, and absent for\na put, a copy, or a revision restore.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
             "description": "The immutable content that the revision published."

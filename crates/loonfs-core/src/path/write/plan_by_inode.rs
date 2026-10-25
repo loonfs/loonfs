@@ -87,6 +87,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
             inode_id,
             base_revision_no: expected_revision_no,
             content_ref,
+            append_offset: None,
         },
     ]))
 }

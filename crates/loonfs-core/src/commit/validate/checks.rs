@@ -89,9 +89,17 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
                 inode_id,
                 base_revision_no,
                 content_ref,
+                append_offset,
             } => {
-                validate_replace_file(view, numbering, *inode_id, *base_revision_no, content_ref)
-                    .await?
+                validate_replace_file(
+                    view,
+                    numbering,
+                    *inode_id,
+                    *base_revision_no,
+                    content_ref,
+                    *append_offset,
+                )
+                .await?
             }
             CommitOperation::RestoreRevision {
                 inode_id,
@@ -291,6 +299,7 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
             revision_no: RevisionNo(1),
             content_ref: content_ref.clone(),
             layout: None,
+            append_offset: None,
         },
     ])
 }
@@ -301,6 +310,7 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_ref: &ContentRef,
+    append_offset: Option<u64>,
 ) -> Result<Vec<WalDelta>> {
     validate_file_base_revision_is(
         view,
@@ -323,6 +333,7 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
         revision_no,
         content_ref: content_ref.clone(),
         layout: None,
+        append_offset,
     }])
 }
 
@@ -356,6 +367,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
         revision_no,
         content_ref: source_revision.content_ref,
         layout: None,
+        append_offset: None,
     }])
 }
 

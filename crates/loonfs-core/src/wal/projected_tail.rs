@@ -430,6 +430,7 @@ mod tests {
                         loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     ),
                     layout: None,
+                    append_offset: None,
                 },
             }],
             inline_content: vec![WalInlineContent {

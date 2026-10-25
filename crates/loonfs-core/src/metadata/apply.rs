@@ -131,6 +131,7 @@ impl MetadataState {
                 revision_no,
                 content_ref,
                 layout,
+                append_offset: _,
             } => {
                 if let Some(layout) = layout {
                     self.push_content_layout_record(ContentLayoutRecord {

@@ -630,6 +630,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             inode_id: event_inode,
             revision_no,
             content_ref,
+            append_offset: None,
         } if *event_inode == inode_id
             && *revision_no == RevisionNo(3)
             && *content_ref == first_content_ref

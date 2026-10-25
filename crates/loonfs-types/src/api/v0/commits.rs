@@ -87,7 +87,8 @@ pub enum FilesystemChange {
         /// The content of the first revision.
         content_ref: ContentRef,
     },
-    /// A file received a new current revision from a put or revision restore.
+    /// A file received a new current revision from a put, a copy, an append, or a revision
+    /// restore.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
     ContentChanged {
         /// The file inode whose history advanced.
@@ -98,6 +99,16 @@ pub enum FilesystemChange {
         revision_no: RevisionNo,
         /// The immutable content that the revision published.
         content_ref: ContentRef,
+        /// The offset where the appended bytes begin, present when an append published the
+        /// revision.
+        ///
+        /// It equals the base revision's `size_bytes`, so the new revision's bytes are the base
+        /// revision's bytes followed by the bytes from this offset to `size_bytes`. It's
+        /// present for every append, including one that starts a new content ID, and absent for
+        /// a put, a copy, or a revision restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        append_offset: Option<u64>,
     },
     /// An inode moved to a new parent directory or name.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
@@ -337,13 +348,32 @@ mod tests {
         let content_changed = FilesystemChange::ContentChanged {
             inode_id: InodeId(2),
             revision_no: crate::RevisionNo(3),
-            content_ref: sample_content_ref,
+            content_ref: sample_content_ref.clone(),
+            append_offset: None,
         };
         assert_eq!(
             serde_json::to_string(&content_changed).expect("serialize content changed event"),
             format!(
                 r#"{{"kind":"content_changed","inode_id":"ino_2","revision_no":3,"content_ref":{sample_content_ref_json}}}"#
             )
+        );
+        let appended = FilesystemChange::ContentChanged {
+            inode_id: InodeId(2),
+            revision_no: crate::RevisionNo(4),
+            content_ref: sample_content_ref,
+            append_offset: Some(3),
+        };
+        let appended_json = format!(
+            r#"{{"kind":"content_changed","inode_id":"ino_2","revision_no":4,"content_ref":{sample_content_ref_json},"append_offset":3}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&appended).expect("serialize appended event"),
+            appended_json
+        );
+        assert_eq!(
+            serde_json::from_str::<FilesystemChange>(&appended_json)
+                .expect("decode appended event"),
+            appended
         );
 
         let moved = FilesystemChange::Moved {

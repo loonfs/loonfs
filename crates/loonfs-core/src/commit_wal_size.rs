@@ -89,6 +89,7 @@ const REVISION_BYTES: usize = delta_bytes(
         ("content_ref", CONTENT_REF_BYTES),
     ],
 );
+const APPEND_OFFSET_BYTES: usize = cbor_string_bytes("append_offset".len()) + INTEGER_BYTES;
 const APPEND_PIECE_BYTES: usize = cbor_map_bytes(&[
     ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("offset", INTEGER_BYTES),
@@ -297,7 +298,7 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
         | FilesystemOperation::RestoreRevisionByInode { .. } => REVISION_BYTES,
         FilesystemOperation::AppendFile { inline_content, .. }
         | FilesystemOperation::AppendFileByInode { inline_content, .. } => {
-            REVISION_BYTES + APPEND_PIECE_BYTES + inline_content.len()
+            REVISION_BYTES + APPEND_OFFSET_BYTES + APPEND_PIECE_BYTES + inline_content.len()
         }
         FilesystemOperation::DeletePath { .. } | FilesystemOperation::DeleteByInode { .. } => {
             DELETE_BYTES

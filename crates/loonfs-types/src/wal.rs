@@ -161,6 +161,14 @@ pub enum WalDelta {
         /// Objects holding the bytes before this commit's pieces.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layout: Option<crate::ContentLayout>,
+        /// The offset where an append's bytes begin, which is the base
+        /// revision's `size_bytes`.
+        ///
+        /// The field is absent from the delta of every other revision, such
+        /// as one from a put, a copy, or a restore
+        /// ([format section 6.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#66-operations-and-wal-deltas)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        append_offset: Option<u64>,
     },
     /// Hides a rooted subtree from snapshots at this delta's sequence or later.
     TombstoneSubtree {
@@ -658,6 +666,7 @@ mod tests {
                                 crate::ChecksumAlgorithm::Crc64nvme,
                             ),
                             layout: None,
+                            append_offset: None,
                         },
                     }],
                     inline_content: vec![WalInlineContent {

@@ -260,6 +260,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 inode_id: existing.inode_id,
                 base_revision_no,
                 content_ref: content_ref.clone(),
+                append_offset: None,
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
