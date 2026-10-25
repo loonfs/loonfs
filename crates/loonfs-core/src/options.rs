@@ -1,6 +1,7 @@
 //! Per-operation options structs for the engine surface.
 
 use loonfs_types::ChangeSeq;
+use std::num::NonZeroU64;
 
 /// Options for creating a namespace.
 ///
@@ -12,6 +13,9 @@ pub struct CreateNamespaceOptions {
     pub access: loonfs_types::NamespaceAccess,
     /// How sibling names compare in the namespace.
     pub naming: loonfs_types::NamespaceNaming,
+    /// The namespace's retention window, which a host's scheduled retention
+    /// advance uses instead of the host's own setting.
+    pub retention_window_ms: Option<NonZeroU64>,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
@@ -21,6 +25,7 @@ impl Default for CreateNamespaceOptions {
         Self {
             access: loonfs_types::NamespaceAccess::Unrestricted {},
             naming: loonfs_types::NamespaceNaming::CaseInsensitive,
+            retention_window_ms: None,
             allow_existing: false,
         }
     }

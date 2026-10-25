@@ -98,10 +98,13 @@ memory_limit_bytes = 4294967296
 #full_sweep_interval_ms = 86400000
 
 # How long, in milliseconds, the server keeps a namespace's history before
-# it advances the namespace's retention floor past that history. Each full
-# pass advances every namespace's floor to the last commit at or before the
-# current time minus this window. Must be positive. Omit it to advance no
-# floor, which is the default. 2592000000 is 30 days.
+# it advances the namespace's retention floor past that history, for each
+# namespace without a retention window of its own. Each full pass advances
+# every namespace's floor to the last commit at or before the current time
+# minus the namespace's window, or minus this setting for a namespace that
+# has no window of its own. Must be positive. Omit it to advance only the
+# floors of namespaces that have their own window, which is the default.
+# 2592000000 is 30 days.
 #retention_window_ms = 2592000000
 
 # Close a caught-up session when its last open is older than this many

@@ -19,6 +19,9 @@ pub struct CreateNamespaceOptions {
     pub access: loonfs_types::NamespaceAccess,
     /// How sibling names compare, fixed for the namespace's life.
     pub naming: loonfs_types::NamespaceNaming,
+    /// The namespace's retention window in milliseconds, or `None` when the
+    /// namespace has no window of its own and the server's window applies.
+    pub retention_window_ms: Option<u64>,
 }
 
 impl Default for CreateNamespaceOptions {
@@ -26,6 +29,7 @@ impl Default for CreateNamespaceOptions {
         Self {
             access: loonfs_types::NamespaceAccess::Unrestricted {},
             naming: loonfs_types::NamespaceNaming::CaseInsensitive,
+            retention_window_ms: None,
         }
     }
 }
@@ -212,6 +216,7 @@ impl Client {
                 access: options.access.clone(),
                 naming: options.naming,
                 namespace_id: namespace_id.clone(),
+                retention_window_ms: options.retention_window_ms,
             }),
             operations::CREATE_NAMESPACE,
         )

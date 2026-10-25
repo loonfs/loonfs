@@ -29,8 +29,9 @@ pub use operations::{
     MetadataMaintenanceResponse, MetadataPassReport, NamespaceAccessMode, NamespaceDiagnostics,
     NamespaceForkBasis, NamespaceMetadata, PreconditionFields, RecoverAdministratorRequest,
     RecoverAdministratorResponse, RetainedCandidates, RetainedReason, RunMaintenanceRequest,
-    RunMaintenanceResponse, Snapshot, StoreProbeCheckOutcome, StoreProbeCheckResult,
-    StoreProbeRequest, StoreProbeResponse, WalFoldStepOutcome,
+    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot,
+    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
+    WalFoldStepOutcome,
 };
 pub use reads::{
     AttributesProjection, EntryInodeKind, ListInodeChildrenResponse, ListPathEntriesResponse,

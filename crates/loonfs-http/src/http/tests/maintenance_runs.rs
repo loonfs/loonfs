@@ -1,5 +1,5 @@
-//! Maintenance runs: the metadata job's loop, and runs against namespaces
-//! that do not exist or are deleted.
+//! Maintenance runs: the metadata job's loop, the retention window job, and
+//! runs against namespaces that do not exist or are deleted.
 
 use super::*;
 use loonfs::{MaintainMetadataOptions, MaintenanceCancellation};
@@ -15,14 +15,25 @@ async fn run(
     namespace_id: &NamespaceId,
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
+    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/runs");
+    send(router, "POST", &uri, body).await
+}
+
+async fn send(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
         .oneshot(
             axum::http::Request::builder()
-                .method("POST")
-                .uri(format!("/v0/maintenance/namespaces/{namespace_id}/runs"))
+                .method(method)
+                .uri(uri)
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
+                .header("Loonfs-Actor", "maintenance-runs")
                 .body(axum::body::Body::from(body.to_owned()))
                 .expect("request"),
         )
@@ -194,7 +205,7 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
         .expect("delete namespace");
 
     let mut answers = Vec::new();
-    for kind in ["metadata", "gc", "retention"] {
+    for kind in ["metadata", "gc", "retention", "retention_window"] {
         for namespace_id in [&missing, &deleted] {
             let body = format!(r#"{{"kind":"{kind}"}}"#);
             let (status, body) = run(&router, namespace_id, &body).await;
@@ -213,7 +224,121 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
             "gc deleted: 200 gc",
             "retention missing: 404 namespace_not_found",
             "retention deleted: 410 namespace_deleted",
+            "retention_window missing: 404 namespace_not_found",
+            "retention_window deleted: 410 namespace_deleted",
         ]
+    );
+    state.runtime.shutdown().await.expect("shutdown writer");
+}
+
+/// Checks that a namespace's retention window is set at creation, changed
+/// and cleared by `retention_window` runs, included in the namespace's
+/// metadata, and copied by a fork, and that a window of zero is rejected.
+#[tokio::test]
+async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_fork() {
+    let directory = tempdir().expect("tempdir");
+    let (router, state) = test_app(
+        test_options(directory.path(), "retention-window-runs"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let windowed = namespace_id("windowed");
+    let window = |body: &serde_json::Value| body.get("retention_window_ms").cloned();
+    let rejected = |(status, body): (StatusCode, serde_json::Value)| {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            (&body["code"], &body["param"]),
+            (
+                &serde_json::json!("invalid_request"),
+                &serde_json::json!("/retention_window_ms")
+            )
+        );
+    };
+
+    rejected(
+        send(
+            &router,
+            "POST",
+            "/v0/namespaces",
+            r#"{"namespace_id":"zero","retention_window_ms":0}"#,
+        )
+        .await,
+    );
+    let (status, created) = send(
+        &router,
+        "POST",
+        "/v0/namespaces",
+        r#"{"namespace_id":"windowed","retention_window_ms":86400000}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(window(&created), Some(serde_json::json!(86_400_000)));
+
+    rejected(
+        run(
+            &router,
+            &windowed,
+            r#"{"kind":"retention_window","retention_window_ms":0}"#,
+        )
+        .await,
+    );
+    let (status, changed) = run(
+        &router,
+        &windowed,
+        r#"{"kind":"retention_window","retention_window_ms":3600000}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(
+        changed,
+        serde_json::json!({"kind": "retention_window", "namespace_id": "windowed", "retention_window_ms": 3_600_000})
+    );
+    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    assert_eq!(window(&shown), Some(serde_json::json!(3_600_000)));
+    let (status, forked) = send(
+        &router,
+        "POST",
+        "/v0/namespaces/windowed/forks",
+        r#"{"new_namespace_id":"forked"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{forked}");
+    assert_eq!(
+        window(&forked),
+        Some(serde_json::json!(3_600_000)),
+        "a fork copies its source's window"
+    );
+
+    let manifest_no = || async {
+        state
+            .maintenance
+            .diagnostics(&windowed)
+            .await
+            .expect("diagnostics")
+            .current_manifest_no
+    };
+    let before = manifest_no().await;
+    for _ in 0..2 {
+        let (status, cleared) = run(&router, &windowed, r#"{"kind":"retention_window"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(
+            cleared,
+            serde_json::json!({"kind": "retention_window", "namespace_id": "windowed"})
+        );
+    }
+    assert_eq!(
+        manifest_no().await.map(|number| number.0),
+        before.map(|number| number.0 + 1),
+        "the first clear publishes a manifest, and the second finds nothing to change"
+    );
+    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    assert_eq!(window(&shown), None);
+    let (_, shown) = send(&router, "GET", "/v0/namespaces/forked", "").await;
+    assert_eq!(
+        window(&shown),
+        Some(serde_json::json!(3_600_000)),
+        "the fork keeps its own copy"
     );
     state.runtime.shutdown().await.expect("shutdown writer");
 }

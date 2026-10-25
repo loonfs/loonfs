@@ -44,7 +44,8 @@ use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, CommitId, ContentRef, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, FileRevisionsPageCursor, InodeId, ListPageCursor,
     NamespaceAccess, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId,
-    RevisionNo, Snapshot, Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    RevisionNo, SetRetentionWindowResponse, Snapshot, Subject, TrashEntry, TrashPageCursor,
+    UploadId, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1360,6 +1361,21 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             target,
             self.now_ms(),
+            Arc::clone(&self.timer),
+        )
+        .await
+    }
+
+    /// Sets the namespace's retention window, or clears it with `None`. The
+    /// report includes the manifest that records the change.
+    pub async fn set_retention_window(
+        &self,
+        retention_window_ms: Option<NonZeroU64>,
+    ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
+        crate::manifest::set_retention_window(
+            &self.store,
+            &self.namespace_id,
+            retention_window_ms,
             Arc::clone(&self.timer),
         )
         .await

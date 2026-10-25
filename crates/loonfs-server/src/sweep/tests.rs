@@ -567,8 +567,10 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         0,
         "the panic doesn't stop the visits to other namespaces"
     );
-    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 1);
+    // The retention advance loads the same manifest, so it panics too.
+    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 2);
     assert_eq!(server.visit_failures(SweepCall::Metadata), 1);
+    assert_eq!(server.visit_failures(SweepCall::Retention), 1);
     assert_eq!(
         server.retry(&names[1], SweepCall::Metadata),
         SweepRetry {
@@ -922,9 +924,9 @@ enum Grep {
 /// garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
 const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 6, 22, 10),
-    (Grep::Maintained, 7, 32, 12),
-    (Grep::Enabled, 21, 50, 12),
+    (Grep::NotMaintained, 10, 26, 10),
+    (Grep::Maintained, 11, 36, 12),
+    (Grep::Enabled, 25, 54, 12),
 ];
 
 #[tokio::test]
@@ -1047,10 +1049,11 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
         .iter()
         .filter(|operation| operation.key().starts_with("namespaces/stray/"))
         .collect();
-    // One hint read each for the metadata call, the grep build, and
-    // collection; grep collection reads the hint and lists its own prefix.
-    assert_eq!(stray.len(), 5, "{stray:?}");
-    for call in ["metadata", "grep_index", "gc"] {
+    // The metadata call, the grep build, the retention advance, and
+    // collection each read the hint once. Grep collection reads the hint and
+    // lists its own prefix.
+    assert_eq!(stray.len(), 6, "{stray:?}");
+    for call in ["metadata", "grep_index", "retention", "gc"] {
         assert_eq!(
             server.counter("loonfs.maintenance.sweep_visit_failures", &[("call", call)]),
             0,

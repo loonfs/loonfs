@@ -23,13 +23,16 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(Arc::clone(&timer));
-    let start = NamespaceManifestPayload::initial(
-        namespace_id.clone(),
-        context.now_ms,
-        actor_id.clone(),
-        options.access.clone(),
-        options.naming,
-    );
+    let start = NamespaceManifestPayload {
+        retention_window_ms: options.retention_window_ms,
+        ..NamespaceManifestPayload::initial(
+            namespace_id.clone(),
+            context.now_ms,
+            actor_id.clone(),
+            options.access.clone(),
+            options.naming,
+        )
+    };
     let created = async {
         ensure_namespace_absent(store, namespace_id).await?;
         create_manifest(store, start.clone(), &deadline).await

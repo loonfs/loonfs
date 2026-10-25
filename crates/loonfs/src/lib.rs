@@ -99,10 +99,10 @@ pub use loonfs_types::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, MetadataPassReport, NameKey,
     NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PaginationPolicy,
     PathEntry, PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, Snapshot, TrashEntry, UploadId,
-    WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    PROTOCOL_VERSION,
+    RunMaintenanceRequest, RunMaintenanceResponse, SetRetentionWindowResponse, Snapshot,
+    TrashEntry, UploadId, WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.

@@ -699,7 +699,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access` and `naming` body fields. |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access`, `naming`, and `retention_window_ms` body fields. |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
@@ -777,9 +777,10 @@ A maintenance run request body identifies exactly one job with `kind`:
 | `metadata` | Optional `max_wal_tail_objects` | `outcome` and `compaction_units` |
 | `gc` | Optional `grace_window_ms` | The collection result, which includes the grep collector's counts in `extensions.grep` when the deployment maintains a grep index |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
+| `retention_window` | Optional `retention_window_ms` | `retention_window_ms`, when the namespace has a window. The job sets the namespace's retention window, or clears it when the request doesn't include `retention_window_ms`. |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
 
-The `metadata`, `retention`, and `gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
+The `metadata`, `retention`, `retention_window`, and `gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
 
 The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a pin. For example, this request body runs one GC pass:
 
@@ -824,6 +825,18 @@ The retention floor limits incremental replay and file revision history. Above t
 The floor also bounds the trash. Once the floor is at or above a deletion's `deletion_seq`, the namespace's writer expires the deletion, in commits that are attributed to `loonfs` and that the change feed reports as `deletion_expired` events (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). A deletion leaves the trash once the writer expires it, and an undelete of it then returns `not_deleted`. Until then, the deletion stays in the trash and can be undeleted, even though the floor is above it. Once the deletion expires, a base compaction removes the revisions and other rows that the deletion hides, and GC reclaims their content in the same way.
 
 Why does the floor stay an hour behind new commits? A client that's reading a file revision can keep reading that revision after a newer revision of the file is committed. Once the floor reaches the replacing commit, a base compaction can remove the replaced revision, and the client's next read of that revision, or its next request for a download grant, returns `revision_not_found`. The floor reaches the replacing commit only once that commit, or a later one, is an hour old, so the client has at least that long to finish.
+
+A `retention_window` run sets the namespace's [retention window](glossary.md#retention-window) to `retention_window_ms`, or clears the window when the request doesn't include that field. The reference server's maintenance sweep then uses this window for the namespace instead of the server's `retention_window_ms` setting (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). A `retention_window_ms` of zero returns `invalid_request`. The run publishes a manifest that changes only the window, and when the namespace already has the requested window, it publishes nothing. The run doesn't move the floor itself, so the new window takes effect at the sweep's next full pass. For example, this request body sets a 7-day window:
+
+```json
+{"kind":"retention_window","retention_window_ms":604800000}
+```
+
+The response includes the namespace's window after the run. It leaves out `retention_window_ms` when the namespace has no window:
+
+```json
+{"kind":"retention_window","namespace_id":"demo","retention_window_ms":604800000}
+```
 
 #### Garbage collection runs
 
@@ -955,7 +968,7 @@ In an active namespace, GC reclaims a content object once it's older than the gr
 
 [Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that an expired deletion hides (see [Retention runs](#retention-runs)).
 
-The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule when its `retention_window_ms` setting is set, as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
+The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
 Completed upload sessions in active namespaces keep their records for the derived content reclamation grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a pass after the record is removed.
 
@@ -968,7 +981,7 @@ The reference server runs a maintenance sweep with two parts:
 - On the collection interval, the sweep visits the namespace sessions that the server keeps open and whose published sequence has moved, and it collects their garbage.
 - A full pass lists every namespace in the store, including deleted ones, and runs GC for each one. The full pass runs when the sweep starts, and then on the full sweep interval (24 hours by default).
 
-When the server's `retention_window_ms` is set, the full pass also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the window. It uses the same advance as a `retention` run with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. If `retention_window_ms` is shorter than an hour, the floor still stops at the newest commit that's at least an hour old. The visits on the collection interval don't advance the floor on their own schedule. A visit that's in progress when the full pass reaches its namespace makes the pass's advance after its own work, so the pass doesn't wait for it. Without the setting, the server doesn't advance any floor.
+The full pass also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's own window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` run (see [Retention runs](#retention-runs)), and a namespace that has no window of its own uses the server's `retention_window_ms` setting. The pass uses the same advance as a `retention` run with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. If the selected window is shorter than an hour, the floor still stops at the newest commit that's at least an hour old. The visits on the collection interval don't advance the floor on their own schedule. A visit that's in progress when the full pass reaches its namespace makes the pass's advance after its own work, so the pass doesn't wait for it. A namespace with neither window keeps its floor, so a server without the setting advances only the floors of namespaces that have their own window.
 
 A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the full pass. The full pass also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between full passes.
 
@@ -1248,8 +1261,9 @@ The `NamespaceMetadata` object has exactly these fields:
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
+| `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with its own window has this field. |
 
-The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes.
+The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes. The create request can also include `retention_window_ms`, a positive number of milliseconds that sets the namespace's retention window, and zero returns `invalid_request`. Unlike the modes, the window can be changed later with a `retention_window` run (see [Retention runs](#retention-runs)), and a fork copies its source's window.
 
 LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read starts at the hint, and if the hint lags, the read probes forward. If the hint is missing, the read treats the namespace as absent. In a runtime without the namespace's writer session, a `strong` read (see [Read consistency](#read-consistency)) from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next `strong` read even when the hint hasn't been raised.
 

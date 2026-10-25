@@ -15,6 +15,7 @@ use crate::{
 use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::num::NonZeroU64;
 
 /// Version 1 is a zstd-compressed JSON envelope document that contains the
 /// payload as a raw JSON fragment.
@@ -1203,6 +1204,12 @@ pub struct NamespaceManifestPayload {
     pub access: NamespaceAccess,
     /// How the namespace compares sibling names. The mode can't be changed.
     pub naming: NamespaceNaming,
+    /// The namespace's retention window in milliseconds, which a scheduled
+    /// retention advance uses instead of its host's setting. Unlike the
+    /// modes above, a successor can change it (see [Advancing the retention
+    /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_window_ms: Option<NonZeroU64>,
     /// Fork provenance and source checkpoint identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
@@ -1265,7 +1272,8 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Constructs manifest 1 with the root inode reserved.
+    /// Constructs manifest 1 with the root inode reserved and no retention
+    /// window.
     pub fn initial(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -1279,6 +1287,7 @@ impl NamespaceManifestPayload {
             created_by,
             access,
             naming,
+            retention_window_ms: None,
             fork_basis: None,
             status: NamespaceStatus::Active {},
             writer: None,
@@ -1604,6 +1613,18 @@ mod tests {
                 field
             );
         }
+        // The retention window is a setting, not identity, so a successor
+        // can set it, change it, and clear it.
+        let mut predecessor = initial.clone();
+        for window_ms in [Some(60_000), Some(1), None] {
+            let mut successor = predecessor.clone();
+            successor.manifest_no = ManifestNo(predecessor.manifest_no.0 + 1);
+            successor.retention_window_ms = window_ms.and_then(std::num::NonZeroU64::new);
+            predecessor
+                .ensure_successor(&successor)
+                .expect("a successor can change the retention window");
+            predecessor = successor;
+        }
         let mut deleted = next.clone();
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,
@@ -1660,6 +1681,7 @@ mod tests {
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
             naming: crate::NamespaceNaming::CaseInsensitive,
+            retention_window_ms: None,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
@@ -1705,6 +1727,7 @@ mod tests {
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
             naming: crate::NamespaceNaming::CaseInsensitive,
+            retention_window_ms: None,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,

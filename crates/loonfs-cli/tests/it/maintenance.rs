@@ -122,6 +122,73 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
 }
 
 #[test]
+fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    let created = harness.run(&[
+        "--json",
+        "namespace",
+        "create",
+        "demo",
+        "--retention-window-ms",
+        "86400000",
+    ]);
+    assert_success(&created);
+    assert_eq!(json_data(&created)["retention_window_ms"], 86_400_000);
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let set = harness.run(&[
+        "maintenance",
+        "retention",
+        "window",
+        "--retention-window-ms",
+        "3600000",
+    ]);
+    assert_success(&set);
+    assert_eq!(
+        stdout_string(&set).trim_end(),
+        "retention window for demo: 3600000 ms"
+    );
+    assert!(stdout_string(&harness.run(&["namespace", "show"]))
+        .contains("retention_window_ms: 3600000"));
+
+    let cleared = harness.run(&["--json", "maintenance", "retention", "window", "--clear"]);
+    assert_success(&cleared);
+    assert_eq!(
+        json_data(&cleared),
+        serde_json::json!({"kind": "retention_window", "namespace_id": "demo"})
+    );
+    assert!(stdout_string(&harness.run(&["namespace", "show"])).contains("retention_window_ms: -"));
+
+    // The command needs exactly one of the two flags.
+    for args in [
+        &["maintenance", "retention", "window"][..],
+        &[
+            "maintenance",
+            "retention",
+            "window",
+            "--clear",
+            "--retention-window-ms",
+            "1",
+        ],
+    ] {
+        let usage = harness.run(args);
+        assert_failure(&usage);
+        assert_eq!(usage.status.code(), Some(2), "{args:?}");
+    }
+    let zero = harness.run(&[
+        "--json",
+        "maintenance",
+        "retention",
+        "window",
+        "--retention-window-ms",
+        "0",
+    ]);
+    assert_failure(&zero);
+    assert_eq!(json_error(&zero)["code"], "invalid_request");
+}
+
+#[test]
 fn embedded_grep_works_after_index_enable() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

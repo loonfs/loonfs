@@ -589,6 +589,91 @@ async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visit
 }
 
 #[tokio::test]
+async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_without_one() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let hour_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 5 * hour_ms;
+    for (path, committed_at_ms) in [
+        ("/a.txt", 2 * hour_ms),
+        ("/b.txt", 3 * hour_ms),
+        ("/c.txt", 4 * hour_ms),
+    ] {
+        let context = MutationContext {
+            now_ms: committed_at_ms,
+            ..context.clone()
+        };
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+    let window = |window_ms: u64| std::num::NonZeroU64::new(window_ms);
+    let set_window = |window_ms: Option<u64>| {
+        crate::manifest::set_retention_window(
+            &store,
+            &namespace_id,
+            window_ms.and_then(window),
+            crate::test_support::std_timer(),
+        )
+    };
+
+    // Each step sets the namespace's window, then advances at five hours
+    // with a default window. The cutoffs are five hours minus the window
+    // that applies, and all three commits are at least an hour old.
+    for (namespace_window_ms, default_window_ms, expected_floor) in [
+        (None, None, ChangeSeq(0)),
+        (None, Some(5 * hour_ms / 2), ChangeSeq(1)),
+        // The namespace's window applies, so the cutoff is 3.5 hours, not 2.5.
+        (Some(3 * hour_ms / 2), Some(5 * hour_ms / 2), ChangeSeq(2)),
+        // Once the window is cleared, the default applies again.
+        (None, Some(hour_ms / 2), ChangeSeq(3)),
+    ] {
+        let set = set_window(namespace_window_ms)
+            .await
+            .expect("set the window");
+        assert_eq!(
+            set.response.retention_window_ms, namespace_window_ms,
+            "the response reports the namespace's window"
+        );
+        let before = current_manifest_no(&store, &namespace_id).await;
+        assert!(
+            set_window(namespace_window_ms)
+                .await
+                .expect("set the same window")
+                .published
+                .is_none(),
+            "setting the window that the namespace has publishes nothing"
+        );
+        assert_eq!(current_manifest_no(&store, &namespace_id).await, before);
+        let target = RetentionTarget::Window {
+            now_ms,
+            default_window_ms: default_window_ms.and_then(window),
+        };
+        let floor = advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            target,
+            now_ms,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+        assert_eq!(floor, expected_floor, "{namespace_window_ms:?} {target:?}");
+    }
+}
+
+#[tokio::test]
 async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

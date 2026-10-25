@@ -99,7 +99,11 @@ async fn run_namespace_create(
         .create_namespace_with_options(
             &namespace_id,
             &actor_id,
-            &CreateNamespaceOptions { access, naming },
+            &CreateNamespaceOptions {
+                access,
+                naming,
+                retention_window_ms: args.retention_window_ms,
+            },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;

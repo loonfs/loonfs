@@ -8,14 +8,14 @@ use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs,
     MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
     MaintenanceMetadataArgs, MaintenanceNamespaceArgs, MaintenanceRecoverAdministratorArgs,
-    MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
-    MaintenanceStoreProbeArgs,
+    MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs,
+    MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
 };
 use crate::backend::StepBudget;
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, GcRequest, MetadataMaintenanceRequest,
-    RecoverAdministratorRequest, RunMaintenanceRequest,
+    RecoverAdministratorRequest, RunMaintenanceRequest, SetRetentionWindowRequest,
 };
 use std::path::Path;
 
@@ -51,6 +51,9 @@ pub(crate) async fn run_maintenance_command(
         MaintenanceCommand::Retention { command } => match command {
             MaintenanceRetentionCommand::Advance(args) => {
                 run_maintenance_retention_advance(kind, config_path, args).await
+            }
+            MaintenanceRetentionCommand::Window(args) => {
+                run_maintenance_retention_window(kind, config_path, args).await
             }
         },
         MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args).await,
@@ -217,6 +220,31 @@ async fn run_maintenance_retention_advance(
             response,
             retention_floor_before,
         )),
+    ))
+}
+
+async fn run_maintenance_retention_window(
+    kind: CommandKind,
+    config_path: &Path,
+    args: MaintenanceRetentionWindowArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let response = context
+        .target
+        .client
+        .run_maintenance(
+            context.namespace(),
+            &RunMaintenanceRequest::RetentionWindow(SetRetentionWindowRequest {
+                retention_window_ms: args.retention_window_ms,
+            }),
+            context.actor_id.as_ref(),
+        )
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
     ))
 }
 

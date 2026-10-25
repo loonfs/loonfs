@@ -791,6 +791,13 @@ pub(crate) struct NamespaceCreateArgs {
     /// namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
     pub naming: NamespaceNamingArg,
+    /// The namespace's retention window, in milliseconds. The server's
+    /// maintenance sweep keeps this many milliseconds of the namespace's
+    /// history, in place of the server's `retention_window_ms`.
+    /// `loonfs maintenance retention window` can change or clear the window
+    /// later.
+    #[arg(long)]
+    pub retention_window_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -1386,6 +1393,12 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// file revision above the floor and each file's newest revision at or
     /// below it.
     Advance(MaintenanceRetentionAdvanceArgs),
+    /// Set or clear the namespace's retention window.
+    ///
+    /// The server's maintenance sweep keeps this much of the namespace's
+    /// history instead of applying the server's own window. Once the
+    /// namespace's window is cleared, the server's window applies again.
+    Window(MaintenanceRetentionWindowArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1431,6 +1444,18 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]
     pub before: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceRetentionWindowArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// The namespace's new retention window, in milliseconds.
+    #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+    pub retention_window_ms: Option<u64>,
+    /// Clear the namespace's window, so that the server's setting applies.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1573,6 +1598,7 @@ command_kinds! {
     MaintenanceCheckpointList => "maintenance_checkpoint_list",
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
+    MaintenanceRetentionWindow => "maintenance_retention_window",
     MaintenanceMetadata => "maintenance_metadata",
     MaintenanceGc => "maintenance_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
@@ -1664,6 +1690,9 @@ impl Command {
                 MaintenanceCommand::Retention { command } => match command {
                     MaintenanceRetentionCommand::Advance(_) => {
                         CommandKind::MaintenanceRetentionAdvance
+                    }
+                    MaintenanceRetentionCommand::Window(_) => {
+                        CommandKind::MaintenanceRetentionWindow
                     }
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
@@ -2002,7 +2031,7 @@ mod tests {
             subcommand(maintenance, "index"),
             &["enable", "disable", "status"],
         );
-        assert_subcommands(subcommand(maintenance, "retention"), &["advance"]);
+        assert_subcommands(subcommand(maintenance, "retention"), &["advance", "window"]);
         assert_subcommands(subcommand(maintenance, "store"), &["probe"]);
     }
 

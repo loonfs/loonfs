@@ -192,6 +192,10 @@ The process that merges a namespace's metadata runs into fewer runs, and drops r
 
 The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). Once the floor reaches a deletion, the namespace's writer expires the deletion, and a base compaction then removes the rows that the expired deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
+### Retention window
+
+A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's maintenance sweep advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+
 ### Control object
 
 A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).

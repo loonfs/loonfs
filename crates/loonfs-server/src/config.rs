@@ -270,10 +270,13 @@ pub struct ServerConfig {
     #[serde(default = "default_full_sweep_interval_ms")]
     pub full_sweep_interval_ms: u64,
     /// How long the server keeps a namespace's history before it advances
-    /// the namespace's retention floor past that history, in milliseconds.
-    /// With it set, each full pass advances every active namespace's floor
-    /// to the last commit at or before the current time minus this window.
-    /// Absent, the server advances no floor.
+    /// the namespace's retention floor past that history, in milliseconds,
+    /// for each namespace without a retention window of its own. Each full
+    /// pass advances every active namespace's floor to the last commit at or
+    /// before the current time minus the namespace's window, or minus this
+    /// setting for a namespace that has no window of its own. Absent, the
+    /// server advances only the floors of namespaces that have their own
+    /// window.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.

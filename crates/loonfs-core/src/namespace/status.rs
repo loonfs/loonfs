@@ -12,6 +12,7 @@ use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
     ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
 };
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Decoded WAL tail usage for test assertions.
@@ -100,23 +101,23 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<NamespaceMetadata> {
     let anchor = load_read_anchor(store, expected_namespace_id, Observation::now(timer)).await?;
-    let retention_floor_seq = anchor.retention_floor_seq();
-    let head = anchor.read_state;
-    super::control::ensure_namespace_live(&head)?;
-    Ok(namespace_metadata(head, retention_floor_seq))
+    super::control::ensure_namespace_live(&anchor.read_state)?;
+    Ok(namespace_metadata(
+        anchor.read_state,
+        anchor.manifest.state.envelope.payload(),
+    ))
 }
 
 /// Returns the state of a namespace that this call created with `manifest`.
 pub(crate) fn created_namespace(manifest: &NamespaceManifestPayload) -> NamespaceMetadata {
-    namespace_metadata(
-        NamespaceReadState::from(manifest),
-        manifest.retention_floor_seq,
-    )
+    namespace_metadata(NamespaceReadState::from(manifest), manifest)
 }
 
+/// Combines the head with the retention state of `manifest`, which is the
+/// current manifest below that head.
 fn namespace_metadata(
     head: NamespaceReadState,
-    retention_floor_seq: ChangeSeq,
+    manifest: &NamespaceManifestPayload,
 ) -> NamespaceMetadata {
     NamespaceMetadata {
         access: (&head.access).into(),
@@ -126,7 +127,8 @@ fn namespace_metadata(
         fork_basis: fork_basis(head.fork_basis),
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        retention_floor_seq,
+        retention_floor_seq: manifest.retention_floor_seq,
+        retention_window_ms: manifest.retention_window_ms.map(NonZeroU64::get),
     }
 }
 

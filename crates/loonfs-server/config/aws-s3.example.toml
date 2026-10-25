@@ -7,9 +7,10 @@ memory_limit_bytes = 4294967296
 #manifest_revalidation_interval_ms = 1000
 #max_staleness_ms = 1000
 #consistency = "eventual"
-# Keep 30 days of each namespace's history, and advance its retention floor
-# past older history on each full maintenance pass. Omit it to advance no
-# floor.
+# Keep 30 days of history for each namespace without a retention window of
+# its own, and advance its retention floor past older history on each full
+# maintenance pass. Omit it to advance only the floors of namespaces that
+# have their own window.
 #retention_window_ms = 2592000000
 
 # Serving beyond loopback requires TLS. Either terminate it here by
