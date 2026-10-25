@@ -79,8 +79,8 @@ pub use loonfs_core::{
     CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
     DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
     FoldWalResponse, GcOptions, ListCheckpointFilesOptions, MetadataCompactionPolicy,
-    MetadataViewError, RetentionTarget, SnapshotPageCursor, WriterFence, CONTENT_READ_CHUNK_BYTES,
-    MAX_CURRENT_FILES_PER_STAT,
+    MetadataViewError, RetentionTarget, SnapshotPageCursor, StreamRange, WriterFence,
+    CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
@@ -230,8 +230,8 @@ pub use options::{
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
     DownloadOptions, ForkNamespaceOptions, ListChangesOptions, ListFileRevisionsOptions,
     ListOptions, ListTrashOptions, MaintainMetadataOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, StatOptions, UndeleteDestination,
-    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};

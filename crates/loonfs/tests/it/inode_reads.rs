@@ -4,7 +4,7 @@ use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
     AppendFileByInodeOptions, CommitId, CommitOptions, DeleteByInodeOptions,
     DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace,
-    PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
+    PutFileOptions, ReadFileStreamOptions, RevisionNo, StreamRange, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::num::NonZeroU64;
@@ -300,7 +300,9 @@ async fn a_resumed_inode_stream_reads_only_the_rest_in_the_asked_chunks() {
             inode_id,
             &ReadFileStreamOptions {
                 chunk_bytes: NonZeroU64::new(1024).expect("non-zero chunk size"),
-                start_offset: held as u64,
+                range: StreamRange::Whole {
+                    start_offset: held as u64,
+                },
                 ..ReadFileStreamOptions::default()
             },
         )

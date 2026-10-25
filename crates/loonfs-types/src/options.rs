@@ -8,6 +8,7 @@ use crate::{
     DestinationBehavior, DisplayName, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 /// Whether a path or inode read includes the attribute projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,6 +164,83 @@ pub struct ReadFileOptions {
     /// live head at the runtime's default consistency. A snapshot read
     /// returns the file revision that the snapshot captured.
     pub at: ReadAt,
+}
+
+/// A byte range of a file that a ranged read returns.
+///
+/// The read returns the bytes from `start_offset` up to `length` bytes or to
+/// the end of the file, whichever comes first. For example, a range of 100
+/// bytes from offset 950 of a 1000-byte file returns the last 50 bytes. A
+/// range that starts at or past the end of the file returns
+/// `range_not_satisfiable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadRange {
+    /// The offset of the first byte to read.
+    pub start_offset: u64,
+    /// The most bytes to read, or `None` to read to the end of the file.
+    pub length: Option<NonZeroU64>,
+}
+
+impl ReadRange {
+    /// Parses an HTTP `Range` header that asks for one range of bytes, in
+    /// the form `bytes=start-end` (where `end` is the offset of the last
+    /// byte) or `bytes=start-`.
+    ///
+    /// Returns `None` for every other value, including a suffix range such as
+    /// `bytes=-500`, a list of ranges, and an `end` below `start`.
+    pub fn from_range_header(value: &str) -> Option<Self> {
+        let (unit, range) = value.trim().split_once('=')?;
+        if !unit.eq_ignore_ascii_case("bytes") {
+            return None;
+        }
+        let (start, end) = range.split_once('-')?;
+        let start_offset = parse_range_offset(start)?;
+        let length = match end {
+            "" => None,
+            end => {
+                let last_bytes = parse_range_offset(end)?.checked_sub(start_offset)?;
+                Some(NonZeroU64::MIN.saturating_add(last_bytes))
+            }
+        };
+        Some(Self {
+            start_offset,
+            length,
+        })
+    }
+
+    /// Returns the HTTP `Range` header that asks for this range.
+    pub fn to_range_header(&self) -> String {
+        match self.length {
+            None => format!("bytes={}-", self.start_offset),
+            Some(length) => format!(
+                "bytes={}-{}",
+                self.start_offset,
+                self.start_offset.saturating_add(length.get() - 1)
+            ),
+        }
+    }
+
+    /// Returns the offset after the last byte that this range reads from a
+    /// file of `size_bytes`, or `None` when the range starts at or past the
+    /// end of the file.
+    pub fn end_offset(&self, size_bytes: u64) -> Option<u64> {
+        if self.start_offset >= size_bytes {
+            return None;
+        }
+        Some(self.length.map_or(size_bytes, |length| {
+            self.start_offset
+                .saturating_add(length.get())
+                .min(size_bytes)
+        }))
+    }
+}
+
+/// Parses one offset of a `Range` header, which is a string of ASCII digits.
+fn parse_range_offset(digits: &str) -> Option<u64> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Options for a direct download of a file's content by path or by inode.
@@ -487,6 +565,90 @@ mod tests {
             ForkNamespaceOptions::default(),
             ForkNamespaceOptions { snapshot_id: None }
         );
+    }
+
+    #[test]
+    fn a_range_header_parses_one_range_and_formats_it_back() {
+        let length = |length| NonZeroU64::new(length);
+        for (header, start_offset, length) in [
+            ("bytes=0-99", 0, length(100)),
+            ("bytes=5-5", 5, length(1)),
+            ("bytes=1024-", 1024, None),
+            ("BYTES=7-8", 7, length(2)),
+            (" bytes=0-0 ", 0, length(1)),
+            ("bytes=0-18446744073709551615", 0, Some(NonZeroU64::MAX)),
+        ] {
+            let range = ReadRange::from_range_header(header).expect(header);
+            assert_eq!(
+                range,
+                ReadRange {
+                    start_offset,
+                    length
+                },
+                "{header}"
+            );
+        }
+        for range in [
+            ReadRange {
+                start_offset: 0,
+                length: length(100),
+            },
+            ReadRange {
+                start_offset: 1024,
+                length: None,
+            },
+        ] {
+            assert_eq!(
+                ReadRange::from_range_header(&range.to_range_header()),
+                Some(range)
+            );
+        }
+        assert_eq!(
+            ReadRange {
+                start_offset: 10,
+                length: length(5),
+            }
+            .to_range_header(),
+            "bytes=10-14"
+        );
+    }
+
+    #[test]
+    fn a_range_header_other_than_one_range_of_bytes_is_refused() {
+        for header in [
+            "",
+            "bytes=",
+            "bytes=-500",
+            "bytes=0-99,200-299",
+            "bytes=0-99, 200-",
+            "bytes=10-9",
+            "bytes=+1-2",
+            "bytes=1-+2",
+            "bytes=a-b",
+            "bytes 0-99",
+            "items=0-99",
+            "bytes=18446744073709551616-",
+        ] {
+            assert_eq!(ReadRange::from_range_header(header), None, "{header}");
+        }
+    }
+
+    #[test]
+    fn a_range_stops_at_the_end_of_the_file() {
+        let range = |start_offset, length| ReadRange {
+            start_offset,
+            length: NonZeroU64::new(length),
+        };
+        assert_eq!(range(950, 100).end_offset(1000), Some(1000));
+        assert_eq!(range(10, 5).end_offset(1000), Some(15));
+        assert_eq!(range(10, 0).end_offset(1000), Some(1000));
+        assert_eq!(
+            range(u64::MAX - 1, 100).end_offset(u64::MAX),
+            Some(u64::MAX)
+        );
+        assert_eq!(range(999, 1).end_offset(1000), Some(1000));
+        assert_eq!(range(1000, 1).end_offset(1000), None);
+        assert_eq!(range(0, 0).end_offset(0), None);
     }
 
     #[test]

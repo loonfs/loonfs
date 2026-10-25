@@ -225,4 +225,4 @@ pub use protocol::{
 };
 // The streaming read `loonfs`'s namespace handle returns, and the chunk size it
 // reads in.
-pub use storage::content::{FileContentStream, CONTENT_READ_CHUNK_BYTES};
+pub use storage::content::{FileContentStream, StreamRange, CONTENT_READ_CHUNK_BYTES};

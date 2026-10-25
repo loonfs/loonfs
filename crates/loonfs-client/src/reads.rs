@@ -707,7 +707,7 @@ impl Client {
         .await
     }
 
-    fn file_content_url(
+    pub(crate) fn file_content_url(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
@@ -822,7 +822,7 @@ impl Client {
         .await
     }
 
-    fn inode_content_url(
+    pub(crate) fn inode_content_url(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

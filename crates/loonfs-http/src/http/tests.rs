@@ -9,6 +9,7 @@ mod inline_commits;
 mod maintenance_runs;
 mod namespaces;
 mod pin_deletion;
+mod ranged_reads;
 mod read_consistency;
 mod request_limit;
 mod surface;
@@ -415,6 +416,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         actual_deletion_seq: Some(ChangeSeq::from(5)),
         expected_head_seq: Some(ChangeSeq::from(6)),
         actual_head_seq: Some(ChangeSeq::from(7)),
+        size_bytes: Some(8),
     };
     let serialized = serde_json::to_value(populated).expect("serialize populated error details");
     let registered = serialized

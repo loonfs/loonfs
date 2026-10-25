@@ -876,6 +876,48 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
     );
 }
 
+/// Checks that each proxied content route documents the optional `Range`
+/// header, its 206 and 416 responses, and the `Accept-Ranges` header of a
+/// whole read.
+#[test]
+fn content_routes_publish_the_range_header_and_its_responses() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    for path in [
+        "/v0/namespaces/{namespace_id}/filesystem/content",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+    ] {
+        let operation = &spec["paths"][path]["get"];
+        let headers: Vec<_> = operation["parameters"]
+            .as_array()
+            .expect("parameters")
+            .iter()
+            .filter(|parameter| parameter["in"] == "header")
+            .collect();
+        assert_eq!(headers.len(), 1, "{path}");
+        assert_eq!(headers[0]["name"], "Range", "{path}");
+        assert_eq!(headers[0]["required"], false, "{path}");
+        assert_eq!(headers[0]["schema"], json!({"type": "string"}), "{path}");
+        let responses = &operation["responses"];
+        assert!(
+            responses["200"]["headers"]["Accept-Ranges"].is_object(),
+            "{path}"
+        );
+        assert!(
+            responses["206"]["headers"]["Content-Range"].is_object(),
+            "{path}"
+        );
+        assert_eq!(
+            responses["416"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorResponse",
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn openapi_query_parameters_publish_the_runtime_grammar() {
     let spec: Value = serde_json::from_str(

@@ -182,6 +182,7 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorKind::Forbidden => StatusCode::FORBIDDEN,
         ErrorKind::ContentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorKind::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
         // The backing object store rejected the deployment's storage
         // credentials, which is not a statement about the caller. 403 would
         // tell the caller to re-authenticate or to ask someone for access,
@@ -216,8 +217,22 @@ impl IntoResponse for ApiResponseError {
         if let Ok(request_id) = super::REQUEST_ID.try_with(|id| id.clone()) {
             self.body.request_id = Some(request_id);
         }
+        // As HTTP specifies, a 416 response includes the file's size in
+        // `Content-Range`, so that a client can choose a range that the file
+        // can satisfy.
+        let unsatisfied_size_bytes = match (self.code, &self.body.details) {
+            (ErrorCode::RangeNotSatisfiable, Some(details)) => details.size_bytes,
+            _ => None,
+        };
         let mut response = (self.status, Json(self.body)).into_response();
         response.extensions_mut().insert(ServedErrorCode(self.code));
+        if let Some(size_bytes) = unsatisfied_size_bytes {
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_RANGE,
+                axum::http::HeaderValue::from_str(&format!("bytes */{size_bytes}"))
+                    .expect("a content range of digits is a valid header value"),
+            );
+        }
         if let Some(seconds) = self.retry_after_seconds {
             if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
                 response

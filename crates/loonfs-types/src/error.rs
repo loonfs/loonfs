@@ -14,6 +14,9 @@ pub enum ErrorKind {
     Forbidden,
     /// The request body exceeds the operation's size limit and must be smaller.
     ContentTooLarge,
+    /// The requested byte range starts at or past the end of the file and the client must
+    /// request a range inside the file.
+    RangeNotSatisfiable,
     /// The object store rejected credentials that the operator must fix.
     StoragePermissionDenied,
     /// The deployment does not implement the operation and clients must check its capabilities.
@@ -114,6 +117,7 @@ error_codes! {
     Forbidden => "forbidden",
     StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
+    RangeNotSatisfiable => "range_not_satisfiable",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
     MethodNotAllowed => "method_not_allowed",
@@ -176,6 +180,7 @@ impl ErrorCode {
             // authorization failure.
             ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
+            ErrorCode::RangeNotSatisfiable => ErrorKind::RangeNotSatisfiable,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
             | ErrorCode::SnapshotNotFound
@@ -248,6 +253,7 @@ impl ErrorCode {
             | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
+            | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
             | ErrorCode::MethodNotAllowed

@@ -25,6 +25,7 @@ mod namespace_path;
 mod operations;
 mod payload;
 mod query;
+mod ranged_reads;
 mod reads;
 mod reqwest_transport;
 mod transport;
@@ -68,6 +69,7 @@ pub use error::ClientError;
 pub use maintenance::CheckpointsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
+pub use ranged_reads::FileRangeStream;
 pub use reads::{
     ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
     SnapshotsPager, TrashPager,
@@ -82,8 +84,9 @@ pub use loonfs_types::options::{
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    ReadFileOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

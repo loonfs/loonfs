@@ -260,6 +260,7 @@ fn request_log_severity(
         | ErrorKind::OutcomeUnknown => RequestLogSeverity::Warn,
         ErrorKind::InvalidRequest
         | ErrorKind::ContentTooLarge
+        | ErrorKind::RangeNotSatisfiable
         | ErrorKind::NotSupported
         | ErrorKind::NotFound
         | ErrorKind::MethodNotAllowed

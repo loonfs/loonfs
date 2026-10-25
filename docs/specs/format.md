@@ -611,7 +611,7 @@ A content reference identifies a prefix of a chain and its checksum. To read it,
 | Zero bytes, and no pieces | Nowhere. The reader verifies the empty value without a content request. |
 | A nonzero folded prefix with no layout | Nowhere. The reader reports corruption, identifying the content ID. |
 
-When the reference is shorter than the layout, the read shortens the last extent it uses. Each extent is read with one ranged read at its object offset, and no read makes a HEAD request. If an object is missing, the error identifies the missing extent's key, and a short range reports its expected and actual lengths. The reader checks the assembled length and checksum against the reference, and those errors identify the reference's own key.
+When the reference is shorter than the layout, the read shortens the last extent it uses. Each extent is read with one ranged GET at its object offset, and no read makes a HEAD request. If an object is missing, the error identifies the missing extent's key, and a short range reports its expected and actual lengths. The reader checks the assembled length and checksum against the reference, and those errors identify the reference's own key. A [ranged read](glossary.md#ranged-read) returns part of a file, so the reader checks the length of each ranged GET but can't check the file's checksum.
 
 Inherited layouts keep their object owners. WAL replay loads pieces along with the metadata, so pieces that are already in memory need no content request. Replay checks each WAL object's envelope, but it doesn't recompute file checksums.
 

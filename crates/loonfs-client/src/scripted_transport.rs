@@ -15,6 +15,8 @@ pub(crate) enum Outcome {
     TransportFailure,
     Success(Vec<u8>),
     PartAccepted(String),
+    /// A 206 response with this `Content-Range` header and body.
+    PartialContent(String, Vec<u8>),
     /// A 503 error envelope with this code.
     Refused(ErrorCode),
 }
@@ -146,6 +148,11 @@ impl Service<Request<Body>> for ScriptedTransport {
                     .header(http::header::ETAG, etag)
                     .body(Body::empty())
                     .expect("etag should be a valid header value")),
+                Outcome::PartialContent(content_range, bytes) => Ok(Response::builder()
+                    .status(http::StatusCode::PARTIAL_CONTENT)
+                    .header(http::header::CONTENT_RANGE, content_range)
+                    .body(Body::from(Bytes::from(bytes)))
+                    .expect("a content range should be a valid header value")),
                 Outcome::Refused(code) => {
                     let body = serde_json::to_vec(&ErrorResponse {
                         code: code.as_str().to_owned(),
