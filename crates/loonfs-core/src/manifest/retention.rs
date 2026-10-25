@@ -5,6 +5,7 @@ use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
 use super::published::{PublicationReport, PublishedManifest};
+use super::scan::Readahead;
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
@@ -180,6 +181,12 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
 /// the commits younger than the window at the top of the history, which is
 /// about an hour of commits, and at worst every commit above the floor, if
 /// writers dated every commit above the floor in the future.
+///
+/// The walk doesn't read ahead, so it fetches each block of commit rows that
+/// it misses and no others. Commit rows are sorted by sequence, and a
+/// read-ahead window covers the missed block and the blocks after it, which
+/// contain newer commits. The walk moves toward older commits, so it has already
+/// read every block that a window would add.
 async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -193,11 +200,13 @@ async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
     }
     let basis = metadata_basis_from_manifest(store, segment_cache, current);
     for seq in (floor.0 + 1..=target.0).rev().map(ChangeSeq) {
-        let commit = commit_at_seq(&basis.segments, seq).await?.ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "the `commits` family has no row at sequence {seq}, which is above the retention floor {floor}"
-            ))
-        })?;
+        let commit = commit_at_seq(&basis.segments, seq, Readahead::Disabled)
+            .await?
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "the `commits` family has no row at sequence {seq}, which is above the retention floor {floor}"
+                ))
+            })?;
         if now_ms.saturating_sub(commit.committed_at_ms) >= GC_DEFAULT_GRACE_WINDOW_MS {
             return Ok(seq);
         }

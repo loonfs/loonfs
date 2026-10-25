@@ -991,7 +991,12 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     for row in &inode_rows {
         let key = row.row_key_for_family(ApiMetadataRowFamily::Inodes);
         let found = segments
-            .get_for_lookup(ApiMetadataRowFamily::Inodes, &key, &key)
+            .get_for_lookup(
+                ApiMetadataRowFamily::Inodes,
+                &key,
+                &key,
+                scan::Readahead::Enabled,
+            )
             .await
             .expect("inode lookup");
         assert!(

@@ -415,6 +415,179 @@ async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
     }
 }
 
+/// Publishes 64 commits stamped `committed_at_ms`, each creating the
+/// directory `/{prefix}-{index}`. Each commit's message is
+/// `MAX_COMMIT_MESSAGE_BYTES` of pseudorandom printable characters generated
+/// from `state`, so the messages compress poorly.
+async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    prefix: &str,
+    committed_at_ms: u64,
+    state: &mut u64,
+) {
+    let candidates: Vec<_> = (0..64)
+        .map(|index| {
+            let message = (0..crate::limits::MAX_COMMIT_MESSAGE_BYTES)
+                .map(|_| {
+                    *state ^= *state << 13;
+                    *state ^= *state >> 7;
+                    *state ^= *state << 17;
+                    char::from(
+                        b'!' + u8::try_from(*state % 94).expect("a remainder below 94 fits a byte"),
+                    )
+                })
+                .collect();
+            CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                Some(message),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(format!("/{prefix}-{index:02}")).expect("path"),
+                    parents: false,
+                },
+            ))
+        })
+        .collect();
+    let context = MutationContext {
+        now_ms: committed_at_ms,
+        ..test_context()
+    };
+    for result in NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        Arc::new(crate::test_support::content_writes()),
+    )
+    .publish_batch(
+        store,
+        candidates,
+        &context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    {
+        result.expect("commit a directory");
+    }
+}
+
+/// Returns the current manifest's one segment of commit rows, with its index.
+async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> (MetadataSegmentRef, Arc<Vec<SegmentIndexEntry>>) {
+    let manifest = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the manifest")
+        .state;
+    let mut segments = manifest
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == ApiMetadataRowFamily::Commits);
+    let segment = segments.next().expect("a segment of commit rows").clone();
+    assert!(segments.next().is_none(), "one segment of commit rows");
+    let index = index_block_load::load_segment_index(
+        store,
+        None,
+        &load::SessionBlockMemo::default(),
+        &segment,
+    )
+    .await
+    .expect("load the index");
+    (segment, index)
+}
+
+/// Checks that the walk to the newest commit past the grace window sends one
+/// ranged GET for each block of commit rows that it visits, and that each GET
+/// covers only that block's stored bytes. The walk moves toward older
+/// commits, so a read-ahead window from a missed block would fetch the newer
+/// blocks that the walk has already read.
+#[tokio::test]
+async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visits() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 10 * grace_ms;
+    // Commits 1 to 64 are two windows old, and commits 65 to 128 are half a
+    // window old. About 15 of these commit rows fill a data block, and the
+    // segment of commit rows is too large to be fetched whole.
+    let mut state = 1_u64;
+    for (prefix, committed_at_ms) in [
+        ("old", now_ms - 2 * grace_ms),
+        ("young", now_ms - grace_ms / 2),
+    ] {
+        commit_directories_with_long_messages(
+            &store,
+            &namespace_id,
+            prefix,
+            committed_at_ms,
+            &mut state,
+        )
+        .await;
+    }
+    fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the commits");
+    let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
+    // The walk reads commits 128 down to 64, so it visits the blocks from the
+    // last one down to the block of commit 64.
+    let stop_seq = ChangeSeq(64);
+    let stop_key = lookup_keys::commit_row_key(stop_seq);
+    let stop_block = index.partition_point(|entry| entry.last_row_key < stop_key);
+    let visited: Vec<(u64, u64)> = index[stop_block..]
+        .iter()
+        .rev()
+        .map(|entry| {
+            let start = entry.block.offset;
+            (start, start + u64::from(entry.block.stored_bytes))
+        })
+        .collect();
+    assert!(
+        stop_block > 0 && visited.len() >= 3,
+        "the walk should pass through a whole block and stop above the first block, but commit 64 is in block {stop_block} of {}",
+        index.len()
+    );
+    store.reset();
+
+    let floor = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        now_ms,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor")
+    .response
+    .retention_floor_seq;
+
+    assert_eq!(floor, stop_seq);
+    let object_key = metadata_segment_object_key(&segment);
+    let gets = store.take_gets();
+    assert!(
+        gets.iter()
+            .all(|(key, range)| *key == object_key && range.is_some()),
+        "the walk reads ranges of the segment of commit rows: {gets:?}"
+    );
+    let data_gets: Vec<(u64, u64)> = gets
+        .into_iter()
+        .filter_map(|(_, range)| range)
+        .filter(|(start, _)| *start < segment.filter_block.offset)
+        .collect();
+    assert_eq!(
+        data_gets, visited,
+        "one GET for each block that the walk visits, newest first, and each GET covers only its block"
+    );
+}
+
 #[tokio::test]
 async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     use std::sync::atomic::{AtomicUsize, Ordering};
