@@ -47,16 +47,15 @@ pub enum RetentionTarget {
         /// A Unix time in milliseconds.
         cutoff_at_ms: u64,
     },
-    /// The last commit committed at or before `now_ms` minus the namespace's
-    /// retention window, or minus `default_window_ms` when the namespace has
-    /// no window. With neither window, the floor stays where it is.
+    /// The last commit committed at or before the current time minus the
+    /// namespace's retention window, or minus `default_window_ms` when the
+    /// namespace has no window. With neither window, the floor stays where it
+    /// is.
     ///
     /// The advance reads the namespace's window from the manifest it loads
     /// to find the target, so a host that advances floors on a schedule
     /// needs no extra request to read each namespace's window.
     Window {
-        /// A Unix time in milliseconds.
-        now_ms: u64,
         /// The window for a namespace that has no window of its own, such as
         /// a host's setting.
         default_window_ms: Option<NonZeroU64>,
@@ -93,7 +92,8 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 }
 
 /// Advances the retention floor toward `target` (format spec, "Advancing the
-/// retention floor"), measuring commit ages against `now_ms`.
+/// retention floor"). The advance uses `now_ms` as the current time for the
+/// grace-window check and for a [`RetentionTarget::Window`] cutoff.
 ///
 /// The advance loads the current manifest once to find the target, and it
 /// returns that manifest's floor without another request when the target is
@@ -118,16 +118,15 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         RetentionTarget::Cutoff { cutoff_at_ms } => {
             last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
         }
-        RetentionTarget::Window {
-            now_ms,
-            default_window_ms,
-        } => match manifest.retention_window_ms.or(default_window_ms) {
-            Some(window_ms) => {
-                let cutoff_at_ms = now_ms.saturating_sub(window_ms.get());
-                last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
+        RetentionTarget::Window { default_window_ms } => {
+            match manifest.retention_window_ms.or(default_window_ms) {
+                Some(window_ms) => {
+                    let cutoff_at_ms = now_ms.saturating_sub(window_ms.get());
+                    last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
+                }
+                None => manifest.retention_floor_seq,
             }
-            None => manifest.retention_floor_seq,
-        },
+        }
     };
     let target =
         newest_commit_past_the_grace_window(store, segment_cache, &current, target, now_ms).await?;

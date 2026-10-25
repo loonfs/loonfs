@@ -1349,8 +1349,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Advances the retention floor toward `target` when a verified checkpoint
-    /// makes it safe, measuring commit ages on this engine's wall clock. The
-    /// report includes the manifest that records the new floor.
+    /// makes it safe. The advance uses this engine's wall clock as the current
+    /// time for the grace-window check and for a
+    /// [`Window`](crate::RetentionTarget::Window) cutoff. The report includes
+    /// the manifest that records the new floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
