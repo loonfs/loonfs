@@ -898,6 +898,8 @@ An append either extends the same chain or starts a new one:
 
 For example, a fork inherits `/log.txt`, whose chain is owned by the source namespace. The fork doesn't own that chain, so appending 10 bytes starts a new chain, whose layout lists the source's objects followed by a piece with the 10 new bytes. Earlier operations in the same commit count when later appends are planned.
 
+Whether an append extends its chain or starts a new one, its `append_file_revision` delta records the offset where the appended bytes begin (`append_offset`), which is the base revision's `size_bytes`. The change feed reports that offset in the append's event. The delta of a put, a copy, a restore, or a file's first revision doesn't include the field.
+
 The WAL stores the resulting metadata changes ("deltas"), not the original request bodies or validation inputs. There are nine kinds of delta:
 
 | Delta | Records |
@@ -913,6 +915,8 @@ The WAL stores the resulting metadata changes ("deltas"), not the original reque
 | `append_access_revision` | A new access revision. |
 
 Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index` that identifies the internal operation that produced it. A convenience request can expand into several internal operations (for example, creating missing parent directories), and each operation's deltas are contiguous within its commit. The actor and timestamp are recorded once per commit and copied into the rows during materialization. [Appendix A](#appendix-a-durable-records-and-byte-encodings) lists the complete stored fields.
+
+Why does an append's delta record its offset, when the append's piece already starts at that offset? A fold writes each commit to a `commit` row without its pieces, and the change feed reads folded commits from those rows. A reader also can't use a piece at offset 0 to tell an append to an empty file from a put of inline content. So the delta records the offset, and the feed reports the same event before and after a fold.
 
 ### 6.7 Change feed
 
@@ -1827,14 +1831,14 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
 | `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms` |
 | `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `target` |
-| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `layout?` |
+| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `layout?`, `append_offset?` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `expire_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes, revokes, or expires. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes, revokes, or expires. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes`, so it's less than the delta's own `content_ref.size_bytes`.
 
 A revision delta's `layout` follows these rules:
 

@@ -41,6 +41,7 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
                 revision_no: RevisionNo(seq),
                 content_ref: reference.clone(),
                 layout: None,
+                append_offset: None,
             },
         }],
         inline_content: vec![WalInlineContent {

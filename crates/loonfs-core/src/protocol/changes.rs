@@ -168,16 +168,20 @@ fn event_from_op_deltas(
                 content_ref: content_ref.clone(),
             }
         }
-        // ReplaceFile or RestoreRevision: one durable fact for both.
+        // ReplaceFile (a put, a copy, or an append) and RestoreRevision share
+        // one delta kind. Only an append's delta records the offset where its
+        // bytes begin.
         [WalDelta::AppendFileRevision {
             inode_id,
             revision_no,
             content_ref,
+            append_offset,
             ..
         }] => FilesystemChange::ContentChanged {
             inode_id: *inode_id,
             revision_no: *revision_no,
             content_ref: content_ref.clone(),
+            append_offset: *append_offset,
         },
         // Rename: retire the old binding, publish the new one.
         [WalDelta::UnbindDirentry {

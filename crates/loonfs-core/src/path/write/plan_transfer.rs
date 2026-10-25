@@ -325,6 +325,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
                 inode_id: existing.inode_id,
                 base_revision_no,
                 content_ref: revision.content_ref.clone(),
+                append_offset: None,
             });
         }
         ReplaceDestination::Vacant => {

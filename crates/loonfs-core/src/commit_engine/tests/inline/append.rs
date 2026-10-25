@@ -543,6 +543,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                         length: 6,
                     }],
                 }),
+                append_offset: None,
             }],
             Vec::new(),
         )

@@ -233,6 +233,7 @@ impl MetadataState {
                     revision_no,
                     content_ref,
                     layout,
+                    append_offset: _,
                 } => {
                     if let Some(layout) = layout {
                         metadata_state.content_layouts.push(ContentLayoutRecord {

@@ -196,6 +196,7 @@ async fn commit_piece(
             revision_no: file.1,
             content_ref: content_ref.clone(),
             layout,
+            append_offset: None,
         }],
         vec![WalInlineContent {
             content_id: content_id.clone(),

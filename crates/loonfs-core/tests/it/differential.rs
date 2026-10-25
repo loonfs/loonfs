@@ -285,6 +285,7 @@ fn create_file(
             revision_no: RevisionNo(1),
             content_ref,
             layout: None,
+            append_offset: None,
         },
     ]
 }
@@ -301,6 +302,7 @@ fn append_revision(
         revision_no,
         content_ref,
         layout: None,
+        append_offset: None,
     }]
 }
 
@@ -1180,6 +1182,7 @@ fn appends_record_revision_checksums_and_the_chain_head() {
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         ),
         layout: None,
+        append_offset: None,
     };
     let mut first = create_file(
         CaseInsensitive,

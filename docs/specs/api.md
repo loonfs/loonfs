@@ -1704,6 +1704,8 @@ The new revision has an ordinary content reference whose size and checksum cover
 - When this namespace owns `C`, `S` is positive, and no revision or layout refers to more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
 - Otherwise, the new reference uses a new content ID owned by this namespace, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
 
+Either way, the append's `content_changed` event in the commit response and the change feed includes `append_offset`, which is `S` (see [`GET /changes`](#611-get-changes)).
+
 Earlier revisions keep their references, and they still read their own bytes. The new checksum combines the base reference's CRC with the CRC of the appended bytes, and the writer doesn't read earlier bytes to compute it. If the base's checksum algorithm differs from the store's, the append returns `namespace_corrupt`.
 
 A retry with the same commit ID and the same bytes replays the original commit. A retry with different bytes returns `commit_id_reuse_conflict`.
@@ -2287,7 +2289,7 @@ Event kinds:
 | --- | --- | --- |
 | `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
 | `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`, `revision_no`, `content_ref`. |
-| `content_changed` | A file received a new current revision, from a replacing put or a revision restore (both are recorded as the same durable event). | `inode_id`, `revision_no`, `content_ref`. |
+| `content_changed` | A file received a new current revision, from a replacing put, a replacing copy, an append, or a revision restore. | `inode_id`, `revision_no`, `content_ref`, and `append_offset` when an append published the revision. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_version`. |
 | `deleted` | A file or directory subtree was deleted. To restore it, use the enclosing `committed_seq` as `deletion_seq`. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and bound to a name again. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
@@ -2323,6 +2325,26 @@ Directory and file creation use separate event shapes. A file creation always in
 }
 ```
 
+A `content_changed` event for an append includes `append_offset`, the offset where the appended bytes begin. It equals the base revision's `size_bytes`, so the new revision's bytes are the base revision's bytes followed by the bytes from `append_offset` to the new `size_bytes`. For example, if a client appends 12 bytes to a file of 1,024 bytes, the change feed reports this event:
+
+```json
+{
+  "kind": "content_changed",
+  "inode_id": "ino_44",
+  "revision_no": 3,
+  "content_ref": {
+    "kind": "blob_v1",
+    "owner_namespace_id": "demo",
+    "content_id": "con_4b7d4a90b13f0d8c5e6a2b419f2a6c0e",
+    "size_bytes": 1036,
+    "checksum": { "algorithm": "crc64nvme", "value": "3c1..." }
+  },
+  "append_offset": 1024
+}
+```
+
+A consumer that keeps a copy of the file can extend its copy with the range from `append_offset` to `size_bytes` (for example, with a [download grant](#610-download-transport) whose `start_offset` is `append_offset`) instead of reading the whole file again. The field is present for every append, including an append to an empty file (where it's 0) and an append that starts a new content ID, such as an append in a fork to a file that the fork inherited (see the `append_file` rules in [`POST /commits`](#68-post-commits)). The field is absent when a put, a copy, or a revision restore published the revision. If one commit contains two appends to the same file, the change feed reports a separate event for each append, with that append's offset.
+
 Events identify inodes and their parent-directory bindings, not full paths. A consumer that needs paths can stat the inode, or maintain its own projection of the bindings from this feed. Clients MUST ignore unknown event kinds and unknown fields.
 
 In a `moved` event, the source fields describe the removed binding, and the destination fields describe the new binding.
@@ -2334,6 +2356,8 @@ The commit `limit` is an upper bound, and a page can contain fewer commits when 
 If either bound ends the page before the namespace head, the response includes `next_after_seq`, set to the last returned change's `committed_seq`. The client resumes with `after_seq={next_after_seq}`. Clients MUST follow `next_after_seq`, instead of counting commits, to decide whether another page remains.
 
 `after_seq` can equal the current namespace head, which returns an empty page. An `after_seq` above the head that the request reads returns `invalid_request`. The lowest `after_seq` the feed accepts is `retention_floor_seq`, and a lower `after_seq` returns `rebootstrap_required`. The client then rebuilds its state from a fresh listing or snapshot, and follows the feed from that state's head.
+
+Why does an append's event include `append_offset`, when a consumer could compare content IDs? An append keeps the content ID only when it extends the [chain's](glossary.md#chain) full current length. Otherwise it starts a new content ID (for example, in a fork or after a restore). A consumer that compared content IDs would treat that append as a replacement and read the whole file again.
 
 ### 6.12 `POST /forks`
 

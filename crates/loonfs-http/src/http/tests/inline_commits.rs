@@ -278,6 +278,7 @@ async fn append_commits_write_only_wal_and_replay_by_bytes() {
     assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
     assert_eq!(appended["events"][0]["kind"], "content_changed");
     assert_eq!(appended["events"][0]["revision_no"], 2);
+    assert_eq!(appended["events"][0]["append_offset"], 3);
     harness.read("/log", b"one two").await;
     let (status, replay) = harness.commit(append("append", b" two")).await;
     assert_eq!((status, &replay), (StatusCode::OK, &appended));

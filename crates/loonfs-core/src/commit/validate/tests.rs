@@ -134,6 +134,7 @@ fn wal_create_file(
             revision_no: RevisionNo(1),
             content_ref,
             layout: None,
+            append_offset: None,
         },
     ]
 }
@@ -150,6 +151,7 @@ fn wal_append_revision(
         revision_no,
         content_ref,
         layout: None,
+        append_offset: None,
     }]
 }
 
@@ -410,6 +412,7 @@ async fn stale_revision_precondition_is_rejected() {
         inode_id: InodeId(3),
         base_revision_no: RevisionNo(1),
         content_ref: content_ref("content-3"),
+        append_offset: None,
     }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
@@ -586,6 +589,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
             inode_id: InodeId(3),
             base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
+            append_offset: None,
         }]),
         4_200,
         &context,
@@ -744,6 +748,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
             inode_id: InodeId(3),
             base_revision_no: RevisionNo(1),
             content_ref: expected.clone(),
+            append_offset: None,
         },
         CommitOperation::RestoreRevision {
             inode_id: InodeId(3),
@@ -864,6 +869,7 @@ async fn restore_revision_overflow_is_rejected() {
         revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         content_ref: content_ref("content-max"),
         layout: None,
+        append_offset: None,
     };
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(

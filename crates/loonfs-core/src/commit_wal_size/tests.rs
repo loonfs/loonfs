@@ -109,6 +109,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         })
                         .collect(),
                 }),
+                append_offset: None,
             },
             WalDelta::AppendAttributesRevision {
                 delta_index: 4,
@@ -147,6 +148,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         length: log_ref.size_bytes,
                     }],
                 }),
+                append_offset: None,
             },
         ],
     );
