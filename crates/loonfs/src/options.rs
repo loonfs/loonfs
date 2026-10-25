@@ -8,6 +8,7 @@
 
 use crate::{Error, MetadataCompactionPolicy, Result, RetentionTarget};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
+use loonfs_core::StreamRange;
 use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
 use std::num::NonZeroU64;
 
@@ -16,7 +17,7 @@ pub use loonfs_types::options::{
     Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    ReadConsistency, ReadFileOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
     UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
@@ -117,15 +118,10 @@ pub struct ReadFileStreamOptions {
     /// declares its own. Non-zero by type, so there is no chunk size that
     /// makes no progress.
     pub chunk_bytes: NonZeroU64,
-    /// Where the read starts, for a caller that already holds the bytes
-    /// below it — an interrupted download picking up where it stopped.
-    ///
-    /// The read still reports on the whole object, so a nonzero offset
-    /// obliges the caller to hand over what it holds through
-    /// [`FileContentStream::fold_resumed_prefix`](loonfs_core::FileContentStream::fold_resumed_prefix)
-    /// before driving the stream. Zero reads from the first byte and asks
-    /// nothing of the caller.
-    pub start_offset: u64,
+    /// The bytes the read returns, by default the whole file from its first
+    /// byte. See [`StreamRange`](loonfs_core::StreamRange) for how a resumed
+    /// read and a ranged read are verified.
+    pub range: StreamRange,
     /// How recently the read confirms the live head, or `None` for the
     /// runtime's default.
     pub consistency: Option<Consistency>,
@@ -135,7 +131,7 @@ impl Default for ReadFileStreamOptions {
     fn default() -> Self {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
-            start_offset: 0,
+            range: StreamRange::default(),
             consistency: None,
         }
     }

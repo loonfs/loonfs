@@ -28,7 +28,7 @@ use crate::protocol::{
 };
 use crate::storage::content::{
     open_content_import_reader, ContentLocation, DurableContentValidationError, FileContentStream,
-    StreamedPayloadKind,
+    StreamRange, StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
 use crate::wal::ProjectedWalTail;
@@ -541,18 +541,21 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ///
     /// The object prefix is fetched `chunk_bytes` at a time, and pieces the tail
     /// holds are retained. The buffered-read size limit does not apply. Later
-    /// commits cannot change the bytes being read.
+    /// commits cannot change the bytes being read, and the read writes no
+    /// content object.
     ///
-    /// When `start_offset` is nonzero, the caller must pass the skipped prefix to
-    /// [`FileContentStream::fold_resumed_prefix`] before fetching more data. This
-    /// allows the stream to verify the checksum of the complete object.
+    /// When a whole read's `start_offset` is nonzero, the caller must pass the
+    /// skipped prefix to [`FileContentStream::fold_resumed_prefix`] before
+    /// fetching more data. This allows the stream to verify the checksum of
+    /// the complete object. A ranged read returns its range without
+    /// verification.
     pub async fn read_file_stream(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
         revision_no: Option<RevisionNo>,
         chunk_bytes: NonZeroU64,
-        start_offset: u64,
+        range: StreamRange,
     ) -> Result<FileContentStream<S>>
     where
         S: Clone,
@@ -563,19 +566,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let (entry, content_ref) = view
             .resolve_file_content(path.as_ref(), revision_no, &access)
             .await?;
-        if start_offset > content_ref.size_bytes {
-            return Err(CoreError::ResumeOffsetOutOfRange {
-                start_offset,
-                size_bytes: content_ref.size_bytes,
-            });
-        }
+        range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
             self.store.clone(),
             view.resolve_content_location(&content_ref).await?,
             Some(entry),
             content_ref,
             chunk_bytes,
-            start_offset,
+            range,
         )
         .await?
         .with_object_cache(Arc::clone(&context.object_cache)))
@@ -589,7 +587,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         revision_no: Option<RevisionNo>,
         context: &RuntimeReadContext,
         chunk_bytes: NonZeroU64,
-        start_offset: u64,
+        range: StreamRange,
     ) -> Result<FileContentStream<S>>
     where
         S: Clone,
@@ -605,19 +603,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             None => view.current_revision_by_inode(inode_id, &access).await?,
         }
         .content_ref;
-        if start_offset > content_ref.size_bytes {
-            return Err(CoreError::ResumeOffsetOutOfRange {
-                start_offset,
-                size_bytes: content_ref.size_bytes,
-            });
-        }
+        range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
             self.store.clone(),
             view.resolve_content_location(&content_ref).await?,
             None,
             content_ref,
             chunk_bytes,
-            start_offset,
+            range,
         )
         .await?
         .with_object_cache(Arc::clone(&context.object_cache)))

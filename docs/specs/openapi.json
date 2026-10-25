@@ -1400,6 +1400,12 @@
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
+          },
+          "size_bytes": {
+            "description": "For `range_not_satisfiable`, the size in bytes of the file that the range was requested\nfrom.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "type": "object"
@@ -5957,7 +5963,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/content": {
       "get": {
-        "description": "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot.",
+        "description": "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot. A `Range` header asks for one byte range of the file instead.",
         "operationId": "get_file_content",
         "parameters": [
           {
@@ -6020,6 +6026,15 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "description": "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.",
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6036,7 +6051,44 @@
                 }
               }
             },
-            "description": "File bytes"
+            "description": "File bytes",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`, because the route accepts a `Range` header.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "items": {
+                    "format": "int32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The returned range and the file's size, as `bytes start-end/size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -6046,7 +6098,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, consistency, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id"
           },
           "401": {
             "content": {
@@ -6086,7 +6138,17 @@
                 }
               }
             },
-            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7425,7 +7487,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content": {
       "get": {
-        "description": "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
+        "description": "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. A `Range` header asks for one byte range of the file instead. An unknown or hidden inode returns `inode_not_found`.",
         "operationId": "get_file_content_by_inode",
         "parameters": [
           {
@@ -7481,6 +7543,15 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "description": "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.",
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -7497,7 +7568,44 @@
                 }
               }
             },
-            "description": "File bytes"
+            "description": "File bytes",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`, because the route accepts a `Range` header.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "items": {
+                    "format": "int32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The returned range and the file's size, as `bytes start-end/size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -7507,7 +7615,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, or consistency"
+            "description": "Invalid inode ID, snapshot ID, consistency, or `Range` header"
           },
           "401": {
             "content": {
@@ -7557,7 +7665,17 @@
                 }
               }
             },
-            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7864,7 +7982,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
-        "description": "Reads and verifies one retained file revision by inode ID and revision number.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
         "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
@@ -7920,6 +8038,15 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "description": "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.",
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -7936,7 +8063,44 @@
                 }
               }
             },
-            "description": "Revision bytes"
+            "description": "Revision bytes",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`, because the route accepts a `Range` header.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "items": {
+                    "format": "int32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The requested range of the revision's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "`bytes`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The returned range and the file's size, as `bytes start-end/size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -7946,7 +8110,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, or consistency, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, consistency, or `Range` header, or a snapshot_id, which can't be combined with a revision"
           },
           "401": {
             "content": {
@@ -7996,7 +8160,17 @@
                 }
               }
             },
-            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

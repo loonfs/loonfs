@@ -168,6 +168,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_head_seq: Option<ChangeSeq>,
+    /// For `range_not_satisfiable`, the size in bytes of the file that the range was requested
+    /// from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub size_bytes: Option<u64>,
 }
 
 /// A request to create a namespace.

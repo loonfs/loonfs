@@ -5,7 +5,7 @@ use crate::cache::{
     DecodedBlockCacheStats, HeadAndWalTailCache, MetadataSegmentCache, WalTailCacheKey,
 };
 use crate::namespace::read_anchor::load_read_anchor;
-use crate::storage::content::{ContentLocation, DurableContentValidationError};
+use crate::storage::content::{ContentLocation, DurableContentValidationError, StreamRange};
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::keys::{content_blob, wal_object};
 use loonfs_objectstore::PutMode;
@@ -124,7 +124,9 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                                 Some(RevisionNo(1)),
                                 &context,
                                 NonZeroU64::new(2).expect("chunk size"),
-                                start_offset as u64,
+                                StreamRange::Whole {
+                                    start_offset: start_offset as u64,
+                                },
                             )
                             .await
                             .expect("inode stream")
@@ -135,7 +137,9 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                                 &context,
                                 Some(RevisionNo(1)),
                                 NonZeroU64::new(2).expect("chunk size"),
-                                start_offset as u64,
+                                StreamRange::Whole {
+                                    start_offset: start_offset as u64,
+                                },
                             )
                             .await
                             .expect("stream")
@@ -689,7 +693,7 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
             &read_context,
             None,
             NonZeroU64::new(4).expect("chunk size"),
-            0,
+            StreamRange::default(),
         )
         .await
         .expect("stream");
@@ -698,6 +702,38 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
         streamed.extend_from_slice(&chunk);
     }
     assert_eq!(streamed, b"hello world");
+
+    // A ranged read gets only the part of the layout that the range covers,
+    // takes the rest from the pieces, and writes nothing.
+    for (start_offset, length, expected, expected_gets) in [
+        (1, 3, &b"ell"[..], vec![(key.clone(), Some((1, 4)))]),
+        (6, 3, &b"wor"[..], Vec::new()),
+        (3, 5, &b"lo wo"[..], vec![(key.clone(), Some((3, 5)))]),
+        (8, 100, &b"rld"[..], Vec::new()),
+    ] {
+        store.reset();
+        let range = loonfs_types::options::ReadRange {
+            start_offset,
+            length: NonZeroU64::new(length),
+        };
+        let mut stream = engine
+            .read_file_stream(
+                "/file-0",
+                &read_context,
+                None,
+                NonZeroU64::new(4).expect("chunk size"),
+                StreamRange::Range(range),
+            )
+            .await
+            .expect("ranged stream");
+        let mut ranged = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("ranged chunk") {
+            ranged.extend_from_slice(&chunk);
+        }
+        assert_eq!(ranged, expected, "{range:?}");
+        assert_eq!(store.counts().puts, 0, "{range:?}");
+        assert_eq!(content_gets(&store), expected_gets, "{range:?}");
+    }
 }
 
 #[tokio::test]

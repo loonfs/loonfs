@@ -162,6 +162,15 @@ impl Client {
         &self,
         request: &WireRequest,
     ) -> Result<PayloadStream> {
+        Ok(self.call_for_streamed_response(request).await?.body)
+    }
+
+    /// Sends a request once and returns a successful response with its body
+    /// unread.
+    pub(crate) async fn call_for_streamed_response(
+        &self,
+        request: &WireRequest,
+    ) -> Result<StreamedResponse> {
         let response = self
             .send(self.build(request, Body::empty())?, None)
             .await
@@ -175,15 +184,19 @@ impl Client {
                 .to_bytes();
             return Err(map_status_error(response.status.as_u16(), &bytes));
         }
-        Ok(response
-            .body
-            .into_data_stream()
-            .map(|chunk| {
-                chunk.map_err(|error| {
-                    std::io::Error::other(format!("response body ended early: {error}"))
+        Ok(StreamedResponse {
+            status: response.status,
+            headers: response.headers,
+            body: response
+                .body
+                .into_data_stream()
+                .map(|chunk| {
+                    chunk.map_err(|error| {
+                        std::io::Error::other(format!("response body ended early: {error}"))
+                    })
                 })
-            })
-            .boxed())
+                .boxed(),
+        })
     }
 
     pub(crate) async fn call(
@@ -314,6 +327,13 @@ struct WireResponse {
     status: StatusCode,
     headers: http::HeaderMap,
     body: Body,
+}
+
+/// A successful response whose body is read as a stream.
+pub(crate) struct StreamedResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: http::HeaderMap,
+    pub(crate) body: PayloadStream,
 }
 
 impl From<Response<Body>> for WireResponse {

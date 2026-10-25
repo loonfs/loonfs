@@ -239,6 +239,10 @@ The longest time a reader can trust that no newer manifest exists after it last 
 
 A position that a paginated read, or a bounded index build, resumes from.
 
+### Ranged read
+
+A service-proxied content read that returns one byte range of a file instead of the whole file. A client uses it to read part of a large file, such as the newest records of a log, or to read a file over the proxied read limit in pieces. A client asks for the range with an HTTP `Range` header, such as `bytes=0-99` for the first 100 bytes. The server doesn't verify a ranged read against the file's checksum, because the checksum covers the whole file. See [Ranged reads](api.md#ranged-reads).
+
 ## Writers
 
 ### Writer session

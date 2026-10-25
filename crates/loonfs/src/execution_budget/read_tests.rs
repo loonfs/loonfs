@@ -6,7 +6,7 @@ use crate::metrics::{
 };
 use crate::{
     CreateSnapshotOptions, InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadAt,
-    ReadFileStreamOptions, StatOptions, Writable,
+    ReadFileStreamOptions, ReadRange, StatOptions, StreamRange, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -325,7 +325,19 @@ async fn streams_release_the_slot_before_reading_body_bytes() {
             .one_read(fixture.namespace.read_file_stream_with_options(
                 "/a",
                 &ReadFileStreamOptions {
-                    start_offset: 1,
+                    range: StreamRange::Whole { start_offset: 1 },
+                    ..ReadFileStreamOptions::default()
+                },
+            ))
+            .await,
+        fixture
+            .one_read(fixture.namespace.read_file_stream_with_options(
+                "/a",
+                &ReadFileStreamOptions {
+                    range: StreamRange::Range(ReadRange {
+                        start_offset: 0,
+                        length: None,
+                    }),
                     ..ReadFileStreamOptions::default()
                 },
             ))

@@ -501,7 +501,7 @@ impl ReadView {
                     &self.context,
                     None,
                     options.chunk_bytes,
-                    options.start_offset,
+                    options.range,
                 )
                 .await?)
         })
@@ -596,7 +596,7 @@ impl ReadView {
                     None,
                     &self.context,
                     options.chunk_bytes,
-                    options.start_offset,
+                    options.range,
                 )
                 .await?)
         })
@@ -1103,14 +1103,15 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Reads a file as bounded chunks, as `options` asks.
     ///
-    /// Each ranged read uses bounded memory. Size and checksum verification
-    /// complete when [`FileContentStream::next_chunk`] returns `None`; stopping
-    /// early leaves the content unverified. The buffered-read size limit does
-    /// not apply.
+    /// The stream reads one chunk at a time, so it uses bounded memory. Size
+    /// and checksum verification complete when [`FileContentStream::next_chunk`]
+    /// returns `None`. Stopping early leaves the content unverified. The
+    /// buffered-read size limit does not apply.
     ///
-    /// [`ReadFileStreamOptions::start_offset`] resumes a read. The caller must
-    /// supply earlier bytes for whole-object verification through
-    /// [`FileContentStream::fold_resumed_prefix`].
+    /// [`ReadFileStreamOptions::range`] can resume a read, in which case the
+    /// caller must supply earlier bytes for whole-object verification through
+    /// [`FileContentStream::fold_resumed_prefix`]. It can also select one
+    /// byte range of the file, which the stream returns without verification.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_file_stream",
@@ -1151,7 +1152,7 @@ impl<M: crate::Mode> Namespace<M> {
                             &read_context,
                             revision_no,
                             options.chunk_bytes,
-                            options.start_offset,
+                            options.range,
                         )
                         .await?;
                     Ok(stream)
@@ -1958,7 +1959,7 @@ impl<M: crate::Mode> Namespace<M> {
                             revision_no,
                             &context,
                             options.chunk_bytes,
-                            options.start_offset,
+                            options.range,
                         )
                         .await?)
                 },

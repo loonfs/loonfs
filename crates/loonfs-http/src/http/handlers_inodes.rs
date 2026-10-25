@@ -1,6 +1,6 @@
 //! HTTP reads addressed by inode ID.
 
-use super::download_body::streamed_download_response;
+use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{
@@ -269,22 +269,25 @@ pub(super) async fn list_file_revisions_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
         summary = "Read file by inode",
-        description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. An unknown or hidden inode returns `inode_not_found`.",
+        description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. A `Range` header asks for one byte range of the file instead. An unknown or hidden inode returns `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
             ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`."),
+            ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
-            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot ID, or consistency", body = ErrorResponse),
+            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
+            (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
+            (status = 400, description = "Invalid inode ID, snapshot ID, consistency, or `Range` header", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -295,6 +298,7 @@ pub(super) async fn get_file_content_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<InodeContentQuery>,
+    range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -307,11 +311,12 @@ pub(super) async fn get_file_content_by_inode(
     let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream_by_inode(inode_id)
+        .read_file_stream_by_inode(inode_id, range.stream_range())
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(
         stream,
+        range.0,
         permit,
         state.options.max_download_bytes,
         &namespace_id,
@@ -327,22 +332,25 @@ pub(super) async fn get_file_content_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",
-        description = "Reads and verifies one retained file revision by inode ID and revision number.",
+        description = "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number."),
             ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head that it finds the revision in. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`."),
+            ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
-            (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, revision number, or consistency, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
+            (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
+            (status = 206, description = "The requested range of the revision's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
+            (status = 400, description = "Invalid inode ID, revision number, consistency, or `Range` header, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -353,6 +361,7 @@ pub(super) async fn get_file_revision_content_by_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(query): AppQuery<InodeContentQuery>,
+    range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -362,6 +371,7 @@ pub(super) async fn get_file_revision_content_by_inode(
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let options = ReadFileStreamOptions {
+        range: range.stream_range(),
         consistency: parse_consistency(
             query.consistency.as_deref(),
             query.max_staleness_ms.as_deref(),
@@ -375,6 +385,7 @@ pub(super) async fn get_file_revision_content_by_inode(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(
         stream,
+        range.0,
         permit,
         state.options.max_download_bytes,
         &namespace_id,

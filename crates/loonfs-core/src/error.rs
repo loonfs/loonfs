@@ -107,6 +107,16 @@ pub enum CoreError {
     /// None of them was folded.
     #[error(transparent)]
     ResumedPrefix(#[from] loonfs_types::ResumedPrefixError),
+    /// A ranged read was given resumed prefix bytes, which only a verified
+    /// read of the whole file uses.
+    #[error("a ranged read doesn't verify the file, so it takes no resumed prefix")]
+    PrefixForRangedRead,
+    /// The requested range starts at or past the end of the file. No data
+    /// was read.
+    #[error(
+        "cannot read a range that starts at offset {start_offset} of a {size_bytes}-byte file"
+    )]
+    RangeNotSatisfiable { start_offset: u64, size_bytes: u64 },
     #[error("expected file at `{target}` but found `{kind}`")]
     ExpectedFile { target: String, kind: InodeKind },
     #[error("expected directory at `{target}` but found `{kind}`")]
@@ -415,7 +425,9 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
+            | CoreError::PrefixForRangedRead
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
+            CoreError::RangeNotSatisfiable { .. } => ErrorCode::RangeNotSatisfiable,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
@@ -520,6 +532,8 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
+            | CoreError::PrefixForRangedRead
+            | CoreError::RangeNotSatisfiable { .. }
             | CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::RootMutationForbidden
@@ -587,6 +601,10 @@ impl CoreError {
                 commit_id: CommitId::parse(commit_id).ok(),
                 committed_seq: *committed_seq,
                 committed_fingerprint: committed_fingerprint.clone(),
+                ..ErrorDetails::default()
+            }),
+            CoreError::RangeNotSatisfiable { size_bytes, .. } => Some(ErrorDetails {
+                size_bytes: Some(*size_bytes),
                 ..ErrorDetails::default()
             }),
             CoreError::RebootstrapRequired {

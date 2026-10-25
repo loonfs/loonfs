@@ -1044,7 +1044,13 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             .map(|entry| entry.inode_id)
             .map_err(|error| error.code());
         let current_content_result = reader
-            .read_file_stream_by_inode(inode_id, None, &context, NonZeroU64::MIN, 0)
+            .read_file_stream_by_inode(
+                inode_id,
+                None,
+                &context,
+                NonZeroU64::MIN,
+                loonfs_core::StreamRange::default(),
+            )
             .await
             .map(|_| inode_id)
             .map_err(|error| error.code());

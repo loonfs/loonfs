@@ -2,7 +2,7 @@
 //! reads, revision listings, filesystem mutations, and the committed-change
 //! feed.
 
-use super::download_body::streamed_download_response;
+use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{
@@ -26,7 +26,7 @@ use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
     ChangeSeq, Consistency, DownloadOptions, ErrorCode, InodeId, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, Namespace, PinId, ReadAt,
-    ReadFileStreamOptions, ReadOnly, ReadView, StatOptions,
+    ReadFileStreamOptions, ReadOnly, ReadView, StatOptions, StreamRange,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -203,14 +203,22 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
+        range: StreamRange,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         match self {
             Self::Snapshot(view) => {
-                view.read_file_stream_with_options(path, &ReadFileStreamOptions::default())
-                    .await
+                view.read_file_stream_with_options(
+                    path,
+                    &ReadFileStreamOptions {
+                        range,
+                        ..ReadFileStreamOptions::default()
+                    },
+                )
+                .await
             }
             Self::Live(namespace, consistency) => {
                 let options = ReadFileStreamOptions {
+                    range,
                     consistency: *consistency,
                     ..ReadFileStreamOptions::default()
                 };
@@ -233,12 +241,16 @@ impl ReadTarget {
     pub(super) async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
+        range: StreamRange,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         match self {
             Self::Snapshot(view) => {
                 view.read_file_stream_by_inode_with_options(
                     inode_id,
-                    &ReadFileStreamOptions::default(),
+                    &ReadFileStreamOptions {
+                        range,
+                        ..ReadFileStreamOptions::default()
+                    },
                 )
                 .await
             }
@@ -247,6 +259,7 @@ impl ReadTarget {
                     .read_file_stream_by_inode_with_options(
                         inode_id,
                         &ReadFileStreamOptions {
+                            range,
                             consistency: *consistency,
                             ..ReadFileStreamOptions::default()
                         },
@@ -461,22 +474,25 @@ pub(super) async fn get_path_entry(
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
-        description = "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot.",
+        description = "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot. A `Range` header asks for one byte range of the file instead.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("path" = String, Query, description = "The absolute path of the file to read."),
             ("revision_no" = Option<RevisionNo>, Query, description = "An earlier revision to read. It can't be combined with `snapshot_id`."),
             ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
             ("consistency" = inline(Option<OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
-            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            ("max_staleness_ms" = inline(Option<OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`."),
+            ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
-            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path, revision, snapshot ID, consistency, or revision_no combined with snapshot_id", body = ErrorResponse),
+            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
+            (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
+            (status = 400, description = "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
+            (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -486,6 +502,7 @@ pub(super) async fn get_file_content(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
+    range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -505,7 +522,7 @@ pub(super) async fn get_file_content(
     let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
-        .read_file_stream(&path, revision_no)
+        .read_file_stream(&path, revision_no, range.stream_range())
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -513,6 +530,7 @@ pub(super) async fn get_file_content(
         })?;
     streamed_download_response(
         stream,
+        range.0,
         permit,
         state.options.max_download_bytes,
         &namespace_id,
