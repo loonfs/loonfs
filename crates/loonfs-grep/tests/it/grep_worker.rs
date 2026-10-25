@@ -21,6 +21,7 @@ use loonfs_grep::{
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
@@ -108,7 +109,11 @@ async fn new_query_page(
     .await
 }
 
+/// Folds the tail through `maintenance`, then advances the floor to the head
+/// through a handle whose wall clock is one default grace window ahead, so the
+/// advance can pass every commit made before the call.
 async fn fold_wal_and_advance_retention(
+    store: &SharedObjectStore,
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
@@ -122,7 +127,16 @@ async fn fold_wal_and_advance_retention(
         )
         .await
         .expect("fold wal");
-    maintenance
+    let clock = Arc::new(ManualClock::at_system_time());
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
+    LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id.clone())
+        .wall_clock(clock)
+        .build()
+        .await
+        .expect("retention maintenance")
+        .maintenance(writer_id)
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention")
@@ -742,7 +756,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    let retention_floor_seq = fold_wal_and_advance_retention(&maintenance, &namespace_id).await;
+    let retention_floor_seq =
+        fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
     assert!(retention_floor_seq > ChangeSeq(0));
 
     // The feed can no longer reach the watermark, which the worker must
@@ -861,7 +876,8 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         )
         .await
         .expect("write during backfill");
-    let retention_floor_seq = fold_wal_and_advance_retention(&maintenance, &namespace_id).await;
+    let retention_floor_seq =
+        fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
     // Checkpoint pages remain readable after retention passes their basis,

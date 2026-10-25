@@ -15,6 +15,7 @@ use loonfs_core::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
@@ -27,6 +28,7 @@ use tempfile::{tempdir, TempDir};
 struct VisibilityHarness {
     _temp_dir: TempDir,
     store: Arc<LocalFsStore>,
+    clock: Arc<ManualClock>,
     engine: NamespaceWriterEngine<Arc<LocalFsStore>>,
 }
 
@@ -35,12 +37,14 @@ impl VisibilityHarness {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+        let clock = Arc::new(ManualClock::new(1_000));
         let engine = NamespaceWriterEngine::writer(
             Arc::clone(&store),
             namespace_id,
             loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
             std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-        );
+        )
+        .with_wall_clock(clock.clone());
         engine
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
@@ -70,6 +74,7 @@ impl VisibilityHarness {
         Self {
             _temp_dir: temp_dir,
             store,
+            clock,
             engine,
         }
     }
@@ -932,6 +937,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .assert_equivalence(&after_folds, "after eight WAL folds", &expected)
         .await;
 
+    // Every commit is now one grace window old, so the floor can reach the
+    // head.
+    harness
+        .clock
+        .advance_ms(loonfs_core::limits::GC_DEFAULT_GRACE_WINDOW_MS);
     match order {
         MaintenanceOrder::CompactThenRetain => {
             drain_compaction(&harness, &expected, "before retention").await;

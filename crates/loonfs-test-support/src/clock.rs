@@ -1,6 +1,6 @@
 //! Time advanced explicitly by tests, and the bound a test waits under.
 
-use loonfs_types::{MonotonicTimer, WallClock};
+use loonfs_types::{MonotonicTimer, SystemWallClock, WallClock};
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -31,6 +31,13 @@ impl ManualClock {
             now_ms: AtomicU64::new(now_ms),
             step_ms: 0,
         }
+    }
+
+    /// Returns a clock set to the system clock's current reading, for a test
+    /// that moves a handle's wall clock forward from the time that other
+    /// handles stamp their commits with.
+    pub fn at_system_time() -> Self {
+        Self::new(SystemWallClock.now_ms())
     }
 
     /// Returns a clock at zero that moves `step_ms` forward after each monotonic reading.

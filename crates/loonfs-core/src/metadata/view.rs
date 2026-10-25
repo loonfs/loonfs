@@ -8,7 +8,7 @@ use super::manifest_index;
 use super::view_session::{latest_visible_binding, LeafRevisionPreload};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
-use crate::manifest::VerifiedMetadataSegments;
+use crate::manifest::{Readahead, VerifiedMetadataSegments};
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
     ActiveDeletionRange, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
@@ -671,7 +671,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(Some(record.clone()));
         }
         match self.manifest_segments() {
-            Some(segments) => manifest_index::commit_at_seq(segments, seq).await,
+            Some(segments) => {
+                manifest_index::commit_at_seq(segments, seq, Readahead::Enabled).await
+            }
             None => Ok(None),
         }
     }

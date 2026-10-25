@@ -284,6 +284,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -402,6 +403,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -521,6 +523,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

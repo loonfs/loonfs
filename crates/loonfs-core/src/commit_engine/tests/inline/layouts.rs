@@ -830,6 +830,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(1_000),
         crate::test_support::std_timer(),
     )
     .await

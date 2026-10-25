@@ -70,6 +70,8 @@ struct Fixture {
     recording: Arc<RecordingStore<BlockingStore<MemoryStore>>>,
     recorder: Arc<DefaultMetricsRecorder>,
     clock: Arc<ManualClock>,
+    /// The runtime's wall clock, which stamps its commits.
+    wall_clock: Arc<ManualClock>,
     namespace_id: NamespaceId,
     actor: ActorId,
     admin: Namespace<Writable>,
@@ -98,11 +100,13 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
     ));
     let store: SharedObjectStore = recording.clone();
     let clock = Arc::new(ManualClock::new(1_000_000));
+    let wall_clock = Arc::new(ManualClock::at_system_time());
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
         .min_publish_interval_ms(0)
         .monotonic_timer(clock.clone())
+        .wall_clock(wall_clock.clone())
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -123,6 +127,7 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
         recording,
         recorder,
         clock,
+        wall_clock,
         admin: writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
@@ -462,6 +467,10 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
                 drop(deleted.await.expect(call));
             }
             "advance_retention_floor" => {
+                // Every commit so far is now one grace window old.
+                fixture
+                    .wall_clock
+                    .advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
                 let advanced = maintenance.advance_retention_floor(namespace_id).await;
                 assert!(advanced.expect(call).retention_floor_seq.0 > 0, "{call}");
             }

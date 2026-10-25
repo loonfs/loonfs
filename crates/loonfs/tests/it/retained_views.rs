@@ -231,7 +231,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .await
                     .expect("materialize source head before advancing retention");
                 let advanced = runtime
-                    .maintenance
                     .advance_retention_floor(&source)
                     .await
                     .expect("advance retention");

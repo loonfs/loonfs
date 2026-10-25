@@ -3,12 +3,14 @@
 
 use crate::common::*;
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId};
+use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
 use loonfs_core::limits::MAX_EXPIRED_DELETIONS_PER_COMMIT;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_types::api::v0::{Commit, FilesystemChange};
 use loonfs_types::{AbsolutePath, ActorId};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent {
@@ -94,7 +96,14 @@ async fn expiry_commits(
 #[tokio::test]
 async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bounded_commits() {
     let temp_dir = tempdir().expect("tempdir");
-    let writer = writer(store(temp_dir.path()), "expiry-writer").await;
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = LoonFs::builder_with_store(store(temp_dir.path()))
+        .writer_id(writer_id("expiry-writer"))
+        .min_publish_interval_ms(0)
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
     let maintenance = writer.maintenance(writer_id("expiry-writer"));
     let namespace_id = namespace_id("expiry");
     writer
@@ -124,6 +133,8 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bou
         ))
         .await
         .expect("delete above the floor");
+    // Every folded commit is now one grace window old.
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
     let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await

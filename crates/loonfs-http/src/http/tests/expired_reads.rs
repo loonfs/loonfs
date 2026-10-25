@@ -13,6 +13,7 @@ use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_types::{public_inode_id, CommitId, ErrorCode, ErrorResponse, ExpiredDeletion};
 use std::sync::Arc;
@@ -67,12 +68,17 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         .await
         .expect("delete directory");
     writer.shutdown().await.expect("writer shutdown");
+    // The floor passes a commit once it's one grace window old, so this
+    // engine's clock is that far ahead of the writer's.
+    let clock = Arc::new(ManualClock::at_system_time());
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         store.clone(),
         namespace_id.clone(),
         writer_id("expiry-writer"),
         Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    )
+    .with_wall_clock(clock);
     maintenance.fold_wal().await.expect("fold the deletion");
     maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion.committed_seq))

@@ -122,6 +122,40 @@ pub(crate) struct TestServer {
     pub(crate) server: tokio::task::JoinHandle<()>,
 }
 
+/// Advances `namespace`'s retention floor to the head through a maintenance
+/// handle on the server's local store whose wall clock is one default grace
+/// window ahead of the system clock.
+///
+/// The server stamps commits on its own clock, which a test can't move, so a
+/// floor can pass commits that a test just made through the server only
+/// through a handle whose clock is ahead of the server's.
+pub(crate) async fn advance_retention_past_the_grace_window(
+    server: &TestServer,
+    namespace: &NamespaceId,
+) -> loonfs_types::AdvanceRetentionResponse {
+    let clock = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::at_system_time());
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
+    loonfs::LoonFs::builder(loonfs::StoreConfig::LocalFs {
+        root: server
+            .store_root
+            .as_ref()
+            .expect("the server uses a local store")
+            .display()
+            .to_string(),
+        key_prefix: server.store_key_prefix.clone(),
+    })
+    .writer_id(writer_id.clone())
+    .wall_clock(clock)
+    .build()
+    .await
+    .expect("build the retention maintenance handle")
+    .maintenance(writer_id)
+    .advance_retention_floor(namespace)
+    .await
+    .expect("advance the retention floor")
+}
+
 // The server runs as a task on the test's own runtime, and the tests call it
 // through the blocking `ureq` agent as well as the async client. A blocking
 // call holds its worker thread until the response arrives, so the tests run

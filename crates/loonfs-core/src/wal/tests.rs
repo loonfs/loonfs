@@ -677,6 +677,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             None,
             &namespace_id,
             crate::manifest::RetentionTarget::Head,
+            crate::test_support::grace_elapsed_after(1_000),
             crate::test_support::std_timer(),
         )
         .await

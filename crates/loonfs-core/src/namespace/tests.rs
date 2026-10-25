@@ -378,6 +378,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 None,
                 &namespace_id,
                 crate::manifest::RetentionTarget::Head,
+                crate::test_support::grace_elapsed_after(context().now_ms),
                 crate::test_support::std_timer(),
             )
             .await

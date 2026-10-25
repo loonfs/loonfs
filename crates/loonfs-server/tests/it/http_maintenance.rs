@@ -217,33 +217,66 @@ fn decode_maintenance_response<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Creates `namespace` with one file at `path`, written by a writer whose
+/// clock is set far in the past, and shuts the writer down, so a server
+/// started on the store afterwards finds a commit that's old on its own clock.
+async fn seed_with_a_departed_writer(
+    store_root: &std::path::Path,
+    key_prefix: &str,
+    namespace: &loonfs_types::NamespaceId,
+    path: &str,
+    bytes: &[u8],
+) {
+    let store = ConfiguredObjectStore::local_fs(store_root, Some(key_prefix))
+        .expect("construct store")
+        .into_shared();
+    let writer = loonfs::LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
+        .wall_clock(std::sync::Arc::new(
+            loonfs_test_support::clock::ManualClock::new(1_750_000_000_000),
+        ))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    writer
+        .open_namespace(namespace)
+        .expect("open namespace")
+        .put_file(path, bytes, &loonfs_test_support::test_actor())
+        .await
+        .expect("write file");
+    writer.shutdown().await.expect("writer shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
+    let key_prefix = "http-maintenance";
+    let namespace = namespace_id("demo");
+    // The floor passes a commit once it's one grace window old on the
+    // server's clock, so the history comes from a writer whose clock is set
+    // far in the past.
+    seed_with_a_departed_writer(
+        &store_root,
+        key_prefix,
+        &namespace,
+        "/docs/hello.txt",
+        b"hello maintenance\n",
+    )
+    .await;
     let harness = start_server(test_config(
-        temp_dir.path().join("store"),
+        store_root,
         "loonfs-server-maintenance",
-        "http-maintenance",
+        key_prefix,
     ))
     .await;
     let client = harness.client.clone();
     let server_url = harness.server_url.clone();
-
-    let namespace = namespace_id("demo");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
-    client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    client
-        .put_file_with_options(
-            &target,
-            b"hello maintenance\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
-        .await
-        .expect("write file");
 
     let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
     assert!(PinId::parse(first.checkpoint_id.as_str()).is_ok());
@@ -489,7 +522,8 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         )
         .await
         .expect("advance retention");
-    assert_eq!(retention_floor(retention), ChangeSeq(1));
+    // The commit is seconds old, so the floor stays below it.
+    assert_eq!(retention_floor(retention), ChangeSeq(0));
     let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
     assert_eq!(gc.deleted.wal_objects, 0);
 
@@ -511,30 +545,11 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         let temp_dir = tempdir().expect("tempdir");
         let store_root = temp_dir.path().join("store");
         let key_prefix = "http-maintenance-idle";
-        let store = ConfiguredObjectStore::local_fs(&store_root, Some(key_prefix))
-            .expect("construct store")
-            .into_shared();
+        let namespace = namespace_id("idle");
         // The server reads commit age on its own clock, so a commit stamped
         // by a writer whose clock is long past is idle on arrival.
-        let writer = loonfs::LoonFs::builder_with_store(store)
-            .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
-            .wall_clock(std::sync::Arc::new(
-                loonfs_test_support::clock::ManualClock::new(1_750_000_000_000),
-            ))
-            .build()
-            .await
-            .expect("writer");
-        let namespace = namespace_id("idle");
-        writer
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
-            .await
-            .expect("create namespace");
-        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-        namespace_writer
-            .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
-            .await
-            .expect("write file");
-        writer.shutdown().await.expect("writer shutdown");
+        seed_with_a_departed_writer(&store_root, key_prefix, &namespace, "/file.txt", b"body")
+            .await;
 
         let harness = start_server(loonfs_server::ServerConfig {
             idle_fold_after_ms,

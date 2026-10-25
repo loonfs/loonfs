@@ -456,6 +456,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -485,6 +486,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -816,6 +818,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

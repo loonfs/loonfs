@@ -117,11 +117,12 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         family: MetadataRowFamily,
         key: &str,
         filter_probe: &str,
+        readahead: Readahead,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Enabled)
+            .scan_prefix_rows(family, key, Some(filter_probe), readahead)
             .await?
             .into_iter()
             .find(|(row_key, _)| row_key == key)

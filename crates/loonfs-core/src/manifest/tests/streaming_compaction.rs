@@ -168,6 +168,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -265,6 +266,7 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -1008,6 +1010,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -1354,6 +1357,7 @@ async fn seed_binding_history(
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -2616,6 +2620,7 @@ impl Interceptor for RivalDuringPublication {
                     None,
                     namespace_id,
                     RetentionTarget::Head,
+                    crate::test_support::grace_elapsed_after(test_context().now_ms),
                     crate::test_support::std_timer(),
                 )
                 .await

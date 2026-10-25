@@ -112,6 +112,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -174,6 +175,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             None,
             &namespace_id,
             RetentionTarget::Head,
+            crate::test_support::grace_elapsed_after(context.now_ms),
             crate::test_support::std_timer()
         )
         .await

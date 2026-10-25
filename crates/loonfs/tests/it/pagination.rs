@@ -836,7 +836,6 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
     // The floor lands on revision 3, so the next base compaction drops
     // revisions 1 and 2.
     let advanced = fs
-        .maintenance
         .advance_retention_floor_with_options(
             &namespace_id,
             &AdvanceRetentionFloorOptions {

@@ -14,6 +14,7 @@ use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
@@ -917,10 +918,15 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
+        // A retention advance passes a commit once it's one grace window old,
+        // so this runtime's clock is that far ahead of the writer's.
+        let clock = Arc::new(ManualClock::at_system_time());
+        clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
         let maintenance_runtime = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
+            .wall_clock(clock)
             .build()
             .await
             .expect("build maintenance");

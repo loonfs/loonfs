@@ -927,6 +927,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             stdout_string(&early_cutoff).contains("retention for demo: floor unchanged at seq 0")
         );
 
+        // Both commits are seconds old, and the floor moves only to a commit
+        // that's at least one grace window old, so no target moves the floor.
         let targeted_retention = harness.run(&[
             "maintenance",
             "retention",
@@ -938,7 +940,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         ]);
         assert_success(&targeted_retention);
         assert!(stdout_string(&targeted_retention)
-            .contains("retention for demo: floor advanced to seq 1"));
+            .contains("retention for demo: floor unchanged at seq 0"));
 
         let both_targets = harness.run(&[
             "--json",
@@ -959,11 +961,12 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "invalid_usage"
         );
 
-        let advanced_retention =
+        let head_retention =
             harness.run(&["maintenance", "retention", "advance", "--profile", profile]);
-        assert_success(&advanced_retention);
-        assert!(stdout_string(&advanced_retention)
-            .contains("retention for demo: floor advanced to seq 2"));
+        assert_success(&head_retention);
+        assert!(
+            stdout_string(&head_retention).contains("retention for demo: floor unchanged at seq 0")
+        );
 
         let retention = harness.run(&[
             "--json",
@@ -977,13 +980,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let retention_data = json_data(&retention);
         assert_eq!(retention_data["kind"], "retention");
         assert_eq!(retention_data["namespace_id"], "demo");
-        assert_eq!(retention_data["retention_floor_seq"], 2);
-
-        let unchanged_retention =
-            harness.run(&["maintenance", "retention", "advance", "--profile", profile]);
-        assert_success(&unchanged_retention);
-        assert!(stdout_string(&unchanged_retention)
-            .contains("retention for demo: floor unchanged at seq 2"));
+        assert_eq!(retention_data["retention_floor_seq"], 0);
 
         // The checkpoint above already covers the head, so the metadata job
         // reports the namespace caught up identically in both modes.

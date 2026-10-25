@@ -3,14 +3,11 @@
 //! with the embedded runtime.
 
 use crate::common::http_split_support::*;
-use crate::common::start_server;
+use crate::common::{advance_retention_past_the_grace_window, start_server};
 use loonfs::publish::CommitIntent;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::api::v0::{
-    AdvanceRetentionRequest, RunMaintenanceRequest, RunMaintenanceResponse,
-};
 use loonfs_types::{
     api::v0::{Commit, FilesystemChange},
     AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef, DeleteDirectoryBehavior,
@@ -369,18 +366,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .create_snapshot(&namespace, "retired", None)
         .await
         .expect("create checkpoint");
-    let advanced = harness
-        .client
-        .run_maintenance(
-            &namespace,
-            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest::default()),
-            None,
-        )
-        .await
-        .expect("advance retention floor");
-    let RunMaintenanceResponse::Retention(advanced) = advanced else {
-        panic!("retention request returned a different response")
-    };
+    let advanced = advance_retention_past_the_grace_window(&harness, &namespace).await;
     assert!(
         advanced.retention_floor_seq >= committed.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",
