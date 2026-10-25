@@ -1,9 +1,13 @@
-//! The retention advance that full passes make under a retention window.
+//! The retention advance that full passes make under each namespace's
+//! retention window, or the server's.
 
 use super::{local_store, seed_writer, sweep_config, SweepServer, DAY_MS};
 use crate::config::ServerConfig;
 use crate::sweep::{lock, GarbageCollection, SweepCall};
-use loonfs::{ChangeSeq, NamespaceDiagnostics, NamespaceId, SharedObjectStore};
+use loonfs::{
+    AdvanceRetentionFloorOptions, ChangeSeq, CreateNamespaceOptions, NamespaceDiagnostics,
+    NamespaceId, RetentionTarget, SharedObjectStore,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -22,9 +26,12 @@ const START_MS: u64 = 100 * DAY_MS;
 /// The 30-day window from the design note.
 const WINDOW_MS: u64 = 30 * DAY_MS;
 
-/// Requests the advance adds to the visit of an idle namespace whose floor
-/// already reached the head: one load of the current manifest. The docs
-/// quote this number.
+/// A namespace's own window, shorter than the server's.
+const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
+
+/// Requests the advance costs on the visit of an idle namespace whose floor
+/// already reached its cutoff, or that has no window: one load of the
+/// current manifest. The docs quote this number.
 const IDLE_ADVANCE_REQUESTS: usize = 4;
 
 /// A config with every default, and `window_ms` as its retention window.
@@ -45,6 +52,25 @@ impl SweepServer {
 
     fn retention_failures(&self) -> u64 {
         self.visit_failures(SweepCall::Retention)
+    }
+
+    /// Creates a namespace with `window_ms` as its own retention window.
+    async fn create_with_window(&self, namespace_id: &NamespaceId, window_ms: Option<u64>) {
+        self.runtime
+            .create_namespace_with_options(
+                namespace_id,
+                &test_actor(),
+                &CreateNamespaceOptions {
+                    retention_window_ms: window_ms.and_then(NonZeroU64::new),
+                    ..CreateNamespaceOptions::default()
+                },
+            )
+            .await
+            .expect("create the namespace");
+    }
+
+    async fn retention_floor(&self, namespace_id: &NamespaceId) -> ChangeSeq {
+        self.diagnostics(namespace_id).await.retention_floor_seq
     }
 
     /// Writes one file on the server's clock, and returns its commit's
@@ -157,6 +183,112 @@ async fn a_full_pass_advances_each_floor_to_the_last_commit_before_the_window() 
             server.retention_failures(),
             0,
             "window {window_ms:?}: a deleted namespace is skipped, not failed"
+        );
+    }
+}
+
+/// Commits to each namespace at `START_MS` and 20 days later, folds the
+/// commits, and returns each namespace's two sequences. The server's clock
+/// then reads 40 days after `START_MS`, so the server's 30-day window passes
+/// the first commit, and a namespace's 15-day window passes both.
+async fn seed_two_commits(
+    server: &SweepServer,
+    namespaces: &[&NamespaceId],
+) -> Vec<[ChangeSeq; 2]> {
+    let mut first = Vec::new();
+    for namespace_id in namespaces {
+        first.push(server.commit(namespace_id, "/old.txt").await);
+    }
+    server.clock.advance_ms(20 * DAY_MS);
+    let mut seqs = Vec::new();
+    for (namespace_id, first) in namespaces.iter().zip(first) {
+        let second = server.commit(namespace_id, "/new.txt").await;
+        server
+            .maintenance
+            .fold_wal(namespace_id)
+            .await
+            .expect("fold the history");
+        seqs.push([first, second]);
+    }
+    server.clock.advance_ms(20 * DAY_MS);
+    seqs
+}
+
+#[tokio::test]
+async fn a_full_pass_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_servers() {
+    for server_window_ms in [None, Some(WINDOW_MS)] {
+        let directory = tempdir().expect("tempdir");
+        let server = SweepServer::start(
+            local_store(directory.path()),
+            &retention_config(server_window_ms),
+            START_MS,
+        )
+        .await;
+        let [windowed, sibling] = ["windowed", "sibling"].map(namespace_id);
+        server
+            .create_with_window(&windowed, Some(NAMESPACE_WINDOW_MS))
+            .await;
+        server.create_with_window(&sibling, None).await;
+        let seqs = seed_two_commits(&server, &[&windowed, &sibling]).await;
+
+        server
+            .sweep
+            .run_pass(GarbageCollection::Skip)
+            .await
+            .expect("list namespaces");
+        assert_eq!(
+            server.retention_floor(&windowed).await,
+            seqs[0][1],
+            "server window {server_window_ms:?}: the namespace's own window applies, with or \
+             without the server's"
+        );
+        let sibling_floor = match server_window_ms {
+            Some(_) => seqs[1][0],
+            None => ChangeSeq(0),
+        };
+        assert_eq!(
+            server.retention_floor(&sibling).await,
+            sibling_floor,
+            "server window {server_window_ms:?}: a namespace without a window takes the \
+             server's, and keeps its floor when the server has none"
+        );
+    }
+}
+
+#[tokio::test]
+async fn each_pass_uses_the_window_that_the_namespace_has_when_the_pass_runs() {
+    let directory = tempdir().expect("tempdir");
+    let server = SweepServer::start(
+        local_store(directory.path()),
+        &retention_config(Some(WINDOW_MS)),
+        START_MS,
+    )
+    .await;
+    let namespace_id = namespace_id("changing");
+    server.create_with_window(&namespace_id, None).await;
+    let [first, second] = seed_two_commits(&server, &[&namespace_id]).await[0];
+
+    // A 50-day window passes neither commit, clearing the window makes the
+    // server's 30-day window apply, and a 15-day window passes both.
+    for (window_ms, expected_floor) in [
+        (Some(50 * DAY_MS), ChangeSeq(0)),
+        (None, first),
+        (Some(NAMESPACE_WINDOW_MS), second),
+    ] {
+        server
+            .maintenance
+            .set_retention_window(&namespace_id, window_ms.and_then(NonZeroU64::new))
+            .await
+            .expect("set the namespace's window");
+        server
+            .sweep
+            .run_pass(GarbageCollection::Skip)
+            .await
+            .expect("list namespaces");
+        assert_eq!(
+            server.retention_floor(&namespace_id).await,
+            expected_floor,
+            "namespace window {window_ms:?}"
         );
     }
 }
@@ -355,16 +487,28 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
 }
 
 #[tokio::test]
-async fn an_idle_namespace_whose_floor_reached_the_head_costs_a_fixed_number_of_requests() {
+async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
     let mut visits = Vec::new();
-    for window_ms in [None, Some(WINDOW_MS)] {
+    for (server_window_ms, namespace_window_ms) in [
+        (None, None),
+        (Some(WINDOW_MS), None),
+        (None, Some(WINDOW_MS)),
+    ] {
         let mut requests = Vec::new();
         let directory = tempdir().expect("tempdir");
         let base: SharedObjectStore = local_store(directory.path());
         let namespace_id = namespace_id("idle");
+        let prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
         let (writer, now_ms) = seed_writer(&base).await;
         writer
-            .create_namespace(&namespace_id, &test_actor())
+            .create_namespace_with_options(
+                &namespace_id,
+                &test_actor(),
+                &CreateNamespaceOptions {
+                    retention_window_ms: namespace_window_ms.and_then(NonZeroU64::new),
+                    ..CreateNamespaceOptions::default()
+                },
+            )
             .await
             .expect("create the namespace");
         writer
@@ -385,21 +529,18 @@ async fn an_idle_namespace_whose_floor_reached_the_head_costs_a_fixed_number_of_
         ));
         let server = SweepServer::start(
             store.clone(),
-            &retention_config(window_ms),
+            &retention_config(server_window_ms),
             now_ms + 2 * WINDOW_MS,
         )
         .await;
-        // The first pass moves the floor to the head and collects what the
-        // seed left behind.
+        // The first pass moves the floor to the head when a window applies,
+        // and collects what the seed left behind.
         server
             .sweep
             .run_pass(GarbageCollection::Collect)
             .await
             .expect("list namespaces");
-        let diagnostics = server.diagnostics(&namespace_id).await;
-        if window_ms.is_some() {
-            assert_eq!(diagnostics.retention_floor_seq, diagnostics.head_seq);
-        }
+        let windows = format!("server {server_window_ms:?}, namespace {namespace_window_ms:?}");
 
         for garbage in [GarbageCollection::Skip, GarbageCollection::Collect] {
             store.reset();
@@ -408,7 +549,6 @@ async fn an_idle_namespace_whose_floor_reached_the_head_costs_a_fixed_number_of_
                 .run_pass(garbage)
                 .await
                 .expect("list namespaces");
-            let prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
             let visit: Vec<_> = store
                 .take()
                 .into_iter()
@@ -422,14 +562,34 @@ async fn an_idle_namespace_whose_floor_reached_the_head_costs_a_fixed_number_of_
                         | RecordedOperation::Head { .. }
                         | RecordedOperation::List { .. }
                 )),
-                "window {window_ms:?}, garbage {garbage:?}: an idle visit writes nothing: \
-                 {visit:?}"
+                "{windows}, garbage {garbage:?}: an idle visit writes nothing: {visit:?}"
             );
             requests.push(visit.len());
         }
+
+        // The visit's share is the advance's one load of the current manifest.
+        store.reset();
+        let target = RetentionTarget::Window {
+            now_ms: server.maintenance.now_ms(),
+            default_window_ms: server_window_ms.and_then(NonZeroU64::new),
+        };
+        server
+            .maintenance
+            .advance_retention_floor_with_options(
+                &namespace_id,
+                &AdvanceRetentionFloorOptions { target },
+            )
+            .await
+            .expect("advance the floor");
+        let advance = store.take();
+        assert!(advance
+            .iter()
+            .all(|operation| operation.key().starts_with(&prefix)));
+        assert_eq!(advance.len(), IDLE_ADVANCE_REQUESTS, "{windows}");
         visits.push(requests);
     }
-    for (without, with) in visits[0].iter().zip(&visits[1]) {
-        assert_eq!(with - without, IDLE_ADVANCE_REQUESTS);
-    }
+    assert!(
+        visits.windows(2).all(|pair| pair[0] == pair[1]),
+        "every visit makes the advance, whichever window applies: {visits:?}"
+    );
 }

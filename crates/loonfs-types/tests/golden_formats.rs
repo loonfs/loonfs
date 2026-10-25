@@ -468,6 +468,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         created_by: loonfs_types::ActorId::parse("test").expect("actor"),
         access: NamespaceAccess::Unrestricted {},
         naming: NamespaceNaming::CaseInsensitive,
+        retention_window_ms: None,
         fork_basis: None,
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
@@ -554,6 +555,14 @@ fn sample_acl_manifest() -> NamespaceManifestPayload {
 fn sample_case_sensitive_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         naming: NamespaceNaming::CaseSensitive,
+        ..sample_manifest_payload()
+    }
+}
+
+/// A namespace with its own 30-day retention window.
+fn sample_retention_window_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
+        retention_window_ms: std::num::NonZeroU64::new(2_592_000_000),
         ..sample_manifest_payload()
     }
 }
@@ -3020,9 +3029,25 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
             "manifest.case_sensitive.v1.json",
             sample_case_sensitive_manifest(),
         ),
+        (
+            "manifest.retention_window.v1.json",
+            sample_retention_window_manifest(),
+        ),
     ] {
         assert_manifest_matches_golden(name, payload);
     }
+}
+
+#[test]
+fn namespace_manifest_rejects_a_zero_retention_window() {
+    let encoded =
+        control_document_with_payload_edit("manifest.retention_window.v1.json", |payload| {
+            payload["retention_window_ms"] = serde_json::Value::from(0);
+        });
+    assert_matches!(
+        decode_namespace_manifest_json(&rezstd(&encoded)),
+        Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("nonzero")
+    );
 }
 
 fn sample_binding_rows() -> Vec<MetadataRow> {

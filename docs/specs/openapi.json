@@ -968,6 +968,12 @@
           "naming": {
             "$ref": "#/components/schemas/NamespaceNaming",
             "description": "How the namespace compares sibling names. The mode can't be changed after the namespace is\ncreated, and it defaults to `case_insensitive`."
+          },
+          "retention_window_ms": {
+            "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep then uses this window for the namespace instead of the server's\n`retention_window_ms` setting. A `retention_window` maintenance run can change or clear the\nwindow later.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -3412,6 +3418,12 @@
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
+          },
+          "retention_window_ms": {
+            "description": "The namespace's retention window, in milliseconds. Only a namespace with its own window has\nthis field. The reference server's maintenance sweep uses the server's `retention_window_ms`\nsetting for a namespace that has no window of its own.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -3796,7 +3808,8 @@
             "gc": "#/components/schemas/RunMaintenanceRequestGc",
             "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
             "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
-            "retention": "#/components/schemas/RunMaintenanceRequestRetention"
+            "retention": "#/components/schemas/RunMaintenanceRequestRetention",
+            "retention_window": "#/components/schemas/RunMaintenanceRequestRetentionWindow"
           },
           "propertyName": "kind"
         },
@@ -3809,6 +3822,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestRetention"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceRequestRetentionWindow"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator"
@@ -3902,6 +3918,27 @@
         ],
         "type": "object"
       },
+      "RunMaintenanceRequestRetentionWindow": {
+        "description": "A job that sets or clears the namespace's retention window.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "retention_window"
+            ],
+            "type": "string"
+          },
+          "retention_window_ms": {
+            "description": "The namespace's new retention window, in milliseconds, which must be positive. Without it,\nthe job clears the namespace's window, and the reference server's `retention_window_ms`\nsetting applies to the namespace again.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
       "RunMaintenanceResponse": {
         "description": "The result of one maintenance job.\n\nThe `kind` matches the request.",
         "discriminator": {
@@ -3909,7 +3946,8 @@
             "gc": "#/components/schemas/RunMaintenanceResponseGc",
             "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
             "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
-            "retention": "#/components/schemas/RunMaintenanceResponseRetention"
+            "retention": "#/components/schemas/RunMaintenanceResponseRetention",
+            "retention_window": "#/components/schemas/RunMaintenanceResponseRetentionWindow"
           },
           "propertyName": "kind"
         },
@@ -3922,6 +3960,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseRetention"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceResponseRetentionWindow"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator"
@@ -4067,6 +4108,32 @@
         "required": [
           "namespace_id",
           "retention_floor_seq",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunMaintenanceResponseRetentionWindow": {
+        "description": "The namespace's retention window after the job.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "retention_window"
+            ],
+            "type": "string"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace whose retention window the job set or cleared."
+          },
+          "retention_window_ms": {
+            "description": "The namespace's retention window, in milliseconds. It's absent when the namespace has no\nwindow of its own.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "namespace_id",
           "kind"
         ],
         "type": "object"
@@ -5234,7 +5301,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         "operationId": "run_maintenance",
         "parameters": [
           {

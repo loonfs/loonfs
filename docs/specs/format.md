@@ -955,6 +955,7 @@ The first manifest of a namespace has these values:
 | Manifest number | 1 | 1 |
 | Namespace ID, creation time, `created_by` | From the request | From the request |
 | Access mode and naming mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
+| Retention window | From the request, if the request includes `retention_window_ms` | From the pinned source manifest, if that manifest sets `retention_window_ms` |
 | Status | Active | Active |
 | Writer block | None | None |
 | Writer epoch, compactor epoch, folded WAL number, activity counters | 0 | 0 |
@@ -976,7 +977,7 @@ A fold works in these steps:
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-A fold loads the current manifest before its put, and again if its put loses, and then it checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
+A fold loads the current manifest before its put, and again if its put loses, and then it checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention advance, and a retention window change publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
 A fold that rebuilds after another writer's claim folds the new writer's log. The old writer session's [writer position](glossary.md#writer-position) doesn't move onto that fold's manifest, as described in [Replaying the visible WAL](#42-replaying-the-visible-wal), and the old session finds that it's fenced at its next commit.
 
@@ -1005,7 +1006,7 @@ Every successor manifest MUST:
 - not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the allocators, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same head.
 
-A namespace tombstone has no successor.
+A successor can set, change, or clear the [retention window](glossary.md#retention-window), because the window is a maintenance setting and not part of the namespace's identity. A namespace tombstone has no successor.
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
@@ -1143,7 +1144,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and naming mode. The inherited runs determine the same base sequence. Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
+3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, naming mode, and retention window. The inherited runs determine the same base sequence. Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1228,6 +1229,10 @@ To find the new floor, the advance reads commits downward from the target, one s
 
 The advance loads the current manifest. If the new floor is at or below the manifest's floor, the advance publishes nothing. Otherwise, the advance checks that the manifest's referenced segments exist, and it publishes a successor with the same runs, head summary, allocators, and authority, with `retention_floor_seq` set to the new floor. In both cases the advance returns the resulting floor, which is below the target when the commit at the target is younger than the default grace. The floor never decreases.
 
+A namespace's "retention window" (`retention_window_ms`) is an optional setting in its manifest, a positive number of milliseconds. It sets how much recent history a maintainer that advances the floor on a schedule keeps for the namespace. Such a maintainer, like the reference server's maintenance sweep, also has a window of its own. On each scheduled advance, the maintainer uses the namespace's window if the current manifest sets `retention_window_ms`, and its own window otherwise. The cutoff time is the current time minus that window. With neither window, it doesn't advance the floor. For example, if a server's window is 30 days and one namespace's window is 7 days, the server keeps 7 days of history for that namespace and 30 days for every namespace without a window.
+
+A create request can set the window, and a later publication can set, change, or clear it. That publication copies every other field of the current manifest. If the current manifest already has the requested window, LoonFS publishes nothing. A fork's first manifest copies the window of the pinned source manifest.
+
 A pin below the new floor still protects its own manifest and runs.
 
 The floor also bounds how long a deletion stays recoverable. Once the floor is at or above a deletion's sequence, the namespace's writer expires the deletion by committing an `expire` event for it (see [File and subtree deletion](#16-file-and-subtree-deletion)). The advance doesn't change any deletion itself, so a deletion at or below the floor stays recoverable until its `expire` is committed. A [writer session](glossary.md#writer-session) keeps the last floor whose deletions it has finished expiring, which is 0 in a new session. Whenever the session's [writer position](glossary.md#writer-position) is on a manifest with a higher floor than the last one it finished, the session repeats these steps until no `listed` row at or below the new floor remains:
@@ -1244,6 +1249,8 @@ Why does the floor stop at a commit that's at least as old as the default grace?
 Why can the floor pass a commit that's younger than the default grace? Commits are assigned sequences in commit order, so if commit 12 is at least an hour old, every commit below 12 was committed at least an hour ago, whatever its timestamp records. A writer whose clock runs far ahead therefore can't stop every later advance. A future-dated commit at the head isn't passed until a commit above it is at least as old as the default grace, or until its own timestamp is at least the default grace in the past.
 
 Why does the advance read downward from the target? It reads only the commits at the top of the history that are younger than the default grace, which is about an hour of commits, instead of every commit above the floor.
+
+Why is the window stored in the manifest, and not only in each maintainer's configuration? Namespaces in one store can need different amounts of history. Every process that maintains a namespace reads the same current manifest, so all of them use the same window for that namespace. The advance already loads that manifest to find its target, so reading the window costs no extra request.
 
 Why check that the segments exist first? Advancing the floor ends the guarantee that older history can be replayed, so LoonFS first makes sure the history it's keeping is readable. The check isn't a transaction across objects, and it doesn't replace garbage collection's reference rules. Reads still verify checksums.
 
@@ -1795,6 +1802,7 @@ A namespace manifest contains:
 | `created_by` | The application-supplied actor that created or forked the namespace. |
 | `access` | The access mode, which can't change after creation: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
 | `naming` | The naming mode, which can't change after creation: `"case_insensitive"` or `"case_sensitive"` (see [Names and paths](#14-names-and-paths)). |
+| `retention_window_ms?` | The retention window, a positive number of milliseconds (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Unlike the access and naming modes, it can change in a successor. |
 | `fork_basis?` | The source reference and pin identity, which can't change after creation. |
 | `status` | Whether the namespace is active or deleted. |
 | `writer?` | The diagnostic writer block. |

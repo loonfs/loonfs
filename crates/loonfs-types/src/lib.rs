@@ -175,6 +175,7 @@ pub use api::v0::{
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataPassReport,
     NamespaceAccessMode, NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, PathEntry,
     PathEntryKind, PreconditionFields, RecoverAdministratorRequest, RecoverAdministratorResponse,
-    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse, Snapshot,
-    TrashEntry, WalFoldStepOutcome,
+    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse,
+    SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot, TrashEntry,
+    WalFoldStepOutcome,
 };

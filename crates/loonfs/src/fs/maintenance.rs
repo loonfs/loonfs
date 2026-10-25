@@ -13,8 +13,8 @@ use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, ErrorCode, FoldWalOutcome,
     FoldWalResponse, ListCheckpointsResponse, MaintainMetadataOptions, MaintenanceCancellation,
     MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, MetadataPassReport, NamespaceId, PinId, SharedObjectStore,
-    WalFoldStepOutcome,
+    MetadataMaintenanceResponse, MetadataPassReport, NamespaceId, PinId,
+    SetRetentionWindowResponse, SharedObjectStore, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -23,6 +23,7 @@ use loonfs_core::CheckpointPageCursor;
 use loonfs_core::CoreError;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -931,8 +932,9 @@ impl Maintenance {
     /// base compaction keeps, for each file, every revision above the floor
     /// and the newest revision at or below it. The runtime doesn't schedule
     /// an advance. The reference server makes one on each full maintenance
-    /// pass when its `retention_window_ms` is set, and without that setting,
-    /// an unattended deployment keeps its whole history.
+    /// pass, toward [`RetentionTarget::Window`](crate::RetentionTarget::Window)
+    /// with its `retention_window_ms` as the default window, so a namespace
+    /// with neither its own window nor that setting keeps its whole history.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.advance_retention_floor",
@@ -954,6 +956,44 @@ impl Maintenance {
         let result = self
             .engine(namespace_id)
             .advance_retention_floor(options.target)
+            .await
+            .map_err(Error::from);
+        self.publisher
+            .finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
+            .await
+            .map(|report| report.response)
+    }
+
+    /// Sets the namespace's retention window.
+    ///
+    /// `None` clears the window, so a host's scheduled advance uses the
+    /// host's own setting again.
+    ///
+    /// The call publishes a manifest that changes nothing else, and if the
+    /// namespace already has the window, it publishes nothing. See
+    /// [Advancing the retention
+    /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor).
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.set_retention_window",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "set_retention_window",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn set_retention_window(
+        &self,
+        namespace_id: &NamespaceId,
+        retention_window_ms: Option<NonZeroU64>,
+    ) -> Result<SetRetentionWindowResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let result = self
+            .engine(namespace_id)
+            .set_retention_window(retention_window_ms)
             .await
             .map_err(Error::from);
         self.publisher

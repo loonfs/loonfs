@@ -32,6 +32,7 @@ use loonfs_types::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
+use std::num::NonZeroU64;
 
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
@@ -49,6 +50,22 @@ pub(super) struct DeleteNamespaceQuery {
     /// Delete only if the head is still at this sequence (`stale_head` on
     /// mismatch).
     expected_head_seq: Option<String>,
+}
+
+/// Reads the `retention_window_ms` field of a request body. A window must be
+/// positive, so zero is an invalid request.
+fn retention_window_ms(value: Option<u64>) -> Result<Option<NonZeroU64>, ApiResponseError> {
+    value
+        .map(|value| {
+            NonZeroU64::new(value).ok_or_else(|| {
+                ApiResponseError::new(
+                    ErrorCode::InvalidRequest,
+                    "`retention_window_ms` must be greater than zero",
+                )
+                .with_param("/retention_window_ms")
+            })
+        })
+        .transpose()
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -220,6 +237,7 @@ pub(super) async fn create_namespace(
             &CreateNamespaceOptions {
                 access: request.access,
                 naming: request.naming,
+                retention_window_ms: retention_window_ms(request.retention_window_ms)?,
                 ..Default::default()
             },
         )
@@ -765,7 +783,7 @@ pub(super) struct CheckpointPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -818,6 +836,13 @@ pub(super) async fn run_maintenance(
                 .advance_retention_floor_with_options(&namespace_id, &options)
                 .await
                 .map(RunMaintenanceResponse::Retention)
+        }
+        RunMaintenanceRequest::RetentionWindow(request) => {
+            let window_ms = retention_window_ms(request.retention_window_ms)?;
+            maintenance
+                .set_retention_window(&namespace_id, window_ms)
+                .await
+                .map(RunMaintenanceResponse::RetentionWindow)
         }
         RunMaintenanceRequest::RecoverAdministrator(request) => {
             let actor_id = actor_id.ok_or_else(missing_actor)?;

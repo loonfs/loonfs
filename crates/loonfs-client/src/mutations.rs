@@ -1022,6 +1022,7 @@ mod tests {
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(0),
             retention_floor_seq: ChangeSeq(0),
+            retention_window_ms: None,
         };
         let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

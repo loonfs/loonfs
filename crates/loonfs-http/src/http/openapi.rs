@@ -21,7 +21,8 @@ use loonfs_types::{
     GrepGcReport, ListCheckpointsResponse, ListFileRevisionsResponse, ListSnapshotsResponse,
     ListTrashResponse, MetadataMaintenanceOutcome, MetadataMaintenanceRequest,
     MetadataMaintenanceResponse, PinId, RetainedCandidates, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, Snapshot, TrashEntry,
+    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot,
+    TrashEntry,
 };
 
 /// Builds the static OpenAPI document for the v0 HTTP API.
@@ -123,6 +124,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         MetadataMaintenanceResponse,
         MetadataMaintenanceOutcome,
         AdvanceRetentionResponse,
+        SetRetentionWindowRequest,
+        SetRetentionWindowResponse,
         RunMaintenanceResponse,
         GcRequest,
         GcResponse,

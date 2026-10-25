@@ -190,6 +190,13 @@ pub struct CreateNamespaceRequest {
     pub naming: NamespaceNaming,
     /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
+    /// The namespace's retention window, in milliseconds, which must be positive. The reference
+    /// server's maintenance sweep then uses this window for the namespace instead of the server's
+    /// `retention_window_ms` setting. A `retention_window` maintenance run can change or clear the
+    /// window later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub retention_window_ms: Option<u64>,
 }
 
 /// A request to fork a namespace.
@@ -229,6 +236,12 @@ pub struct NamespaceMetadata {
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it.
     pub retention_floor_seq: ChangeSeq,
+    /// The namespace's retention window, in milliseconds. Only a namespace with its own window has
+    /// this field. The reference server's maintenance sweep uses the server's `retention_window_ms`
+    /// setting for a namespace that has no window of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub retention_window_ms: Option<u64>,
 }
 
 /// A namespace's access mode, without the grants that the namespace was created with.
@@ -1605,6 +1618,33 @@ pub struct AdvanceRetentionResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
+/// A request to set the namespace's retention window, or to clear it when the request doesn't
+/// include `retention_window_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SetRetentionWindowRequest {
+    /// The namespace's new retention window, in milliseconds, which must be positive. Without it,
+    /// the job clears the namespace's window, and the reference server's `retention_window_ms`
+    /// setting applies to the namespace again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub retention_window_ms: Option<u64>,
+}
+
+/// The namespace's retention window after a `retention_window` job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SetRetentionWindowResponse {
+    /// The namespace whose retention window the job set or cleared.
+    pub namespace_id: NamespaceId,
+    /// The namespace's retention window, in milliseconds. It's absent when the namespace has no
+    /// window of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub retention_window_ms: Option<u64>,
+}
+
 /// One maintenance job for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1621,6 +1661,8 @@ pub enum RunMaintenanceRequest {
     ///
     /// The floor stops at the newest commit at or below the target that's at least one hour old.
     Retention(AdvanceRetentionRequest),
+    /// A job that sets or clears the namespace's retention window.
+    RetentionWindow(SetRetentionWindowRequest),
     /// A job that restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),
 }
@@ -1707,6 +1749,8 @@ pub enum RunMaintenanceResponse {
     Gc(GcResponse),
     /// The result of advancing the retention floor.
     Retention(AdvanceRetentionResponse),
+    /// The namespace's retention window after the job.
+    RetentionWindow(SetRetentionWindowResponse),
     /// The committed administrator recovery.
     RecoverAdministrator(RecoverAdministratorResponse),
 }
@@ -1938,9 +1982,10 @@ mod tests {
             fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
+            retention_window_ms: None,
         };
         assert_eq!(
-            serde_json::to_value(namespace).expect("serialize namespace"),
+            serde_json::to_value(namespace.clone()).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
                 "access": {"kind": "unrestricted"},
@@ -1950,6 +1995,15 @@ mod tests {
                 "head_seq": 11,
                 "retention_floor_seq": 4
             })
+        );
+        let windowed = NamespaceMetadata {
+            retention_window_ms: Some(86_400_000),
+            ..namespace
+        };
+        assert_eq!(
+            serde_json::to_value(windowed).expect("serialize namespace")["retention_window_ms"],
+            86_400_000,
+            "the metadata of a namespace with its own window includes retention_window_ms"
         );
     }
 
@@ -2868,6 +2922,24 @@ mod tests {
                     cutoff_at_ms: Some(1_752_624_000_000),
                 })),
             ),
+            (
+                serde_json::json!({"kind": "retention_window"}),
+                Some(RunMaintenanceRequest::RetentionWindow(
+                    SetRetentionWindowRequest::default(),
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "retention_window", "retention_window_ms": 86_400_000}),
+                Some(RunMaintenanceRequest::RetentionWindow(
+                    SetRetentionWindowRequest {
+                        retention_window_ms: Some(86_400_000),
+                    },
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "retention_window", "bogus": 1}),
+                None,
+            ),
             (serde_json::json!({"kind": "grep_gc"}), None),
             (serde_json::json!({}), None),
             (serde_json::json!({"kind": "nope"}), None),
@@ -2918,6 +2990,15 @@ mod tests {
             "namespace_id": "demo",
         }))
         .expect("the same create body without a typo decodes");
+        assert_eq!(
+            serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+                "namespace_id": "demo",
+                "retention_window_ms": 86_400_000
+            }))
+            .expect("a create body with a retention window decodes")
+            .retention_window_ms,
+            Some(86_400_000)
+        );
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
             "namespace_id": "demo",
             "fork_of": "other"

@@ -92,6 +92,6 @@ pub(crate) use self::load::{
     load_manifest_segments, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present, metadata_basis_from_manifest, LoadedMetadataBasis,
 };
-pub(crate) use self::retention::advance_retention_floor;
+pub(crate) use self::retention::{advance_retention_floor, set_retention_window};
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};

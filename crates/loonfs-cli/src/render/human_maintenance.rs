@@ -30,13 +30,21 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
         }
     };
     format!(
-        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\nnaming: {}",
+        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\nnaming: {}\n\
+         retention_window_ms: {}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,
         namespace.created_by,
-        namespace.naming.as_str()
+        namespace.naming.as_str(),
+        retention_window(namespace.retention_window_ms),
     )
+}
+
+/// Formats a namespace's retention window, or `-` when the namespace has no
+/// window of its own and the server's window applies.
+fn retention_window(retention_window_ms: Option<u64>) -> String {
+    retention_window_ms.map_or_else(|| "-".to_owned(), |window_ms| window_ms.to_string())
 }
 
 pub(super) fn human_namespace_deleted(response: &DeleteNamespaceResponse) -> String {
@@ -163,6 +171,16 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 retention.namespace_id, retention.retention_floor_seq.0
             )
         }
+        RunMaintenanceResponse::RetentionWindow(window) => match window.retention_window_ms {
+            Some(window_ms) => format!(
+                "retention window for {}: {window_ms} ms",
+                window.namespace_id
+            ),
+            None => format!(
+                "retention window for {}: none, so the server's window applies",
+                window.namespace_id
+            ),
+        },
     }
 }
 

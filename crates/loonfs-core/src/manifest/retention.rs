@@ -1,4 +1,5 @@
-//! Retention floor advancement through a verified successor manifest.
+//! Retention floor advancement, and the namespace's retention window, through
+//! a verified successor manifest.
 
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
@@ -17,8 +18,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{AdvanceRetentionResponse, ChangeSeq, NamespaceId};
+use loonfs_types::{AdvanceRetentionResponse, ChangeSeq, NamespaceId, SetRetentionWindowResponse};
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Where a retention advance moves the floor.
@@ -44,6 +46,20 @@ pub enum RetentionTarget {
     Cutoff {
         /// A Unix time in milliseconds.
         cutoff_at_ms: u64,
+    },
+    /// The last commit committed at or before `now_ms` minus the namespace's
+    /// retention window, or minus `default_window_ms` when the namespace has
+    /// no window. With neither window, the floor stays where it is.
+    ///
+    /// The advance reads the namespace's window from the manifest it loads
+    /// to find the target, so a host that advances floors on a schedule
+    /// needs no extra request to read each namespace's window.
+    Window {
+        /// A Unix time in milliseconds.
+        now_ms: u64,
+        /// The window for a namespace that has no window of its own, such as
+        /// a host's setting.
+        default_window_ms: Option<NonZeroU64>,
     },
 }
 
@@ -102,6 +118,16 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         RetentionTarget::Cutoff { cutoff_at_ms } => {
             last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
         }
+        RetentionTarget::Window {
+            now_ms,
+            default_window_ms,
+        } => match manifest.retention_window_ms.or(default_window_ms) {
+            Some(window_ms) => {
+                let cutoff_at_ms = now_ms.saturating_sub(window_ms.get());
+                last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
+            }
+            None => manifest.retention_floor_seq,
+        },
     };
     let target =
         newest_commit_past_the_grace_window(store, segment_cache, &current, target, now_ms).await?;
@@ -143,6 +169,45 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             retention_floor_seq: floor,
         },
         published: advanced
+            .then(|| PublishedManifest::new(&current.state.envelope, Some(deadline.origin()))),
+    })
+}
+
+/// Sets the namespace's retention window, or clears it when
+/// `retention_window_ms` is `None`, through a successor manifest that changes
+/// nothing else (format spec, "Advancing the retention floor").
+///
+/// If the current manifest already has the requested window, the call
+/// publishes nothing.
+pub(crate) async fn set_retention_window<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    retention_window_ms: Option<NonZeroU64>,
+    timer: Arc<dyn MonotonicTimer>,
+) -> Result<PublicationReport<SetRetentionWindowResponse>> {
+    let deadline = Deadline::start(timer);
+    let (changed, current, _) = update_manifest(
+        store,
+        namespace_id,
+        &deadline,
+        MAX_CONTENTION_ATTEMPTS,
+        |current: LoadedManifest| async move {
+            let mut payload = current.state.envelope.payload().clone();
+            ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+            if payload.retention_window_ms == retention_window_ms {
+                return Ok(ManifestChange::Finished(false));
+            }
+            payload.retention_window_ms = retention_window_ms;
+            Ok(ManifestChange::Next(Box::new(payload), true))
+        },
+    )
+    .await?;
+    Ok(PublicationReport {
+        response: SetRetentionWindowResponse {
+            namespace_id: namespace_id.clone(),
+            retention_window_ms: retention_window_ms.map(NonZeroU64::get),
+        },
+        published: changed
             .then(|| PublishedManifest::new(&current.state.envelope, Some(deadline.origin()))),
     })
 }

@@ -78,9 +78,13 @@ pub enum GarbageCollection {
 /// without a held entry keeps no retry state, because the next pass is its
 /// retry.
 ///
-/// With `retention_window_ms` set, the pass also advances each active
-/// namespace's retention floor to the last commit at or before the current
-/// time minus the window. Ticks don't advance the floor on their own
+/// The pass also advances each active namespace's retention floor to the
+/// last commit at or before the current time minus the namespace's retention
+/// window, or minus `retention_window_ms` for a namespace that has no window
+/// of its own. The
+/// advance reads the namespace's window from the manifest that it loads to
+/// find the floor, so a namespace with neither window costs that one load
+/// and publishes nothing. Ticks don't advance the floor on their own
 /// schedule, because an advance checks that the manifest's segments exist and
 /// publishes a manifest, and a window measured in days needs no finer
 /// schedule than the daily pass. A namespace whose floor already reached its
@@ -109,6 +113,8 @@ struct SweepInner {
     metadata_retry_interval_ms: u64,
     collection_interval_ms: u64,
     full_interval: Duration,
+    /// The server's retention window, which applies to each namespace
+    /// without a window of its own.
     retention_window_ms: Option<NonZeroU64>,
     idle_session_close_after_ms: u64,
     /// The namespaces being visited, each with whether a full pass found it
@@ -280,8 +286,8 @@ impl Sweep {
 
     /// Visits every namespace the store lists once. With
     /// [`GarbageCollection::Collect`], each visit also collects the
-    /// namespace's garbage and its grep garbage. With a retention window,
-    /// each visit also advances the namespace's retention floor.
+    /// namespace's garbage and its grep garbage. Each visit also advances the
+    /// namespace's retention floor under its retention window.
     ///
     /// Returns how many namespaces the pass listed, or the listing failure
     /// that ended it once the visits it had started returned. A failed call
@@ -385,10 +391,7 @@ impl Sweep {
         }
         // The advance reads only folded commits, so it runs after the
         // metadata call, which can fold an idle tail.
-        if let Some(retention_window_ms) = inner.retention_window_ms {
-            self.advance_retention(&namespace_id, entry, retention_window_ms)
-                .await;
-        }
+        self.advance_retention(&namespace_id, entry).await;
         if garbage == GarbageCollection::Collect {
             self.gc(&namespace_id, entry, seq).await;
         }
@@ -471,8 +474,7 @@ impl Sweep {
         let inner = &self.inner;
         match lock(&inner.visiting).entry(namespace_id.clone()) {
             Entry::Occupied(mut visit) => {
-                if overlap == Overlap::LeaveRetentionAdvance && inner.retention_window_ms.is_some()
-                {
+                if overlap == Overlap::LeaveRetentionAdvance {
                     visit.insert(true);
                 }
                 return None;
@@ -503,11 +505,9 @@ impl Sweep {
         // had the namespace, so the loop turns once for each full pass that
         // overlaps the visit.
         while visit.release_unless_retention_due() {
-            if let Some(retention_window_ms) = self.inner.retention_window_ms {
-                let entry = self.inner.namespaces.entry(&visit.namespace_id);
-                self.advance_retention(&visit.namespace_id, entry.as_deref(), retention_window_ms)
-                    .await;
-            }
+            let entry = self.inner.namespaces.entry(&visit.namespace_id);
+            self.advance_retention(&visit.namespace_id, entry.as_deref())
+                .await;
         }
     }
 
@@ -556,27 +556,27 @@ impl Sweep {
     }
 
     /// Advances the namespace's retention floor to the last commit at or
-    /// before the current time minus `retention_window_ms`, with the same
-    /// advance as the `retention` job. A deleted namespace returns
-    /// `namespace_deleted`, which isn't a failure. For when the deletions
-    /// below the new floor expire, see [Advancing the floor on a
+    /// before the current time minus the namespace's retention window, or
+    /// minus `retention_window_ms` for a namespace that has no window of its
+    /// own, with the same
+    /// advance as the `retention` job. A namespace with neither window keeps
+    /// its floor. A deleted namespace returns `namespace_deleted`, which isn't
+    /// a failure. For when the deletions below the new floor expire, see
+    /// [Advancing the floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
     async fn advance_retention(
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace>>,
-        retention_window_ms: NonZeroU64,
     ) {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
             return;
         }
         let options = AdvanceRetentionFloorOptions {
-            target: RetentionTarget::Cutoff {
-                cutoff_at_ms: inner
-                    .maintenance
-                    .now_ms()
-                    .saturating_sub(retention_window_ms.get()),
+            target: RetentionTarget::Window {
+                now_ms: inner.maintenance.now_ms(),
+                default_window_ms: inner.retention_window_ms,
             },
         };
         // Boxed so the spawned sweep's `Send` check does not recurse through
@@ -775,8 +775,8 @@ impl Drop for IndexBuild<'_> {
 enum Overlap {
     /// Skip the namespace.
     Skip,
-    /// Skip the namespace, and with a retention window, leave the retention
-    /// advance to the visit that has it.
+    /// Skip the namespace, and let the visit in progress make the retention
+    /// advance.
     LeaveRetentionAdvance,
 }
 
