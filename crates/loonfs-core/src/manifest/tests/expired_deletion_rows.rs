@@ -259,6 +259,7 @@ async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
         None,
         namespace_id,
         RetentionTarget::Seq(deletion_seq),
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -611,6 +612,7 @@ async fn a_recoverable_deletion_inside_an_expired_one_keeps_the_boundary_above_i
         None,
         &namespace_id,
         RetentionTarget::Seq(deletion_seq),
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -694,6 +696,7 @@ async fn expire_old<S: ObjectStore>(
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

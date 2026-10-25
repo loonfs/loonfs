@@ -99,6 +99,14 @@ pub(crate) fn assert_matches_golden_token(name: &str, actual: &str) {
     assert_eq!(expected, actual, "golden token `{name}` changed");
 }
 
+/// Returns the wall-clock reading at which a commit stamped at
+/// `committed_at_ms` is one default garbage collection grace window old, so a
+/// retention advance measured at that reading can pass the commit.
+#[cfg(test)]
+pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
+    committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
+}
+
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
 pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
     crate::MutationContext {

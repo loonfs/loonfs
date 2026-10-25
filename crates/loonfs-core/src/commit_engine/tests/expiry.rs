@@ -133,6 +133,7 @@ async fn an_undelete_before_the_expiry_step_revokes_its_deletion_and_one_after_r
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(1_000),
         Arc::new(StdMonotonicTimer::default()),
     )
     .await
@@ -287,6 +288,7 @@ async fn advance_the_floor<S: ObjectStore + ?Sized>(
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(1_000),
         Arc::new(StdMonotonicTimer::default()),
     )
     .await

@@ -91,7 +91,6 @@ async fn compact_receipt_past_horizon(
             .expect("create checkpoint");
     }
     let advanced = runtime
-        .maintenance
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention floor");
@@ -735,7 +734,6 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .await
         .expect("create checkpoint");
     let advanced = runtime
-        .maintenance
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance retention floor");

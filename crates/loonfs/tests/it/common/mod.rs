@@ -4,14 +4,15 @@
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::{
-    ActorId, AdvanceRetentionResponse, ChangeSeq, Commit, CompleteUploadBody, ContentRef,
-    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager,
-    FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder,
-    MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace, NamespaceDiagnostics,
-    NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore,
-    Snapshot, UploadId, UploadSession, Writable,
+    ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
+    CompleteUploadBody, ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode,
+    FileBytes, FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse,
+    LoonFs, LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace,
+    NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
+    SharedObjectStore, Snapshot, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -212,6 +213,22 @@ pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: 
     panic!("compaction did not finish within 32 steps");
 }
 
+/// Builds a maintenance handle on `store` whose wall clock is one default
+/// grace window ahead of the system clock, so a retention advance through it
+/// can pass every commit made before the call.
+pub(crate) async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
+    let clock = Arc::new(ManualClock::at_system_time());
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
+    LoonFs::builder_with_store(store)
+        .writer_id(writer_id.clone())
+        .wall_clock(clock)
+        .build()
+        .await
+        .expect("build the retention maintenance handle")
+        .maintenance(writer_id)
+}
+
 /// A reader with nothing cached, so its first read loads the current manifest.
 pub(crate) async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
     LoonFs::builder_with_store(store)
@@ -228,6 +245,7 @@ pub(crate) struct TestRuntime {
     pub(crate) writer: LoonFs<Writable>,
     pub(crate) reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
+    store: SharedObjectStore,
     /// The fixture holds one handle per namespace it writes, as a host
     /// would, so its helpers keep publishing through one session.
     namespaces: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
@@ -277,7 +295,7 @@ pub(crate) async fn open_runtime_with_async(
     .await
     .expect("build writer");
     let reader = writer.read_only();
-    let maintenance = LoonFs::builder_with_store(store)
+    let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .build()
         .await
@@ -287,6 +305,7 @@ pub(crate) async fn open_runtime_with_async(
         writer,
         reader,
         maintenance,
+        store,
         namespaces: Mutex::default(),
     }
 }
@@ -294,6 +313,33 @@ pub(crate) async fn open_runtime_with_async(
 /// Direct async access for tests that drive several operations inside one
 /// runtime; everything else goes through the blocking trait below.
 impl TestRuntime {
+    /// Advances the namespace's retention floor to the head through
+    /// [`maintenance_past_the_grace_window`], so the advance can pass every
+    /// commit this fixture made.
+    pub(crate) async fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<AdvanceRetentionResponse> {
+        self.advance_retention_floor_with_options(
+            namespace_id,
+            &AdvanceRetentionFloorOptions::default(),
+        )
+        .await
+    }
+
+    /// Advances the namespace's retention floor toward `options.target`
+    /// through [`maintenance_past_the_grace_window`].
+    pub(crate) async fn advance_retention_floor_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &AdvanceRetentionFloorOptions,
+    ) -> loonfs::Result<AdvanceRetentionResponse> {
+        maintenance_past_the_grace_window(self.store.clone())
+            .await
+            .advance_retention_floor_with_options(namespace_id, options)
+            .await
+    }
+
     /// Returns the handle this fixture holds for `namespace_id`, opening it
     /// on first use.
     pub(crate) fn namespace_writer(
@@ -786,7 +832,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        block_on(self.maintenance.advance_retention_floor(namespace_id))
+        block_on(self.advance_retention_floor(namespace_id))
     }
 }
 

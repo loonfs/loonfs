@@ -64,6 +64,7 @@ impl Rival {
                     None,
                     namespace_id,
                     RetentionTarget::Head,
+                    crate::test_support::grace_elapsed_after(test_context().now_ms),
                     crate::test_support::std_timer(),
                 )
                 .await

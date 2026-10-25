@@ -243,6 +243,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(setup.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -1210,6 +1211,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         None,
         namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(1_000),
         crate::test_support::std_timer(),
     )
     .await
@@ -1473,6 +1475,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(setup.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -1762,6 +1765,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(setup.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -1999,6 +2003,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(setup.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -3003,6 +3008,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(setup.now_ms),
         crate::test_support::std_timer(),
     )
     .await

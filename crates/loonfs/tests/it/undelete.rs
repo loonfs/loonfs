@@ -779,7 +779,6 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
         .await
         .expect("fold the deletion");
     let advanced = fs
-        .maintenance
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance the floor past the deletion");

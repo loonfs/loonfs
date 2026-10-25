@@ -227,6 +227,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

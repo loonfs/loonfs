@@ -922,6 +922,11 @@ impl Maintenance {
     /// Advances the namespace retention floor toward `options.target` when a
     /// verified checkpoint makes it safe.
     ///
+    /// Whatever the target, the floor stops at the newest commit at or below
+    /// the target that's at least
+    /// [`GC_DEFAULT_GRACE_WINDOW_MS`](crate::GC_DEFAULT_GRACE_WINDOW_MS) old
+    /// on the runtime's wall clock (format spec, "Advancing the retention
+    /// floor"), and the response includes the floor that the advance reached.
     /// Advancing the floor abandons the replay history below it, and a later
     /// base compaction keeps, for each file, every revision above the floor
     /// and the newest revision at or below it. The runtime doesn't schedule

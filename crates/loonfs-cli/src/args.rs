@@ -1380,8 +1380,11 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// Advance the retention floor and discard older replay history.
     ///
     /// The floor moves to the folded manifest head unless a target is given.
-    /// A later base compaction keeps every file revision above the floor and
-    /// each file's newest revision at or below it.
+    /// Whatever the target, the floor stops at the newest commit at or below
+    /// the target that's at least one hour old, and the output shows the
+    /// floor that the advance reached. A later base compaction keeps every
+    /// file revision above the floor and each file's newest revision at or
+    /// below it.
     Advance(MaintenanceRetentionAdvanceArgs),
 }
 

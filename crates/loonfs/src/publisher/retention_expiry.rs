@@ -9,7 +9,14 @@ async fn a_busy_session_retries_a_panicked_expiry_step_after_its_next_publicatio
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
-    let writer = test_writer_with_interval(store.clone() as SharedStore, 0).await;
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .min_publish_interval_ms(0)
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
     let actor = loonfs_test_support::test_actor();
     writer
         .create_namespace(&namespace_id, &actor)
@@ -54,8 +61,9 @@ async fn a_busy_session_retries_a_panicked_expiry_step_after_its_next_publicatio
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
     maintenance.fold_wal(&namespace_id).await.expect("fold");
 
-    // The advance's position move starts the worker's expiry step, and the
-    // step's WAL put panics.
+    // Once every commit is one grace window old, the advance's position move
+    // starts the worker's expiry step, and the step's WAL put panics.
+    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
     store.arm_blocking_panic();
     maintenance
         .advance_retention_floor(&namespace_id)

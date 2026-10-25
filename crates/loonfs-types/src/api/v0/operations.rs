@@ -1569,6 +1569,9 @@ impl RetainedCandidates {
 
 /// A request to advance the retention floor to the folded manifest head, or to the one target that
 /// the request sets.
+///
+/// Whatever the target, the floor stops at the newest commit at or below the target that's at
+/// least one hour old (the default garbage collection grace window).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1592,7 +1595,8 @@ pub struct AdvanceRetentionRequest {
 pub struct AdvanceRetentionResponse {
     /// The namespace whose retention floor was advanced.
     pub namespace_id: NamespaceId,
-    /// The new retention floor, which is the minimum sequence for incremental replay.
+    /// The retention floor that the advance reached, which is the minimum sequence for incremental
+    /// replay. It's below the target when the commit at the target is less than one hour old.
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -1607,8 +1611,10 @@ pub enum RunMaintenanceRequest {
     /// A garbage collection job for aged, unreferenced objects, which also collects the grep
     /// index's objects when the deployment maintains a grep index.
     Gc(GcRequest),
-    /// A job that advances the retention floor to the folded manifest head, or to the target that
-    /// the request sets.
+    /// A job that advances the retention floor toward the folded manifest head, or toward the
+    /// target that the request sets.
+    ///
+    /// The floor stops at the newest commit at or below the target that's at least one hour old.
     Retention(AdvanceRetentionRequest),
     /// A job that restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),

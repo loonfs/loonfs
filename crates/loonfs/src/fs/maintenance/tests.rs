@@ -17,6 +17,7 @@ use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     Intercept, InterceptStore, Interceptor, OperationContext, OperationSelector,
@@ -70,6 +71,22 @@ async fn manual_deployment(
     let scheduled =
         writer.maintenance(loonfs_test_support::ids::writer_id("scheduled-maintenance"));
     (writer, standalone, scheduled, recorder)
+}
+
+/// Builds a maintenance handle on `store` whose wall clock is one default
+/// grace window ahead of the system clock, so a retention advance through it
+/// can pass every commit made before the call.
+async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
+    let clock = Arc::new(ManualClock::at_system_time());
+    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
+    LoonFs::builder_with_store(store)
+        .writer_id(writer_id.clone())
+        .wall_clock(clock)
+        .build()
+        .await
+        .expect("build the retention maintenance handle")
+        .maintenance(writer_id)
 }
 
 fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
@@ -241,7 +258,8 @@ async fn namespace_with_a_frozen_base(
         .create_snapshot("retention", &crate::CreateSnapshotOptions::default())
         .await
         .expect("snapshot the namespace");
-    maintenance
+    maintenance_past_the_grace_window(writer.object_store())
+        .await
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance the retention floor past the churn");
@@ -1022,7 +1040,6 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
 #[tokio::test]
 async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     use loonfs_core::time::WallClock;
-    use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     /// GET, HEAD, and LIST requests, then every write.
@@ -1218,14 +1235,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
 
     // Each advance runs in a new runtime, so no cache has the segments that
     // the fold wrote.
-    let maintenance = || async {
-        LoonFs::builder_with_store(store.clone())
-            .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
-            .build()
-            .await
-            .expect("maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
-    };
+    let maintenance = || maintenance_past_the_grace_window(store.clone());
     for (floor, advances) in [
         (
             ChangeSeq(1),

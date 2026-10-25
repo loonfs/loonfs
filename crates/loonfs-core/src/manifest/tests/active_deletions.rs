@@ -341,6 +341,7 @@ pub(super) async fn expire<S: ObjectStore + ?Sized>(
         None,
         namespace_id,
         RetentionTarget::Seq(deletion_seq),
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -825,6 +826,7 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

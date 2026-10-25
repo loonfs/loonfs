@@ -151,7 +151,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self
     }
 
-    /// Supplies the wall clock behind every timestamp this engine records.
+    /// Supplies the wall clock behind every timestamp this engine records and
+    /// every commit age that its retention advances measure.
     pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
         self.wall_clock = wall_clock;
         self
@@ -1354,8 +1355,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Advances the retention floor toward `target` when a verified checkpoint
-    /// makes it safe. The report includes the manifest that records the new
-    /// floor.
+    /// makes it safe, measuring commit ages on this engine's wall clock. The
+    /// report includes the manifest that records the new floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
@@ -1365,6 +1366,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.segment_cache.as_deref(),
             &self.namespace_id,
             target,
+            self.now_ms(),
             Arc::clone(&self.timer),
         )
         .await

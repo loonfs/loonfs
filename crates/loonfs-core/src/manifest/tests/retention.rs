@@ -145,6 +145,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -157,70 +158,97 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         "retention should validate manifest descriptors without loading metadata segment payloads"
     );
 
-    write_file_bytes(
+    // The test folds three commits with one row per segment, so the segments
+    // that the advance reads show which commits the advance inspected.
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("write a file");
+    }
+    crate::manifest::fold_wal_tail(
         &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
         None,
+        &namespace_id,
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        MetadataRunPolicy {
+            max_rows_per_segment: NonZeroUsize::MIN,
+            ..MetadataRunPolicy::default()
+        },
+        &crate::test_support::content_writes(),
     )
     .await
-    .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
+    .expect("fold the commits");
     let manifest = load_current_manifest(&store, &namespace_id)
         .await
         .expect("load metadata manifest")
         .state;
-    let referenced_segment_count = load_manifest_segments_for_inspection(
+    let segments = load_manifest_segments_for_inspection(
         &store,
         None,
         &namespace_id,
         &manifest.manifest().manifest_no,
     )
     .await
-    .expect("load current manifest")
-    .manifest()
-    .payload()
-    .runs
-    .iter()
-    .flat_map(|run| &run.segments)
-    .map(metadata_segment_object_key)
-    .collect::<BTreeSet<_>>()
-    .len();
+    .expect("load current manifest");
+    let head_seq = segments.manifest().payload().head_seq;
+    assert_eq!(head_seq, ChangeSeq(3));
+    let referenced = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments);
+    let referenced_segment_count = referenced
+        .clone()
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let head_commit_segment = referenced
+        .filter(|segment| {
+            segment.family == ApiMetadataRowFamily::Commits
+                && segment.min_row_key == lookup_keys::commit_row_key(head_seq)
+        })
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(head_commit_segment.len(), 1, "one segment per commit row");
+    let wal_objects_prefix = wal_prefix(&namespace_id);
+    let wal_objects = store
+        .list_prefix(&wal_objects_prefix)
+        .await
+        .expect("list wal");
     store.reset();
     let advanced = advance_retention_floor(
         &store,
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
     .expect("advance retention")
     .response;
-    assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        0,
-        "retention should advance from manifest descriptors without materializing rows"
-    );
+    assert_eq!(advanced.retention_floor_seq, head_seq);
     assert_eq!(
         store.count(OperationSelector::Head),
         referenced_segment_count,
         "retention should verify each distinct referenced segment"
     );
+    assert_eq!(
+        store.take_get_keys().into_iter().collect::<BTreeSet<_>>(),
+        head_commit_segment,
+        "the head commit is a grace window old, so the advance reads that one commit row"
+    );
 
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, head_seq);
     assert_eq!(
         store
-            .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
+            .list_prefix(&wal_objects_prefix)
             .await
-            .expect("list wal")
-            .len(),
-        3
+            .expect("list wal"),
+        wal_objects,
+        "the advance only moves the floor"
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
@@ -288,6 +316,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             None,
             &namespace_id,
             target,
+            crate::test_support::grace_elapsed_after(5_000),
             crate::test_support::std_timer(),
         )
         .await
@@ -303,6 +332,86 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
                 "a target below the floor publishes nothing"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 10 * grace_ms;
+    // Commit 3 is stamped before commit 2, and commits 5 and 6 are stamped
+    // after `now_ms`.
+    for (path, committed_at_ms) in [
+        ("/a.txt", now_ms - 3 * grace_ms),
+        ("/b.txt", now_ms - grace_ms / 2),
+        ("/c.txt", now_ms - 2 * grace_ms),
+        ("/d.txt", now_ms - grace_ms / 4),
+        ("/e.txt", now_ms + grace_ms / 2),
+        ("/f.txt", now_ms + 3 * grace_ms),
+    ] {
+        let context = MutationContext {
+            now_ms: committed_at_ms,
+            ..context.clone()
+        };
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+
+    for (target, advance_at_ms, expected_floor) in [
+        // A cutoff more than a window old stops where it would without the
+        // window.
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: now_ms - 3 * grace_ms,
+            },
+            now_ms,
+            ChangeSeq(1),
+        ),
+        // Commit 3 is two windows old, so the floor reaches it and passes
+        // commit 2, which is half a window old.
+        (RetentionTarget::Seq(ChangeSeq(3)), now_ms, ChangeSeq(3)),
+        // Commit 6 is dated after the advance's clock and commit 5 is half a
+        // window old, so the floor stops at commit 4.
+        (RetentionTarget::Head, now_ms + grace_ms, ChangeSeq(4)),
+        // A sequence above the head targets the head, and commit 6 is still
+        // dated after the advance's clock.
+        (
+            RetentionTarget::Seq(ChangeSeq(99)),
+            now_ms + 2 * grace_ms,
+            ChangeSeq(5),
+        ),
+        // Commit 6 is exactly one window old, so the floor reaches the head.
+        (RetentionTarget::Head, now_ms + 4 * grace_ms, ChangeSeq(6)),
+    ] {
+        let floor = advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            target,
+            advance_at_ms,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+        assert_eq!(floor, expected_floor, "{target:?} at {advance_at_ms}");
+        assert_eq!(
+            read_floor_seq(&store, &namespace_id).await,
+            floor,
+            "the response reports the published floor"
+        );
     }
 }
 
@@ -352,6 +461,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
         RetentionTarget::Cutoff {
             cutoff_at_ms: u64::MAX,
         },
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -419,6 +529,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -499,6 +610,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -857,6 +969,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -2279,6 +2392,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
@@ -2434,6 +2548,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             None,
             &namespace_id,
             RetentionTarget::Head,
+            crate::test_support::grace_elapsed_after(context.now_ms),
             crate::test_support::std_timer(),
         )
         .await
@@ -2552,6 +2667,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         None,
         &namespace_id,
         RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await

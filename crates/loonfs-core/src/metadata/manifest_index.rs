@@ -33,7 +33,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
-pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
+pub(crate) async fn commit_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     seq: ChangeSeq,
 ) -> Result<Option<WalCommitPayload>> {
