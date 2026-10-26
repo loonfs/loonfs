@@ -8,7 +8,8 @@ use loonfs_mount::{Engine, ItemId, ItemKind, MountAccess, MountConfig, ReadHandl
 use loonfs_mount_sim::{Operation, RequestRecord, SimulatedServer, SimulatedServerConfig};
 use loonfs_test_support::clock::bounded;
 use loonfs_types::api::v0::{
-    Commit, CommitRequest, DeleteDirectoryBehavior, FilesystemOperation, PathEntry, PathEntryKind,
+    Commit, CommitRequest, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation,
+    PathEntry, PathEntryKind,
 };
 use loonfs_types::options::Consistency;
 use loonfs_types::{
@@ -74,6 +75,27 @@ pub(crate) fn put(relative: &str, bytes: &[u8]) -> FilesystemOperation {
         content_ref: None,
         inline_content: Some(bytes.to_vec()),
         behavior: Default::default(),
+        expected_inode_id: None,
+        expected_revision_no: None,
+    }
+}
+
+/// A put that replaces the file at `relative` with a revision of `bytes`.
+pub(crate) fn put_replacing(relative: &str, bytes: &[u8]) -> FilesystemOperation {
+    FilesystemOperation::PutFile {
+        path: path(relative),
+        content_ref: None,
+        inline_content: Some(bytes.to_vec()),
+        behavior: DestinationBehavior::Replace,
+        expected_inode_id: None,
+        expected_revision_no: None,
+    }
+}
+
+pub(crate) fn append(relative: &str, bytes: &[u8]) -> FilesystemOperation {
+    FilesystemOperation::AppendFile {
+        path: path(relative),
+        inline_content: bytes.to_vec(),
         expected_inode_id: None,
         expected_revision_no: None,
     }

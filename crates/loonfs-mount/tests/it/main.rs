@@ -5,7 +5,10 @@
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 mod admission;
+mod content_changes;
 mod dependencies;
 mod feed;
+mod feed_pages;
 mod reads;
+mod rebuild;
 mod support;
