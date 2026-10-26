@@ -46,7 +46,9 @@ struct Run {
 /// read yet. So the bytes fetched ahead of the reader never exceed the bytes
 /// it consumed, and a run of reads that consumes `c` bytes fetches at most
 /// `2c` bytes plus the part of its first window before its first read, which
-/// is less than 1 MiB.
+/// is less than 1 MiB. The handle waits until that allows a window of at
+/// least half the current one, so the windows don't shrink to a few bytes
+/// after a read that starts in the middle of its first window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ReadWindow {
     /// The current run, or `None` before the first read.
@@ -96,11 +98,14 @@ impl ReadWindow {
         if run.next.is_none() && half_read && demand.end < size_bytes {
             let consumed = range.end - run.start_offset;
             let unread = demand.end - range.end;
+            let rest_of_file = size_bytes - demand.end;
             let next_length = (2 * length(&run.current))
                 .min(MAX_WINDOW_BYTES)
-                .min(consumed.saturating_sub(unread));
-            if next_length > 0 {
-                let next = demand.end..(demand.end + next_length).min(size_bytes);
+                .min(consumed.saturating_sub(unread))
+                .min(rest_of_file);
+            let least_length = (length(&run.current) / 2).min(rest_of_file);
+            if next_length >= least_length {
+                let next = demand.end..demand.end + next_length;
                 run.next = Some(next.clone());
                 ahead = Some(next);
             }
@@ -167,8 +172,10 @@ mod tests {
         assert_eq!((first.demand, first.ahead), (0..MIB, None));
         let half = window.plan(128 * 1024..512 * 1024, size);
         assert_eq!(half.ahead, None, "nothing consumed is left over yet");
-        let next = window.plan(512 * 1024..640 * 1024, size);
-        assert_eq!(next.ahead, Some(MIB..MIB + 256 * 1024));
+        let too_small = window.plan(512 * 1024..640 * 1024, size);
+        assert_eq!(too_small.ahead, None, "a window of 256 KiB is too small");
+        let next = window.plan(640 * 1024..768 * 1024, size);
+        assert_eq!(next.ahead, Some(MIB..MIB + 512 * 1024));
 
         let mut window = ReadWindow::default();
         let reads = std::iter::repeat_n(4 * 1024, 64)
@@ -180,8 +187,14 @@ mod tests {
             .any(|window| length(window) == MAX_WINDOW_BYTES));
 
         let seek = 700 * MIB + 7;
-        let after_seek = read_sequentially(&mut window, seek, [4096; 300], size);
+        let after_seek = read_sequentially(&mut window, seek, [128 * 1024; 64], size);
         assert_eq!(after_seek[0], 700 * MIB..701 * MIB);
+        assert!(
+            after_seek
+                .windows(2)
+                .all(|pair| length(&pair[1]) >= length(&pair[0]) / 2),
+            "no window shrinks below half the one before: {after_seek:?}"
+        );
     }
 
     #[test]

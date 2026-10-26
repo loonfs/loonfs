@@ -74,7 +74,7 @@ fn range_quarter_mib(start: u64, end: u64) -> ByteRange {
 /// Checks that a sequential reader of a 32 MiB file fetches windows that grow
 /// from 1 MiB, each the smallest of twice the last window, 64 MiB, and the
 /// bytes read less the bytes fetched but not read yet, with one window
-/// ahead; that windows of at most 8 MiB are ranged reads and the larger one
+/// ahead once that's at least half the current window; that windows of at most 8 MiB are ranged reads and the larger one
 /// is a grant; and that after every read the engine has fetched at most
 /// twice the bytes read plus the first window (scaling invariant 2), plus the
 /// signed ranges that a grant's stream keeps in flight.
@@ -116,13 +116,12 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         .collect();
     let windows = [
         (0, 4),
-        (4, 5),
-        (5, 7),
-        (7, 11),
-        (11, 18),
-        (18, 29),
-        (29, 47),
-        (47, 76),
+        (4, 6),
+        (6, 10),
+        (10, 16),
+        (16, 26),
+        (26, 42),
+        (42, 68),
     ];
     let expected: Vec<_> = windows
         .into_iter()
@@ -134,11 +133,11 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         .filter(|record| record.operation == Operation::ReadDownloadRange)
         .map(|record| record.byte_range.expect("a range"))
         .collect();
-    let expected: Vec<_> = (19..32).map(|start| range_mib(start, start + 1)).collect();
+    let expected: Vec<_> = (17..28).map(|start| range_mib(start, start + 1)).collect();
     assert_eq!(
-        granted[..12],
-        expected[..12],
-        "one grant from 19 MiB, in 1 MiB ranges"
+        granted[..expected.len()],
+        expected,
+        "one grant from 17 MiB, in 1 MiB ranges"
     );
     let grants = trace
         .iter()
@@ -149,7 +148,8 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
 
 /// Checks that a read far from where a sequential run ended starts again
 /// with a 1 MiB window and no read-ahead, and that the windows that follow
-/// continue from there within twice the bytes read since the seek.
+/// continue from there, none smaller than half the one before, within twice
+/// the bytes read since the seek.
 #[tokio::test]
 async fn a_read_at_a_far_offset_resets_the_window() {
     let fixture = fixture();
@@ -161,7 +161,7 @@ async fn a_read_at_a_far_offset_resets_the_window() {
     for offset in (0..=MIB).step_by(128 * 1024) {
         read(&handle, offset, CHUNK).await;
     }
-    eventually(|| fetched_bytes(&fixture.server.trace()) >= 7 * MIB / 4).await;
+    eventually(|| fetched_bytes(&fixture.server.trace()) >= 3 * MIB / 2).await;
     fixture.server.take_trace();
     let far = 20 * MIB + 7;
     let start = usize::try_from(far).expect("an offset");
@@ -187,15 +187,14 @@ async fn a_read_at_a_far_offset_resets_the_window() {
             "{fetched} after {offset}"
         );
     }
-    let mut fetched: Vec<_> = content_reads(&fixture.server.take_trace())
+    let fetched: Vec<_> = content_reads(&fixture.server.take_trace())
         .iter()
         .map(|record| record.byte_range.expect("a range"))
         .collect();
-    fetched.sort_by_key(|range| range.start_offset);
-    let contiguous = fetched
-        .windows(2)
-        .all(|pair| pair[0].end_offset == pair[1].start_offset);
-    assert!(contiguous && fetched.len() > 1, "{fetched:?}");
+    let grows = fetched.windows(2).all(|pair| {
+        pair[0].end_offset == pair[1].start_offset && pair[1].length() >= pair[0].length() / 2
+    });
+    assert!(grows && fetched.len() > 1, "{fetched:?}");
 }
 
 /// Checks that a cache file whose bytes don't match the revision's checksum
