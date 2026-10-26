@@ -1959,9 +1959,13 @@ name = "loonfs-mount"
 version = "0.4.0"
 dependencies = [
  "bytes",
+ "form_urlencoded",
  "fs4",
  "futures",
+ "http",
+ "http-body-util",
  "loonfs-client",
+ "loonfs-test-support",
  "loonfs-types",
  "rusqlite",
  "rustix",
@@ -1970,6 +1974,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
 ]
 
