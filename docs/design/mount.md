@@ -84,7 +84,7 @@ impl Engine {
     // and a WriteHandle also writes the working file.
     pub async fn open_read(&self, item: ItemId) -> Result<ReadHandle>;
     pub async fn open_write(&self, request: OpenWrite) -> Result<WriteHandle>;
-    pub async fn barrier(&self, items: &[ItemId]) -> Result<Seq>;
+    pub async fn barrier(&self, items: &[ItemId]) -> Result<ChangeSeq>;
 
     // Changes to the Local tree.
     pub async fn mkdir(&self, request: Mkdir) -> Result<Entry>;
@@ -96,14 +96,17 @@ impl Engine {
     pub fn forget(&self, item: ItemId, lookups: u64);
 
     // Control.
-    pub async fn sync(&self) -> Result<Seq>;
-    pub async fn refresh_at_least(&self, seq: Seq) -> Result<()>;
+    pub async fn sync(&self) -> Result<ChangeSeq>;
+    pub async fn refresh_at_least(&self, seq: ChangeSeq) -> Result<()>;
     pub fn subscribe_invalidations(&self) -> Receiver<Invalidation>;
+    pub fn record_mount_method(&self, method: MountMethod);
     pub fn status(&self) -> Status;
 }
 ```
 
 An `ItemId` is a local number that the engine assigns to each item, and it's also the inode number that the kernel shows. The engine maps each item to a LoonFS inode ID once the item is published. The planner can change which LoonFS inode an item publishes to (see [Planning a commit](#planning-a-commit)), but it never changes an item's `ItemId`.
+
+The receiver that `subscribe_invalidations` returns is bounded (4,096 items). If the adapter falls behind, the engine drops the invalidations that don't fit, and status reports how many it dropped. The adapter calls `record_mount_method` after it mounts, because whether the mount went through `mount(2)` or `fusermount3` is visible only inside the adapter, which calls `fuser`. `readdir` doesn't count lookups, so an adapter that serves readdirplus calls `lookup` for each entry it returns.
 
 Each mount has one control task. Only the control task changes the trees, the dirty set, the generations, and the pending batch. Network requests, uploads, captures, and feed polls run in worker tasks that send their results to the control task as messages, and the adapter sends every change through the control task's channel. Metadata reads (`lookup`, `getattr`, `readdir`, and `readlink`) read the in-memory tree under a read lock, so they don't wait for the channel. With the workers replaced by fakes, the control task is a deterministic state machine over its messages, which is what the simulation relies on.
 
@@ -226,6 +229,7 @@ Each item's record has these fields:
 | `kind` | File, directory, or symlink. |
 | `c_parent`, `c_name`, `c_binding_version` | The Committed binding. The binding version is stored as text, because it's an opaque token. |
 | `c_revision_no`, `c_content_ref`, `c_size` | The Committed content. |
+| `c_revision_committed_at_ms`, `c_fs_mtime_ms`, `c_fs_mtime_revision_no` | The current revision's commit time (`revision_committed_at_ms`) and the raw values of the `fs.mtime_ms` and `fs.mtime_revision_no` attributes, which the content group records so that the engine can compute the shown modification time again when the content changes. |
 | `c_mode`, `c_mtime_ms`, `c_target`, `c_attributes_revision_no` | The Committed attributes. |
 | `s_*` | The server-observed copy of every Committed field. |
 | `s_hidden_by` | The inode ID and deletion sequence of a remote deletion that hides the item. |
@@ -235,12 +239,13 @@ Each item's record has these fields:
 | `materialized` | Whether the item has a working file. |
 | `generation`, `published_generation` | The item's local generation, and the generation of its base. |
 | `lowest_write_offset`, `truncated_below_base` | What [Accepting writes](#accepting-writes) uses to tell whether a change is an append. |
-| `lookups` | The kernel's lookup count. |
 | `fingerprint` | The fingerprint of the base's bytes, when the engine has computed it. |
 
-The database also records the mount's settings, its applied sequence, the paths and inode IDs of the root and its ancestors, the [captures](#accepting-writes), the pending batch, and the sequences of the engine's own commits that the feed hasn't reached yet.
+The database also records the mount's settings, its applied sequence, the paths and inode IDs of the root and its ancestors, the [captures](#accepting-writes), the pending batch, and the sequences of the engine's own commits that the feed hasn't reached yet. Its `entering_directories` table lists the directories that entered the mount and stay hidden until the feed reaches their snapshot (see [Following the change feed](#following-the-change-feed)), and its `cache_files` table lists each complete cache file and the size it covers. The mount's row has an `admitted` flag, which admission sets once it has written the scan and the applied sequence, so the next start discards a mount whose admission was interrupted.
 
-The "dirty set" is the set of items with at least one dirty field group. The binding is dirty when the Local binding differs from the Committed one, the content is dirty when the generation is ahead of the published generation, and the attributes are dirty when a Local attribute differs from the Committed one. A modification time that differs from the Committed one by less than the publish interval, and that no program set explicitly, doesn't make the attributes dirty. The database indexes the dirty set, and the engine keeps a copy of it in memory, so a plan costs time in proportion to the number of dirty items, and nothing when there are none.
+The kernel's lookup counts are kept in memory only, because they don't survive a daemon restart, and storing them would add a database write to every lookup, the kernel's most frequent request, to keep a count that the next start discards.
+
+The "dirty set" is the set of items with at least one dirty field group. The binding is dirty when the Local binding differs from the Committed one, the content is dirty when the generation is ahead of the published generation, and the attributes are dirty when a Local attribute differs from the Committed one. A modification time that differs from the Committed one by less than the publish interval, and that no program set explicitly, doesn't make the attributes dirty. The database keeps the dirty set in a `dirty_groups` table with a partial index, and the engine keeps a copy of it in memory, so a plan costs time in proportion to the number of dirty items, and nothing when there are none.
 
 A "generation" is a number on each item that the engine increments on every write and truncate. A plan publishes the generation that it captured, and an acknowledgment moves the item's base to that generation and no further. If a program wrote again while the commit was in flight, the item stays dirty, relative to its new base.
 
@@ -267,7 +272,7 @@ A write open "materializes" a file, which means that it creates the file's worki
 | State | Bytes are in | Leaves the state when |
 | --- | --- | --- |
 | Absent | The server only | A read fetches part of it (to Partial), or a write open materializes it (to Materialized). |
-| Partial | A sparse cache file, with the present ranges recorded in memory | The present ranges cover the file (to Complete), or a write open materializes it. |
+| Partial | A sparse cache file, with the present ranges recorded in memory | The present ranges cover the file (to Complete), a write open materializes it, or eviction removes it (to Absent). |
 | Complete | A cache file that covers the whole revision | A write open materializes it, or eviction removes it (to Absent). |
 | Materialized | The item's working file, plus any [captures](#accepting-writes) | The last descriptor closes and the item is clean (to Complete, or Absent if the cache evicted the file). |
 
@@ -279,7 +284,9 @@ A working file is at `staging/<item ID>`. It's the one mutable copy of a file th
 
 The working files, captures, and cache are on one filesystem, so moving a capture into the cache is a rename, and copying a cache file into a working file can be a reflink.
 
-The engine evicts complete cache files that no descriptor uses, least recently used first, to stay under `--cache-max-bytes` and above `--cache-min-free`. Partial files, working files, captures, the copies in the control directory, and cache files with open descriptors can't be evicted, and they count against `--pinned-max-bytes` (see [Resource bounds](#resource-bounds)).
+The engine evicts cache files that no descriptor uses, complete or partial, least recently used first, to stay under `--cache-max-bytes` and above `--cache-min-free`. A partial file is evicted as a whole, because its present ranges aren't stored on disk and a restart drops it anyway. Working files, captures, the copies in the control directory, and cache files with open descriptors (including partial files) can't be evicted, and they count against `--pinned-max-bytes` (see [Resource bounds](#resource-bounds)).
+
+Why can a partial file be evicted? A program that reads part of a file and closes it leaves a partial file behind. If partial files were pinned, each abandoned partial read of a current file would stay pinned until the daemon restarts, and enough of them would make reads fail with `ENOSPC`.
 
 ## Reading files
 
@@ -288,7 +295,7 @@ This section describes how the engine fetches content, and what a program reads 
 A file that the engine read once in full shouldn't be fetched again, and a program that reads 4 KiB of a large file shouldn't cause the whole file to be fetched. So each read handle has its own read window, and the engine fetches by range:
 
 - A file of at most 8 MiB is fetched whole on its first read, with a proxied read of the whole file, which the server verifies.
-- A larger file starts with a window of 1 MiB, aligned to 1 MiB. Each sequential read doubles the window, up to 64 MiB, and the handle keeps one window in flight ahead of the reader. A read at another offset resets the window to 1 MiB.
+- A larger file starts with a window of 1 MiB, aligned to 1 MiB. On sequential reads, each new window is the smallest of twice the previous window, the bytes that the handle has consumed so far, and 64 MiB, and the engine requests the next window when the reader has consumed half of the current one. So the bytes in flight ahead of a reader never exceed what it has consumed, and the total that a handle fetches stays under twice the bytes it consumed plus its first 1 MiB window. A read at another offset resets the window to 1 MiB.
 - A fetch of at most 8 MiB is a [ranged read](../specs/glossary.md#ranged-read) through the server, by inode and revision (`GET /inodes/{inode_id}/revisions/{revision_no}/content` with a `Range` header). The server serves bytes that are still in the WAL tail from memory, so a ranged read of a small tail writes nothing to object storage.
 - A larger fetch, which only a grown sequential window makes, uses a download grant from the fetch's offset (see [Download transport](../specs/api.md#610-download-transport)). The handle reads the grant's stream, through the client's download stream, which keeps four range responses in flight, and stops reading when its window is full. A read outside the streamed region drops the stream.
 
@@ -310,6 +317,8 @@ A file with a working file follows a different rule, because its descriptors sha
 The engine uses `append_offset`, never content ID continuity, to tell whether a change is an append, because an append that starts a new chain (for example, in a fork, or after a restore) has a new content ID (see [`GET /changes`](../specs/api.md#611-get-changes)).
 
 Why does a replacement change the name's kernel inode number? The kernel keeps one page cache for each inode number, and descriptors on one inode share it. If a descriptor pinned to the old revision and a descriptor on the new revision shared an inode number, each could read pages that the other one had cached. With a new inode number, the old descriptors keep the old pages, and a program that follows a log by name (`tail -F`) sees the replacement as a new file, as it would see a rotated log.
+
+Why is a new window limited by the bytes that the handle has consumed? A reader that stops after a few windows shouldn't have paid for the next doubling. With windows that only double, a handle could have fetched four times what it had consumed when a new window begins.
 
 Why does a pinned descriptor fetch the rest of its revision at once? The server keeps a replaced revision's rows and bytes for at least an hour, because the retention floor never passes a commit that's younger than the default garbage collection grace (see [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor)), and a grant's URLs work for 15 minutes. Fetching the rest at once ends the read within both limits, so a program that keeps a file open for a day can still read every byte of the revision it opened.
 
@@ -588,8 +597,8 @@ The engine's memory for the tree is at most about 400 bytes per entry, so the de
 
 Local disk is divided into two kinds of bytes:
 
-- Evictable bytes are complete cache files that no descriptor uses. `--cache-max-bytes` is the eviction target for them, and the engine also evicts to keep `--cache-min-free` free.
-- Pinned bytes are partial cache files, working files, captures, uploads in flight, the copies in the control directory, and cache files with open descriptors. `--pinned-max-bytes` is a hard limit on them. When it's reached, a new materialization and a write that would grow pinned bytes fail with `ENOSPC`. Open files can keep pinned bytes above the limit, because the engine can't free them.
+- Evictable bytes are cache files, complete or partial, that no descriptor uses. `--cache-max-bytes` is the eviction target for them, and the engine also evicts to keep `--cache-min-free` free.
+- Pinned bytes are working files, captures, uploads in flight, the copies in the control directory, and cache files with open descriptors, including partial files. `--pinned-max-bytes` is a hard limit on them. When it's reached, a new materialization and a write that would grow pinned bytes fail with `ENOSPC`. Open files can keep pinned bytes above the limit, because the engine can't free them.
 
 A daemon with several mounts uses at most the sum of their limits. Each mount has its own cache directory, so no cache file is shared between mounts.
 
@@ -612,14 +621,14 @@ This section describes what a mount does when something fails.
 
 While the server is unreachable, status reports the age of the oldest unpublished change. A barrier fails once the sync timeout passes, and `loonfs run` then exits with status 4 and keeps the state.
 
-`loonfs status` reports, for each mount: whether it's ready, whether it mounted through `mount(2)` or `fusermount3`, the applied sequence, the number of dirty items and the age of the oldest unpublished change, the pending batch and its attempts, uploads in flight, the cache's evictable and pinned bytes, the entry count against the budget, whether the filesystem supports reflinks, conflicts and refused publications, and any reason that publication stopped.
+`loonfs status` reports, for each mount: whether it's ready, whether it mounted through `mount(2)` or `fusermount3`, the applied sequence, the number of dirty items and the age of the oldest unpublished change, the pending batch and its attempts, uploads in flight, the cache's evictable and pinned bytes, the number of invalidations dropped, the entry count against the budget, whether the filesystem supports reflinks, conflicts and refused publications, and any reason that publication stopped.
 
 ## Scaling invariants
 
 This section lists the measurable properties that the mount has to keep, which the tests in [Testing](#testing) check.
 
 1. After a mount is ready, no engine code lists a subtree on the server, except the listing of a directory that enters the mount (which reads at most the entries that entered) and a rebuild after `rebootstrap_required`. Both are recorded in metrics.
-2. In steady state, a mount sends at most two feed polls a second, one commit per publish interval and one per append interval (more only when a plan exceeds a request's limits), the uploads of captures above the inline limit, and content fetches in proportion to the bytes that programs read or are about to read (at most twice the bytes each handle consumes).
+2. In steady state, a mount sends at most two feed polls a second, one commit per publish interval and one per append interval (more only when a plan exceeds a request's limits), the uploads of captures above the inline limit, and content fetches in proportion to the bytes that programs read or are about to read (at most twice the bytes each handle consumes, plus its first window).
 3. The tree takes at most 400 bytes of memory per entry.
 4. A plan with D dirty items does work in proportion to D, and constant work when D is zero.
 5. 10,000 writes to one file in one second publish exactly one content operation and no attribute update.
