@@ -16,7 +16,7 @@ use crate::tree::Tree;
 use crate::workers::ClientWorkers;
 use crate::write::{Mkdir, OpenWrite, Rename, SetAttr, Symlink, WriteHandle};
 use loonfs_client::Client;
-use loonfs_types::{ChangeSeq, MonotonicTimer, StdMonotonicTimer, SystemWallClock, WallClock};
+use loonfs_types::{ChangeSeq, MonotonicTimer, StdMonotonicTimer};
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::Ordering;
@@ -56,24 +56,15 @@ impl Engine {
     /// Tokio runtime, which runs the engine's requests.
     pub async fn mount(client: Client, config: MountConfig) -> Result<Self> {
         let disk: Arc<dyn DiskSpace> = Arc::new(HostDiskSpace);
-        let clock: Arc<dyn WallClock> = Arc::new(SystemWallClock);
         let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
         let (database, reflinks) = match resume(&config, disk.as_ref())? {
             Some(resumed) => resumed,
             None => {
-                let admission = admit(
-                    &client,
-                    &config,
-                    disk.as_ref(),
-                    timer.as_ref(),
-                    clock.as_ref(),
-                )
-                .await?;
+                let admission = admit(&client, &config, disk.as_ref(), timer.as_ref()).await?;
                 (admission.database, admission.reflinks)
             }
         };
         let environment = Environment {
-            clock,
             timer: timer.clone(),
             disk,
             reflinks,

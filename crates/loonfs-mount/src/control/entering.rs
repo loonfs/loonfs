@@ -2,7 +2,7 @@
 //! directories among them, which the Local tree doesn't show until the
 //! applied sequence reaches the snapshot they were listed at.
 
-use super::changes::Changes;
+use super::changes::{Changes, Source};
 use super::events::{ReadKey, ReadResult};
 use super::ControlTask;
 use crate::database::{self, Database, EnteringDirectory};
@@ -46,7 +46,7 @@ pub(super) fn load(database: &mut Database) -> Result<Vec<EnteringState>> {
     let mut entering = Vec::new();
     let transaction = database.transaction()?;
     let withheld = HashSet::new();
-    let mut changes = Changes::for_listing(&transaction, ChangeSeq(0), 0, &withheld);
+    let mut changes = Changes::new(&transaction, ChangeSeq(0), Source::Listing, &withheld);
     for record in records {
         let root = find_item(&transaction, record.root_item_id)?;
         match (record.listed, root.and_then(|root| root.remote_inode_id)) {
@@ -135,10 +135,13 @@ impl ControlTask {
         snapshot: &SnapshotRef,
     ) -> Result<()> {
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
         let transaction = self.database.transaction()?;
-        let mut changes =
-            Changes::for_listing(&transaction, snapshot.captured_seq, now_ms, &withheld);
+        let mut changes = Changes::new(
+            &transaction,
+            snapshot.captured_seq,
+            Source::Listing,
+            &withheld,
+        );
         let parent = match entry.parent_inode_id {
             Some(parent) => find_item_id_by_inode(&transaction, parent)?,
             None => None,
@@ -188,9 +191,8 @@ impl ControlTask {
 
     fn write_entering_page(&mut self, entries: &[PathEntry]) -> Result<()> {
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
         let transaction = self.database.transaction()?;
-        let mut changes = Changes::for_listing(&transaction, ChangeSeq(0), now_ms, &withheld);
+        let mut changes = Changes::new(&transaction, ChangeSeq(0), Source::Listing, &withheld);
         for entry in entries {
             changes.upsert_entry(entry, None)?;
         }
@@ -218,9 +220,8 @@ impl ControlTask {
 
     fn remove_entering_rows(&mut self, roots: &[ItemId]) -> Result<()> {
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
         let transaction = self.database.transaction()?;
-        let mut changes = Changes::for_listing(&transaction, ChangeSeq(0), now_ms, &withheld);
+        let mut changes = Changes::new(&transaction, ChangeSeq(0), Source::Listing, &withheld);
         for root in roots {
             changes.remove_subtree(*root, InodeId(0))?;
             database::delete_entering_directory(&transaction, *root)?;
@@ -263,7 +264,10 @@ impl ControlTask {
     }
 
     /// Shows the directories whose snapshot the applied sequence reached.
-    pub(super) fn reveal_entering(&mut self) -> Result<()> {
+    /// Each one's parent takes `committed_at_ms`, the time of the commit
+    /// that the feed just applied, as its modification time, or keeps its
+    /// time when it's `None`, at a restart.
+    pub(super) fn reveal_entering(&mut self, committed_at_ms: Option<u64>) -> Result<()> {
         let applied_seq = self.applied_seq;
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entering)
             .into_iter()
@@ -273,9 +277,11 @@ impl ControlTask {
             return Ok(());
         }
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
+        let source = committed_at_ms.map_or(Source::Listing, |committed_at_ms| Source::Commit {
+            committed_at_ms,
+        });
         let transaction = self.database.transaction()?;
-        let mut changes = Changes::for_commit(&transaction, applied_seq, now_ms, now_ms, &withheld);
+        let mut changes = Changes::new(&transaction, applied_seq, source, &withheld);
         for entering in &ready {
             database::delete_entering_directory(&transaction, entering.root_item_id())?;
             if let Some(mut record) = find_item(&transaction, entering.root_item_id())? {

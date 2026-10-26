@@ -5,7 +5,7 @@ use crate::support::{
     delete, engine_tree, fixture, item, mkdir, move_path, open, operations, put, read, refresh,
     request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH,
 };
-use loonfs_mount::{ItemKind, PublicationStop};
+use loonfs_mount::{ItemId, ItemKind, PublicationStop};
 use loonfs_mount_sim::{EchoOrder, Operation, RequestRecord};
 use loonfs_types::api::v0::FilesystemChange;
 use std::ffi::OsString;
@@ -57,6 +57,19 @@ async fn created_directories_and_files_appear_through_strong_polls_from_the_appl
     let out = item(&engine, "build/gen/out.log").expect("the created file");
     let attr = engine.getattr(out).expect("the file's attributes");
     assert_eq!((attr.kind, attr.size_bytes), (ItemKind::File, 3));
+    for directory in ["", "build", "build/gen"] {
+        let directory = match directory {
+            "" => ItemId::ROOT,
+            directory => item(&engine, directory).expect("a directory"),
+        };
+        let attr = engine
+            .getattr(directory)
+            .expect("the directory's attributes");
+        assert_eq!(
+            attr.mtime_ms, commit.committed_at_ms,
+            "a directory that a commit changed shows the commit's time"
+        );
+    }
     assert_eq!(
         read(&open(&engine, "build/gen/out.log").await, 0, 10).await,
         "log"

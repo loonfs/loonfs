@@ -14,8 +14,8 @@ use crate::status::{ReflinkSupport, Transports};
 use loonfs_client::{Client, NamespacePath};
 use loonfs_types::api::v0::{PathEntry, PathEntryKind};
 use loonfs_types::{
-    MonotonicTimer, NamespaceNaming, WallClock, FEATURE_COMMIT_INLINE_CONTENT,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    MonotonicTimer, NamespaceNaming, FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 
@@ -35,7 +35,6 @@ pub(crate) async fn admit(
     config: &MountConfig,
     disk: &dyn DiskSpace,
     timer: &dyn MonotonicTimer,
-    clock: &dyn WallClock,
 ) -> Result<Admission> {
     let host = check_host(config, disk)?;
     let capabilities = client.get_capabilities().await?;
@@ -65,7 +64,6 @@ pub(crate) async fn admit(
         config,
         &mut lease,
         timer,
-        clock,
         inline_limit_bytes,
         transports,
     )
@@ -93,7 +91,6 @@ async fn scan(
     config: &MountConfig,
     lease: &mut SnapshotLease,
     timer: &dyn MonotonicTimer,
-    clock: &dyn WallClock,
     inline_limit_bytes: u64,
     transports: Transports,
 ) -> Result<Database> {
@@ -170,7 +167,7 @@ async fn scan(
             });
         }
         let transaction = database.transaction()?;
-        write_listing(&transaction, &entries, clock.now_ms())?;
+        write_listing(&transaction, &entries)?;
         transaction.commit()?;
         lease.keep_alive(client, timer).await?;
     }

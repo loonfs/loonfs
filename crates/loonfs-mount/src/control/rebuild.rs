@@ -1,7 +1,7 @@
 //! The rebuild after `rebootstrap_required`, which lists the root's subtree
 //! at a new snapshot and brings every item to the listed state.
 
-use super::changes::Changes;
+use super::changes::{Changes, Source};
 use super::feed::FeedState;
 use super::ControlTask;
 use crate::database;
@@ -44,10 +44,8 @@ impl ControlTask {
             .listed
             .extend(entries.iter().map(|entry| entry.inode_id));
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
         let transaction = self.database.transaction()?;
-        let mut changes =
-            Changes::for_commit(&transaction, self.applied_seq, now_ms, now_ms, &withheld);
+        let mut changes = Changes::new(&transaction, self.applied_seq, Source::Listing, &withheld);
         for entry in entries {
             changes.upsert_entry(entry, None)?;
         }
@@ -110,11 +108,9 @@ impl ControlTask {
             }
         })?;
         let withheld = HashSet::new();
-        let now_ms = self.now_ms();
         let captured_seq: ChangeSeq = basis.snapshot.captured_seq;
         let transaction = self.database.transaction()?;
-        let mut changes =
-            Changes::for_commit(&transaction, captured_seq, now_ms, now_ms, &withheld);
+        let mut changes = Changes::new(&transaction, captured_seq, Source::Listing, &withheld);
         if let Some(root) = &basis.root {
             if let Some(record) = find_item(&transaction, ItemId::ROOT)? {
                 if let Some((kind, state)) = RemoteState::from_entry(root, None) {

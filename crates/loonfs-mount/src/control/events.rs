@@ -169,6 +169,9 @@ fn created(
     let Some(parent) = find_item_id_by_inode(changes.connection, parent_inode_id)? else {
         return Ok(None);
     };
+    let committed_at_ms = changes
+        .committed_at_ms()
+        .expect("a feed event belongs to a commit");
     let kind = match file {
         Some(_) => ItemKind::File,
         None => ItemKind::Directory,
@@ -183,12 +186,12 @@ fn created(
         content: file.map(|(revision_no, content_ref)| FileContent {
             revision_no,
             content_ref: content_ref.clone(),
-            committed_at_ms: changes.committed_at_ms,
+            committed_at_ms,
         }),
         attributes: AttributeState {
             revision_no: AttributesRevisionNo(0),
             mode: fs.effective_mode(kind),
-            mtime_ms: changes.committed_at_ms,
+            mtime_ms: committed_at_ms,
             target: None,
             mtime_attribute: None,
         },
@@ -217,10 +220,13 @@ fn content_changed(
         // commits that the feed applies after it.
         return Ok(None);
     }
+    let committed_at_ms = changes
+        .committed_at_ms()
+        .expect("a feed event belongs to a commit");
     let content = FileContent {
         revision_no,
         content_ref: content_ref.clone(),
-        committed_at_ms: changes.committed_at_ms,
+        committed_at_ms,
     };
     if append_offset == Some(current.content_ref.size_bytes) {
         changes.extend(&mut record, content);

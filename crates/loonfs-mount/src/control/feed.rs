@@ -1,7 +1,7 @@
 //! Following the change feed: strong polls every poll interval and after a
 //! page that ends before the head, and one transaction per commit.
 
-use super::changes::Changes;
+use super::changes::{Changes, Source};
 use super::events::{apply_commit_events, CommitOutcome, ReadKey, ReadResult, ReadResults};
 use super::rebuild::RebuildState;
 use super::ControlTask;
@@ -119,9 +119,10 @@ impl ControlTask {
             }
             match self.apply_commit(commit, &progress.reads) {
                 Ok(CommitOutcome::Applied) => {
+                    let committed_at_ms = commit.committed_at_ms;
                     progress.changes.pop_front();
                     progress.reads.clear();
-                    if let Err(error) = self.reveal_entering() {
+                    if let Err(error) = self.reveal_entering(Some(committed_at_ms)) {
                         self.fail_page(error);
                         return;
                     }
@@ -237,16 +238,12 @@ impl ControlTask {
             .iter()
             .map(|entering| entering.root_item_id())
             .collect();
-        let now_ms = self.now_ms();
         let mut root = self.root.clone();
         let transaction = self.database.transaction()?;
-        let mut changes = Changes::for_commit(
-            &transaction,
-            commit.committed_seq,
-            commit.committed_at_ms,
-            now_ms,
-            &withheld,
-        );
+        let source = Source::Commit {
+            committed_at_ms: commit.committed_at_ms,
+        };
+        let mut changes = Changes::new(&transaction, commit.committed_seq, source, &withheld);
         let mut stop = None;
         if let Some(key) = apply_commit_events(&mut changes, &mut root, &mut stop, commit, reads)? {
             return Ok(CommitOutcome::NeedsRead(key));

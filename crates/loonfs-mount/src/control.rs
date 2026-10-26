@@ -35,7 +35,7 @@ use crate::status::{
 };
 use crate::tree::{ItemView, Tree};
 use crate::workers::{WorkOutcome, Workers};
-use loonfs_types::{AbsolutePath, ChangeSeq, ContentId, InodeId, MonotonicTimer, WallClock};
+use loonfs_types::{AbsolutePath, ChangeSeq, ContentId, InodeId, MonotonicTimer};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,10 +123,9 @@ pub(crate) struct SharedState {
     pub(crate) tick_pending: Arc<AtomicBool>,
 }
 
-/// The clocks and filesystems that a control task reads.
+/// The timer and filesystem that a control task reads.
 #[derive(Clone)]
 pub(crate) struct Environment {
-    pub(crate) clock: Arc<dyn WallClock>,
     pub(crate) timer: Arc<dyn MonotonicTimer>,
     pub(crate) disk: Arc<dyn DiskSpace>,
     pub(crate) reflinks: ReflinkSupport,
@@ -253,7 +252,7 @@ impl ControlTask {
     pub(crate) fn start(&mut self) {
         // A restart between a commit and the transaction that shows the
         // directories it reached leaves them to show now.
-        if let Err(error) = self.reveal_entering() {
+        if let Err(error) = self.reveal_entering(None) {
             tracing::error!(%error, "showing directories that entered the mount failed");
         }
         self.on_tick();
@@ -335,10 +334,6 @@ impl ControlTask {
         self.request_poll();
         self.keep_entering_alive();
         self.sweep_tree();
-    }
-
-    fn now_ms(&self) -> u64 {
-        self.environment.clock.now_ms()
     }
 
     fn tree(&self) -> std::sync::RwLockWriteGuard<'_, Tree> {

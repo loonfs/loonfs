@@ -17,7 +17,6 @@ use loonfs_types::api::v0::{
 use loonfs_types::{
     AbsolutePath, ActorId, BindingVersion, ChangeSeq, ChecksumAlgorithm, CommitId, ContentId,
     ContentRef, DisplayName, InodeId, NamespaceId, PinId, RevisionNo, StdMonotonicTimer,
-    SystemWallClock,
 };
 use std::ffi::OsStr;
 use std::path::Path;
@@ -125,12 +124,11 @@ fn task(directory: &Path, listing: &[PathEntry]) -> (ControlTask, SharedState, R
         Visibility::Shown,
     );
     write_item(&transaction, &root_record).expect("the root row");
-    write_listing(&transaction, listing, 0).expect("the listing");
+    write_listing(&transaction, listing).expect("the listing");
     transaction.commit().expect("the commit");
     database.mark_admitted().expect("admitted");
     let workers = RecordedWork::default();
     let environment = Environment {
-        clock: Arc::new(SystemWallClock),
         timer: Arc::new(StdMonotonicTimer::default()),
         disk: Arc::new(EveryByteFree),
         reflinks: ReflinkSupport::Unsupported,

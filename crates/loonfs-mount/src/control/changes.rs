@@ -29,15 +29,9 @@ pub(super) struct Changes<'a> {
     /// The commit's sequence, or the sequence that a listing's snapshot
     /// captured.
     pub(super) seq: ChangeSeq,
-    /// When the commit was made, which a new file shows as its modification
-    /// time.
-    pub(super) committed_at_ms: u64,
-    pub(super) now_ms: u64,
+    pub(super) source: Source,
     /// The roots of directories that entered the mount and aren't shown yet.
     pub(super) withheld: &'a HashSet<ItemId>,
-    /// Whether a change in a directory sets the directory's modification
-    /// time, which a feed event does and a listing doesn't.
-    pub(super) touches_directories: bool,
     pub(super) effects: Vec<Effect>,
     /// Entering roots that the changes removed.
     pub(super) left_entering: Vec<ItemId>,
@@ -45,6 +39,17 @@ pub(super) struct Changes<'a> {
     pub(super) reserved: Option<InodeId>,
     /// Items added less items removed.
     pub(super) entry_change: i64,
+}
+
+/// Where a transaction's changes come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    /// A commit of the feed, made at `committed_at_ms`. A new file shows
+    /// that time as its modification time, and so does each directory that
+    /// the commit changes, so the tree follows from the feed alone.
+    Commit { committed_at_ms: u64 },
+    /// A page of a listing, whose entries carry their own times.
+    Listing,
 }
 
 /// What a transaction's changes did, once it commits.
@@ -67,20 +72,17 @@ enum ContentChange {
 }
 
 impl<'a> Changes<'a> {
-    pub(super) fn for_commit(
+    pub(super) fn new(
         connection: &'a Connection,
         seq: ChangeSeq,
-        committed_at_ms: u64,
-        now_ms: u64,
+        source: Source,
         withheld: &'a HashSet<ItemId>,
     ) -> Self {
         Self {
             connection,
             seq,
-            committed_at_ms,
-            now_ms,
+            source,
             withheld,
-            touches_directories: true,
             effects: Vec::new(),
             left_entering: Vec::new(),
             reserved: None,
@@ -88,15 +90,11 @@ impl<'a> Changes<'a> {
         }
     }
 
-    pub(super) fn for_listing(
-        connection: &'a Connection,
-        seq: ChangeSeq,
-        now_ms: u64,
-        withheld: &'a HashSet<ItemId>,
-    ) -> Self {
-        Self {
-            touches_directories: false,
-            ..Self::for_commit(connection, seq, now_ms, now_ms, withheld)
+    /// Returns when the commit was made, or `None` for a listing.
+    pub(super) fn committed_at_ms(&self) -> Option<u64> {
+        match self.source {
+            Source::Commit { committed_at_ms } => Some(committed_at_ms),
+            Source::Listing => None,
         }
     }
 
@@ -137,16 +135,17 @@ impl<'a> Changes<'a> {
         Ok(())
     }
 
-    /// Sets a directory's modification time to now, because the mount saw a
-    /// change in it.
+    /// Sets a directory's modification time to the time of the commit that
+    /// changed an entry in it. A listing's entries carry their own times, so
+    /// a listing doesn't change it.
     fn touch(&mut self, directory: ItemId) -> Result<()> {
-        if !self.touches_directories {
+        let Source::Commit { committed_at_ms } = self.source else {
             return Ok(());
-        }
+        };
         let Some(mut record) = find_item(self.connection, directory)? else {
             return Ok(());
         };
-        record.local.mtime_ms = self.now_ms;
+        record.local.mtime_ms = committed_at_ms;
         self.write(&record)?;
         self.effects.push(Effect::Invalidate(Invalidation::Inode {
             item: directory,
@@ -473,13 +472,9 @@ impl<'a> Changes<'a> {
 
 /// Writes the rows of one page of admission's listing, before the control
 /// task starts.
-pub(crate) fn write_listing(
-    connection: &Connection,
-    entries: &[PathEntry],
-    now_ms: u64,
-) -> Result<()> {
+pub(crate) fn write_listing(connection: &Connection, entries: &[PathEntry]) -> Result<()> {
     let withheld = HashSet::new();
-    let mut changes = Changes::for_listing(connection, ChangeSeq(0), now_ms, &withheld);
+    let mut changes = Changes::new(connection, ChangeSeq(0), Source::Listing, &withheld);
     for entry in entries {
         changes.upsert_entry(entry, None)?;
     }
