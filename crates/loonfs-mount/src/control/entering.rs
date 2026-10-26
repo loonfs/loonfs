@@ -69,16 +69,35 @@ pub(super) fn load(database: &mut Database) -> Result<Vec<EnteringState>> {
 impl ControlTask {
     /// Records what a worker read for an item that entered the mount, and
     /// continues the page that waited for it.
+    ///
+    /// A read at a waiting directory's snapshot fails with
+    /// `snapshot_not_found` once that snapshot expires, for example after the
+    /// daemon was stopped for longer than its lifetime. Every directory that
+    /// waits at the snapshot is then discarded and listed again at a new
+    /// snapshot, and the page's read starts again, so the feed doesn't stop
+    /// at the commit.
     pub(super) fn on_entering_item_read(
         &mut self,
         inode_id: InodeId,
+        snapshot: Option<SnapshotRef>,
         result: Result<EnteringItem>,
     ) {
+        let relisted = self.relisting.remove(&inode_id);
         match result {
             Ok(EnteringItem::Listed) => {
-                let marked = self.mark_listed(inode_id);
+                let marked = self
+                    .mark_listed(inode_id)
+                    .and_then(|()| self.reveal_entering(None));
                 if let Err(error) = marked {
-                    self.fail_page(error);
+                    if relisted {
+                        tracing::warn!(%error, %inode_id, "recording a listing again failed");
+                        if let Err(error) = self.drop_entering(inode_id) {
+                            tracing::error!(%error, "removing an interrupted listing failed");
+                        }
+                        self.relist_on_tick.insert(inode_id);
+                    } else {
+                        self.fail_page(error);
+                    }
                     return;
                 }
                 self.resume_page(
@@ -91,9 +110,62 @@ impl ControlTask {
                 if let Err(error) = self.drop_entering(inode_id) {
                     tracing::error!(%error, "removing an interrupted listing failed");
                 }
-                self.fail_page(error);
+                let expired = snapshot.filter(|_| {
+                    error.client_code() == Some(loonfs_types::ErrorCode::SnapshotNotFound)
+                });
+                if let Some(expired) = expired {
+                    tracing::warn!(
+                        snapshot_id = %expired.snapshot_id,
+                        "a waiting directory's snapshot expired, so the mount lists it again"
+                    );
+                    match self.relist_expired(&expired.snapshot_id) {
+                        Ok(()) => self.retry_awaited_read(),
+                        Err(error) => self.fail_page(error),
+                    }
+                } else if relisted {
+                    // No page waits for this listing, so the next tick
+                    // starts it again.
+                    tracing::warn!(%error, %inode_id, "listing a directory again failed");
+                    self.relist_on_tick.insert(inode_id);
+                } else {
+                    self.fail_page(error);
+                }
             }
         }
+    }
+
+    /// Lists again the directories whose listing at a new snapshot failed.
+    pub(super) fn relist_failed_listings(&mut self) {
+        for inode_id in std::mem::take(&mut self.relist_on_tick) {
+            self.relist(inode_id);
+        }
+    }
+
+    fn relist(&mut self, inode_id: InodeId) {
+        self.relisting.insert(inode_id);
+        self.workers.start(Work::ReadEnteringItem {
+            inode_id,
+            snapshot: None,
+        });
+    }
+
+    /// Discards the directories that wait at an expired snapshot, and lists
+    /// each one again at a new snapshot.
+    fn relist_expired(&mut self, snapshot_id: &PinId) -> Result<()> {
+        let expired: Vec<_> = self
+            .entering
+            .iter()
+            .filter(|entering| entering.snapshot_id() == snapshot_id)
+            .cloned()
+            .collect();
+        let roots: Vec<_> = expired.iter().map(EnteringState::root_item_id).collect();
+        self.remove_entering_rows(&roots)?;
+        self.entering
+            .retain(|entering| entering.snapshot_id() != snapshot_id);
+        for entering in expired {
+            self.relist(entering.inode_id);
+        }
+        Ok(())
     }
 
     fn mark_listed(&mut self, inode_id: InodeId) -> Result<()> {

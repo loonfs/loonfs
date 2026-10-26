@@ -10,7 +10,7 @@ use crate::service::SimulatedService;
 use crate::state::ServerState;
 use crate::trace::RequestRecord;
 use loonfs_client::ClientConfig;
-use loonfs_sim::{DeterministicClock, SimInstant};
+use loonfs_sim::{DeterministicClock, SimClock as _, SimDuration, SimInstant};
 use loonfs_types::api::v0::{Commit, CommitRequest, Snapshot};
 use loonfs_types::{ActorId, ChangeSeq, NamespaceId, NamespaceNaming};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -64,6 +64,12 @@ impl SimulatedServer {
     /// share the same time.
     pub fn clock(&self) -> &DeterministicClock {
         &self.clock
+    }
+
+    /// Moves the virtual clock forward by `delta_ms`, which expires the
+    /// snapshots, grants, and tokens whose lifetime passes.
+    pub fn advance_clock(&self, delta_ms: u64) {
+        self.clock.advance(SimDuration::from_millis(delta_ms));
     }
 
     /// Returns the virtual clock's time in Unix milliseconds.

@@ -171,6 +171,18 @@ impl ControlTask {
         self.continue_page(progress);
     }
 
+    /// Starts the read that the current page waits for again.
+    pub(super) fn retry_awaited_read(&mut self) {
+        let FeedState::WaitingForRead(progress) = &self.feed else {
+            return;
+        };
+        let (Some(key), Some(commit)) = (progress.awaiting, progress.changes.front()) else {
+            return;
+        };
+        let seq = commit.committed_seq;
+        self.start_read(&key, seq);
+    }
+
     /// Abandons the current page after an error. The next poll reads it
     /// again from the applied sequence.
     pub(super) fn fail_page(&mut self, error: MountError) {

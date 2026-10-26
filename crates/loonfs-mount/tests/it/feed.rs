@@ -2,8 +2,8 @@
 //! produces, applied to a mount without local changes.
 
 use crate::support::{
-    delete, engine_tree, fixture, item, mkdir, move_path, open, operations, put, read, refresh,
-    request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH, WAIT,
+    delete, engine_tree, eventually, fixture, item, mkdir, move_path, open, operations, put, read,
+    refresh, request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH, WAIT,
 };
 use loonfs_mount::{ItemId, ItemKind, MountError, PublicationStop};
 use loonfs_mount_sim::{EchoOrder, Operation, RequestRecord};
@@ -382,4 +382,48 @@ async fn a_refresh_fails_past_the_head_and_after_its_timeout() {
     hold.release();
     refresh(&engine, commit.committed_seq).await;
     assert!(item(&engine, "new.txt").is_some());
+}
+
+/// Checks that when the snapshot of a directory that waits for the feed
+/// expires, as it does while a daemon is stopped for longer than the
+/// snapshot's lifetime, a commit that reads at that snapshot doesn't stop
+/// the feed: the directory is listed again at a new snapshot, and the
+/// commit applies.
+#[tokio::test]
+async fn an_expired_snapshot_of_a_waiting_directory_is_replaced_and_the_feed_continues() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let moved = fixture.commit(vec![move_path("/elsewhere/incoming", "incoming")]);
+    let hold = fixture
+        .server
+        .order_next_commit_echo(EchoOrder::ResponseFirst);
+    let later = fixture
+        .client
+        .commit(
+            &fixture.namespace_id,
+            &fixture.actor,
+            &request(vec![move_path("/elsewhere/loose.txt", "loose.txt")]),
+        )
+        .await
+        .expect("the commit's response comes before its echo");
+    refresh(&engine, moved.committed_seq).await;
+    assert_eq!(
+        item(&engine, "incoming"),
+        None,
+        "the directory waits for the feed to reach its snapshot"
+    );
+
+    // Past the 10-minute lifetime of the directory's snapshot.
+    fixture.server.advance_clock(11 * 60 * 1000);
+    hold.release();
+    refresh(&engine, later.committed_seq).await;
+    assert!(item(&engine, "loose.txt").is_some());
+    eventually(|| item(&engine, "incoming").is_some()).await;
+    let incoming = item(&engine, "incoming").expect("the directory listed again");
+    let names: Vec<OsString> = engine
+        .readdir(incoming, 0)
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(names, ["a.txt"]);
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }

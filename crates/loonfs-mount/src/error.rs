@@ -176,6 +176,15 @@ pub enum MountError {
 pub type Result<T> = std::result::Result<T, MountError>;
 
 impl MountError {
+    /// Returns the server's error code, when a request to the server failed
+    /// with one.
+    pub(crate) fn client_code(&self) -> Option<loonfs_types::ErrorCode> {
+        match self {
+            Self::Client(error) => error.code(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn io(path: &std::path::Path, error: &std::io::Error) -> Self {
         Self::Io {
             path: path.display().to_string(),

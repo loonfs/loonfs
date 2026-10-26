@@ -36,7 +36,7 @@ use crate::status::{
 use crate::tree::{ItemView, Tree};
 use crate::workers::{WorkOutcome, Workers};
 use loonfs_types::{AbsolutePath, ChangeSeq, ContentId, InodeId, MonotonicTimer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -153,6 +153,12 @@ pub(crate) struct ControlTask {
     refresh_waiters: Vec<RefreshWaiter>,
     invalidations: Vec<Invalidation>,
     entering: Vec<EnteringState>,
+    /// Waiting directories whose snapshot expired, which are being listed
+    /// again. At most one entry for each directory that entered the mount.
+    relisting: HashSet<InodeId>,
+    /// Directories whose listing again failed, which the next tick lists
+    /// again.
+    relist_on_tick: HashSet<InodeId>,
     publication_stop: Option<PublicationStop>,
     reserved_name: Option<InodeId>,
     /// The owner that every item shows, which status reports.
@@ -224,6 +230,8 @@ impl ControlTask {
             refresh_waiters: Vec::new(),
             invalidations: Vec::new(),
             entering,
+            relisting: HashSet::new(),
+            relist_on_tick: HashSet::new(),
             publication_stop: mount.publication_stop,
             reserved_name: None,
             owner,
@@ -312,9 +320,11 @@ impl ControlTask {
     fn on_work_done(&mut self, outcome: WorkOutcome) {
         match outcome {
             WorkOutcome::FeedPage(page) => self.on_feed_page(page),
-            WorkOutcome::EnteringItemRead { inode_id, result } => {
-                self.on_entering_item_read(inode_id, result);
-            }
+            WorkOutcome::EnteringItemRead {
+                inode_id,
+                snapshot,
+                result,
+            } => self.on_entering_item_read(inode_id, snapshot, result),
             WorkOutcome::EnteringDirectory {
                 inode_id,
                 entry,
@@ -344,6 +354,7 @@ impl ControlTask {
     fn on_tick(&mut self) {
         self.request_poll();
         self.keep_entering_alive();
+        self.relist_failed_listings();
         self.sweep_tree();
     }
 

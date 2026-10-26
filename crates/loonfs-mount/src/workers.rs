@@ -114,6 +114,8 @@ pub(crate) enum WorkOutcome {
     FeedPage(std::result::Result<ListChangesResponse, ClientError>),
     EnteringItemRead {
         inode_id: InodeId,
+        /// The snapshot of a waiting directory that the read was at.
+        snapshot: Option<SnapshotRef>,
         result: Result<EnteringItem>,
     },
     /// The entry of a directory that entered the mount, at the snapshot that
@@ -227,8 +229,12 @@ impl WorkerContext {
                 self.send(WorkOutcome::FeedPage(page));
             }
             Work::ReadEnteringItem { inode_id, snapshot } => {
-                let result = self.read_entering_item(inode_id, snapshot).await;
-                self.send(WorkOutcome::EnteringItemRead { inode_id, result });
+                let result = self.read_entering_item(inode_id, snapshot.clone()).await;
+                self.send(WorkOutcome::EnteringItemRead {
+                    inode_id,
+                    snapshot,
+                    result,
+                });
             }
             Work::ReadAncestors { root_inode_id } => {
                 let result = self.read_ancestors(root_inode_id).await;

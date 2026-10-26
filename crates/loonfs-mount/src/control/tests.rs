@@ -250,6 +250,7 @@ fn a_commit_that_brings_in_a_directory_waits_for_its_listing() {
     written.blocking_recv().expect("the page is written");
     task.handle(done(WorkOutcome::EnteringItemRead {
         inode_id: InodeId(30),
+        snapshot: None,
         result: Ok(EnteringItem::Listed),
     }));
     assert_eq!(task.applied_seq, ChangeSeq(6));
