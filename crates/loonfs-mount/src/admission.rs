@@ -166,12 +166,19 @@ async fn scan(
                 path: config.path.to_string(),
             });
         }
-        let transaction = database.transaction()?;
-        write_listing(&transaction, &entries)?;
-        transaction.commit()?;
+        write_page(&mut database, &entries)?;
         lease.keep_alive(client, timer).await?;
     }
     Ok(database)
+}
+
+/// Writes one listing page in one transaction. It's a step of its own, so
+/// the scan's future holds no transaction across an await and stays `Send`.
+fn write_page(database: &mut Database, entries: &[PathEntry]) -> Result<()> {
+    let transaction = database.transaction()?;
+    write_listing(&transaction, entries)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn is_reserved(entry: &PathEntry, root: &PathEntry) -> bool {

@@ -54,7 +54,8 @@ impl Engine {
     /// A mount that the host or the namespace can't serve fails with the
     /// reason (see "Admitting a mount" in the design note). A resumed mount
     /// keeps the settings it was admitted with. It must be called from a
-    /// Tokio runtime, which runs the engine's requests.
+    /// Tokio runtime, which runs the engine's requests. The future is `Send`,
+    /// so a daemon can spawn it.
     pub async fn mount(client: Client, config: MountConfig) -> Result<Self> {
         config.validate()?;
         let disk: Arc<dyn DiskSpace> = Arc::new(HostDiskSpace);
@@ -346,5 +347,21 @@ impl Iterator for ReadDirectory {
             self.batch = batch.into();
         }
         self.batch.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Checks at compile time that a mount's future is `Send`, so a daemon
+    /// can spawn it on a runtime with several threads.
+    #[test]
+    fn the_mount_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let _never_called = |client: Client, config: MountConfig| {
+            let future = Engine::mount(client, config);
+            assert_send(&future);
+        };
     }
 }
