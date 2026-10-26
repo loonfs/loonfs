@@ -1,6 +1,7 @@
 //! Admitting a mount: the scan at a snapshot and the requests it makes, the
-//! steps it reports, the entry budget, the checks that refuse a mount, and a
-//! second mount that resumes the state.
+//! steps it reports, the entry budget, the checks that refuse a mount, a
+//! second mount that resumes the state, and what the status reports about
+//! the host.
 
 use crate::support::{engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH};
 use loonfs_mount::{ItemId, MountAccess, MountError, MountProgress, Readiness};
@@ -153,6 +154,25 @@ async fn a_second_mount_resumes_the_state_without_a_scan() {
             .all(|record| record.operation == Operation::ListChanges),
         "{:?}",
         operations(&trace)
+    );
+}
+
+/// Checks that status reports the owner that the mount's settings set, the
+/// state directory, and the free space on the state directory's filesystem.
+#[tokio::test]
+async fn status_reports_the_owner_the_state_directory_and_the_free_space() {
+    let fixture = fixture();
+    let mut config = fixture.config();
+    config.uid = Some(1234);
+    config.gid = Some(5678);
+    let engine = fixture.mount_with(config.clone()).await;
+    let status = engine.status();
+    assert_eq!((status.uid, status.gid), (1234, 5678));
+    assert_eq!(status.state_directory, config.state_directory);
+    assert!(
+        status.available_bytes.is_some_and(|bytes| bytes > 0),
+        "{:?}",
+        status.available_bytes
     );
 }
 

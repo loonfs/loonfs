@@ -3,6 +3,7 @@
 use crate::config::MountAccess;
 use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, InodeId, NamespaceId};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// The state of one mount, as `loonfs status` and `.loonfs/status.json`
 /// report it.
@@ -14,6 +15,19 @@ pub struct Status {
     pub path: AbsolutePath,
     /// Whether the mount accepts changes.
     pub access: MountAccess,
+    /// The user that every item shows as its owner: `--uid`, or the user
+    /// that runs the daemon.
+    pub uid: u32,
+    /// The group that every item shows: `--gid`, or the group of the user
+    /// that runs the daemon.
+    pub gid: u32,
+    /// The mount's state directory, which stores `tree.db` and the content
+    /// cache.
+    pub state_directory: PathBuf,
+    /// The bytes that the daemon's user can still write on the state
+    /// directory's filesystem, measured when the status is read, or `None`
+    /// when the filesystem doesn't report them.
+    pub available_bytes: Option<u64>,
     /// Whether the engine serves its trees, or is listing the namespace again.
     pub readiness: Readiness,
     /// How the adapter mounted the directory, once it has.

@@ -36,6 +36,7 @@ const READ_DIRECTORY_BATCH_ENTRIES: usize = 256;
 /// mount's control task. Dropping the engine stops the control task.
 pub struct Engine {
     config: MountConfig,
+    disk: Arc<dyn DiskSpace>,
     shared: SharedState,
     control: ControlSender,
     mount_method: Mutex<Option<MountMethod>>,
@@ -82,7 +83,7 @@ impl Engine {
         let config = database.mount()?.config;
         let environment = Environment {
             timer: timer.clone(),
-            disk,
+            disk: disk.clone(),
             reflinks,
         };
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -106,6 +107,7 @@ impl Engine {
         runtime.spawn(tick(sender.clone(), shared.clone(), poll_interval_ms));
         Ok(Self {
             config,
+            disk,
             shared,
             control: sender,
             mount_method: Mutex::new(None),
@@ -251,7 +253,8 @@ impl Engine {
         self.shared.subscribers.subscribe()
     }
 
-    /// Returns the mount's state, as `loonfs status` reports it.
+    /// Returns the mount's state, as `loonfs status` reports it, with the
+    /// state directory's free space measured now.
     pub fn status(&self) -> Status {
         let mut status = self
             .shared
@@ -263,6 +266,7 @@ impl Engine {
             .mount_method
             .lock()
             .expect("the mount method lock should not be poisoned");
+        status.available_bytes = self.disk.available_bytes(&self.config.state_directory).ok();
         status
     }
 

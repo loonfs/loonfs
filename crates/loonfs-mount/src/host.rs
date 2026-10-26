@@ -30,6 +30,28 @@ impl DiskSpace for HostDiskSpace {
     }
 }
 
+/// The owner that every item in a mount shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Owner {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+}
+
+impl Owner {
+    /// Returns the owner that `--uid` and `--gid` set, or the user and group
+    /// that run the engine.
+    pub(crate) fn of(config: &MountConfig) -> Self {
+        Self {
+            uid: config
+                .uid
+                .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
+            gid: config
+                .gid
+                .unwrap_or_else(|| rustix::process::getegid().as_raw()),
+        }
+    }
+}
+
 /// What the host checks found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HostReport {

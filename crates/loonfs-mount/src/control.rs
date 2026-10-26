@@ -25,7 +25,7 @@ use crate::config::MountConfig;
 use crate::database::{self, Ancestor, Database};
 use crate::error::Result;
 use crate::fetch::FetchQueue;
-use crate::host::DiskSpace;
+use crate::host::{DiskSpace, Owner};
 use crate::invalidation::{Invalidation, Subscribers};
 use crate::item::ItemId;
 use crate::item_table::for_each_item;
@@ -155,6 +155,8 @@ pub(crate) struct ControlTask {
     entering: Vec<EnteringState>,
     publication_stop: Option<PublicationStop>,
     reserved_name: Option<InodeId>,
+    /// The owner that every item shows, which status reports.
+    owner: Owner,
     feed_error: Option<String>,
     dropped_invalidations: u64,
 
@@ -185,6 +187,7 @@ impl ControlTask {
             ancestors: database::read_ancestors(database.connection())?,
         };
         let entering = entering::load(&mut database)?;
+        let owner = Owner::of(&mount.config);
         let tree = load_tree(&database)?;
         let rows = database::read_cache_files(database.connection())?;
         let (cache, missing) = Cache::load(&mount.config.cache_directory(), rows)?;
@@ -194,7 +197,11 @@ impl ControlTask {
         let entries = database::count_items(database.connection())?;
         let shared = SharedState {
             tree: Arc::new(RwLock::new(tree)),
-            status: Arc::new(Mutex::new(initial_status(&mount.config, &environment))),
+            status: Arc::new(Mutex::new(initial_status(
+                &mount.config,
+                owner,
+                &environment,
+            ))),
             subscribers: Subscribers::default(),
             tick_pending: Arc::new(AtomicBool::new(false)),
         };
@@ -219,6 +226,7 @@ impl ControlTask {
             entering,
             publication_stop: mount.publication_stop,
             reserved_name: None,
+            owner,
             feed_error: None,
             dropped_invalidations: 0,
             cache,
@@ -378,6 +386,10 @@ impl ControlTask {
             namespace_id: self.config.namespace_id.clone(),
             path: self.config.path.clone(),
             access: self.config.access,
+            uid: self.owner.uid,
+            gid: self.owner.gid,
+            state_directory: self.config.state_directory.clone(),
+            available_bytes: None,
             readiness: if self.feed.is_rebuilding() {
                 Readiness::Rebuilding
             } else {
@@ -416,11 +428,15 @@ impl ControlTask {
     }
 }
 
-fn initial_status(config: &MountConfig, environment: &Environment) -> Status {
+fn initial_status(config: &MountConfig, owner: Owner, environment: &Environment) -> Status {
     Status {
         namespace_id: config.namespace_id.clone(),
         path: config.path.clone(),
         access: config.access,
+        uid: owner.uid,
+        gid: owner.gid,
+        state_directory: config.state_directory.clone(),
+        available_bytes: None,
         readiness: Readiness::Ready,
         mount_method: None,
         applied_seq: ChangeSeq(0),
