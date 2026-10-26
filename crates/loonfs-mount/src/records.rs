@@ -189,7 +189,6 @@ pub(crate) struct WriteState {
     pub(crate) published_generation: u64,
     pub(crate) lowest_write_offset: Option<u64>,
     pub(crate) truncated_below_base: bool,
-    pub(crate) lookups: u64,
     pub(crate) fingerprint: Option<Vec<u8>>,
     /// The field groups with local changes, as `*_DIRTY` bits.
     pub(crate) dirty_groups: u8,

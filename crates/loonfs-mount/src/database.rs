@@ -78,7 +78,6 @@ CREATE TABLE items (
     published_generation INTEGER NOT NULL,
     lowest_write_offset INTEGER,
     truncated_below_base INTEGER NOT NULL,
-    lookups INTEGER NOT NULL,
     fingerprint BLOB,
     dirty_groups INTEGER NOT NULL
 );

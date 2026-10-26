@@ -1,4 +1,4 @@
-//! The `items` table of `tree.db`: how an item's record maps to its 47
+//! The `items` table of `tree.db`: how an item's record maps to its 46
 //! columns, and the queries that read and write records.
 
 use crate::attributes::MtimeAttribute;
@@ -22,8 +22,8 @@ const ITEM_COLUMNS: &str = "item_id, remote_inode_id, kind, \
     s_hidden_by_inode_id, s_hidden_by_seq, s_append_only, \
     l_parent, l_name, l_size, l_mode, l_mtime_ms, l_target, l_mtime_explicit, \
     materialized, generation, published_generation, lowest_write_offset, \
-    truncated_below_base, lookups, fingerprint, dirty_groups";
-const ITEM_COLUMN_COUNT: usize = 47;
+    truncated_below_base, fingerprint, dirty_groups";
+const ITEM_COLUMN_COUNT: usize = 46;
 
 /// Converts a `u64` to the `i64` that the database stores, keeping every bit.
 ///
@@ -108,7 +108,6 @@ fn record_values(record: &ItemRecord) -> Vec<Value> {
         integer(write.published_generation),
         optional_integer(write.lowest_write_offset),
         flag(write.truncated_below_base),
-        integer(write.lookups),
         write.fingerprint.clone().map_or(Value::Null, Value::Blob),
         integer(u64::from(write.dirty_groups)),
     ]);
@@ -248,7 +247,6 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<ItemRecord> {
         published_generation: columns.u64()?,
         lowest_write_offset: columns.optional_u64()?,
         truncated_below_base: columns.flag()?,
-        lookups: columns.u64()?,
         fingerprint: columns.next()?,
         dirty_groups: u8::try_from(columns.u64()?)
             .map_err(|error| conversion_error(ITEM_COLUMN_COUNT - 1, error))?,
