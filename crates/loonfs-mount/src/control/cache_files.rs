@@ -280,6 +280,15 @@ impl ControlTask {
         if let Err(error) = removed {
             tracing::error!(%error, %content_id, "deleting a cache file failed");
         }
+        // No fetch writes the removed file, so a read that waits for it
+        // fails instead of waiting for good.
+        self.fail_waiters(
+            content_id,
+            &(0..u64::MAX),
+            &MountError::CacheFileRemoved {
+                content_id: content_id.clone(),
+            },
+        );
     }
 
     /// Evicts files, partial or complete, that no handle has open, least

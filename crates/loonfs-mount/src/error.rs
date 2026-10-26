@@ -137,6 +137,14 @@ pub enum MountError {
         /// The content whose bytes didn't match.
         content_id: ContentId,
     },
+    /// The cache file that a read waited for was removed, for example
+    /// because the revision it filled was replaced, so the read fails
+    /// instead of waiting for bytes that no fetch writes.
+    #[error("the cache file of content `{content_id}` was removed while a read waited for it")]
+    CacheFileRemoved {
+        /// The content whose cache file was removed.
+        content_id: ContentId,
+    },
     /// The cache can't store more bytes, so it stopped filling.
     #[error("the content cache is full: {reason}")]
     NoSpace {

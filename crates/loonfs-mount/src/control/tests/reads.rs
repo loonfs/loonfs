@@ -253,3 +253,31 @@ fn the_second_fetch_reads_the_files_target_from_a_revision_that_covers_it() {
     assert_eq!(refetch.inode_id, InodeId(11));
     assert_eq!(refetch.range, 0..14);
 }
+
+/// Checks that a read that waits for a cache file fails when the file is
+/// removed, instead of waiting for bytes that no fetch writes.
+#[test]
+fn a_read_that_waits_for_a_removed_file_fails() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
+    task.start();
+    workers.take();
+    let opened = open(&mut task, &shared, "a.txt");
+    let mut read = read_all(&mut task, &opened);
+    only_fetch(workers.take());
+    let content_id = opened
+        .view
+        .lock()
+        .expect("the view lock")
+        .revision
+        .content_ref
+        .content_id
+        .clone();
+    task.remove_cache_file(&content_id);
+    task.publish_and_deliver();
+    let result = read.try_recv().expect("a reply");
+    assert!(
+        matches!(result, Err(MountError::CacheFileRemoved { .. })),
+        "{result:?}"
+    );
+}
