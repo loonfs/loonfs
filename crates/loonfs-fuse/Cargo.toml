@@ -25,5 +25,9 @@ loonfs-client.workspace = true
 loonfs-types.workspace = true
 tempfile.workspace = true
 
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
 [lints]
 workspace = true
