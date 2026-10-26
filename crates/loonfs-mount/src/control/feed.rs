@@ -252,6 +252,8 @@ impl ControlTask {
     /// Waits until a poll that starts after now completes with the applied
     /// sequence at `seq` or later.
     pub(super) fn on_refresh(&mut self, seq: ChangeSeq, reply: oneshot::Sender<Result<()>>) {
+        self.refresh_waiters
+            .retain(|waiter| !waiter.reply.is_closed());
         self.refresh_waiters.push(RefreshWaiter {
             seq,
             poll: self.started_polls + 1,

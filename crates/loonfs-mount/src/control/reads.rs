@@ -1,6 +1,7 @@
 //! The read handles of the control task, and the fetches that their reads
 //! wait for.
 
+use super::read_waiters::ReadWaiter;
 use super::ControlTask;
 use crate::cache::{CacheEntryState, FillAttempt};
 use crate::cache_file::CacheFile;
@@ -29,13 +30,6 @@ impl OpenHandle {
             .lock()
             .expect("a read handle's view lock should not be poisoned")
     }
-}
-
-/// A read that waits for bytes of one content.
-pub(super) struct ReadWaiter {
-    content_id: ContentId,
-    needed: Range<u64>,
-    reply: oneshot::Sender<Result<Arc<CacheFile>>>,
 }
 
 /// Which bytes a request fetches.
@@ -140,11 +134,14 @@ impl ControlTask {
             return;
         }
         self.fetches.promote(&content_id, &needed);
-        self.read_waiters.push(ReadWaiter {
+        self.read_waiters.push(
             content_id,
-            needed,
-            reply,
-        });
+            ReadWaiter {
+                handle,
+                needed,
+                reply,
+            },
+        );
         self.start_fetches();
     }
 
@@ -176,6 +173,7 @@ impl ControlTask {
             return;
         };
         let content_id = open.view().revision.content_ref.content_id.clone();
+        self.read_waiters.remove_handle(handle);
         self.unpin(&content_id);
         self.workers.start(Work::DropStream { handle });
         self.sweep_tree();
@@ -394,11 +392,9 @@ impl ControlTask {
             return;
         };
         let failed = matches!(entry.state, CacheEntryState::Failed);
-        let waiters = std::mem::take(&mut self.read_waiters);
-        for waiter in waiters {
-            if &waiter.content_id != content_id {
-                self.read_waiters.push(waiter);
-            } else if failed {
+        let mut waiting = Vec::new();
+        for waiter in self.read_waiters.take(content_id) {
+            if failed {
                 self.outbox.reply(
                     waiter.reply,
                     Err(MountError::ContentMismatch {
@@ -408,9 +404,10 @@ impl ControlTask {
             } else if entry.contains(&waiter.needed) {
                 self.outbox.reply(waiter.reply, Ok(entry.file.clone()));
             } else {
-                self.read_waiters.push(waiter);
+                waiting.push(waiter);
             }
         }
+        self.read_waiters.restore(content_id, waiting);
     }
 
     /// Fails the reads that wait for the bytes of `range`, or every read of
@@ -425,15 +422,16 @@ impl ControlTask {
             .cache
             .entry(content_id)
             .is_some_and(|entry| entry.is_refetching());
-        let waiters = std::mem::take(&mut self.read_waiters);
-        for waiter in waiters {
+        let mut waiting = Vec::new();
+        for waiter in self.read_waiters.take(content_id) {
             let overlaps =
                 refetching || (waiter.needed.start < range.end && range.start < waiter.needed.end);
-            if &waiter.content_id == content_id && overlaps {
+            if overlaps {
                 self.outbox.reply(waiter.reply, Err(error.clone()));
             } else {
-                self.read_waiters.push(waiter);
+                waiting.push(waiter);
             }
         }
+        self.read_waiters.restore(content_id, waiting);
     }
 }

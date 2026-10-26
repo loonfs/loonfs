@@ -14,6 +14,7 @@ mod entering;
 mod events;
 mod feed;
 mod outbox;
+mod read_waiters;
 mod reads;
 mod rebuild;
 #[cfg(test)]
@@ -47,7 +48,8 @@ pub(crate) use changes::write_listing;
 use entering::EnteringState;
 use feed::{FeedState, RefreshWaiter};
 use outbox::Outbox;
-use reads::{OpenHandle, ReadWaiter};
+use read_waiters::ReadWaiters;
+use reads::OpenHandle;
 
 /// Sends messages to a control task.
 ///
@@ -155,6 +157,9 @@ pub(crate) struct ControlTask {
     completed_polls: u64,
     /// The namespace's head that the current poll's last page read.
     polled_head_seq: Option<ChangeSeq>,
+    /// The `refresh_at_least` calls that wait. It's bounded by the calls in
+    /// flight: a call leaves when it gets its reply, or when its caller's
+    /// timeout passes and the next call or the end of a poll drops it.
     refresh_waiters: Vec<RefreshWaiter>,
     invalidations: Vec<Invalidation>,
     entering: Vec<EnteringState>,
@@ -176,7 +181,7 @@ pub(crate) struct ControlTask {
     handles: HashMap<HandleId, OpenHandle>,
     /// The open handles that read each content, which keep its cache file.
     pins: HashMap<ContentId, usize>,
-    read_waiters: Vec<ReadWaiter>,
+    read_waiters: ReadWaiters,
     next_handle_id: u64,
     mismatched_files: u64,
 
@@ -247,7 +252,7 @@ impl ControlTask {
             fetches: FetchQueue::default(),
             handles: HashMap::new(),
             pins: HashMap::new(),
-            read_waiters: Vec::new(),
+            read_waiters: ReadWaiters::default(),
             next_handle_id: 0,
             mismatched_files: 0,
             outbox: Outbox::default(),

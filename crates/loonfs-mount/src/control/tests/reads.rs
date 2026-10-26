@@ -281,3 +281,23 @@ fn a_read_that_waits_for_a_removed_file_fails() {
         "{result:?}"
     );
 }
+
+/// Checks that the waiting reads shrink when their owners go away: a read
+/// whose caller stopped waiting leaves when the next read of the same
+/// content arrives, and a handle's reads leave when it closes.
+#[test]
+fn waiting_reads_leave_with_their_callers_and_handles() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
+    task.start();
+    workers.take();
+    let opened = open(&mut task, &shared, "a.txt");
+    let abandoned = read_all(&mut task, &opened);
+    drop(abandoned);
+    let _waiting = read_all(&mut task, &opened);
+    assert_eq!(task.read_waiters.len(), 1, "the abandoned read left");
+    task.handle(ControlMessage::CloseRead {
+        handle: opened.handle,
+    });
+    assert_eq!(task.read_waiters.len(), 0, "the closed handle's read left");
+}

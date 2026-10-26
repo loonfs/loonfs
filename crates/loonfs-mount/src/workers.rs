@@ -160,6 +160,10 @@ struct WorkerContext {
     namespace_id: NamespaceId,
     control: ControlSender,
     timer: Arc<dyn MonotonicTimer>,
+    /// The grant streams that read handles keep between their windows. It
+    /// has at most one stream for each open handle: a handle's close drops
+    /// its stream, and a fetch that ends after the close drops the stream
+    /// that it kept.
     streams: Mutex<HashMap<HandleId, ParkedStream>>,
 }
 
