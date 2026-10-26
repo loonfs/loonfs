@@ -95,6 +95,8 @@ pub(crate) struct RunningFetch {
     pub(crate) content_id: ContentId,
     pub(crate) file: Arc<CacheFile>,
     pub(crate) range: Range<u64>,
+    /// The read handle that keeps the grant's stream after the fetch.
+    pub(crate) stream_owner: Option<HandleId>,
 }
 
 /// The queued and running fetches of one mount.
@@ -168,6 +170,7 @@ impl FetchQueue {
                     content_id: job.content_id.clone(),
                     file: job.file.clone(),
                     range: job.range.clone(),
+                    stream_owner: job.stream_owner,
                 },
             );
             started.push(job);

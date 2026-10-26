@@ -349,6 +349,14 @@ impl ControlTask {
         let Some(running) = self.fetches.finish(fetch_id) else {
             return;
         };
+        if let Some(handle) = running
+            .stream_owner
+            .filter(|handle| !self.handles.contains_key(handle))
+        {
+            // The handle closed while its grant fetch ran, and the fetch kept
+            // the grant's stream for it after the drop that the close sent.
+            self.workers.start(Work::DropStream { handle });
+        }
         let content_id = running.content_id.clone();
         let current = self
             .cache
