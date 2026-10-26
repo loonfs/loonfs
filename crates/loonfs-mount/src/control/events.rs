@@ -6,7 +6,6 @@ use super::RootLocation;
 use crate::attributes::FsAttributes;
 use crate::error::Result;
 use crate::item::ItemKind;
-use crate::item_table::{find_item_by_inode, find_item_id_by_inode};
 use crate::records::{AttributeState, Binding, FileContent, RemoteState};
 use crate::status::PublicationStop;
 use crate::workers::{EnteringItem, RootAncestry};
@@ -126,7 +125,7 @@ pub(super) fn apply_commit_events(
                         inode_id: *inode_id,
                         deleted_seq: changes.seq,
                     });
-                } else if let Some(item) = find_item_id_by_inode(changes.connection, *inode_id)? {
+                } else if let Some(item) = changes.items.find_id_by_inode(*inode_id)? {
                     changes.remove_subtree(item, *inode_id)?;
                 }
                 None
@@ -165,7 +164,7 @@ fn created(
     binding_version: &BindingVersion,
     file: Option<(RevisionNo, &ContentRef)>,
 ) -> Result<Option<ReadKey>> {
-    let Some(parent) = find_item_id_by_inode(changes.connection, parent_inode_id)? else {
+    let Some(parent) = changes.items.find_id_by_inode(parent_inode_id)? else {
         return Ok(None);
     };
     let committed_at_ms = changes
@@ -208,7 +207,7 @@ fn content_changed(
     content_ref: &ContentRef,
     append_offset: Option<u64>,
 ) -> Result<Option<ReadKey>> {
-    let Some(mut record) = find_item_by_inode(changes.connection, inode_id)? else {
+    let Some(mut record) = changes.items.find_by_inode(inode_id)? else {
         return Ok(None);
     };
     let Some(current) = record.server.content.clone() else {
@@ -247,7 +246,7 @@ fn attributes_changed(
     revision_no: AttributesRevisionNo,
     attributes: &Attributes,
 ) -> Result<Option<ReadKey>> {
-    let Some(mut record) = find_item_by_inode(changes.connection, inode_id)? else {
+    let Some(mut record) = changes.items.find_by_inode(inode_id)? else {
         return Ok(None);
     };
     if revision_no <= record.server.attributes.revision_no {
@@ -275,8 +274,8 @@ fn bound(
     binding_version: &BindingVersion,
     reads: &ReadResults,
 ) -> Result<Option<ReadKey>> {
-    let parent = find_item_id_by_inode(changes.connection, parent_inode_id)?;
-    let record = find_item_by_inode(changes.connection, inode_id)?;
+    let parent = changes.items.find_id_by_inode(parent_inode_id)?;
+    let record = changes.items.find_by_inode(inode_id)?;
     let binding = parent.map(|parent| Binding {
         parent,
         name: display_name.as_str().to_owned(),

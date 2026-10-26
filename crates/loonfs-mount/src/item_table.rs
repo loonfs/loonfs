@@ -11,9 +11,15 @@ use loonfs_types::{
     AttributesRevisionNo, BindingVersion, ChangeSeq, ContentId, InodeId, RevisionNo,
 };
 use rusqlite::types::{Type, Value};
-use rusqlite::{params, Connection, OptionalExtension as _, Row};
+use rusqlite::{params, Connection, OptionalExtension as _, Row, Statement};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
-const ITEM_COLUMNS: &str = "item_id, remote_inode_id, kind, \
+/// The `items` columns, in the order of [`record_values`], as a literal that
+/// `concat!` can build statements from.
+macro_rules! item_columns {
+    () => {
+        "item_id, remote_inode_id, kind, \
     c_parent, c_name, c_binding_version, c_revision_no, c_content_ref, c_size, \
     c_revision_committed_at_ms, c_mode, c_mtime_ms, c_target, c_attributes_revision_no, \
     c_mtime_attribute_ms, c_mtime_attribute_revision_no, \
@@ -23,7 +29,38 @@ const ITEM_COLUMNS: &str = "item_id, remote_inode_id, kind, \
     s_hidden_by_inode_id, s_hidden_by_seq, s_append_only, \
     l_parent, l_name, l_size, l_mode, l_mtime_ms, l_target, l_mtime_explicit, \
     materialized, generation, published_generation, lowest_write_offset, \
-    truncated_below_base, fingerprint, dirty_groups";
+    truncated_below_base, fingerprint, dirty_groups"
+    };
+}
+
+/// One placeholder for each `items` column.
+macro_rules! item_placeholders {
+    () => {
+        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, \
+         ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, \
+         ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46"
+    };
+}
+
+const SELECT_ITEMS: &str = concat!("SELECT ", item_columns!(), " FROM items");
+const FIND_ITEM: &str = concat!("SELECT ", item_columns!(), " FROM items WHERE item_id = ?1");
+const FIND_ITEM_BY_INODE: &str = concat!(
+    "SELECT ",
+    item_columns!(),
+    " FROM items WHERE remote_inode_id = ?1"
+);
+const FIND_ITEM_ID_BY_INODE: &str = "SELECT item_id FROM items WHERE remote_inode_id = ?1";
+const WRITE_ITEM: &str = concat!(
+    "INSERT OR REPLACE INTO items (",
+    item_columns!(),
+    ") VALUES (",
+    item_placeholders!(),
+    ")"
+);
+const DELETE_ITEM: &str = "DELETE FROM items WHERE item_id = ?1";
+const SERVER_CHILDREN: &str = "SELECT item_id FROM items WHERE s_parent = ?1";
+const ALLOCATE_ITEM_ID: &str =
+    "UPDATE mount SET next_item_id = next_item_id + 1 RETURNING next_item_id - 1";
 const ITEM_COLUMN_COUNT: usize = 46;
 
 /// Converts a `u64` to the `i64` that the database stores, keeping every bit.
@@ -265,17 +302,93 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<ItemRecord> {
     })
 }
 
+/// The `items` table through one connection, which prepares each statement
+/// once and keeps it for later calls. A transaction that changes many items,
+/// such as a listing page, prepares each statement once instead of once for
+/// each item.
+pub(crate) struct ItemTable<'c> {
+    connection: &'c Connection,
+    prepared: HashMap<&'static str, Statement<'c>>,
+}
+
+impl<'c> ItemTable<'c> {
+    pub(crate) fn new(connection: &'c Connection) -> Self {
+        Self {
+            connection,
+            prepared: HashMap::new(),
+        }
+    }
+
+    fn statement(&mut self, sql: &'static str) -> rusqlite::Result<&mut Statement<'c>> {
+        match self.prepared.entry(sql) {
+            Entry::Occupied(prepared) => Ok(prepared.into_mut()),
+            Entry::Vacant(vacant) => Ok(vacant.insert(self.connection.prepare(sql)?)),
+        }
+    }
+
+    /// Writes an item's row, replacing the row it had.
+    pub(crate) fn write(&mut self, record: &ItemRecord) -> rusqlite::Result<()> {
+        self.statement(WRITE_ITEM)?
+            .execute(rusqlite::params_from_iter(record_values(record)))?;
+        Ok(())
+    }
+
+    /// Returns the row of `item_id`.
+    pub(crate) fn find(&mut self, item_id: ItemId) -> rusqlite::Result<Option<ItemRecord>> {
+        self.statement(FIND_ITEM)?
+            .query_row(params![sql_u64(item_id.0)], record_from_row)
+            .optional()
+    }
+
+    /// Returns the row of the item that publishes to `inode_id`.
+    pub(crate) fn find_by_inode(
+        &mut self,
+        inode_id: InodeId,
+    ) -> rusqlite::Result<Option<ItemRecord>> {
+        self.statement(FIND_ITEM_BY_INODE)?
+            .query_row(params![sql_u64(inode_id.0)], record_from_row)
+            .optional()
+    }
+
+    /// Returns the item that publishes to `inode_id`.
+    pub(crate) fn find_id_by_inode(
+        &mut self,
+        inode_id: InodeId,
+    ) -> rusqlite::Result<Option<ItemId>> {
+        self.statement(FIND_ITEM_ID_BY_INODE)?
+            .query_row(params![sql_u64(inode_id.0)], |row| row.get::<_, i64>(0))
+            .optional()
+            .map(|item_id| item_id.map(|item_id| ItemId(from_sql_u64(item_id))))
+    }
+
+    /// Deletes an item's row.
+    pub(crate) fn delete(&mut self, item_id: ItemId) -> rusqlite::Result<()> {
+        self.statement(DELETE_ITEM)?
+            .execute(params![sql_u64(item_id.0)])?;
+        Ok(())
+    }
+
+    /// Returns the items whose server-observed parent is `parent`.
+    pub(crate) fn server_children(&mut self, parent: ItemId) -> rusqlite::Result<Vec<ItemId>> {
+        let children = self
+            .statement(SERVER_CHILDREN)?
+            .query_map(params![sql_u64(parent.0)], |row| row.get::<_, i64>(0))?
+            .map(|item_id| item_id.map(|item_id| ItemId(from_sql_u64(item_id))))
+            .collect();
+        children
+    }
+
+    /// Allocates a new item ID.
+    pub(crate) fn allocate_id(&mut self) -> rusqlite::Result<ItemId> {
+        self.statement(ALLOCATE_ITEM_ID)?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|item_id| ItemId(from_sql_u64(item_id)))
+    }
+}
+
 /// Writes an item's row, replacing the row it had.
 pub(crate) fn write_item(connection: &Connection, record: &ItemRecord) -> rusqlite::Result<()> {
-    let placeholders = (1..=ITEM_COLUMN_COUNT)
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection.execute(
-        &format!("INSERT OR REPLACE INTO items ({ITEM_COLUMNS}) VALUES ({placeholders})"),
-        rusqlite::params_from_iter(record_values(record)),
-    )?;
-    Ok(())
+    ItemTable::new(connection).write(record)
 }
 
 /// Returns the row of `item_id`.
@@ -283,27 +396,7 @@ pub(crate) fn find_item(
     connection: &Connection,
     item_id: ItemId,
 ) -> rusqlite::Result<Option<ItemRecord>> {
-    connection
-        .query_row(
-            &format!("SELECT {ITEM_COLUMNS} FROM items WHERE item_id = ?1"),
-            params![sql_u64(item_id.0)],
-            record_from_row,
-        )
-        .optional()
-}
-
-/// Returns the row of the item that publishes to `inode_id`.
-pub(crate) fn find_item_by_inode(
-    connection: &Connection,
-    inode_id: InodeId,
-) -> rusqlite::Result<Option<ItemRecord>> {
-    connection
-        .query_row(
-            &format!("SELECT {ITEM_COLUMNS} FROM items WHERE remote_inode_id = ?1"),
-            params![sql_u64(inode_id.0)],
-            record_from_row,
-        )
-        .optional()
+    ItemTable::new(connection).find(item_id)
 }
 
 /// Returns the item that publishes to `inode_id`.
@@ -311,36 +404,7 @@ pub(crate) fn find_item_id_by_inode(
     connection: &Connection,
     inode_id: InodeId,
 ) -> rusqlite::Result<Option<ItemId>> {
-    connection
-        .query_row(
-            "SELECT item_id FROM items WHERE remote_inode_id = ?1",
-            params![sql_u64(inode_id.0)],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map(|item_id| item_id.map(|item_id| ItemId(from_sql_u64(item_id))))
-}
-
-/// Deletes an item's row.
-pub(crate) fn delete_item(connection: &Connection, item_id: ItemId) -> rusqlite::Result<()> {
-    connection.execute(
-        "DELETE FROM items WHERE item_id = ?1",
-        params![sql_u64(item_id.0)],
-    )?;
-    Ok(())
-}
-
-/// Returns the items whose server-observed parent is `parent`.
-pub(crate) fn server_children(
-    connection: &Connection,
-    parent: ItemId,
-) -> rusqlite::Result<Vec<ItemId>> {
-    let mut statement = connection.prepare("SELECT item_id FROM items WHERE s_parent = ?1")?;
-    let children = statement
-        .query_map(params![sql_u64(parent.0)], |row| row.get::<_, i64>(0))?
-        .map(|item_id| item_id.map(|item_id| ItemId(from_sql_u64(item_id))))
-        .collect();
-    children
+    ItemTable::new(connection).find_id_by_inode(inode_id)
 }
 
 /// Calls `visit` with every item's row.
@@ -348,7 +412,7 @@ pub(crate) fn for_each_item(
     connection: &Connection,
     mut visit: impl FnMut(ItemRecord),
 ) -> rusqlite::Result<()> {
-    let mut statement = connection.prepare(&format!("SELECT {ITEM_COLUMNS} FROM items"))?;
+    let mut statement = connection.prepare(SELECT_ITEMS)?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         visit(record_from_row(row)?);

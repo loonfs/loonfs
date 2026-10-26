@@ -303,18 +303,6 @@ fn shm_path(path: &Path) -> PathBuf {
     PathBuf::from(shm)
 }
 
-/// Allocates the next item ID, in the caller's transaction, so a rolled-back
-/// transaction allocates nothing.
-pub(crate) fn allocate_item_id(connection: &Connection) -> rusqlite::Result<ItemId> {
-    connection
-        .query_row(
-            "UPDATE mount SET next_item_id = next_item_id + 1 RETURNING next_item_id - 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|item_id| ItemId(from_sql_u64(item_id)))
-}
-
 /// Records the sequence of the last commit whose changes are in the trees.
 pub(crate) fn write_applied_seq(connection: &Connection, seq: ChangeSeq) -> rusqlite::Result<()> {
     connection.execute("UPDATE mount SET applied_seq = ?1", params![sql_u64(seq.0)])?;

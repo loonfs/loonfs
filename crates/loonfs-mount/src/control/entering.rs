@@ -296,7 +296,7 @@ impl ControlTask {
             let below_staged = entry
                 .parent_inode_id
                 .is_some_and(|parent| staged.contains(&parent));
-            if below_staged || find_item_id_by_inode(&transaction, entry.inode_id)?.is_some() {
+            if below_staged || changes.items.find_id_by_inode(entry.inode_id)?.is_some() {
                 staged.insert(entry.inode_id);
                 continue;
             }

@@ -4,13 +4,10 @@
 
 use super::effects::Effect;
 use crate::config::CONTROL_DIRECTORY_NAME;
-use crate::database::allocate_item_id;
 use crate::error::Result;
 use crate::invalidation::{CachedPages, Invalidation};
 use crate::item::{ItemId, ItemKind};
-use crate::item_table::{
-    delete_item, find_item, find_item_by_inode, find_item_id_by_inode, server_children, write_item,
-};
+use crate::item_table::ItemTable;
 use crate::read_handle::PinnedRevision;
 use crate::records::{
     Binding, FileContent, HiddenBy, ItemRecord, RemoteState, Visibility, CONTENT_DIRTY,
@@ -25,7 +22,8 @@ use std::ffi::OsString;
 /// The changes of one transaction: one commit's events, or one page of a
 /// listing.
 pub(super) struct Changes<'a> {
-    pub(super) connection: &'a Connection,
+    /// The `items` table, whose statements the changes prepare once.
+    pub(super) items: ItemTable<'a>,
     /// The commit's sequence, or the sequence that a listing's snapshot
     /// captured.
     pub(super) seq: ChangeSeq,
@@ -79,7 +77,7 @@ impl<'a> Changes<'a> {
         withheld: &'a HashSet<ItemId>,
     ) -> Self {
         Self {
-            connection,
+            items: ItemTable::new(connection),
             seq,
             source,
             withheld,
@@ -130,7 +128,7 @@ impl<'a> Changes<'a> {
 
     /// Writes a record and shows it.
     pub(super) fn write(&mut self, record: &ItemRecord) -> Result<()> {
-        write_item(self.connection, record)?;
+        self.items.write(record)?;
         self.effects.push(Effect::Show(ItemView::of(record)));
         Ok(())
     }
@@ -142,7 +140,7 @@ impl<'a> Changes<'a> {
         let Source::Commit { committed_at_ms } = self.source else {
             return Ok(());
         };
-        let Some(mut record) = find_item(self.connection, directory)? else {
+        let Some(mut record) = self.items.find(directory)? else {
             return Ok(());
         };
         record.local.mtime_ms = committed_at_ms;
@@ -190,7 +188,7 @@ impl<'a> Changes<'a> {
         kind: ItemKind,
         state: RemoteState,
     ) -> Result<ItemId> {
-        let item = allocate_item_id(self.connection)?;
+        let item = self.items.allocate_id()?;
         let visibility = self.visibility(item, inode_id, state.binding.as_ref());
         let record = ItemRecord::clean(item, Some(inode_id), kind, state, visibility);
         self.write(&record)?;
@@ -207,7 +205,7 @@ impl<'a> Changes<'a> {
         kind: ItemKind,
         state: RemoteState,
     ) -> Result<ItemId> {
-        let item = allocate_item_id(self.connection)?;
+        let item = self.items.allocate_id()?;
         let record = ItemRecord::clean(item, Some(inode_id), kind, state, Visibility::Withheld);
         self.write(&record)?;
         self.entry_change += 1;
@@ -227,7 +225,7 @@ impl<'a> Changes<'a> {
             Some(binding) => binding,
             None => {
                 let parent = match entry.parent_inode_id {
-                    Some(parent) => find_item_id_by_inode(self.connection, parent)?,
+                    Some(parent) => self.items.find_id_by_inode(parent)?,
                     None => None,
                 };
                 let (Some(parent), Some(name), Some(binding_version)) = (
@@ -257,7 +255,7 @@ impl<'a> Changes<'a> {
         kind: ItemKind,
         state: RemoteState,
     ) -> Result<ItemId> {
-        match find_item_by_inode(self.connection, inode_id)? {
+        match self.items.find_by_inode(inode_id)? {
             Some(record) => self.reconcile(record, kind, state),
             None => self.insert(inode_id, kind, state),
         }
@@ -403,15 +401,15 @@ impl<'a> Changes<'a> {
             let mut record = record;
             record.server = state;
             record.append_only = false;
-            write_item(self.connection, &record)?;
+            self.items.write(&record)?;
             return Ok(record.item_id);
         }
         let inode_id = record
             .remote_inode_id
             .expect("a replaced item has an inode");
-        delete_item(self.connection, record.item_id)?;
+        self.items.delete(record.item_id)?;
         self.retire(&record);
-        let item = allocate_item_id(self.connection)?;
+        let item = self.items.allocate_id()?;
         let visibility = self.visibility(item, inode_id, state.binding.as_ref());
         let replacement = ItemRecord::clean(item, Some(inode_id), kind, state, visibility);
         self.write(&replacement)?;
@@ -446,13 +444,13 @@ impl<'a> Changes<'a> {
     /// Removes an item and everything below it, as a recursive delete does.
     /// An item with local changes stays, hidden by the deletion.
     pub(super) fn remove_subtree(&mut self, top: ItemId, deleted_by: InodeId) -> Result<()> {
-        let Some(top_record) = find_item(self.connection, top)? else {
+        let Some(top_record) = self.items.find(top)? else {
             return Ok(());
         };
         let mut queue = vec![top];
         while let Some(item) = queue.pop() {
-            queue.extend(server_children(self.connection, item)?);
-            let Some(mut record) = find_item(self.connection, item)? else {
+            queue.extend(self.items.server_children(item)?);
+            let Some(mut record) = self.items.find(item)? else {
                 continue;
             };
             if record.write.dirty_groups != 0 {
@@ -460,10 +458,10 @@ impl<'a> Changes<'a> {
                     inode_id: deleted_by,
                     deleted_seq: self.seq,
                 });
-                write_item(self.connection, &record)?;
+                self.items.write(&record)?;
                 continue;
             }
-            delete_item(self.connection, item)?;
+            self.items.delete(item)?;
             self.entry_change -= 1;
             self.retire(&record);
         }

@@ -2,7 +2,7 @@
 //! events that change nothing, and refreshes.
 
 use super::*;
-use crate::item_table::find_item_by_inode;
+use crate::item_table::ItemTable;
 use crate::records::CONTENT_DIRTY;
 use crate::status::Warning;
 
@@ -322,7 +322,8 @@ fn an_append_keeps_append_only_set_on_a_file_with_a_local_change() {
     let (mut task, _shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
     task.start();
     workers.take();
-    let mut record = find_item_by_inode(task.database.connection(), InodeId(11))
+    let mut record = ItemTable::new(task.database.connection())
+        .find_by_inode(InodeId(11))
         .expect("a read")
         .expect("the file's row");
     record.write.dirty_groups |= CONTENT_DIRTY;
@@ -347,7 +348,8 @@ fn an_append_keeps_append_only_set_on_a_file_with_a_local_change() {
     };
     task.handle(page(5, vec![commit(6, vec![append])]));
     assert_eq!(task.applied_seq, ChangeSeq(6));
-    let record = find_item_by_inode(task.database.connection(), InodeId(11))
+    let record = ItemTable::new(task.database.connection())
+        .find_by_inode(InodeId(11))
         .expect("a read")
         .expect("the file's row");
     assert!(record.append_only);
