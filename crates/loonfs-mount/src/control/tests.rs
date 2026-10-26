@@ -205,15 +205,7 @@ fn a_commit_that_brings_in_a_directory_waits_for_its_listing() {
         }]
     ));
 
-    let moved_in = FilesystemChange::Moved {
-        inode_id: InodeId(30),
-        source_parent_inode_id: InodeId(2),
-        source_display_name: DisplayName::parse("incoming").expect("a name"),
-        destination_parent_inode_id: InodeId(10),
-        destination_display_name: DisplayName::parse("incoming").expect("a name"),
-        binding_version: BindingVersion::parse("moved").expect("a version"),
-    };
-    task.handle(page(5, vec![commit(6, vec![moved_in])]));
+    task.handle(page(5, vec![commit(6, vec![moved_in()])]));
     let read = workers.take();
     assert!(
         matches!(
@@ -247,7 +239,10 @@ fn a_commit_that_brings_in_a_directory_waits_for_its_listing() {
         entries: vec![file(31, 30, "/elsewhere/incoming/b.txt")],
         processed,
     }));
-    written.blocking_recv().expect("the page is written");
+    written
+        .blocking_recv()
+        .expect("a reply")
+        .expect("the page is written");
     task.handle(done(WorkOutcome::EnteringItemRead {
         inode_id: InodeId(30),
         snapshot: None,
@@ -272,6 +267,80 @@ fn a_commit_that_brings_in_a_directory_waits_for_its_listing() {
     assert!(
         matches!(&deleted[..], [Work::DeleteSnapshot { snapshot_id }] if *snapshot_id == snapshot.snapshot_id),
         "{deleted:?}"
+    );
+}
+
+/// Returns the event of a commit that moves `/elsewhere/incoming` (inode 30)
+/// into the mount's root.
+fn moved_in() -> FilesystemChange {
+    FilesystemChange::Moved {
+        inode_id: InodeId(30),
+        source_parent_inode_id: InodeId(2),
+        source_display_name: DisplayName::parse("incoming").expect("a name"),
+        destination_parent_inode_id: InodeId(10),
+        destination_display_name: DisplayName::parse("incoming").expect("a name"),
+        binding_version: BindingVersion::parse("moved").expect("a version"),
+    }
+}
+
+/// Checks that a listing page that the database can't write fails its
+/// listing: the control task replies to the page with the error, so the
+/// worker stops the listing, and the commit that waits for the listing
+/// isn't applied.
+#[test]
+fn a_listing_page_that_isnt_written_fails_its_listing() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
+    task.start();
+    workers.take();
+    task.handle(page(5, vec![commit(6, vec![moved_in()])]));
+    workers.take();
+    let snapshot = SnapshotRef {
+        snapshot_id: PinId::parse("pin_00000000000000000002-0000000000000002").expect("a pin"),
+        captured_seq: ChangeSeq(7),
+    };
+    task.handle(done(WorkOutcome::EnteringDirectory {
+        inode_id: InodeId(30),
+        entry: entry(30, 2, "/elsewhere/incoming", PathEntryKind::Directory {}),
+        snapshot,
+        created: true,
+    }));
+
+    // Another connection keeps the database's write lock, and the task's
+    // connection doesn't wait for it.
+    let blocker =
+        rusqlite::Connection::open(task.config.database_path()).expect("a second connection");
+    blocker
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("the write lock");
+    task.database
+        .connection()
+        .pragma_update(None, "busy_timeout", 0)
+        .expect("no busy wait");
+    let (processed, written) = oneshot::channel();
+    task.handle(done(WorkOutcome::ListingPage {
+        listing: Listing::Entering(InodeId(30)),
+        entries: vec![file(31, 30, "/elsewhere/incoming/b.txt")],
+        processed,
+    }));
+    let error = written
+        .blocking_recv()
+        .expect("a reply")
+        .expect_err("the page isn't written");
+    blocker
+        .execute_batch("ROLLBACK")
+        .expect("the lock released");
+
+    task.handle(done(WorkOutcome::EnteringItemRead {
+        inode_id: InodeId(30),
+        snapshot: None,
+        result: Err(error),
+    }));
+    assert_eq!(task.applied_seq, ChangeSeq(5), "the commit isn't applied");
+    assert!(!shown(&shared, "incoming"));
+    assert!(
+        task.entering.is_empty(),
+        "the directory whose listing failed is removed, so the next poll reads it again"
     );
 }
 

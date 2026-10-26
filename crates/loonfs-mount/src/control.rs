@@ -337,8 +337,8 @@ impl ControlTask {
                 entries,
                 processed,
             } => {
-                self.on_listing_page(listing, &entries);
-                let _ = processed.send(());
+                let written = self.on_listing_page(listing, &entries);
+                let _ = processed.send(written);
             }
             WorkOutcome::RebuildDone(result) => self.on_rebuild_done(result),
             WorkOutcome::Fetched { fetch_id, result } => self.on_fetched(fetch_id, result),

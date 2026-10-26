@@ -249,16 +249,24 @@ impl ControlTask {
         Ok(())
     }
 
-    /// Writes one page of a listing.
-    pub(super) fn on_listing_page(&mut self, listing: Listing, entries: &[PathEntry]) {
+    /// Writes one page of a listing, and returns whether it did. A page that
+    /// isn't written fails its listing, so the commit or the rebuild that
+    /// waits for the listing doesn't move the applied sequence past rows
+    /// that aren't in the database.
+    pub(super) fn on_listing_page(
+        &mut self,
+        listing: Listing,
+        entries: &[PathEntry],
+    ) -> Result<()> {
         let written = match listing {
             Listing::Rebuild => self.write_rebuild_page(entries),
             Listing::Entering(_) => self.write_entering_page(entries),
         };
-        if let Err(error) = written {
+        if let Err(error) = &written {
             tracing::error!(%error, "writing a listing page failed");
             self.feed_error = Some(error.to_string());
         }
+        written
     }
 
     fn write_entering_page(&mut self, entries: &[PathEntry]) -> Result<()> {

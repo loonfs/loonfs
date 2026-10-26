@@ -131,9 +131,10 @@ pub(crate) enum WorkOutcome {
     ListingPage {
         listing: Listing,
         entries: Vec<PathEntry>,
-        /// Answered once the control task wrote the page, so a listing
-        /// keeps one page in memory at a time.
-        processed: oneshot::Sender<()>,
+        /// The control task replies on this channel after it writes the
+        /// page, or with the error that stopped it, so a listing keeps one
+        /// page in memory at a time and stops at a page that isn't written.
+        processed: oneshot::Sender<Result<()>>,
     },
     RebuildDone(Result<RebuildBasis>),
     Fetched {
@@ -389,7 +390,7 @@ impl WorkerContext {
             entries,
             processed,
         });
-        written.await.map_err(|_| MountError::Stopped)
+        written.await.map_err(|_| MountError::Stopped)?
     }
 
     async fn read_ancestors(&self, root_inode_id: InodeId) -> Result<RootAncestry> {

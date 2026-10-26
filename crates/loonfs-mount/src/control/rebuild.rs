@@ -40,12 +40,9 @@ impl ControlTask {
 
     /// Writes one page of the rebuild's listing.
     pub(super) fn write_rebuild_page(&mut self, entries: &[PathEntry]) -> Result<()> {
-        let FeedState::Rebuilding(rebuild) = &mut self.feed else {
+        if !matches!(self.feed, FeedState::Rebuilding(_)) {
             return Ok(());
-        };
-        rebuild
-            .listed
-            .extend(entries.iter().map(|entry| entry.inode_id));
+        }
         let withheld = HashSet::new();
         let transaction = self.database.transaction()?;
         let mut changes = Changes::new(&transaction, self.applied_seq, Source::Listing, &withheld);
@@ -54,6 +51,11 @@ impl ControlTask {
         }
         let applied = changes.finish();
         transaction.commit()?;
+        if let FeedState::Rebuilding(rebuild) = &mut self.feed {
+            rebuild
+                .listed
+                .extend(entries.iter().map(|entry| entry.inode_id));
+        }
         self.entries = self.entries.saturating_add_signed(applied.entry_change);
         self.apply_effects(applied.effects);
         self.flush_invalidations();
