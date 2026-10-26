@@ -122,7 +122,7 @@ utoipa = { version = "5.5", features = ["macros"] }
 walkdir = "2"
 # XXH64, the hash of the durable Bloom filters and of grep cursor fingerprints.
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
-zstd = "0.13"
+zstd = "0.14"
 
 [profile.dev]
 # Tests inherit this profile. Line tables are everything a backtrace or a
