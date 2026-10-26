@@ -90,7 +90,7 @@ A fold's objects stay [rooted](../specs/glossary.md#content-root) while a fold c
 
 A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in the meantime. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view, and neither one checks its publication budget until its content writes return. So a content object can be written after a sweep. It's found the same way as a late upload, because the retired-owner sweep lists the content prefix again on every later pass (see [Sweeping a retired owner's content](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
-A fold becomes due when the unfolded tail reaches 32 WAL objects, or when the bytes of its pieces reach the fold threshold.
+A fold becomes due when the unfolded tail reaches 64 WAL objects, or when the bytes of its pieces reach the fold threshold.
 
 Why is there a byte trigger? It limits how much a cold reader has to download to replay a tail.
 

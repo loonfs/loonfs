@@ -209,7 +209,7 @@ impl Namespace<Writable> {
     /// fold is running.
     ///
     /// A session starts a fold when a publish leaves its WAL tail over the
-    /// fold trigger (32 WAL objects, or
+    /// fold trigger (64 WAL objects, or
     /// [`inline_content_fold_at_bytes`](crate::InlineContentPolicy::inline_content_fold_at_bytes)
     /// of inline content). The fold task folds again while the tail that its
     /// last fold left is over the trigger, so the wait usually ends with the

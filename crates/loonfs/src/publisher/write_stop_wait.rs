@@ -270,7 +270,11 @@ async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
 /// and the rest wait for the next fold.
 #[tokio::test]
 async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
-    const WAITING_COMMITS: usize = 40;
+    // The first fold frees room for as many WAL objects as the fold trigger,
+    // and each waiting commit publishes in a WAL object of its own, so the
+    // last eight commits wait for the next fold.
+    let waiting_commits =
+        usize::try_from(FOLD_AT_WAL_OBJECTS + 8).expect("the commit count fits in usize");
     let fixture = fixture(|builder| {
         builder
             .execution_budget(one_fold_at_a_time())
@@ -316,7 +320,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     wait_for_fold_waiters(&fixture.writer, 1).await;
 
     let mut commits = Vec::new();
-    for index in 0..WAITING_COMMITS {
+    for index in 0..waiting_commits {
         let namespace = namespace.clone();
         commits.push(tokio::spawn(async move {
             namespace
@@ -346,7 +350,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     .expect("the commits after the first fold refill the tail to the write stop");
     let still_waiting = queued_candidates(&publisher_state(&publisher));
     assert!(
-        (1..WAITING_COMMITS).contains(&still_waiting),
+        (1..waiting_commits).contains(&still_waiting),
         "the first fold frees room for some of the commits: {still_waiting} still wait"
     );
 
@@ -363,7 +367,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     let recorder = &fixture.recorder;
     assert_eq!(
         counter(recorder, "loonfs.publisher.write_stop_waits"),
-        usize_to_u64(WAITING_COMMITS)
+        usize_to_u64(waiting_commits)
     );
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 0);
     assert_eq!(counter(recorder, "loonfs.publisher.wal_folds"), 2);

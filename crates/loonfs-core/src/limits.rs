@@ -150,7 +150,11 @@ pub const MAX_POSITION_MOVES: usize = 8;
 pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 128;
 
 /// Visible WAL-tail length, in WAL objects, that starts an automatic WAL fold.
-pub const FOLD_AT_WAL_OBJECTS: u64 = 32;
+///
+/// The write stop ([`MAX_UNFOLDED_WAL_OBJECTS`]) is twice this length, so
+/// while a fold runs, the session can publish as many WAL objects again as the
+/// tail had when the fold started, and then new commits wait.
+pub const FOLD_AT_WAL_OBJECTS: u64 = 64;
 
 const _: () = assert!(0 < FOLD_AT_WAL_OBJECTS && FOLD_AT_WAL_OBJECTS < MAX_UNFOLDED_WAL_OBJECTS);
 

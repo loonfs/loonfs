@@ -4,7 +4,7 @@ This note describes what a [writer session](../specs/glossary.md#writer-session)
 
 ## Why the session waits
 
-A writer session keeps its WAL tail in its [writer position](../specs/glossary.md#writer-position) until a fold moves the tail into metadata segments. The session starts a fold once the tail reaches the "fold trigger" (32 WAL objects or 2 MiB of inline bytes), and it keeps publishing while the fold runs. The "write stop" is the longest tail that a session lets grow: 128 unfolded WAL objects (`MAX_UNFOLDED_WAL_OBJECTS`). (Inline bytes have no stop of their own. Past 32 MiB of unfolded inline bytes, LoonFS stages new inline content as content objects instead.)
+A writer session keeps its WAL tail in its [writer position](../specs/glossary.md#writer-position) until a fold moves the tail into metadata segments. The session starts a fold once the tail reaches the "fold trigger" (64 WAL objects or 2 MiB of inline bytes), and it keeps publishing while the fold runs. The "write stop" is the longest tail that a session lets grow: 128 unfolded WAL objects (`MAX_UNFOLDED_WAL_OBJECTS`). (Inline bytes have no stop of their own. Past 32 MiB of unfolded inline bytes, LoonFS stages new inline content as content objects instead.)
 
 A new commit at the write stop waits in the namespace's queue for the session's fold. The fold that frees the tail runs in the writer's own process, so refusing the commit would ask the client to wait for work that the runtime is already doing. Each client would then need its own wait-and-resubmit loop, and an HTTP client, which has no route that waits for a fold, would have to guess at a backoff.
 
@@ -24,7 +24,7 @@ What waits is the commit's place in the namespace's queue, where the commit is a
 
 Each fold that publishes a manifest wakes the worker. The fold runs as a session task, and that task folds again while the tail that its last fold left is still over the fold trigger, so the worker doesn't wait for the task to end. A fold that publishes nothing ends the task, and the task's end also wakes the worker. That happens when another process already folded the tail (the position moves onto that process's manifest), and when the fold fails (the next publish starts another fold).
 
-A fold frees the tail up to where it started, and commits published while it ran stay in the tail, so a fold can free less room than the queue needs. For example, if a fold starts at 32 WAL objects and 96 more are published while it runs, the next batch waits at the stop. The fold leaves 96 objects, so 32 more batches publish in arrival order, and the commits behind them keep waiting. The tail still has more than 32 WAL objects, so the fold task folds again.
+A fold frees the tail up to where it started, and commits published while it ran stay in the tail, so a fold can free less room than the queue needs. For example, if a fold starts at 64 WAL objects and 64 more are published while it runs, the next batch waits at the stop. The fold leaves 64 objects, so 64 more batches publish in arrival order, and the commits behind them keep waiting. The tail is still at the fold trigger, so the fold task folds again.
 
 The write stop itself doesn't move. It bounds the memory of the tail in the session's position, and waiting commits don't add to that tail.
 

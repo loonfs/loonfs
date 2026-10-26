@@ -1037,7 +1037,7 @@ Implementations can fold automatically as the WAL grows. The reference implement
 
 | Trigger | Reference default |
 | --- | --- |
-| Request a fold | 32 unfolded WAL objects |
+| Request a fold | 64 unfolded WAL objects |
 | Make new commits wait for a fold | 128 unfolded WAL objects |
 | Refuse a commit still waiting for a fold with `maintenance_required` (the write-stop wait) | 30 s after the commit entered the queue |
 | Fold an idle tail | The tail contains a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock |
@@ -2297,7 +2297,7 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Maximum compaction input runs | 8 |
 | Maximum compaction input rows in one metadata maintenance pass | 131,072 |
 | Maximum decoded input one merge keeps in memory | 64 MiB |
-| Automatic WAL-fold threshold | 32 WAL objects |
+| Automatic WAL-fold threshold | 64 WAL objects |
 | Idle WAL-fold period | 15 minutes |
 | Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
 | `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
