@@ -1,6 +1,6 @@
 # loonfs-cli
 
-`loonfs-cli` provides the `loonfs` command, which you can use to manage profiles, namespaces, and namespace maintenance, and to work with files and directories by path. To use LoonFS from a Rust program instead, use the `loonfs` crate to embed the runtime, or `loonfs-client` to call a LoonFS server. To run a server, use `loonfs-server`.
+`loonfs-cli` provides the `loonfs` command, which you can use to manage profiles, namespaces, and namespace maintenance, to work with files and directories by path, and, on Linux, to mount a namespace as a local directory. To use LoonFS from a Rust program instead, use the `loonfs` crate to embed the runtime, or `loonfs-client` to call a LoonFS server. To run a server, use `loonfs-server`.
 
 A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, or `gcs`) reads and writes the object store directly. It runs the HTTP binding (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to the binding through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
 
@@ -379,6 +379,95 @@ Inspection and diagnostics
     Check the configuration, provider, connection, authentication, server
     health, capabilities, and selected namespace. The command prints every
     result and exits nonzero if a check fails
+
+Mounts
+  Mounts are available on Linux only, and on any other platform these
+  commands fail at once with that reason. A mount needs a remote profile,
+  because the daemon that serves it is a client of a LoonFS server. This
+  version mounts read-only.
+
+  loonfs mount <namespace>[/<path>] <dir> --ro [--max-entries <n>]
+               [--poll-interval-ms <ms>] [--cache-max-bytes <n>]
+               [--cache-min-free <n>] [--pinned-max-bytes <n>]
+               [--sync-timeout-ms <ms>] [--uid <uid>] [--gid <gid>]
+               [--actor-id <id>]
+    Mount a namespace, or the directory <path> in it, on the local
+    directory <dir>, and return once the directory is ready. The command
+    starts the daemon that serves this user's mounts when none is running,
+    and sends it the profile's server URL, token, actor, and subject, which
+    the daemon keeps in memory only. Before anything is mounted, the daemon
+    checks that the kernel can mount and lists the whole tree at a
+    snapshot. If the tree has more entries than --max-entries (100,000 by
+    default), the daemon refuses the mount and reports both numbers.
+    Writable mounts aren't available yet, so --ro is required.
+    Running the command again for the same namespace and path succeeds and
+    changes nothing, and a different mount at a mounted directory is
+    refused. If the daemon stopped, the next mount of the directory
+    detaches its old mount and resumes its state.
+    --poll-interval-ms sets how often the mount reads the namespace's
+    change feed (500 by default). --cache-max-bytes is how much cached
+    content that nothing uses the mount keeps before it evicts the least
+    recently used (8 GiB), --cache-min-free is the free space it keeps on
+    the state directory's filesystem (2 GiB), and --pinned-max-bytes limits
+    the local bytes it can't evict, such as the files that programs have
+    open (16 GiB). --sync-timeout-ms limits how long `loonfs refresh` waits
+    (60,000 by default). --uid and --gid set the owner that every item
+    shows, which is the user that runs the daemon by default
+
+  loonfs unmount <dir> [--force]
+    Unmount a directory, and remove the mount's state (its copy of the tree
+    and its cached content). --force keeps the state for a later
+    `loonfs mount`. If programs still have files open in the directory, the
+    directory is detached at once, the programs keep reading their files,
+    and the state is removed after they close them. Unmounting a directory
+    without a mount succeeds, and detaches a mount that a stopped daemon
+    left there
+
+  loonfs status [<dir>]
+    Report every mount, or the mount at <dir>: whether it's ready, whether
+    it was mounted through mount(2) or fusermount3, its applied sequence,
+    its entries against the budget, and its cache. --json reports the
+    whole status, which `.loonfs/status.json` in the mounted directory
+    contains too
+
+  loonfs refresh <dir> [--at-least <seq>]
+    Read the mount's change feed now. --at-least waits until the mount has
+    applied the commit at that sequence, such as one that another host
+    printed. The command fails at once if the namespace hasn't committed
+    that sequence yet, and after the mount's sync timeout if the mount
+    hasn't applied it by then
+
+  Every mount command takes --state-dir <path>, the directory where the
+  daemon keeps each mount's state and cache and its own log
+  (`$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs`). The daemon
+  listens on `$XDG_RUNTIME_DIR/loonfs/daemon.sock`, or on `daemon.sock` in
+  the state directory when XDG_RUNTIME_DIR isn't set, so the commands need
+  the same --state-dir to reach it. The daemon stops a minute after its
+  last mount is removed. `loonfs daemon`, which `loonfs mount` starts, is
+  the daemon itself, and `loonfs daemon --stop` detaches every mount,
+  keeps its state, and stops the daemon. Neither is listed in --help.
+
+  The daemon mounts with default_permissions and allow_other, so other
+  users can use the mount as each item's mode allows. A daemon that runs as
+  root mounts with mount(2). A daemon that runs as another user mounts with
+  fusermount3, and allow_other then needs user_allow_other in
+  /etc/fuse.conf.
+
+  The mounted directory contains a read-only directory, `.loonfs`, with
+  `status.json` (the mount's status) and `seq` (its applied sequence).
+
+  On a terminal, `loonfs mount` redraws one line on stderr with the step it
+  has reached and, while it lists the tree, the entries listed so far
+  against the budget. With --json, it writes one event per step to stderr
+  instead:
+
+    {"kind":"step","op":"mount","path":"demo:/","step":"scanning",
+     "listed_entries":12000,"max_entries":100000,"elapsed_ms":840}
+
+  The steps are checking_kernel, checking_host, reading_capabilities,
+  creating_snapshot, scanning, starting_feed, and mounting, and a mount
+  that resumes its state skips the three steps before starting_feed.
+  listed_entries and max_entries appear only in scanning events.
 
 Maintenance
   loonfs maintenance recover-administrator <principal>
