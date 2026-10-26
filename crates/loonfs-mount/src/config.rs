@@ -78,8 +78,8 @@ pub struct MountConfig {
 const GIB: u64 = 1 << 30;
 
 /// The name of the mount's control directory at its root, which the mount
-/// reserves.
-pub(crate) const CONTROL_DIRECTORY_NAME: &str = ".loonfs";
+/// reserves and the adapter shows.
+pub const CONTROL_DIRECTORY_NAME: &str = ".loonfs";
 
 impl MountConfig {
     /// Returns the configuration of a mount of `path` in `namespace_id`, with

@@ -37,7 +37,7 @@ mod window;
 mod workers;
 mod write;
 
-pub use config::{ConflictPolicy, MountAccess, MountConfig};
+pub use config::{ConflictPolicy, MountAccess, MountConfig, CONTROL_DIRECTORY_NAME};
 pub use engine::Engine;
 pub use error::{MountError, Result};
 pub use invalidation::{CachedPages, Invalidation};

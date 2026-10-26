@@ -33,6 +33,7 @@ const READ_DIRECTORY_BATCH_ENTRIES: usize = 256;
 /// in-memory tree under a read lock. Everything else goes through the
 /// mount's control task. Dropping the engine stops the control task.
 pub struct Engine {
+    config: MountConfig,
     shared: SharedState,
     control: ControlSender,
     mount_method: Mutex<Option<MountMethod>>,
@@ -72,6 +73,7 @@ impl Engine {
                 (admission.database, admission.reflinks)
             }
         };
+        let config = database.mount()?.config;
         let environment = Environment {
             clock,
             timer: timer.clone(),
@@ -98,11 +100,18 @@ impl Engine {
             })?;
         runtime.spawn(tick(sender.clone(), shared.clone(), poll_interval_ms));
         Ok(Self {
+            config,
             shared,
             control: sender,
             mount_method: Mutex::new(None),
             control_thread: Some(control_thread),
         })
+    }
+
+    /// Returns the mount's settings: the ones it was admitted with, which a
+    /// resumed mount keeps.
+    pub fn config(&self) -> &MountConfig {
+        &self.config
     }
 
     fn tree(&self) -> std::sync::RwLockReadGuard<'_, Tree> {
